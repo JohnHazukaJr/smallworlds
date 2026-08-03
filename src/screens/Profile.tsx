@@ -1,16 +1,30 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useState } from 'react';
-import { db, exportWorld } from '../db';
+import { PassphraseDialog } from '../components/PassphraseDialog';
+import { db, encryptExport, exportWorld, type BackupExport } from '../db';
+import { useVault } from '../security/vault';
 import { useSettings } from '../store/settings';
 import { Mono, useVw } from '../ui/bits';
 import { avatarStyle, plateStyle, VIS } from '../ui/theme';
 import type { Visibility } from '../types';
 
+function download(data: unknown, filename: string) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 export function Profile() {
   const vw = useVw();
   const narrow = vw < 780;
   const s = useSettings();
+  const vaultEnabled = useVault((v) => v.enabled);
   const [exporting, setExporting] = useState(false);
+  const [backupDialog, setBackupDialog] = useState(false);
 
   const worlds = useLiveQuery(() => db.worlds.toArray(), []) ?? [];
   const stats = useLiveQuery(async () => {
@@ -23,17 +37,17 @@ export function Profile() {
     return { seasons, cast, words };
   }, []);
 
-  const exportAll = async () => {
+  const exportAll = async (passphrase: string) => {
     setExporting(true);
     try {
       const all = await Promise.all(worlds.map((w) => exportWorld(w.id)));
-      const blob = new Blob([JSON.stringify({ format: 'small-worlds-backup', version: 1, worlds: all }, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `small-worlds-backup-${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
+      const backup: BackupExport = { format: 'small-worlds-backup', version: 1, worlds: all };
+      const date = new Date().toISOString().slice(0, 10);
+      if (passphrase) {
+        download(await encryptExport(backup, passphrase), `small-worlds-backup-${date}.enc.json`);
+      } else {
+        download(backup, `small-worlds-backup-${date}.json`);
+      }
     } finally {
       setExporting(false);
     }
@@ -125,7 +139,7 @@ export function Profile() {
           <Mono style={{ fontSize: 9 }}>your data</Mono>
           {[
             ['All stories & cast', 'IndexedDB, this device'],
-            ['API keys & preferences', 'localStorage, this device'],
+            ['API keys', vaultEnabled ? 'encrypted at rest (AES-256, your passphrase)' : 'localStorage — add a passphrase in Settings'],
             ['Used for model training', 'never — requests go straight to your provider'],
             ['Cloud sync', 'not yet — use export / import between devices']
           ].map(([label, value]) => (
@@ -135,12 +149,27 @@ export function Profile() {
             </div>
           ))}
           <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 14, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-            <button className="btn-ghost" disabled={exporting || worlds.length === 0} onClick={() => void exportAll()}>
+            <button className="btn-ghost" disabled={exporting || worlds.length === 0} onClick={() => setBackupDialog(true)}>
               {exporting ? 'Exporting…' : 'Back up everything'}
             </button>
           </div>
         </div>
       </div>
+
+      <PassphraseDialog
+        open={backupDialog}
+        title="Back up everything"
+        description="Add a passphrase to encrypt the backup (AES-256) — recommended if it will sit in cloud storage or email. Leave blank for plain JSON."
+        mode="set"
+        allowEmpty
+        emptyLabel="blank = plain, readable JSON"
+        submitLabel="Download backup"
+        busy={exporting}
+        onCancel={() => setBackupDialog(false)}
+        onSubmit={(pass) => {
+          void exportAll(pass).finally(() => setBackupDialog(false));
+        }}
+      />
     </div>
   );
 }

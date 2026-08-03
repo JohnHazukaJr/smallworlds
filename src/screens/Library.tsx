@@ -1,10 +1,28 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useRef, useState } from 'react';
-import { db, deleteWorld, exportWorld, importWorld, type WorldExport } from '../db';
+import { PassphraseDialog } from '../components/PassphraseDialog';
+import {
+  db, decryptExport, deleteWorld, encryptExport, exportWorld, importAny, isEncryptedExport,
+  type BackupExport, type EncryptedExport, type WorldExport
+} from '../db';
 import { seedStarterWorld } from '../data/seed';
 import { useApp } from '../store/app';
 import { Mono, useVw, ErrorNote } from '../ui/bits';
 import { plateStyle, VIS } from '../ui/theme';
+
+function download(data: unknown, filename: string) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function slug(title: string) {
+  return title.replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').toLowerCase() || 'world';
+}
 
 export function Library() {
   const vw = useVw();
@@ -43,25 +61,37 @@ export function Library() {
     }
   };
 
+  // pending state for the passphrase dialogs
+  const [pendingExport, setPendingExport] = useState<{ worldId: string; title: string } | null>(null);
+  const [pendingImport, setPendingImport] = useState<EncryptedExport | null>(null);
+  const [dialogBusy, setDialogBusy] = useState(false);
+  const [dialogError, setDialogError] = useState('');
+
+  const finishImport = async (data: WorldExport | BackupExport) => {
+    const ids = await importAny(data);
+    if (ids.length === 1) openWorld(ids[0]);
+  };
+
   const onImportFile = async (file: File) => {
     try {
-      const data = JSON.parse(await file.text()) as WorldExport;
-      const id = await importWorld(data);
-      openWorld(id);
+      const data = JSON.parse(await file.text());
+      if (isEncryptedExport(data)) {
+        setPendingImport(data); // ask for the passphrase first
+        return;
+      }
+      await finishImport(data as WorldExport | BackupExport);
     } catch (e) {
       setError(`Import failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
-  const onExport = async (worldId: string, title: string) => {
+  const runExport = async (worldId: string, title: string, passphrase: string) => {
     const data = await exportWorld(worldId);
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${title.replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').toLowerCase() || 'world'}.smallworlds.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    if (passphrase) {
+      download(await encryptExport(data, passphrase), `${slug(title)}.smallworlds.enc.json`);
+    } else {
+      download(data, `${slug(title)}.smallworlds.json`);
+    }
   };
 
   return (
@@ -145,7 +175,7 @@ export function Library() {
                   <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
                     <button
                       className="btn-quiet" style={{ padding: '2px 4px', fontSize: 10 }}
-                      onClick={(e) => { e.stopPropagation(); void onExport(w.id, w.title); }}
+                      onClick={(e) => { e.stopPropagation(); setPendingExport({ worldId: w.id, title: w.title }); }}
                     >export</button>
                     <button
                       className="btn-quiet" style={{ padding: '2px 4px', fontSize: 10 }}
@@ -161,6 +191,47 @@ export function Library() {
           );
         })}
       </div>
+
+      <PassphraseDialog
+        open={pendingExport !== null}
+        title={`Export "${pendingExport?.title ?? ''}"`}
+        description="Add a passphrase to encrypt the file (AES-256), or leave it blank for a plain-text JSON you can read and edit."
+        mode="set"
+        allowEmpty
+        emptyLabel="blank = plain, readable JSON"
+        submitLabel="Export"
+        busy={dialogBusy}
+        onCancel={() => setPendingExport(null)}
+        onSubmit={(pass) => {
+          if (!pendingExport) return;
+          setDialogBusy(true);
+          void runExport(pendingExport.worldId, pendingExport.title, pass)
+            .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+            .finally(() => { setDialogBusy(false); setPendingExport(null); });
+        }}
+      />
+      <PassphraseDialog
+        open={pendingImport !== null}
+        title="Encrypted file"
+        description="This export is encrypted. Enter the passphrase it was exported with."
+        mode="enter"
+        submitLabel="Decrypt & import"
+        busy={dialogBusy}
+        error={dialogError}
+        onCancel={() => { setPendingImport(null); setDialogError(''); }}
+        onSubmit={(pass) => {
+          if (!pendingImport) return;
+          setDialogBusy(true);
+          void decryptExport(pendingImport, pass)
+            .then(async (data) => {
+              await finishImport(data);
+              setPendingImport(null);
+              setDialogError('');
+            })
+            .catch((e) => setDialogError(e instanceof Error ? e.message : String(e)))
+            .finally(() => setDialogBusy(false));
+        }}
+      />
     </div>
   );
 }

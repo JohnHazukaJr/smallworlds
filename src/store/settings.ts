@@ -2,6 +2,14 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { AppSettings, ModelRef, ProviderConfig } from '../types';
 
+// Checked via localStorage directly to avoid a circular import with security/vault.ts.
+const vaultEnabled = () => !!localStorage.getItem('small-worlds-vault');
+
+/** After any provider change, re-encrypt keys into the vault (no-op when the vault is off). */
+function syncVault() {
+  void import('../security/vault').then(({ useVault }) => useVault.getState().persistKeys());
+}
+
 interface SettingsStore extends AppSettings {
   addProvider: (p: ProviderConfig) => void;
   updateProvider: (id: string, patch: Partial<ProviderConfig>) => void;
@@ -20,21 +28,39 @@ export const useSettings = create<SettingsStore>()(
       utilityModel: null,
       matureDefault: true,
       defaultVisibility: 'private',
-      addProvider: (p) => set((s) => ({ providers: [...s.providers, p] })),
-      updateProvider: (id, patch) =>
-        set((s) => ({ providers: s.providers.map((p) => (p.id === id ? { ...p, ...patch } : p)) })),
-      removeProvider: (id) =>
+      addProvider: (p) => {
+        set((s) => ({ providers: [...s.providers, p] }));
+        syncVault();
+      },
+      updateProvider: (id, patch) => {
+        set((s) => ({ providers: s.providers.map((p) => (p.id === id ? { ...p, ...patch } : p)) }));
+        syncVault();
+      },
+      removeProvider: (id) => {
         set((s) => ({
           providers: s.providers.filter((p) => p.id !== id),
           proseModel: s.proseModel?.providerId === id ? null : s.proseModel,
           utilityModel: s.utilityModel?.providerId === id ? null : s.utilityModel
-        })),
+        }));
+        syncVault();
+      },
       setProseModel: (proseModel) => set({ proseModel }),
       setUtilityModel: (utilityModel) => set({ utilityModel }),
       setMatureDefault: (matureDefault) => set({ matureDefault }),
       setDefaultVisibility: (defaultVisibility) => set({ defaultVisibility })
     }),
-    { name: 'small-worlds-settings' }
+    {
+      name: 'small-worlds-settings',
+      // When the vault is enabled, API keys never touch disk in plaintext —
+      // only the encrypted copy in the vault does.
+      partialize: (s) => ({
+        providers: vaultEnabled() ? s.providers.map((p) => ({ ...p, apiKey: '' })) : s.providers,
+        proseModel: s.proseModel,
+        utilityModel: s.utilityModel,
+        matureDefault: s.matureDefault,
+        defaultVisibility: s.defaultVisibility
+      })
+    }
   )
 );
 

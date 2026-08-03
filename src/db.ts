@@ -1,4 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie';
+import { decryptString, deriveKey, encryptString, randomSalt } from './security/crypto';
 import type {
   World, Season, Episode, Turn, Character, ContinuityFact, OpenThread, SeasonWrap
 } from './types';
@@ -76,6 +77,62 @@ export async function importWorld(data: WorldExport): Promise<string> {
       await db.wraps.bulkPut(data.wraps);
     });
   return data.world.id;
+}
+
+export interface BackupExport {
+  format: 'small-worlds-backup';
+  version: 1;
+  worlds: WorldExport[];
+}
+
+export interface EncryptedExport {
+  format: 'small-worlds-encrypted';
+  version: 1;
+  salt: string;
+  iv: string;
+  ct: string;
+}
+
+export async function encryptExport(data: WorldExport | BackupExport, passphrase: string): Promise<EncryptedExport> {
+  const salt = randomSalt();
+  const key = await deriveKey(passphrase, salt);
+  const { iv, ct } = await encryptString(key, JSON.stringify(data));
+  return { format: 'small-worlds-encrypted', version: 1, salt, iv, ct };
+}
+
+export async function decryptExport(payload: EncryptedExport, passphrase: string): Promise<WorldExport | BackupExport> {
+  const key = await deriveKey(passphrase, payload.salt);
+  try {
+    return JSON.parse(await decryptString(key, { iv: payload.iv, ct: payload.ct }));
+  } catch {
+    throw new Error('Wrong passphrase (or the file is corrupted).');
+  }
+}
+
+export function isEncryptedExport(data: unknown): data is EncryptedExport {
+  return !!data && typeof data === 'object' && (data as EncryptedExport).format === 'small-worlds-encrypted';
+}
+
+/** Import a single-world export or a full backup. Returns the imported world ids. */
+export async function importAny(data: WorldExport | BackupExport): Promise<string[]> {
+  if (data.format === 'small-worlds-world') {
+    return [await importWorld(data)];
+  }
+  if (data.format === 'small-worlds-backup') {
+    const ids: string[] = [];
+    for (const w of data.worlds) ids.push(await importWorld(w));
+    return ids;
+  }
+  throw new Error('Not a Small Worlds file.');
+}
+
+/** Deletes everything: stories, characters, settings, keys, vault. Irreversible. */
+export async function wipeAllData(): Promise<void> {
+  await db.delete();
+  localStorage.removeItem('small-worlds-settings');
+  localStorage.removeItem('small-worlds-app');
+  localStorage.removeItem('small-worlds-vault');
+  location.reload();
 }
 
 export async function deleteWorld(worldId: string): Promise<void> {

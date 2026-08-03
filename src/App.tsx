@@ -1,4 +1,6 @@
 import { Rail, TabBar } from './components/Nav';
+import { LockScreen } from './components/LockScreen';
+import { useVault } from './security/vault';
 import { useApp } from './store/app';
 import { useVw } from './ui/bits';
 import { Library } from './screens/Library';
@@ -13,6 +15,9 @@ export default function App() {
   const screen = useApp((s) => s.screen);
   const vw = useVw();
   const narrow = vw < 780;
+  const vaultLocked = useVault((v) => v.enabled && v.locked);
+
+  if (vaultLocked) return <LockScreen />;
 
   return (
     <div style={{

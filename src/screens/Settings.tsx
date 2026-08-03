@@ -2,7 +2,9 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useId, useState } from 'react';
 import { testConnection } from '../ai/client';
 import { listModels, PROVIDER_PRESETS, presetFor, type ProviderPreset } from '../ai/providers';
-import { db, uid } from '../db';
+import { PassphraseDialog } from '../components/PassphraseDialog';
+import { db, uid, wipeAllData } from '../db';
+import { useVault } from '../security/vault';
 import { useApp } from '../store/app';
 import { useSettings } from '../store/settings';
 import type { ModelRef, ProviderConfig, World, WorldAISettings } from '../types';
@@ -85,7 +87,122 @@ export function Settings() {
           </div>
         </div>
       </Section>
+
+      <SecuritySection />
     </div>
+  );
+}
+
+// ---------- security ----------
+
+function SecuritySection() {
+  const vault = useVault();
+  const [dialog, setDialog] = useState<'none' | 'enable' | 'change-old' | 'change-new'>('none');
+  const [oldPass, setOldPass] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [dialogError, setDialogError] = useState('');
+
+  const close = () => { setDialog('none'); setDialogError(''); setOldPass(''); };
+
+  return (
+    <Section title="Security" note="everything stays on this device — this controls how it's protected here">
+      <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap' }}>
+          <div style={{ flex: 1, minWidth: 240, display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: 'rgba(236,234,230,0.92)' }}>
+              App lock &amp; key encryption
+              {vault.enabled && (
+                <span style={{
+                  fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase',
+                  marginLeft: 10, padding: '3px 8px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.16)',
+                  color: 'oklch(0.85 0.09 140)'
+                }}>on</span>
+              )}
+            </div>
+            <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
+              Sets a passphrase that locks the app and encrypts your API keys at rest (AES-256-GCM; the key is derived
+              from your passphrase and never stored). Anyone opening this browser sees a lock screen instead of your
+              stories and keys. If you forget the passphrase, the keys are gone — stories stay.
+            </div>
+          </div>
+          {!vault.enabled ? (
+            <button className="btn-primary" onClick={() => setDialog('enable')}>Set a passphrase</button>
+          ) : (
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button className="btn-ghost" onClick={() => vault.lock()}>Lock now</button>
+              <button className="btn-ghost" onClick={() => setDialog('change-old')}>Change passphrase</button>
+              <button className="btn-quiet" onClick={() => {
+                if (confirm('Remove the passphrase? Your API keys will be stored unencrypted on this device again.')) {
+                  void vault.disable();
+                }
+              }}>Remove</button>
+            </div>
+          )}
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
+          <div style={{ flex: 1, minWidth: 240, display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: 'oklch(0.75 0.12 25)' }}>Erase everything</div>
+            <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
+              Deletes all worlds, characters, settings and keys from this device. Export a backup first — this cannot
+              be undone.
+            </div>
+          </div>
+          <button className="btn-quiet" style={{ color: 'oklch(0.75 0.12 25)', borderColor: 'oklch(0.4 0.1 25)' }} onClick={() => {
+            if (!confirm('Delete ALL data on this device? This cannot be undone.')) return;
+            if (!confirm('Last chance — every world, season and key will be erased. Continue?')) return;
+            void wipeAllData();
+          }}>Erase all data</button>
+        </div>
+      </div>
+
+      <PassphraseDialog
+        open={dialog === 'enable'}
+        title="Set a passphrase"
+        description="Locks the app and encrypts your API keys on this device. Pick something you won't lose — it can't be recovered or reset without wiping the keys."
+        mode="set"
+        submitLabel="Encrypt & lock in"
+        busy={busy}
+        error={dialogError}
+        onCancel={close}
+        onSubmit={(pass) => {
+          setBusy(true);
+          void vault.enable(pass).then(close).finally(() => setBusy(false));
+        }}
+      />
+      <PassphraseDialog
+        open={dialog === 'change-old'}
+        title="Change passphrase"
+        description="First, confirm your current passphrase."
+        mode="enter"
+        submitLabel="Continue"
+        busy={busy}
+        error={dialogError}
+        onCancel={close}
+        onSubmit={(pass) => {
+          setOldPass(pass);
+          setDialogError('');
+          setDialog('change-new');
+        }}
+      />
+      <PassphraseDialog
+        open={dialog === 'change-new'}
+        title="New passphrase"
+        description="Your keys will be re-encrypted with the new passphrase."
+        mode="set"
+        submitLabel="Change passphrase"
+        busy={busy}
+        error={dialogError}
+        onCancel={close}
+        onSubmit={(pass) => {
+          setBusy(true);
+          void vault.changePassphrase(oldPass, pass).then((ok) => {
+            if (ok) close();
+            else { setDialogError('Current passphrase was wrong.'); setDialog('change-old'); }
+          }).finally(() => setBusy(false));
+        }}
+      />
+    </Section>
   );
 }
 

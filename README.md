@@ -65,6 +65,33 @@ Set two defaults in Settings:
 - Move worlds between devices with **export / import** (Worlds screen or Profile). Each device has
   its own storage; there is no sync backend yet.
 
+## Security
+
+Small Worlds has no server and no accounts — the security model is protecting what sits on your
+device and what leaves it in backups.
+
+- **App lock + key encryption** (Settings → Security). Set a passphrase and the app shows a lock
+  screen on open, and your API keys are stored encrypted (AES-256-GCM; key derived from your
+  passphrase with PBKDF2-SHA256, 600k iterations). The decrypted keys exist only in memory while
+  unlocked. There is deliberately no recovery: forget the passphrase and the keys are wiped (your
+  stories are untouched — the passphrase never encrypts story text, so they can't be lost with it).
+- **Encrypted exports.** Every export and full backup offers an optional passphrase. Use it for
+  anything that will sit in cloud storage, email, or a chat app. Import detects encrypted files and
+  asks for the passphrase.
+- **Content-Security-Policy.** Production builds lock script execution to the app's own bundle.
+  `connect-src` stays open on purpose — you can point the app at any AI endpoint, including local
+  Ollama over http.
+- **Erase all data** (Settings → Security) wipes IndexedDB, settings, keys, and the vault in one
+  step.
+- **What this doesn't cover:** story text in IndexedDB is not encrypted at rest (it is as private
+  as any file on your device — protect it with your OS user account / device encryption), and your
+  prompts necessarily go to whichever AI provider you configured, under that provider's privacy
+  policy.
+
+If you host the build yourself, also send these HTTP headers (they can't be set from inside the
+page): `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
+`Referrer-Policy: no-referrer`. Netlify/Cloudflare Pages support a `_headers` file for this.
+
 ## Use it on your phone
 
 The app is an installable PWA. Host the `dist/` build on any static host with HTTPS
