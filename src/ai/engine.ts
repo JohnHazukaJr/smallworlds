@@ -313,12 +313,13 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
 /** AI-assisted character draft from a one-line description. */
 export async function draftCharacter(world: World | null, description: string): Promise<Partial<Character>> {
   const result = await utilityJson<{
-    name: string; role: string; age: string; appearance: string; summary: string;
+    name: string; role: string; age: string; appearance: string; mannerisms: string;
+    backstory: string; summary: string;
     speechStyle: string; exampleLines: string[]; traits: string; desires: string;
     fears: string; flaws: string; secrets: string; anchors: string[];
   }>(
     world,
-    'You design deep NPC character sheets for longform interactive fiction. Respond with JSON only:\n{"name": string, "role": "<role · relationship to protagonist>", "age": string, "appearance": string, "summary": "<who they are, 2-4 sentences of prose>", "speechStyle": "<how they talk, 1-2 sentences>", "exampleLines": [<2-3 sample spoken lines>], "traits": string, "desires": string, "fears": string, "flaws": string, "secrets": "<something they hide>", "anchors": [<3-4 hard behavioural rules they never break, e.g. "Never lies in writing">]}\nMake them specific, contradictory in believable ways, never generic.',
+    'You design deep NPC character sheets for longform interactive fiction. Respond with JSON only:\n{"name": string, "role": "<role · relationship to protagonist>", "age": string, "appearance": string, "mannerisms": "<2-3 recurring physical habits or tics, concrete and observable>", "backstory": "<the history that shaped them, 2-3 sentences>", "summary": "<who they are, 2-4 sentences of prose>", "speechStyle": "<how they talk, 1-2 sentences>", "exampleLines": [<2-3 sample spoken lines>], "traits": string, "desires": string, "fears": string, "flaws": string, "secrets": "<something they hide>", "anchors": [<3-4 hard behavioural rules they never break, e.g. "Never lies in writing">]}\nMake them specific, contradictory in believable ways, never generic.',
     `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}Character to create: ${description}`
   );
   return result;

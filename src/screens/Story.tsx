@@ -3,9 +3,10 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { deleteTurnsAfter, deleteTurnsFrom, extractContinuity, writeTurn } from '../ai/engine';
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
 import { db, uid } from '../db';
-import { useApp } from '../store/app';
+import { AVATAR_PX, DEFAULT_DISPLAY, useApp, type AvatarSize } from '../store/app';
 import type { Character, ComposeMode, ContinuityFact, Episode, OpenThread, Season, Turn, TurnLength, World } from '../types';
 import { Chip, ErrorNote, Mono, Sheet, Spinner, useVw } from '../ui/bits';
+import { fileToSceneImage } from '../ui/image';
 import { avatarStyle, BACKDROPS, MOODS, STRIPE } from '../ui/theme';
 import { nextEpisode } from '../worldOps';
 
@@ -44,12 +45,14 @@ function parseTurn(turn: Turn, characters: Character[]): ProseBlock[] {
     });
 }
 
-function ProseBlockView({ b, accent, prose, director }: { b: ProseBlock; accent: string; prose: string; director: boolean }) {
+function ProseBlockView({ b, accent, prose, fontPx, avatarPx }: {
+  b: ProseBlock; accent: string; prose: string; fontPx: number; avatarPx: number;
+}) {
   const isDialog = b.kind === 'dialogue' || b.kind === 'action';
   return (
     <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', marginBottom: isDialog ? 24 : 22 }}>
       {isDialog && b.hue !== undefined && (
-        <div style={{ ...avatarStyle(b.hue, 34, 'rgba(255,255,255,0.2)'), marginTop: 4 }} />
+        <div style={{ ...avatarStyle(b.hue, avatarPx, 'rgba(255,255,255,0.2)'), marginTop: 4 }} />
       )}
       <div style={{
         flex: 1, minWidth: 0,
@@ -72,7 +75,7 @@ function ProseBlockView({ b, accent, prose, director }: { b: ProseBlock; accent:
           </p>
         ) : (
           <p className="serif" style={{
-            fontSize: director ? 17.5 : 19, lineHeight: 1.78, margin: 0, color: prose,
+            fontSize: fontPx, lineHeight: 1.78, margin: 0, color: prose,
             fontStyle: b.kind === 'dialogue' ? 'italic' : 'normal', textWrap: 'pretty'
           }}>
             {b.text}
@@ -88,10 +91,12 @@ function ProseBlockView({ b, accent, prose, director }: { b: ProseBlock; accent:
 export function Story() {
   const vw = useVw();
   const narrow = vw < 780;
-  const { currentWorldId, layout, setLayout, mood, setMood, backdrop, setBackdrop, go } = useApp();
+  const { currentWorldId, layout, setLayout, mood, setMood, backdrop, setBackdrop, go, display } = useApp();
   const M = MOODS[mood];
   const BD = BACKDROPS[backdrop];
   const director = layout === 'director' && vw >= 940;
+  const avatarPx = AVATAR_PX[display.avatarSize];
+  const fontPx = director ? display.textSize - 1.5 : display.textSize;
 
   const world = useLiveQuery(
     async () => (currentWorldId ? db.worlds.get(currentWorldId) : undefined),
@@ -135,6 +140,7 @@ export function Story() {
   const [wrapBusy, setWrapBusy] = useState(false);
   const [directorSheet, setDirectorSheet] = useState(false);
   const [worldEditOpen, setWorldEditOpen] = useState(false);
+  const [displayOpen, setDisplayOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLElement>(null);
 
@@ -273,17 +279,35 @@ export function Story() {
 
   return (
     <div style={{ position: 'relative', minHeight: narrow ? 'auto' : '100vh', height: narrow ? 'calc(100vh - 58px - env(safe-area-inset-bottom))' : '100vh', display: 'flex', flexDirection: 'column', color: M.text }}>
-      {/* backdrop */}
-      <div style={{
-        position: 'absolute', inset: 0, zIndex: 0,
-        background: `linear-gradient(160deg, ${BD.a}, ${BD.b}), ${STRIPE('rgba(255,255,255,0.05)', 'rgba(255,255,255,0.01)')}`,
-        opacity: backdrop === 'none' ? 0.25 : 1, transition: 'opacity 0.5s ease'
-      }} />
-      <div style={{
-        position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none',
-        background: 'radial-gradient(720px 520px at 50% 40%, transparent, rgba(8,9,12,0.72) 78%), linear-gradient(180deg, rgba(8,9,12,0.5), rgba(8,9,12,0.2) 30%, rgba(8,9,12,0.6))',
-        backdropFilter: 'blur(3px)'
-      }} />
+      {/* backdrop — scene image when the episode has one, mood gradient otherwise */}
+      {episode.image ? (
+        <>
+          <div style={{
+            position: 'absolute', inset: 0, zIndex: 0,
+            backgroundImage: `url(${episode.image})`, backgroundSize: 'cover', backgroundPosition: 'center',
+            filter: display.imageBlur > 0 ? `blur(${display.imageBlur}px)` : undefined,
+            transform: display.imageBlur > 0 ? 'scale(1.06)' : undefined
+          }} />
+          <div style={{
+            position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none',
+            background: `rgba(8,9,12,${(display.imageDim / 100).toFixed(2)})`,
+            transition: 'background 0.2s ease'
+          }} />
+        </>
+      ) : (
+        <>
+          <div style={{
+            position: 'absolute', inset: 0, zIndex: 0,
+            background: `linear-gradient(160deg, ${BD.a}, ${BD.b}), ${STRIPE('rgba(255,255,255,0.05)', 'rgba(255,255,255,0.01)')}`,
+            opacity: backdrop === 'none' ? 0.25 : 1, transition: 'opacity 0.5s ease'
+          }} />
+          <div style={{
+            position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none',
+            background: 'radial-gradient(720px 520px at 50% 40%, transparent, rgba(8,9,12,0.72) 78%), linear-gradient(180deg, rgba(8,9,12,0.5), rgba(8,9,12,0.2) 30%, rgba(8,9,12,0.6))',
+            backdropFilter: 'blur(3px)'
+          }} />
+        </>
+      )}
 
       {/* header */}
       <div style={{
@@ -335,6 +359,7 @@ export function Story() {
               }} />
             ))}
           </div>
+          <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setDisplayOpen(true)}>Display</button>
           <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setWorldEditOpen(true)}>Edit world</button>
           <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setWrapOpen('episode')}>Wrap up</button>
         </div>
@@ -357,7 +382,18 @@ export function Story() {
         )}
 
         <section ref={scrollRef} style={{ overflow: 'auto', display: 'flex', flexDirection: 'column', position: 'relative' }}>
-          <div style={{ maxWidth: director ? 680 : 740, margin: '0 auto', width: '100%', padding: narrow ? '26px 18px 40px' : director ? '32px 30px 56px' : '52px 28px 76px' }}>
+          <div style={{
+            maxWidth: director ? 680 : 740,
+            margin: display.textScrim > 0 ? '18px auto' : '0 auto',
+            width: display.textScrim > 0 ? 'calc(100% - 24px)' : '100%',
+            padding: narrow ? '26px 18px 40px' : director ? '32px 30px 56px' : '52px 28px 76px',
+            // Optional plate behind the text so prose stays readable over scene images.
+            ...(display.textScrim > 0 ? {
+              background: `rgba(8,9,12,${(display.textScrim / 100).toFixed(2)})`,
+              borderRadius: 20,
+              backdropFilter: 'blur(10px)'
+            } : {})
+          }}>
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.16em', textTransform: 'uppercase', opacity: 0.42, marginBottom: 24 }}>
               season {numberWord(season.number)}, episode {numberWord(episode.number)}{episode.title ? ` — ${episode.title.toLowerCase()}` : ''}
             </div>
@@ -386,7 +422,8 @@ export function Story() {
                 blocks={bs}
                 accent={M.accent}
                 prose={M.prose}
-                director={director}
+                fontPx={fontPx}
+                avatarPx={avatarPx}
                 streaming={streaming}
                 hasBelow={ti < blocks.length - 1}
                 onRetry={() => void retryFrom(turn)}
@@ -396,7 +433,7 @@ export function Story() {
 
             {streaming && partial && (
               parseTurn({ id: 'partial', episodeId: episode.id, worldId: world.id, role: 'narrator', mode: null, text: partial, createdAt: 0 }, characters)
-                .map((b, i) => <ProseBlockView key={`p${i}`} b={b} accent={M.accent} prose={M.prose} director={director} />)
+                .map((b, i) => <ProseBlockView key={`p${i}`} b={b} accent={M.accent} prose={M.prose} fontPx={fontPx} avatarPx={avatarPx} />)
             )}
 
             {streaming && (
@@ -558,18 +595,142 @@ export function Story() {
         episode={episode}
         characters={characters}
       />
+
+      {/* display settings */}
+      <DisplaySheet open={displayOpen} onClose={() => setDisplayOpen(false)} narrow={narrow} episode={episode} />
     </div>
+  );
+}
+
+// ---------- display settings (scene image, text plate, sizes) ----------
+
+function SliderRow({ label, value, min, max, unit, onChange }: {
+  label: string; value: number; min: number; max: number; unit?: string; onChange: (v: number) => void;
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+        <Mono style={{ fontSize: 9 }}>{label}</Mono>
+        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: 'oklch(0.85 0.1 62)' }}>
+          {value}{unit ?? ''}
+        </span>
+      </div>
+      <input
+        type="range" min={min} max={max} value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        style={{ padding: 0, height: 4 }}
+      />
+    </div>
+  );
+}
+
+function DisplaySheet({ open, onClose, narrow, episode }: {
+  open: boolean; onClose: () => void; narrow: boolean; episode: Episode;
+}) {
+  const { display, setDisplay } = useApp();
+  const [imgError, setImgError] = useState('');
+  const [imgBusy, setImgBusy] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const onFile = async (file: File) => {
+    setImgBusy(true);
+    setImgError('');
+    try {
+      const image = await fileToSceneImage(file);
+      await db.episodes.update(episode.id, { image });
+    } catch (e) {
+      setImgError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setImgBusy(false);
+    }
+  };
+
+  return (
+    <Sheet open={open} onClose={onClose} narrow={narrow}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+          <div className="serif" style={{ fontWeight: 300, fontSize: 24, color: '#f6f4f0' }}>Display</div>
+          <Mono style={{ fontSize: 9 }}>sizes & plate settings stay on this device · the image stays with the episode</Mono>
+        </div>
+        <button className="btn-ghost" style={{ width: 30, height: 30, padding: 0, flexShrink: 0 }} onClick={onClose}>×</button>
+      </div>
+
+      <div style={{ flex: 1, minHeight: 0, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 22, paddingRight: 2 }}>
+        {/* scene image */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <Mono style={{ fontSize: 9 }}>scene image — episode {episode.number}</Mono>
+          <div style={{ fontSize: 12, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
+            A picture of what's happening right now, shown behind the story text. Swap it whenever
+            the scene changes; each episode keeps its own.
+          </div>
+          {episode.image && (
+            <div style={{
+              height: 120, borderRadius: 13, border: '1px solid rgba(255,255,255,0.12)',
+              backgroundImage: `url(${episode.image})`, backgroundSize: 'cover', backgroundPosition: 'center'
+            }} />
+          )}
+          {imgError && <ErrorNote error={imgError} onDismiss={() => setImgError('')} />}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button className="btn-ghost" style={{ fontSize: 12 }} disabled={imgBusy} onClick={() => fileRef.current?.click()}>
+              {imgBusy ? 'Processing…' : episode.image ? 'Replace image' : 'Add an image'}
+            </button>
+            {episode.image && (
+              <button className="btn-quiet" style={{ fontSize: 11 }}
+                onClick={() => void db.episodes.update(episode.id, { image: null })}>remove</button>
+            )}
+            <input
+              ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }}
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); e.target.value = ''; }}
+            />
+          </div>
+          {episode.image && (
+            <>
+              <SliderRow label="image darkness" value={display.imageDim} min={0} max={90} unit="%"
+                onChange={(v) => setDisplay({ imageDim: v })} />
+              <SliderRow label="image blur" value={display.imageBlur} min={0} max={20} unit="px"
+                onChange={(v) => setDisplay({ imageBlur: v })} />
+            </>
+          )}
+        </div>
+
+        {/* text visibility */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
+          <Mono style={{ fontSize: 9 }}>text</Mono>
+          <SliderRow label="plate behind text" value={display.textScrim} min={0} max={80} unit="%"
+            onChange={(v) => setDisplay({ textScrim: v })} />
+          <SliderRow label="text size" value={display.textSize} min={15} max={24} unit="px"
+            onChange={(v) => setDisplay({ textSize: v })} />
+        </div>
+
+        {/* avatars */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
+          <Mono style={{ fontSize: 9 }}>avatar size in the story</Mono>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {(['S', 'M', 'L'] as AvatarSize[]).map((s) => (
+              <Chip key={s} active={display.avatarSize === s} onClick={() => setDisplay({ avatarSize: s })}>
+                {s === 'S' ? 'Small' : s === 'M' ? 'Medium' : 'Large'}
+              </Chip>
+            ))}
+            <div style={{ ...avatarStyle(200, AVATAR_PX[display.avatarSize], 'rgba(255,255,255,0.25)'), marginLeft: 'auto' }} />
+          </div>
+        </div>
+
+        <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
+          onClick={() => setDisplay(DEFAULT_DISPLAY)}>reset display to defaults</button>
+      </div>
+    </Sheet>
   );
 }
 
 // ---------- turn row with edit / retry / delete-below ----------
 
-function TurnRow({ turn, blocks, accent, prose, director, streaming, hasBelow, onRetry, onDeleteBelow }: {
+function TurnRow({ turn, blocks, accent, prose, fontPx, avatarPx, streaming, hasBelow, onRetry, onDeleteBelow }: {
   turn: Turn;
   blocks: ProseBlock[];
   accent: string;
   prose: string;
-  director: boolean;
+  fontPx: number;
+  avatarPx: number;
   streaming: boolean;
   hasBelow: boolean;
   onRetry: () => void;
@@ -612,7 +773,7 @@ function TurnRow({ turn, blocks, accent, prose, director, streaming, hasBelow, o
 
   return (
     <div className="turn-row" style={{ position: 'relative' }}>
-      {blocks.map((b, i) => <ProseBlockView key={i} b={b} accent={accent} prose={prose} director={director} />)}
+      {blocks.map((b, i) => <ProseBlockView key={i} b={b} accent={accent} prose={prose} fontPx={fontPx} avatarPx={avatarPx} />)}
       <div className="turn-tools" style={{ display: 'flex', gap: 10, marginTop: -8, marginBottom: 20 }}>
         <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} disabled={streaming}
           onClick={() => { setDraft(turn.text); setEditing(true); }}>✎ edit</button>
@@ -681,7 +842,9 @@ function ScenePlatePanel({ episode, bd }: { episode: Episode; bd: { tag: string;
       <div style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, overflow: 'hidden', background: 'rgba(255,255,255,0.04)' }}>
         <div style={{
           height: 98, display: 'flex', alignItems: 'flex-end', padding: 9,
-          background: `linear-gradient(155deg, ${bd.a}, ${bd.b}), ${STRIPE('rgba(255,255,255,0.06)', 'rgba(255,255,255,0.015)')}`
+          background: episode.image
+            ? `linear-gradient(rgba(8,9,12,0.15), rgba(8,9,12,0.3)), url(${episode.image}) center / cover`
+            : `linear-gradient(155deg, ${bd.a}, ${bd.b}), ${STRIPE('rgba(255,255,255,0.06)', 'rgba(255,255,255,0.015)')}`
         }}>
           <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, color: 'rgba(236,234,230,0.6)', background: 'rgba(8,9,12,0.5)', padding: '4px 7px', borderRadius: 5 }}>
             {bd.tag}

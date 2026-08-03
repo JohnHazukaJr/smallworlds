@@ -198,6 +198,18 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <textarea key={selected.id + '-summary'} rows={4} defaultValue={selected.summary}
                 onBlur={(e) => patchChar(selected.id, { summary: e.target.value })} />
             </Field>
+            <Field label="Appearance">
+              <textarea key={selected.id + '-appearance'} rows={2} defaultValue={selected.appearance}
+                onBlur={(e) => patchChar(selected.id, { appearance: e.target.value })} />
+            </Field>
+            <Field label="Mannerisms" note="recurring physical habits and tics">
+              <textarea key={selected.id + '-mannerisms'} rows={2} defaultValue={selected.mannerisms ?? ''}
+                onBlur={(e) => patchChar(selected.id, { mannerisms: e.target.value })} />
+            </Field>
+            <Field label="Backstory" note="revealed only in earned fragments">
+              <textarea key={selected.id + '-backstory'} rows={3} defaultValue={selected.backstory ?? ''}
+                onBlur={(e) => patchChar(selected.id, { backstory: e.target.value })} />
+            </Field>
             <Field label="Voice" note="how they talk">
               <textarea key={selected.id + '-voice'} rows={2} defaultValue={selected.speechStyle}
                 onBlur={(e) => patchChar(selected.id, { speechStyle: e.target.value })} />

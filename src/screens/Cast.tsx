@@ -265,6 +265,14 @@ export function Cast() {
                   <Field label="Appearance" note="identity the narrator keeps consistent">
                     <textarea rows={2} value={d.appearance} onChange={(e) => patch({ appearance: e.target.value })} />
                   </Field>
+                  <Field label="Mannerisms" note="recurring physical habits the narrator weaves in — never all at once">
+                    <textarea rows={2} value={d.mannerisms ?? ''} onChange={(e) => patch({ mannerisms: e.target.value })}
+                      placeholder="Cracks her knuckles one at a time when stalling. Never sits with her back to a door." />
+                  </Field>
+                  <Field label="Backstory" note="informs behaviour; the narrator reveals it only in earned fragments">
+                    <textarea rows={4} value={d.backstory ?? ''} onChange={(e) => patch({ backstory: e.target.value })}
+                      placeholder="Where they come from, what it cost, and what they had to become to survive it." />
+                  </Field>
                 </>
               )}
 

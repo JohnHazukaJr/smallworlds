@@ -35,7 +35,9 @@ function characterSheet(c: Character, all: Character[]): string {
     c.role && `Role: ${c.role}`,
     c.age && `Age/read: ${c.age}`,
     c.appearance && `Appearance: ${c.appearance}`,
+    c.mannerisms && `Mannerisms (recurring physical habits and tics — weave them in naturally, never all at once): ${c.mannerisms}`,
     c.summary && `Who they are: ${c.summary}`,
+    c.backstory && `Backstory (informs behaviour; reveal only in earned fragments, never as exposition): ${c.backstory}`,
     c.speechStyle && `Voice: ${c.speechStyle}`,
     c.exampleLines.length > 0 &&
       `Example lines (imitate the rhythm, never reuse verbatim):\n${c.exampleLines.map((l) => `  "${l}"`).join('\n')}`,

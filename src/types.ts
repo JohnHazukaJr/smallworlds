@@ -74,6 +74,8 @@ export interface Episode {
   title: string;
   /** where the episode takes place — feeds the scene plate + prompt */
   location: string;
+  /** optional scene image (data URL) shown behind the story text */
+  image?: string | null;
   /** character ids present in the current scene */
   castIds: string[];
   status: 'active' | 'ended';
@@ -122,6 +124,10 @@ export interface Character {
   // identity
   age: string;
   appearance: string;
+  /** recurring physical habits, gestures, tics the narrator weaves in */
+  mannerisms: string;
+  /** the history that shaped them — informs behaviour, never dumped as exposition */
+  backstory: string;
   /** prose description — who they are */
   summary: string;
   // voice

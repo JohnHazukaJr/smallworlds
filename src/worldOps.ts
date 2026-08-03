@@ -72,7 +72,7 @@ export function emptyCharacter(worldId: string, patch: Partial<Character> = {}):
   return {
     id: uid(), worldId,
     name: '', role: '', hue: Math.floor(Math.random() * 360), isPlayer: false,
-    age: '', appearance: '', summary: '',
+    age: '', appearance: '', mannerisms: '', backstory: '', summary: '',
     speechStyle: '', exampleLines: [],
     traits: '', desires: '', fears: '', flaws: '',
     secrets: '', mustNotKnow: '',
