@@ -4,6 +4,10 @@ Longform AI roleplay: worlds with their own rules, a cast that holds its line, a
 remember selectively. Local-first — your stories, characters, and API keys live on your device and
 are sent nowhere except the AI endpoint you configure.
 
+**Copyright © 2026. All rights reserved.** This is proprietary software — no copying,
+modification, or redistribution without written permission. See [LICENSE](LICENSE). Stories and
+worlds you create in the app are yours, not covered by this license.
+
 ## Run it
 
 ```bash

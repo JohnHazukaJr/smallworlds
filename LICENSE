@@ -1,0 +1,43 @@
+Copyright (c) 2026 [Your Name]. All rights reserved.
+
+PROPRIETARY LICENSE
+
+This software and its source code, design, and documentation (the "Software")
+are the exclusive property of the copyright holder.
+
+NO PERMISSION IS GRANTED to any person to:
+
+  1. Copy, reproduce, or duplicate the Software, in whole or in part;
+  2. Modify, adapt, translate, or create derivative works of the Software;
+  3. Distribute, publish, sublicense, sell, rent, lease, or lend the Software;
+  4. Reverse engineer, decompile, or disassemble the Software, except to the
+     extent such restriction is prohibited by applicable law;
+  5. Use the Software or any part of it in any other product or service;
+
+in each case without the prior written permission of the copyright holder.
+
+Viewing the Software where the copyright holder has made it publicly
+accessible (for example, a hosted deployment) does not grant any of the
+rights above.
+
+THIRD-PARTY COMPONENTS
+
+The Software depends on third-party open-source packages (including React,
+Dexie, Zustand, and Vite) that are licensed separately under their own terms
+(MIT and similar). Those licenses apply only to those components, not to the
+Software itself. Fonts loaded from Google Fonts are licensed under the SIL
+Open Font License.
+
+USER CONTENT
+
+Stories, characters, worlds, and other content created by a user of the
+Software belong to that user. This license covers the Software only.
+
+DISCLAIMER
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
