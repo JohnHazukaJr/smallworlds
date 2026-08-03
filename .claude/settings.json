@@ -5,7 +5,12 @@
       "Bash(sed -n '10,745p' \"Small Worlds AI.dc.html\")",
       "Bash(sed -n '748,1323p' \"Small Worlds AI.dc.html\")",
       "Bash(cp \"Small Worlds AI.dc.html\" \"Small Worlds AI.dc.html.orig\")",
-      "Bash(node build.js)"
+      "Bash(node build.js)",
+      "Bash(mkdir -p vendor)",
+      "Bash(curl -sL -o vendor/react.production.min.js \"https://unpkg.com/react@18.3.1/umd/react.production.min.js\")",
+      "Bash(curl -sL -o vendor/react-dom.production.min.js \"https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js\")",
+      "Bash(openssl dgst *)",
+      "Bash(openssl base64 *)"
     ]
   }
 }

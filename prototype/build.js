@@ -15,6 +15,13 @@ const ROOT = __dirname;
 const SRC = path.join(ROOT, "src");
 const OUT_FILE = path.join(ROOT, "Small Worlds AI.dc.html");
 
+// Pinned to the exact versions/hashes support.js's loadReactUmd() expects
+// (REACT_SRI / REACT_DOM_SRI). Loading them here as plain <script> tags means
+// window.React/window.ReactDOM already exist by the time support.js runs, so
+// it never reaches out to unpkg.com at runtime.
+const REACT_SRI = "sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z";
+const REACT_DOM_SRI = "sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1";
+
 function escapeHtmlAttr(value) {
   return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
 }
@@ -31,6 +38,8 @@ function build() {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./vendor/react.production.min.js" integrity="${REACT_SRI}" crossorigin="anonymous"></script>
+<script src="./vendor/react-dom.production.min.js" integrity="${REACT_DOM_SRI}" crossorigin="anonymous"></script>
 <script src="./support.js"></script>
 </head>
 <body>
