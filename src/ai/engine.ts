@@ -87,12 +87,20 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
   return narratorTurn.id;
 }
 
-/** Regenerate: delete the last narrator turn and rewrite from the same point. */
+/** Delete a turn and everything after it (used by regenerate / retry). */
 export async function deleteTurnsFrom(turnId: string, episodeId: string): Promise<void> {
   const turns = await db.turns.where('episodeId').equals(episodeId).sortBy('createdAt');
   const idx = turns.findIndex((t) => t.id === turnId);
   if (idx < 0) return;
   await db.turns.bulkDelete(turns.slice(idx).map((t) => t.id));
+}
+
+/** Delete everything after a turn, keeping the turn itself. */
+export async function deleteTurnsAfter(turnId: string, episodeId: string): Promise<void> {
+  const turns = await db.turns.where('episodeId').equals(episodeId).sortBy('createdAt');
+  const idx = turns.findIndex((t) => t.id === turnId);
+  if (idx < 0) return;
+  await db.turns.bulkDelete(turns.slice(idx + 1).map((t) => t.id));
 }
 
 // ---------- Utility calls (JSON tasks on the utility model) ----------

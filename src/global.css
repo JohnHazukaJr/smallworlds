@@ -146,3 +146,11 @@ select { appearance: none; cursor: pointer; }
   text-transform: uppercase;
 }
 .tabbar button.active { color: #f6f4f0; }
+
+/* Per-turn tools in the story: hidden until hover on desktop, dimly visible on touch */
+.turn-tools { opacity: 0; transition: opacity 0.15s ease; }
+.turn-row:hover .turn-tools,
+.turn-row:focus-within .turn-tools { opacity: 1; }
+@media (hover: none) {
+  .turn-tools { opacity: 0.55; }
+}

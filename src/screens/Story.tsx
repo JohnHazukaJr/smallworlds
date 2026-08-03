@@ -1,6 +1,7 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { deleteTurnsFrom, extractContinuity, writeTurn } from '../ai/engine';
+import { deleteTurnsAfter, deleteTurnsFrom, extractContinuity, writeTurn } from '../ai/engine';
+import { WorldEditorSheet } from '../components/WorldEditorSheet';
 import { db, uid } from '../db';
 import { useApp } from '../store/app';
 import type { Character, ComposeMode, ContinuityFact, Episode, OpenThread, Season, Turn, TurnLength, World } from '../types';
@@ -133,6 +134,7 @@ export function Story() {
   const [wrapOpen, setWrapOpen] = useState<null | 'episode' | 'season'>(null);
   const [wrapBusy, setWrapBusy] = useState(false);
   const [directorSheet, setDirectorSheet] = useState(false);
+  const [worldEditOpen, setWorldEditOpen] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLElement>(null);
 
@@ -140,61 +142,73 @@ export function Story() {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [turns.length, partial]);
 
-  const write = async () => {
-    if (!world || !season || !episode || streaming) return;
-    if (composeMode !== 'continue' && !input.trim()) return;
+  /** Shared streaming runner behind write / rewrite / retry. */
+  const runNarration = async (mode: ComposeMode, text: string): Promise<'ok' | 'error' | 'aborted'> => {
+    if (!world || !season || !episode) return 'error';
     setError('');
     setStreaming(true);
     setPartial('');
     const controller = new AbortController();
     abortRef.current = controller;
-    const text = input;
-    setInput('');
     try {
       await writeTurn({
-        world, season, episode,
-        mode: composeMode, input: text, length,
-        signal: controller.signal,
-        onDelta: setPartial
+        world, season, episode, mode, input: text, length,
+        signal: controller.signal, onDelta: setPartial
       });
       setPartial('');
-      if (composeMode === 'speak' || composeMode === 'act' || composeMode === 'steer') setComposeMode('continue');
+      return 'ok';
     } catch (e) {
-      if ((e as Error).name !== 'AbortError') {
-        setError(e instanceof Error ? e.message : String(e));
-        setInput(text);
-      } else {
-        setPartial('');
-      }
+      setPartial('');
+      if ((e as Error).name === 'AbortError') return 'aborted';
+      setError(e instanceof Error ? e.message : String(e));
+      return 'error';
     } finally {
       setStreaming(false);
       abortRef.current = null;
     }
   };
 
-  const regenerate = async () => {
+  const write = async () => {
     if (!world || !season || !episode || streaming) return;
-    const lastNarrator = [...turns].reverse().find((t) => t.role === 'narrator');
-    if (!lastNarrator) return;
-    await deleteTurnsFrom(lastNarrator.id, episode.id);
-    setError('');
-    setStreaming(true);
-    setPartial('');
-    const controller = new AbortController();
-    abortRef.current = controller;
-    try {
-      await writeTurn({
-        world, season, episode, mode: 'continue', input: '', length,
-        signal: controller.signal, onDelta: setPartial
-      });
-      setPartial('');
-    } catch (e) {
-      if ((e as Error).name !== 'AbortError') setError(e instanceof Error ? e.message : String(e));
-      setPartial('');
-    } finally {
-      setStreaming(false);
-      abortRef.current = null;
+    if (composeMode !== 'continue' && !input.trim()) return;
+    const text = input;
+    setInput('');
+    const result = await runNarration(composeMode, text);
+    if (result === 'ok') {
+      if (composeMode !== 'continue') setComposeMode('continue');
+    } else if (result === 'error') {
+      setInput(text);
     }
+  };
+
+  /**
+   * Retry from a turn. For a narrator turn: that response and everything after
+   * are rewritten. For a player turn: the turn is kept (edits included) and
+   * everything after is rewritten from it.
+   */
+  const retryFrom = async (turn: Turn) => {
+    if (!episode || streaming) return;
+    const idx = turns.findIndex((t) => t.id === turn.id);
+    if (idx < 0) return;
+    const below = turns.length - idx - 1;
+    if (turn.role === 'narrator') {
+      if (below > 0 && !confirm(`Rewrite this response? The ${below} turn${below > 1 ? 's' : ''} after it will be replaced.`)) return;
+      await deleteTurnsFrom(turn.id, episode.id);
+    } else {
+      if (below > 0 && !confirm(`Retry from here? The ${below} turn${below > 1 ? 's' : ''} after this will be replaced.`)) return;
+      await deleteTurnsAfter(turn.id, episode.id);
+    }
+    await runNarration('continue', '');
+  };
+
+  /** Delete everything after a turn, keeping the turn itself. */
+  const deleteBelow = async (turn: Turn) => {
+    if (!episode || streaming) return;
+    const idx = turns.findIndex((t) => t.id === turn.id);
+    const below = turns.length - idx - 1;
+    if (idx < 0 || below === 0) return;
+    if (!confirm(`Delete the ${below} turn${below > 1 ? 's' : ''} below this one? This cannot be undone.`)) return;
+    await deleteTurnsAfter(turn.id, episode.id);
   };
 
   const endEpisode = async () => {
@@ -321,6 +335,7 @@ export function Story() {
               }} />
             ))}
           </div>
+          <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setWorldEditOpen(true)}>Edit world</button>
           <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setWrapOpen('episode')}>Wrap up</button>
         </div>
       </div>
@@ -364,10 +379,19 @@ export function Story() {
               </div>
             )}
 
-            {blocks.map(({ turn, blocks: bs }) => (
-              <div key={turn.id} style={{ position: 'relative' }} className="turn-row">
-                {bs.map((b, i) => <ProseBlockView key={i} b={b} accent={M.accent} prose={M.prose} director={director} />)}
-              </div>
+            {blocks.map(({ turn, blocks: bs }, ti) => (
+              <TurnRow
+                key={turn.id}
+                turn={turn}
+                blocks={bs}
+                accent={M.accent}
+                prose={M.prose}
+                director={director}
+                streaming={streaming}
+                hasBelow={ti < blocks.length - 1}
+                onRetry={() => void retryFrom(turn)}
+                onDeleteBelow={() => void deleteBelow(turn)}
+              />
             ))}
 
             {streaming && partial && (
@@ -381,18 +405,6 @@ export function Story() {
               </div>
             )}
 
-            {!streaming && turns.some((t) => t.role === 'narrator') && (
-              <div style={{ display: 'flex', gap: 8, marginTop: 14, opacity: 0.8 }}>
-                <button className="btn-quiet" style={{ fontSize: 11 }} onClick={() => void regenerate()}>↻ rewrite last</button>
-                <button
-                  className="btn-quiet" style={{ fontSize: 11 }}
-                  onClick={async () => {
-                    const last = turns[turns.length - 1];
-                    if (last && confirm('Delete the last turn?')) await db.turns.delete(last.id);
-                  }}
-                >× delete last</button>
-              </div>
-            )}
           </div>
         </section>
 
@@ -535,6 +547,86 @@ export function Story() {
         </div>
         {directorContent}
       </Sheet>
+
+      {/* live world editor */}
+      <WorldEditorSheet
+        open={worldEditOpen}
+        onClose={() => setWorldEditOpen(false)}
+        narrow={narrow}
+        world={world}
+        season={season}
+        episode={episode}
+        characters={characters}
+      />
+    </div>
+  );
+}
+
+// ---------- turn row with edit / retry / delete-below ----------
+
+function TurnRow({ turn, blocks, accent, prose, director, streaming, hasBelow, onRetry, onDeleteBelow }: {
+  turn: Turn;
+  blocks: ProseBlock[];
+  accent: string;
+  prose: string;
+  director: boolean;
+  streaming: boolean;
+  hasBelow: boolean;
+  onRetry: () => void;
+  onDeleteBelow: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+
+  const save = async () => {
+    const text = draft.trim();
+    if (text && text !== turn.text) await db.turns.update(turn.id, { text });
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <div style={{ marginBottom: 22, display: 'flex', flexDirection: 'column', gap: 9 }}>
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.5 }}>
+          editing {turn.role === 'narrator' ? 'the narrator' : `your ${turn.mode ?? 'turn'}`} — saved into story memory
+        </div>
+        <textarea
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          rows={Math.min(16, Math.max(4, Math.ceil(draft.length / 70)))}
+          style={{ fontFamily: 'Spectral, serif', fontSize: 15.5, lineHeight: 1.7, width: '100%' }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void save(); }
+            if (e.key === 'Escape') setEditing(false);
+          }}
+        />
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <button className="btn-primary" style={{ padding: '7px 14px', fontSize: 12 }} onClick={() => void save()}>Save</button>
+          <button className="btn-quiet" style={{ fontSize: 11 }} onClick={() => setEditing(false)}>cancel</button>
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.4, marginLeft: 'auto' }}>⌘↵ save · esc cancel</span>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="turn-row" style={{ position: 'relative' }}>
+      {blocks.map((b, i) => <ProseBlockView key={i} b={b} accent={accent} prose={prose} director={director} />)}
+      <div className="turn-tools" style={{ display: 'flex', gap: 10, marginTop: -8, marginBottom: 20 }}>
+        <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} disabled={streaming}
+          onClick={() => { setDraft(turn.text); setEditing(true); }}>✎ edit</button>
+        <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} disabled={streaming}
+          onClick={onRetry}>↻ {turn.role === 'narrator' ? 'retry' : 'retry from here'}</button>
+        {hasBelow && (
+          <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} disabled={streaming}
+            onClick={onDeleteBelow}>⌫ delete below</button>
+        )}
+        <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} disabled={streaming}
+          onClick={async () => {
+            if (confirm('Delete this turn? The turns after it are kept.')) await db.turns.delete(turn.id);
+          }}>× delete</button>
+      </div>
     </div>
   );
 }
