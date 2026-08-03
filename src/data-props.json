@@ -1,0 +1,28 @@
+{
+  "storyLayout": {
+    "editor": "enum",
+    "options": ["immersive", "director"],
+    "default": "immersive",
+    "tsType": "string",
+    "section": "Story view"
+  },
+  "moodTheming": {
+    "editor": "boolean",
+    "default": true,
+    "tsType": "boolean",
+    "section": "Story view"
+  },
+  "matureDefault": {
+    "editor": "boolean",
+    "default": true,
+    "tsType": "boolean",
+    "section": "Content"
+  },
+  "accentColor": {
+    "editor": "color",
+    "default": "#e0a55f",
+    "options": ["#e0a55f", "#9fb8d4", "#b7c79a", "#d49a9a"],
+    "tsType": "string",
+    "section": "Theme"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p src)",
+      "Bash(sed -n '10,745p' \"Small Worlds AI.dc.html\")",
+      "Bash(sed -n '748,1323p' \"Small Worlds AI.dc.html\")",
+      "Bash(cp \"Small Worlds AI.dc.html\" \"Small Worlds AI.dc.html.orig\")",
+      "Bash(node build.js)"
+    ]
+  }
+}
