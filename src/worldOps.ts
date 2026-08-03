@@ -19,6 +19,8 @@ export interface NewWorldInput {
   bible: string;
   premise: string;
   hue?: number;
+  /** overrides for the world's narrator settings; merges onto defaults */
+  ai?: Partial<WorldAISettings>;
 }
 
 /** Create a world with season 1 / episode 1 and a player character, ready to write. */
@@ -35,7 +37,7 @@ export async function createWorld(input: NewWorldInput): Promise<World> {
     bible: input.bible,
     hue: input.hue ?? Math.floor(Math.random() * 360),
     visibility: s.defaultVisibility,
-    ai: { ...DEFAULT_AI, mature: s.matureDefault },
+    ai: { ...DEFAULT_AI, mature: s.matureDefault, ...input.ai },
     proseModel: null,
     utilityModel: null,
     activeSeasonId: seasonId,

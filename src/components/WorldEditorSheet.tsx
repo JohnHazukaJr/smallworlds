@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { db } from '../db';
+import { ModelPicker } from '../screens/Settings';
 import { useApp } from '../store/app';
 import type { Character, Episode, Season, World, WorldAISettings } from '../types';
-import { Chip, Field, Mono, Sheet, Toggle } from '../ui/bits';
+import { Bar, Chip, Field, Mono, Sheet, Toggle } from '../ui/bits';
 import { avatarStyle } from '../ui/theme';
 import { emptyCharacter } from '../worldOps';
 
-type Tab = 'lore' | 'plot' | 'instructions' | 'cast';
+type Tab = 'lore' | 'plot' | 'instructions' | 'settings' | 'cast';
 
 const MONO_INPUT = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 } as const;
 
@@ -47,7 +48,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
       </div>
 
       <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
-        {(['lore', 'plot', 'instructions', 'cast'] as const).map((t) => (
+        {(['lore', 'plot', 'instructions', 'settings', 'cast'] as const).map((t) => (
           <Chip key={t} active={tab === t} onClick={() => setTab(t)}>{t[0].toUpperCase() + t.slice(1)}</Chip>
         ))}
       </div>
@@ -116,6 +117,11 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <textarea key={world.id + '-content'} rows={3} defaultValue={world.ai.contentNotes}
                 onBlur={(e) => patchAI({ contentNotes: e.target.value })} />
             </Field>
+          </>
+        )}
+
+        {tab === 'settings' && (
+          <>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
               <Field label="Point of view">
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -132,15 +138,53 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 </div>
               </Field>
             </div>
+
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
               <Toggle on={world.ai.mature} onClick={() => patchAI({ mature: !world.ai.mature })} />
               <div style={{ fontSize: 12.5, color: 'rgba(236,234,230,0.6)' }}>
                 {world.ai.mature ? 'Adult world — unrestricted' : 'General audience'}
               </div>
             </div>
+
+            <MiniSlider
+              label="Purple-ness"
+              value={world.ai.proseDensity}
+              onChange={(v) => patchAI({ proseDensity: v })}
+              valueLabel={world.ai.proseDensity < 34 ? 'restrained' : world.ai.proseDensity < 67 ? 'balanced' : 'ornamental'}
+            />
+            <MiniSlider
+              label="Pacing"
+              value={world.ai.pacing}
+              onChange={(v) => patchAI({ pacing: v })}
+              valueLabel={world.ai.pacing < 34 ? 'slow-burn' : world.ai.pacing < 67 ? 'measured' : 'propulsive'}
+            />
+
+            <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <Field label="Prose model for this world" note="unset = global default">
+                <ModelPicker
+                  value={world.proseModel}
+                  onChange={(m) => void db.worlds.update(world.id, { proseModel: m })}
+                />
+                {world.proseModel && (
+                  <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
+                    onClick={() => void db.worlds.update(world.id, { proseModel: null })}>use global default</button>
+                )}
+              </Field>
+              <Field label="Utility model for this world" note="unset = global default">
+                <ModelPicker
+                  value={world.utilityModel}
+                  onChange={(m) => void db.worlds.update(world.id, { utilityModel: m })}
+                />
+                {world.utilityModel && (
+                  <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
+                    onClick={() => void db.worlds.update(world.id, { utilityModel: null })}>use global default</button>
+                )}
+              </Field>
+            </div>
+
             <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
               onClick={() => { onClose(); go('settings'); }}>
-              prose density, pacing & models → Settings
+              providers, keys & app settings → Settings
             </button>
           </>
         )}
@@ -253,5 +297,24 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
         )}
       </div>
     </Sheet>
+  );
+}
+
+function MiniSlider({ label, value, onChange, valueLabel }: {
+  label: string; value: number; onChange: (v: number) => void; valueLabel: string;
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+        <div style={{ fontSize: 13, fontWeight: 600, color: 'rgba(236,234,230,0.9)' }}>{label}</div>
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: 'oklch(0.85 0.1 62)' }}>{valueLabel}</div>
+      </div>
+      <Bar pct={value} />
+      <input
+        type="range" min={0} max={100} value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        style={{ padding: 0, height: 4 }}
+      />
+    </div>
   );
 }

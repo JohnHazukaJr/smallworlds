@@ -92,9 +92,10 @@ device and what leaves it in backups.
   prompts necessarily go to whichever AI provider you configured, under that provider's privacy
   policy.
 
-If you host the build yourself, also send these HTTP headers (they can't be set from inside the
-page): `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
-`Referrer-Policy: no-referrer`. Netlify/Cloudflare Pages support a `_headers` file for this.
+Production builds ship a `public/_headers` file (copied into `dist/`) that Netlify and Cloudflare
+Pages apply automatically: `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
+`Referrer-Policy: no-referrer`, `Permissions-Policy` (camera/mic/location/payment off),
+`Strict-Transport-Security`, and `Cross-Origin-Opener-Policy: same-origin`.
 
 ## Use it on your phone
 
