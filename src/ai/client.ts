@@ -24,6 +24,30 @@ export class AIError extends Error {
 }
 
 /**
+ * Claude Sonnet 5 / Opus 4.7+ reject non-default sampling params with 400.
+ * Match both direct Anthropic ids and OpenRouter-style `anthropic/...` slugs.
+ */
+export function modelOmitsSamplingParams(model: string): boolean {
+  const m = model.toLowerCase();
+  if (!m.includes('claude')) return false;
+  if (/sonnet[-_.]?5\b/.test(m) || /sonnet[-_.]?5\./.test(m)) return true;
+  // Opus 4.7+ and any Opus 5+
+  if (/opus[-_.]?4[-_.]?([7-9]|\d{2,})\b/.test(m)) return true;
+  if (/opus[-_.]?([5-9])\b/.test(m)) return true;
+  return false;
+}
+
+/** Attach temperature only when the model accepts it. */
+function withTemperature<T extends Record<string, unknown>>(
+  body: T,
+  model: string,
+  temperature: number | undefined
+): T {
+  if (modelOmitsSamplingParams(model)) return body;
+  return { ...body, temperature: temperature ?? 0.9 };
+}
+
+/**
  * Stream a chat completion from any configured provider.
  * Resolves with the full response text; onDelta fires as tokens arrive.
  */
@@ -80,13 +104,12 @@ async function streamOpenAI(req: StreamRequest): Promise<string> {
     method: 'POST',
     headers,
     signal: req.signal,
-    body: JSON.stringify({
+    body: JSON.stringify(withTemperature({
       model: req.model,
       stream: true,
       max_tokens: req.maxTokens,
-      temperature: req.temperature ?? 0.9,
       messages: [{ role: 'system', content: req.system }, ...req.messages]
-    })
+    }, req.model, req.temperature))
   });
   if (!res.ok) await throwHttpError(res);
   let full = '';
@@ -114,14 +137,13 @@ async function streamAnthropic(req: StreamRequest): Promise<string> {
       'anthropic-version': '2023-06-01',
       'anthropic-dangerous-direct-browser-access': 'true'
     },
-    body: JSON.stringify({
+    body: JSON.stringify(withTemperature({
       model: req.model,
       stream: true,
       max_tokens: req.maxTokens,
-      temperature: req.temperature ?? 0.9,
       system: req.system,
       messages: req.messages
-    })
+    }, req.model, req.temperature))
   });
   if (!res.ok) await throwHttpError(res);
   let full = '';
@@ -153,10 +175,9 @@ async function streamGemini(req: StreamRequest): Promise<string> {
         role: m.role === 'assistant' ? 'model' : 'user',
         parts: [{ text: m.content }]
       })),
-      generationConfig: {
-        maxOutputTokens: req.maxTokens,
-        temperature: req.temperature ?? 0.9
-      }
+      generationConfig: withTemperature({
+        maxOutputTokens: req.maxTokens
+      }, req.model, req.temperature)
     })
   });
   if (!res.ok) await throwHttpError(res);

@@ -467,7 +467,8 @@ export function directorSystemPrompt(): string {
     'After applying enter/leave, speak characterIds must be in the resulting in-scene cast (never the player). ' +
     'Narration briefs describe atmosphere or physical action — never finished dialogue. ' +
     'Speak briefs are intent only (tone/goal), never the finished line. ' +
-    'Not everyone must speak. Typical: 1–3 narration beats and 1–4 speak beats. ' +
+    'Not everyone must speak. Typical: 1–2 narration beats and at most 3 speak beats. ' +
+    'Hard cap: at most 3 speak beats and at most 5 beats total. ' +
     'Always include at least one narration beat unless the player just spoke and an immediate reply is natural — then you may open with speak. ' +
     'End the plan on tension or an opening for the player.'
   );

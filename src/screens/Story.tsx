@@ -188,7 +188,11 @@ export function Story() {
   const [streaming, setStreaming] = useState(false);
   const [partial, setPartial] = useState('');
   const [partialMeta, setPartialMeta] = useState<StreamMeta>({ role: 'narrator' });
+  const [progressLabel, setProgressLabel] = useState('writing…');
   const [error, setError] = useState('');
+  /** How many turns from the end are mounted — keeps long episodes responsive. */
+  const [turnWindow, setTurnWindow] = useState(60);
+  useEffect(() => { setTurnWindow(60); }, [episode?.id]);
   const [wrapOpen, setWrapOpen] = useState<null | 'episode' | 'season'>(null);
   const [wrapBusy, setWrapBusy] = useState(false);
   const [directorSheet, setDirectorSheet] = useState(false);
@@ -259,12 +263,14 @@ export function Story() {
     setStreaming(true);
     setPartial('');
     setPartialMeta({ role: 'narrator' });
+    setProgressLabel('planning…');
     const controller = new AbortController();
     abortRef.current = controller;
     try {
       await writeTurn({
         world, season, episode, mode, input: text, length,
         signal: controller.signal,
+        onProgress: setProgressLabel,
         onDelta: (p, meta) => {
           setPartialMeta(meta);
           setPartial(p);
@@ -565,7 +571,19 @@ export function Story() {
               </div>
             )}
 
-            {blocks.map(({ turn, blocks: bs }, ti) => (
+            {blocks.length > turnWindow && (
+              <div style={{ marginBottom: 22 }}>
+                <button
+                  className="btn-ghost"
+                  style={{ fontSize: 11, padding: '8px 14px' }}
+                  onClick={() => setTurnWindow((n) => n + 60)}
+                >
+                  Show earlier turns ({blocks.length - turnWindow} hidden)
+                </button>
+              </div>
+            )}
+
+            {blocks.slice(-turnWindow).map(({ turn, blocks: bs }, ti, visible) => (
               <TurnRow
                 key={turn.id}
                 turn={turn}
@@ -576,7 +594,7 @@ export function Story() {
                 fontPx={fontPx}
                 avatarPx={avatarPx}
                 streaming={streaming}
-                hasBelow={ti < blocks.length - 1}
+                hasBelow={ti < visible.length - 1 || streaming}
                 onRetry={() => void retryFrom(turn)}
                 onDeleteBelow={() => void deleteBelow(turn)}
               />
@@ -598,16 +616,7 @@ export function Story() {
 
             {streaming && (
               <div style={{ marginTop: 22 }}>
-                <Spinner
-                  accent={M.accent}
-                  label={
-                    !partial
-                      ? 'planning…'
-                      : partialMeta.role === 'character'
-                        ? `${characters.find((c) => c.id === partialMeta.characterId)?.name ?? 'someone'} speaking…`
-                        : 'writing…'
-                  }
-                />
+                <Spinner accent={M.accent} label={progressLabel || 'writing…'} />
               </div>
             )}
 

@@ -5,7 +5,7 @@ import { db } from '../db';
 import { useApp } from '../store/app';
 import type { Location } from '../types';
 import { ErrorNote, Field, Mono, Spinner, useVw } from '../ui/bits';
-import { fileToSceneImage } from '../ui/image';
+import { fileToPortraitImage } from '../ui/image';
 import { avatarStyle, STRIPE } from '../ui/theme';
 import { emptyLocation } from '../worldOps';
 
@@ -79,7 +79,7 @@ export function Locations() {
     setPortraitBusy(true);
     setPortraitError('');
     try {
-      const portrait = await fileToSceneImage(file, 900, 0.85);
+      const portrait = await fileToPortraitImage(file);
       await db.locations.update(draft.id, { portrait, updatedAt: Date.now() });
       patch({ portrait });
     } catch (e) {

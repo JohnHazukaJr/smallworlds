@@ -5,6 +5,7 @@
 // - The settings store persists providers with blank apiKey fields (see partialize in store/settings.ts).
 // - On unlock, keys are decrypted and held in memory only; locking wipes them from memory.
 // - Losing the passphrase loses the keys (not the stories) — there is no recovery by design.
+// - Lock always awaits a successful persistKeys write before blanking in-memory keys.
 
 import { create } from 'zustand';
 import { useSettings } from '../store/settings';
@@ -13,7 +14,7 @@ import { decryptString, deriveKey, encryptString, randomSalt, type CipherPayload
 export const VAULT_STORAGE_KEY = 'small-worlds-vault';
 const CHECK_PLAINTEXT = 'small-worlds-vault-ok';
 
-interface VaultData {
+export interface VaultData {
   v: 1;
   salt: string;
   /** known plaintext encrypted with the vault key — verifies the passphrase */
@@ -30,6 +31,20 @@ function readVault(): VaultData | null {
   } catch {
     return null;
   }
+}
+
+function writeVault(data: VaultData): void {
+  try {
+    localStorage.setItem(VAULT_STORAGE_KEY, JSON.stringify(data));
+  } catch (e) {
+    void import('../storage/quota').then(({ markStoragePressure, isQuotaError }) => {
+      if (isQuotaError(e)) markStoragePressure();
+    });
+    throw new Error('Could not write the key vault (storage may be full or blocked).');
+  }
+  // Confirm the write landed — protect against quota / private-mode failures.
+  const verify = localStorage.getItem(VAULT_STORAGE_KEY);
+  if (!verify) throw new Error('Could not write the key vault (storage may be full or blocked).');
 }
 
 function currentKeyMap(): Record<string, string> {
@@ -49,7 +64,8 @@ interface VaultStore {
   sessionKey: CryptoKey | null;
   enable: (passphrase: string) => Promise<void>;
   unlock: (passphrase: string) => Promise<boolean>;
-  lock: () => void;
+  /** Persist keys, then blank memory. Throws if the vault write fails — keys stay in memory. */
+  lock: () => Promise<void>;
   /** Decrypts keys back into plaintext settings storage and removes the vault. Requires unlocked. */
   disable: () => Promise<void>;
   /** Re-encrypts the current in-memory keys. Called after any provider change while unlocked. */
@@ -57,6 +73,10 @@ interface VaultStore {
   changePassphrase: (oldPass: string, newPass: string) => Promise<boolean>;
   /** Forgot passphrase: deletes the encrypted keys (stories are untouched). */
   reset: () => void;
+  /** Snapshot of the on-disk vault blob (for device backup). */
+  exportVaultBlob: () => VaultData | null;
+  /** Restore a vault blob from a device backup (leaves the app locked). */
+  importVaultBlob: (data: VaultData) => void;
 }
 
 export const useVault = create<VaultStore>()((set, get) => ({
@@ -73,7 +93,7 @@ export const useVault = create<VaultStore>()((set, get) => ({
       check: await encryptString(key, CHECK_PLAINTEXT),
       keys: await encryptString(key, JSON.stringify(currentKeyMap()))
     };
-    localStorage.setItem(VAULT_STORAGE_KEY, JSON.stringify(data));
+    writeVault(data);
     set({ enabled: true, locked: false, sessionKey: key });
     repersistSettings(); // strips plaintext keys from localStorage
   },
@@ -99,8 +119,10 @@ export const useVault = create<VaultStore>()((set, get) => ({
     return true;
   },
 
-  lock: () => {
+  lock: async () => {
     if (!get().enabled) return;
+    // Never blank in-memory keys until the ciphertext write succeeds.
+    await get().persistKeys();
     useSettings.setState((s) => ({ providers: s.providers.map((p) => ({ ...p, apiKey: '' })) }));
     set({ locked: true, sessionKey: null });
   },
@@ -118,7 +140,7 @@ export const useVault = create<VaultStore>()((set, get) => ({
     const data = readVault();
     if (!data) return;
     data.keys = await encryptString(sessionKey, JSON.stringify(currentKeyMap()));
-    localStorage.setItem(VAULT_STORAGE_KEY, JSON.stringify(data));
+    writeVault(data);
   },
 
   changePassphrase: async (oldPass, newPass) => {
@@ -141,7 +163,7 @@ export const useVault = create<VaultStore>()((set, get) => ({
       check: await encryptString(newKey, CHECK_PLAINTEXT),
       keys: await encryptString(newKey, keyMapJson)
     };
-    localStorage.setItem(VAULT_STORAGE_KEY, JSON.stringify(next));
+    writeVault(next);
     set({ sessionKey: newKey, locked: false });
     return true;
   },
@@ -150,6 +172,15 @@ export const useVault = create<VaultStore>()((set, get) => ({
     localStorage.removeItem(VAULT_STORAGE_KEY);
     useSettings.setState((s) => ({ providers: s.providers.map((p) => ({ ...p, apiKey: '' })) }));
     set({ enabled: false, locked: false, sessionKey: null });
+    repersistSettings();
+  },
+
+  exportVaultBlob: () => readVault(),
+
+  importVaultBlob: (data) => {
+    writeVault(data);
+    useSettings.setState((s) => ({ providers: s.providers.map((p) => ({ ...p, apiKey: '' })) }));
+    set({ enabled: true, locked: true, sessionKey: null });
     repersistSettings();
   }
 }));

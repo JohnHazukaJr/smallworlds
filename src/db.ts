@@ -121,7 +121,7 @@ export function isEncryptedExport(data: unknown): data is EncryptedExport {
   return !!data && typeof data === 'object' && (data as EncryptedExport).format === 'small-worlds-encrypted';
 }
 
-/** Import a single-world export or a full backup. Returns the imported world ids. */
+/** Import a single-world export or a full worlds-only backup. Returns the imported world ids. */
 export async function importAny(data: WorldExport | BackupExport): Promise<string[]> {
   if (data.format === 'small-worlds-world') {
     return [await importWorld(data)];
@@ -134,12 +134,31 @@ export async function importAny(data: WorldExport | BackupExport): Promise<strin
   throw new Error('Not a Small Worlds file.');
 }
 
+/**
+ * Import world, backup, or full device bundle (settings + vault).
+ * Device format is handled in sync/serialize to avoid circular imports.
+ */
+export async function importAnyFile(data: unknown): Promise<string[]> {
+  const { isDeviceExport, importDevice } = await import('./sync/serialize');
+  if (isDeviceExport(data)) return importDevice(data);
+  if (data && typeof data === 'object' && 'format' in data) {
+    const fmt = (data as { format: string }).format;
+    if (fmt === 'small-worlds-world' || fmt === 'small-worlds-backup') {
+      return importAny(data as WorldExport | BackupExport);
+    }
+  }
+  throw new Error('Not a Small Worlds file.');
+}
+
 /** Deletes everything: stories, characters, settings, keys, vault. Irreversible. */
 export async function wipeAllData(): Promise<void> {
   await db.delete();
   localStorage.removeItem('small-worlds-settings');
   localStorage.removeItem('small-worlds-app');
   localStorage.removeItem('small-worlds-vault');
+  localStorage.removeItem('small-worlds-sync-meta');
+  localStorage.removeItem('small-worlds-auth');
+  localStorage.removeItem('small-worlds-storage-pressure');
   location.reload();
 }
 

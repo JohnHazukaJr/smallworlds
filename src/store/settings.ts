@@ -6,8 +6,9 @@ import type { AppSettings, ModelRef, ProviderConfig } from '../types';
 const vaultEnabled = () => !!localStorage.getItem('small-worlds-vault');
 
 /** After any provider change, re-encrypt keys into the vault (no-op when the vault is off). */
-function syncVault() {
-  void import('../security/vault').then(({ useVault }) => useVault.getState().persistKeys());
+async function syncVault() {
+  const { useVault } = await import('../security/vault');
+  await useVault.getState().persistKeys();
 }
 
 interface SettingsStore extends AppSettings {
@@ -18,6 +19,8 @@ interface SettingsStore extends AppSettings {
   setUtilityModel: (m: ModelRef | null) => void;
   setMatureDefault: (v: boolean) => void;
   setDefaultVisibility: (v: AppSettings['defaultVisibility']) => void;
+  /** Replace settings from a device restore (does not touch vault ciphertext). */
+  hydrateFromBackup: (s: AppSettings) => void;
 }
 
 export const useSettings = create<SettingsStore>()(
@@ -30,11 +33,11 @@ export const useSettings = create<SettingsStore>()(
       defaultVisibility: 'private',
       addProvider: (p) => {
         set((s) => ({ providers: [...s.providers, p] }));
-        syncVault();
+        void syncVault().catch((e) => console.error('vault persist failed', e));
       },
       updateProvider: (id, patch) => {
         set((s) => ({ providers: s.providers.map((p) => (p.id === id ? { ...p, ...patch } : p)) }));
-        syncVault();
+        void syncVault().catch((e) => console.error('vault persist failed', e));
       },
       removeProvider: (id) => {
         set((s) => ({
@@ -42,12 +45,19 @@ export const useSettings = create<SettingsStore>()(
           proseModel: s.proseModel?.providerId === id ? null : s.proseModel,
           utilityModel: s.utilityModel?.providerId === id ? null : s.utilityModel
         }));
-        syncVault();
+        void syncVault().catch((e) => console.error('vault persist failed', e));
       },
       setProseModel: (proseModel) => set({ proseModel }),
       setUtilityModel: (utilityModel) => set({ utilityModel }),
       setMatureDefault: (matureDefault) => set({ matureDefault }),
-      setDefaultVisibility: (defaultVisibility) => set({ defaultVisibility })
+      setDefaultVisibility: (defaultVisibility) => set({ defaultVisibility }),
+      hydrateFromBackup: (s) => set({
+        providers: s.providers,
+        proseModel: s.proseModel,
+        utilityModel: s.utilityModel,
+        matureDefault: s.matureDefault,
+        defaultVisibility: s.defaultVisibility
+      })
     }),
     {
       name: 'small-worlds-settings',
@@ -70,4 +80,16 @@ export function resolveModel(ref: ModelRef | null): { provider: ProviderConfig; 
   const provider = useSettings.getState().providers.find((p) => p.id === ref.providerId);
   if (!provider) return null;
   return { provider, model: ref.model };
+}
+
+/** Snapshot of settings suitable for device backup (keys included when unlocked / no vault). */
+export function settingsSnapshot(): AppSettings {
+  const s = useSettings.getState();
+  return {
+    providers: s.providers.map((p) => ({ ...p })),
+    proseModel: s.proseModel,
+    utilityModel: s.utilityModel,
+    matureDefault: s.matureDefault,
+    defaultVisibility: s.defaultVisibility
+  };
 }

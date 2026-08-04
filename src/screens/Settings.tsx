@@ -131,14 +131,15 @@ function SecuritySection() {
             <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
               Sets a passphrase that locks the app and encrypts your API keys at rest (AES-256-GCM; the key is derived
               from your passphrase and never stored). Anyone opening this browser sees a lock screen instead of your
-              stories and keys. If you forget the passphrase, the keys are gone — stories stay.
+              stories and keys. If you forget the passphrase, keys on this device are wiped — export a device backup
+              from Profile first so you can restore them. Stories stay either way.
             </div>
           </div>
           {!vault.enabled ? (
             <button className="btn-primary" onClick={() => setDialog('enable')}>Set a passphrase</button>
           ) : (
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <button className="btn-ghost" onClick={() => vault.lock()}>Lock now</button>
+              <button className="btn-ghost" onClick={() => { void vault.lock().catch((e) => alert(e instanceof Error ? e.message : String(e))); }}>Lock now</button>
               <button className="btn-ghost" onClick={() => setDialog('change-old')}>Change passphrase</button>
               <button className="btn-quiet" onClick={() => {
                 if (confirm('Remove the passphrase? Your API keys will be stored unencrypted on this device again.')) {

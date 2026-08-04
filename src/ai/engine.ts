@@ -67,7 +67,13 @@ export interface WriteOptions {
   signal?: AbortSignal;
   /** Partial text of the beat currently streaming. */
   onDelta: (partial: string, meta: StreamMeta) => void;
+  /** High-level stage labels for the UI spinner (planning / narrating / Name speaking). */
+  onProgress?: (label: string) => void;
 }
+
+const MAX_SPEAK_BEATS = 3;
+const MAX_TOTAL_BEATS = 5;
+const UTILITY_TIMEOUT_MS = 45_000;
 
 function labelTurn(t: Turn, characters: Character[]): string {
   if (t.role === 'user') return `[player ${t.mode ?? 'turn'}]: ${t.text}`;
@@ -84,13 +90,17 @@ function normalizeBeats(
 ): DirectorBeat[] {
   const allowed = new Set(inScene.map((c) => c.id));
   const beats: DirectorBeat[] = [];
+  let speakCount = 0;
   for (const b of raw.beats ?? []) {
+    if (beats.length >= MAX_TOTAL_BEATS) break;
     const brief = (b.brief ?? '').trim();
     if (!brief) continue;
     if (b.type === 'speak') {
+      if (speakCount >= MAX_SPEAK_BEATS) continue;
       const id = (b.characterId ?? '').trim();
       if (!allowed.has(id)) continue;
       beats.push({ type: 'speak', characterId: id, brief });
+      speakCount++;
     } else if (b.type === 'narration') {
       beats.push({ type: 'narration', brief });
     }
@@ -102,6 +112,21 @@ function normalizeBeats(
     });
   }
   return beats;
+}
+
+/** Race a utility call against a timeout; merges with an optional outer AbortSignal. */
+function withTimeoutSignal(outer: AbortSignal | undefined, ms: number): { signal: AbortSignal; cancel: () => void } {
+  const ctrl = new AbortController();
+  const onOuter = () => ctrl.abort();
+  outer?.addEventListener('abort', onOuter);
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  return {
+    signal: ctrl.signal,
+    cancel: () => {
+      clearTimeout(timer);
+      outer?.removeEventListener('abort', onOuter);
+    }
+  };
 }
 
 /** Apply director enter/leave to episode cast; only known non-player ids may enter/leave. */
@@ -140,9 +165,12 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
     ctx.turns.push(userTurn);
   }
 
+  const progress = opts.onProgress ?? (() => {});
+
   // Director plans cast changes + ordered narration / speak beats (utility model).
   let beats: DirectorBeat[];
   try {
+    progress('planning…');
     const plan = await utilityJson<{
       castDelta?: { enter?: string[]; leave?: string[] };
       beats: Array<{ type?: string; brief?: string; characterId?: string }>;
@@ -176,6 +204,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
 
     if (beat.type === 'narration') {
       const meta: StreamMeta = { role: 'narrator' };
+      progress('narrating…');
       opts.onDelta('', meta);
       let acc = '';
       const text = await streamChat({
@@ -206,6 +235,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
     if (!speaking || speaking.isPlayer) continue;
 
     const meta: StreamMeta = { role: 'character', characterId: speaking.id };
+    progress(`${speaking.name} speaking…`);
     opts.onDelta('', meta);
     let acc = '';
     const text = await streamChat({
@@ -279,12 +309,22 @@ async function utilityJson<T>(
   signal?: AbortSignal
 ): Promise<T> {
   const { provider, model } = utilityModelFor(world);
-  const raw = await streamChat({
-    provider, model, system,
-    messages: [{ role: 'user', content: user }],
-    maxTokens, temperature: 0.4, signal
-  });
-  return extractJson<T>(raw);
+  const { signal: timed, cancel } = withTimeoutSignal(signal, UTILITY_TIMEOUT_MS);
+  try {
+    const raw = await streamChat({
+      provider, model, system,
+      messages: [{ role: 'user', content: user }],
+      maxTokens, temperature: 0.4, signal: timed
+    });
+    return extractJson<T>(raw);
+  } catch (e) {
+    if ((e as Error).name === 'AbortError' && !signal?.aborted) {
+      throw new AIError(`Utility model timed out after ${UTILITY_TIMEOUT_MS / 1000}s.`);
+    }
+    throw e;
+  } finally {
+    cancel();
+  }
 }
 
 /** Extract new continuity facts + open threads after an episode ends. */

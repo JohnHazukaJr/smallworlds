@@ -54,13 +54,13 @@ export function LockScreen() {
         </button>
         <div style={{ fontSize: 12, lineHeight: 1.6, color: 'rgba(236,234,230,0.45)' }}>
           Your stories are on this device and unaffected by the lock. The passphrase only protects your API keys —
-          it was never sent anywhere and cannot be recovered.
+          it was never sent anywhere and cannot be recovered. If you reset it, any keys not in a device backup are gone.
         </div>
         <button
           className="btn-quiet"
           style={{ alignSelf: 'flex-start' }}
           onClick={() => {
-            if (confirm('Forgot your passphrase? This deletes the encrypted API keys (you will need to re-enter them). Stories and characters are kept.')) {
+            if (confirm('Forgot your passphrase? This deletes the encrypted API keys on this device. Restore them from a device backup (Profile → Restore) or re-enter them in Settings. Stories stay.')) {
               vault.reset();
             }
           }}

@@ -65,32 +65,31 @@ Set two defaults in Settings:
 ## Your data
 
 - Stories, cast, continuity: **IndexedDB** on this device.
-- Keys and preferences: **localStorage** on this device.
-- Move worlds between devices with **export / import** (Worlds screen or Profile). Each device has
-  its own storage; there is no sync backend yet.
+- Keys and preferences: **localStorage** on this device (keys go into the vault when enabled).
+- **Device backup** (Profile → Back up this device): worlds + settings + encrypted key vault.
+  Restore on another browser the same way. World-only export/import still lives on the Worlds screen.
+- **Optional cloud sync** (Profile): set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` (see
+  `.env.example`), run `supabase/migrations/001_initial.sql`, then sign in with phone, email, or
+  Google. Sync is revisioned pull/push with RLS; API keys sync only as E2E ciphertext via a separate
+  secrets passphrase.
 
 ## Security
 
-Small Worlds has no server and no accounts — the security model is protecting what sits on your
-device and what leaves it in backups.
+Local-first by default. Optional Supabase auth is for sync — not required to play.
 
 - **App lock + key encryption** (Settings → Security). Set a passphrase and the app shows a lock
   screen on open, and your API keys are stored encrypted (AES-256-GCM; key derived from your
-  passphrase with PBKDF2-SHA256, 600k iterations). The decrypted keys exist only in memory while
-  unlocked. There is deliberately no recovery: forget the passphrase and the keys are wiped (your
-  stories are untouched — the passphrase never encrypts story text, so they can't be lost with it).
-- **Encrypted exports.** Every export and full backup offers an optional passphrase. Use it for
-  anything that will sit in cloud storage, email, or a chat app. Import detects encrypted files and
-  asks for the passphrase.
+  passphrase with PBKDF2-SHA256, 600k iterations). Lock always persists ciphertext before blanking
+  memory. Forget the passphrase and keys on this device are wiped — restore from a device backup
+  or re-enter them. Stories stay.
+- **Encrypted device backups.** Required when API keys are present. Import detects encrypted files.
+- **Optional TOTP MFA** on the account (Supabase free-tier basic MFA). Phone SMS OTP needs Twilio.
 - **Content-Security-Policy.** Production builds lock script execution to the app's own bundle.
   `connect-src` stays open on purpose — you can point the app at any AI endpoint, including local
   Ollama over http.
-- **Erase all data** (Settings → Security) wipes IndexedDB, settings, keys, and the vault in one
-  step.
-- **What this doesn't cover:** story text in IndexedDB is not encrypted at rest (it is as private
-  as any file on your device — protect it with your OS user account / device encryption), and your
-  prompts necessarily go to whichever AI provider you configured, under that provider's privacy
-  policy.
+- **Erase all data** (Settings → Security) wipes IndexedDB, settings, keys, vault, and sync meta.
+- **What this doesn't cover:** story text in IndexedDB is not encrypted at rest (protect it with
+  OS/device encryption). Prompts go to whichever AI provider you configured.
 
 Production builds ship a `public/_headers` file (copied into `dist/`) that Netlify and Cloudflare
 Pages apply automatically: `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
@@ -108,6 +107,9 @@ Keys entered on the phone stay on the phone.
 
 - `src/ai/` — universal streaming LLM client (OpenAI-compatible, Anthropic, Gemini), prompt
   builder, and the story engine (writing loop + utility tasks).
-- `src/screens/` — the seven screens: Worlds, Story, Cast, Next season, Profile, Settings, New world.
+- `src/screens/` — Worlds, Story, Cast, Locations, Next season, Profile, Settings, New world.
 - `src/db.ts` — Dexie/IndexedDB schema and world export/import.
+- `src/sync/` — device serialization + Supabase pull/push sync.
+- `src/cloud/` — Supabase client and auth store.
+- `supabase/migrations/` — Postgres schema + RLS for cloud sync.
 - `prototype/` — the original dc-runtime design prototype this UI was ported from (reference only).

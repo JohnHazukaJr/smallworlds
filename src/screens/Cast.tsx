@@ -5,7 +5,7 @@ import { db } from '../db';
 import { useApp } from '../store/app';
 import type { Character, Relationship } from '../types';
 import { Chip, ErrorNote, Field, Mono, Spinner, useVw } from '../ui/bits';
-import { fileToSceneImage } from '../ui/image';
+import { fileToPortraitImage } from '../ui/image';
 import { avatarStyle, STRIPE } from '../ui/theme';
 import { characterPortraits, emptyCharacter, MAX_CHARACTER_PORTRAITS, portraitsPatch } from '../worldOps';
 
@@ -84,7 +84,7 @@ export function Cast() {
     setPortraitBusy(true);
     setPortraitError('');
     try {
-      const url = await fileToSceneImage(file, 900, 0.85);
+      const url = await fileToPortraitImage(file);
       const next = portraitsPatch([...current, url]);
       await db.characters.update(draft.id, { ...next, updatedAt: Date.now() });
       patch(next);

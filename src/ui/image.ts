@@ -25,3 +25,8 @@ export async function fileToSceneImage(file: File, maxDim = 1920, quality = 0.85
     URL.revokeObjectURL(url);
   }
 }
+
+/** Tighter compression for character / location gallery photos (IndexedDB-friendly). */
+export async function fileToPortraitImage(file: File): Promise<string> {
+  return fileToSceneImage(file, 720, 0.72);
+}

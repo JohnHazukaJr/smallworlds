@@ -1,5 +1,7 @@
+import { useEffect } from 'react';
 import { Rail, TabBar } from './components/Nav';
 import { LockScreen } from './components/LockScreen';
+import { useAuth } from './cloud/authStore';
 import { useVault } from './security/vault';
 import { useApp } from './store/app';
 import { useVw } from './ui/bits';
@@ -19,6 +21,11 @@ export default function App() {
   const narrow = vw < 780;
   const vaultLocked = useVault((v) => v.enabled && v.locked);
   const readMode = screen === 'story' && layout === 'read';
+  const initAuth = useAuth((s) => s.init);
+
+  useEffect(() => {
+    void initAuth();
+  }, [initAuth]);
 
   if (vaultLocked) return <LockScreen />;
 

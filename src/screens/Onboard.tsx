@@ -9,7 +9,7 @@ import { useApp } from '../store/app';
 import { useSettings } from '../store/settings';
 import type { Character, Location, Season, World, WorldAISettings } from '../types';
 import { Bar, Chip, ErrorNote, Field, Mono, Spinner, Toggle, useVw } from '../ui/bits';
-import { fileToSceneImage } from '../ui/image';
+import { fileToPortraitImage } from '../ui/image';
 import { avatarStyle, STRIPE } from '../ui/theme';
 import {
   characterPortraits, createWorld, DEFAULT_AI, emptyCharacter, emptyLocation,
@@ -723,7 +723,7 @@ function CastCard({ c, expanded, onToggle, onRemove, onPatch, onToggleSelfTag }:
     setBusy(true);
     setError('');
     try {
-      const url = await fileToSceneImage(file, 900, 0.85);
+      const url = await fileToPortraitImage(file);
       onPatch(portraitsPatch([...gallery, url]));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -829,7 +829,7 @@ function PlaceCard({ l, expanded, onToggle, onRemove, onPatch }: {
     setBusy(true);
     setError('');
     try {
-      onPatch({ portrait: await fileToSceneImage(file, 900, 0.85) });
+      onPatch({ portrait: await fileToPortraitImage(file) });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

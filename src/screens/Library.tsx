@@ -2,9 +2,10 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useRef, useState } from 'react';
 import { PassphraseDialog } from '../components/PassphraseDialog';
 import {
-  db, decryptExport, deleteWorld, encryptExport, exportWorld, importAny, isEncryptedExport,
-  type BackupExport, type EncryptedExport, type WorldExport
+  db, deleteWorld, encryptExport, exportWorld, importAnyFile, isEncryptedExport,
+  type EncryptedExport
 } from '../db';
+import { decryptDeviceExport } from '../sync/serialize';
 import { seedStarterWorld } from '../data/seed';
 import { useApp } from '../store/app';
 import { Mono, useVw, ErrorNote } from '../ui/bits';
@@ -67,8 +68,8 @@ export function Library() {
   const [dialogBusy, setDialogBusy] = useState(false);
   const [dialogError, setDialogError] = useState('');
 
-  const finishImport = async (data: WorldExport | BackupExport) => {
-    const ids = await importAny(data);
+  const finishImport = async (data: unknown) => {
+    const ids = await importAnyFile(data);
     if (ids.length === 1) openWorld(ids[0]);
   };
 
@@ -79,7 +80,7 @@ export function Library() {
         setPendingImport(data); // ask for the passphrase first
         return;
       }
-      await finishImport(data as WorldExport | BackupExport);
+      await finishImport(data);
     } catch (e) {
       setError(`Import failed: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -226,7 +227,7 @@ export function Library() {
         onSubmit={(pass) => {
           if (!pendingImport) return;
           setDialogBusy(true);
-          void decryptExport(pendingImport, pass)
+          void decryptDeviceExport(pendingImport, pass)
             .then(async (data) => {
               await finishImport(data);
               setPendingImport(null);
