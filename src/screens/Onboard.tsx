@@ -11,7 +11,10 @@ import type { Character, Location, Season, World, WorldAISettings } from '../typ
 import { Bar, Chip, ErrorNote, Field, Mono, Spinner, Toggle, useVw } from '../ui/bits';
 import { fileToSceneImage } from '../ui/image';
 import { avatarStyle, STRIPE } from '../ui/theme';
-import { createWorld, DEFAULT_AI, emptyCharacter, emptyLocation } from '../worldOps';
+import {
+  characterPortraits, createWorld, DEFAULT_AI, emptyCharacter, emptyLocation,
+  MAX_CHARACTER_PORTRAITS, portraitsPatch
+} from '../worldOps';
 
 const SHAPES = [
   { label: 'One long story I keep returning to', line: 'Seasons, episodes, a cast that ages and remembers.' },
@@ -709,11 +712,19 @@ function CastCard({ c, expanded, onToggle, onRemove, onPatch, onToggleSelfTag }:
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
+  const gallery = characterPortraits(c);
+  const primary = gallery[0] ?? null;
+
   const onFile = async (file: File) => {
+    if (gallery.length >= MAX_CHARACTER_PORTRAITS) {
+      setError(`Up to ${MAX_CHARACTER_PORTRAITS} photos per character.`);
+      return;
+    }
     setBusy(true);
     setError('');
     try {
-      onPatch({ portrait: await fileToSceneImage(file, 900, 0.85) });
+      const url = await fileToSceneImage(file, 900, 0.85);
+      onPatch(portraitsPatch([...gallery, url]));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -724,7 +735,10 @@ function CastCard({ c, expanded, onToggle, onRemove, onPatch, onToggleSelfTag }:
   return (
     <div className="glass" style={{ borderRadius: 12, overflow: 'hidden' }}>
       <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }} onClick={onToggle}>
-        <div style={{ ...avatarStyle(c.hue, 34), flexShrink: 0, ...(c.portrait ? { backgroundImage: `url(${c.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}) }} />
+        <div style={{
+          ...avatarStyle(c.hue, 34), flexShrink: 0,
+          ...(primary ? { backgroundImage: `url(${primary})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {})
+        }} />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
           <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>{c.name || 'unnamed'}{c.selfTag ? ' · me' : ''}</div>
           {c.role && (
@@ -742,11 +756,47 @@ function CastCard({ c, expanded, onToggle, onRemove, onPatch, onToggleSelfTag }:
             ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }}
             onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); e.target.value = ''; }}
           />
+          {gallery.length > 0 && (
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {gallery.map((url, i) => (
+                <div key={`${i}-${url.slice(0, 20)}`} style={{ position: 'relative' }}>
+                  <button
+                    type="button"
+                    title={i === 0 ? 'Primary face' : 'Make primary'}
+                    onClick={() => {
+                      if (i === 0) return;
+                      onPatch(portraitsPatch([url, ...gallery.filter((_, j) => j !== i)]));
+                    }}
+                    style={{
+                      width: 44, height: 44, borderRadius: 9, padding: 0, cursor: 'pointer',
+                      border: i === 0 ? '2px solid oklch(0.85 0.1 62)' : '1px solid rgba(255,255,255,0.16)',
+                      backgroundImage: `url(${url})`, backgroundSize: 'cover', backgroundPosition: 'center'
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="btn-quiet"
+                    title="Remove"
+                    onClick={() => onPatch(portraitsPatch(gallery.filter((_, j) => j !== i)))}
+                    style={{
+                      position: 'absolute', top: -5, right: -5, width: 16, height: 16, padding: 0,
+                      borderRadius: '50%', fontSize: 9, lineHeight: '16px',
+                      background: 'rgba(8,9,12,0.85)', border: '1px solid rgba(255,255,255,0.2)'
+                    }}
+                  >×</button>
+                </div>
+              ))}
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }} disabled={busy} onClick={() => fileRef.current?.click()}>
-              {busy ? 'Uploading…' : c.portrait ? 'Change photo' : 'Upload photo'}
+            <button
+              className="btn-ghost"
+              style={{ fontSize: 11, padding: '6px 12px' }}
+              disabled={busy || gallery.length >= MAX_CHARACTER_PORTRAITS}
+              onClick={() => fileRef.current?.click()}
+            >
+              {busy ? 'Uploading…' : gallery.length ? 'Add photo' : 'Upload photo'}
             </button>
-            {c.portrait && <button className="btn-quiet" style={{ fontSize: 11 }} onClick={() => onPatch({ portrait: null })}>remove photo</button>}
             <button className="btn-quiet" style={{ fontSize: 11 }} onClick={onToggleSelfTag}>
               {c.selfTag ? '✓ tagged as me — untag' : 'tag as "this is me"'}
             </button>

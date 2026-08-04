@@ -457,11 +457,16 @@ export type DirectorBeat =
 export function directorSystemPrompt(): string {
   return (
     'You are the scene director for an interactive story. ' +
-    'Plan the next response as an ordered list of beats. ' +
-    'Respond with JSON only: {"beats":[{"type":"narration","brief":"..."}|{"type":"speak","characterId":"<id>","brief":"..."}]}. ' +
+    'Plan cast changes and an ordered list of beats. ' +
+    'Respond with JSON only: ' +
+    '{"castDelta":{"enter":["<characterId>",...],"leave":["<characterId>",...]},' +
+    '"beats":[{"type":"narration","brief":"..."}|{"type":"speak","characterId":"<id>","brief":"..."}]}' +
+    '\n' +
+    'castDelta.enter: NPCs who arrive or join this beat (from the off-scene list). ' +
+    'castDelta.leave: NPCs who exit and should leave the scene. Use empty arrays when unchanged. ' +
+    'After applying enter/leave, speak characterIds must be in the resulting in-scene cast (never the player). ' +
     'Narration briefs describe atmosphere or physical action — never finished dialogue. ' +
     'Speak briefs are intent only (tone/goal), never the finished line. ' +
-    'Only use characterIds from the in-scene cast list provided. ' +
     'Not everyone must speak. Typical: 1–3 narration beats and 1–4 speak beats. ' +
     'Always include at least one narration beat unless the player just spoke and an immediate reply is natural — then you may open with speak. ' +
     'End the plan on tension or an opening for the player.'
@@ -474,9 +479,13 @@ export function directorUserPrompt(
   input: string
 ): string {
   const inScene = ctx.characters.filter((c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer);
+  const offScene = ctx.characters.filter((c) => !ctx.episode.castIds.includes(c.id) && !c.isPlayer);
   const castList = inScene.length > 0
     ? inScene.map((c) => `- ${c.id} · ${c.name}${c.role ? ` (${c.role})` : ''}`).join('\n')
-    : '(no NPCs in scene — narration beats only)';
+    : '(no NPCs in scene yet)';
+  const offList = offScene.length > 0
+    ? offScene.map((c) => `- ${c.id} · ${c.name}${c.role ? ` (${c.role})` : ''}`).join('\n')
+    : '(none)';
 
   const recent = packTurns(ctx.turns).slice(-8);
   const transcript = recent.map((t) => {
@@ -491,9 +500,10 @@ export function directorUserPrompt(
   return (
     `World: ${ctx.world.title}\n` +
     `Episode ${ctx.episode.number}${ctx.episode.location ? ` @ ${ctx.episode.location}` : ''}\n\n` +
-    `In-scene cast (speak only these characterIds):\n${castList}\n\n` +
+    `In-scene cast:\n${castList}\n\n` +
+    `Off-scene cast (may enter via castDelta.enter):\n${offList}\n\n` +
     `Latest player move: ${MODE_PREFIX[mode](input)}\n\n` +
     `Recent transcript:\n${transcript || '(episode just opened)'}\n\n` +
-    `Plan the next beats as JSON.`
+    `Plan castDelta and beats as JSON.`
   );
 }

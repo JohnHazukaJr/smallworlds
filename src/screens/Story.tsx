@@ -12,7 +12,7 @@ import type { Character, ComposeMode, ContinuityFact, Episode, Location, OpenThr
 import { Chip, ErrorNote, Mono, Sheet, Spinner, Toggle, useVw } from '../ui/bits';
 import { fileToSceneImage } from '../ui/image';
 import { avatarStyle, BACKDROPS, MOODS, STRIPE } from '../ui/theme';
-import { emptyLocation, nextEpisode, worldCalendar } from '../worldOps';
+import { characterPortraits, emptyLocation, nextEpisode, worldCalendar } from '../worldOps';
 
 // ---------- prose rendering ----------
 
@@ -20,21 +20,43 @@ interface ProseBlock {
   text: string;
   speaker?: string;
   hue?: number;
+  portrait?: string | null;
   kind: 'narration' | 'dialogue' | 'direction' | 'action';
 }
 
 const DIALOGUE_RE = /^([A-Z][^:\n]{0,48}?):\s*["“](.+?)["”]?\s*$/;
 
+function findByName(characters: Character[], name: string): Character | undefined {
+  return characters.find((c) => c.name.toLowerCase() === name.toLowerCase().trim());
+}
+
+function portraitPlate(hue: number, size: number, portrait?: string | null, border = 'rgba(255,255,255,0.2)'): CSSProperties {
+  return {
+    ...avatarStyle(hue, size, border),
+    ...(portrait ? { backgroundImage: `url(${portrait})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {})
+  };
+}
+
 function parseTurn(turn: Turn, characters: Character[]): ProseBlock[] {
-  const hueFor = (name: string) =>
-    characters.find((c) => c.name.toLowerCase() === name.toLowerCase().trim())?.hue;
   if (turn.role === 'user') {
     const player = characters.find((c) => c.isPlayer);
     if (turn.mode === 'speak') {
-      return [{ text: `"${turn.text.replace(/^"|"$/g, '')}"`, speaker: player?.name ?? 'you', hue: player?.hue ?? 60, kind: 'dialogue' }];
+      return [{
+        text: `"${turn.text.replace(/^"|"$/g, '')}"`,
+        speaker: player?.name ?? 'you',
+        hue: player?.hue ?? 60,
+        portrait: player ? characterPortraits(player)[0] : null,
+        kind: 'dialogue'
+      }];
     }
     if (turn.mode === 'act') {
-      return [{ text: turn.text, speaker: player?.name ?? 'you', hue: player?.hue ?? 60, kind: 'action' }];
+      return [{
+        text: turn.text,
+        speaker: player?.name ?? 'you',
+        hue: player?.hue ?? 60,
+        portrait: player ? characterPortraits(player)[0] : null,
+        kind: 'action'
+      }];
     }
     return [{ text: turn.text, kind: 'direction' }];
   }
@@ -45,6 +67,7 @@ function parseTurn(turn: Turn, characters: Character[]): ProseBlock[] {
       text: `"${line}"`,
       speaker: who?.name ?? 'someone',
       hue: who?.hue ?? 200,
+      portrait: who ? characterPortraits(who)[0] : null,
       kind: 'dialogue'
     }];
   }
@@ -55,7 +78,16 @@ function parseTurn(turn: Turn, characters: Character[]): ProseBlock[] {
     .filter(Boolean)
     .map((p): ProseBlock => {
       const m = p.match(DIALOGUE_RE);
-      if (m) return { text: `"${m[2]}"`, speaker: m[1].trim(), hue: hueFor(m[1]), kind: 'dialogue' };
+      if (m) {
+        const who = findByName(characters, m[1]);
+        return {
+          text: `"${m[2]}"`,
+          speaker: m[1].trim(),
+          hue: who?.hue,
+          portrait: who ? characterPortraits(who)[0] : null,
+          kind: 'dialogue'
+        };
+      }
       return { text: p, kind: 'narration' };
     });
 }
@@ -67,7 +99,7 @@ function ProseBlockView({ b, accent, prose, fontPx, avatarPx }: {
   return (
     <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', marginBottom: isDialog ? 24 : 22 }}>
       {isDialog && b.hue !== undefined && (
-        <div style={{ ...avatarStyle(b.hue, avatarPx, 'rgba(255,255,255,0.2)'), marginTop: 4 }} />
+        <div style={{ ...portraitPlate(b.hue, avatarPx, b.portrait), marginTop: 4 }} />
       )}
       <div style={{
         flex: 1, minWidth: 0,
@@ -736,6 +768,8 @@ export function Story() {
           {continuity.length === 0 && <div style={{ fontSize: 12.5, opacity: 0.5, color: '#eceae6' }}>Nothing filed yet — end an episode to extract what mattered.</div>}
         </div>
 
+        {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
+
         <div style={{ display: 'flex', flexDirection: 'column', gap: 9, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 14 }}>
           <div style={{ display: 'flex', gap: 9, alignItems: 'center', flexWrap: 'wrap' }}>
             {wrapOpen === 'season' ? (
@@ -1082,7 +1116,7 @@ function SceneCastPanel({ episode, characters, accent }: { episode: Episode; cha
             border: `1px solid ${active ? 'rgba(255,255,255,0.08)' : 'transparent'}`,
             opacity: active ? 1 : 0.45
           }}>
-            <div style={avatarStyle(c.hue, 30)} />
+            <div style={portraitPlate(c.hue, 30, characterPortraits(c)[0])} />
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
               <div style={{ fontSize: 13, fontWeight: 600, color: '#f0eee9' }}>{c.name}</div>
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>

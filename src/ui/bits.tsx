@@ -118,10 +118,10 @@ export function Sheet({
     <>
       <div
         onClick={onClose}
-        style={{ position: 'fixed', inset: 0, zIndex: 30, background: 'rgba(6,7,10,0.55)', backdropFilter: 'blur(4px)' }}
+        style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(6,7,10,0.55)', backdropFilter: 'blur(4px)' }}
       />
       <aside style={{
-        position: 'fixed', zIndex: 31,
+        position: 'fixed', zIndex: 51,
         ...(narrow
           ? { left: 0, right: 0, bottom: 0, top: '8vh', borderTop: '1px solid rgba(255,255,255,0.12)', borderRadius: '18px 18px 0 0', animation: 'wr-slide-up 0.25s ease both' }
           : { top: 0, right: 0, bottom: 0, width, borderLeft: '1px solid rgba(255,255,255,0.12)', animation: 'wr-fade 0.25s ease both' }),

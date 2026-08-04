@@ -7,7 +7,7 @@ import type { Character, Relationship } from '../types';
 import { Chip, ErrorNote, Field, Mono, Spinner, useVw } from '../ui/bits';
 import { fileToSceneImage } from '../ui/image';
 import { avatarStyle, STRIPE } from '../ui/theme';
-import { emptyCharacter } from '../worldOps';
+import { characterPortraits, emptyCharacter, MAX_CHARACTER_PORTRAITS, portraitsPatch } from '../worldOps';
 
 type Tab = 'persona' | 'voice' | 'psyche' | 'secrets' | 'relations' | 'anchors' | 'ai';
 const TABS: Array<[Tab, string]> = [
@@ -76,12 +76,18 @@ export function Cast() {
 
   const onPortraitFile = async (file: File) => {
     if (!draft) return;
+    const current = characterPortraits(draft);
+    if (current.length >= MAX_CHARACTER_PORTRAITS) {
+      setPortraitError(`Up to ${MAX_CHARACTER_PORTRAITS} photos per character.`);
+      return;
+    }
     setPortraitBusy(true);
     setPortraitError('');
     try {
-      const portrait = await fileToSceneImage(file, 900, 0.85);
-      await db.characters.update(draft.id, { portrait, updatedAt: Date.now() });
-      patch({ portrait });
+      const url = await fileToSceneImage(file, 900, 0.85);
+      const next = portraitsPatch([...current, url]);
+      await db.characters.update(draft.id, { ...next, updatedAt: Date.now() });
+      patch(next);
     } catch (e) {
       setPortraitError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -89,10 +95,22 @@ export function Cast() {
     }
   };
 
-  const removePortrait = async () => {
+  const removePortraitAt = async (index: number) => {
     if (!draft) return;
-    await db.characters.update(draft.id, { portrait: null, updatedAt: Date.now() });
-    patch({ portrait: null });
+    const current = characterPortraits(draft);
+    const next = portraitsPatch(current.filter((_, i) => i !== index));
+    await db.characters.update(draft.id, { ...next, updatedAt: Date.now() });
+    patch(next);
+  };
+
+  const setPrimaryPortrait = async (index: number) => {
+    if (!draft || index <= 0) return;
+    const current = characterPortraits(draft);
+    if (index >= current.length) return;
+    const reordered = [current[index], ...current.filter((_, i) => i !== index)];
+    const next = portraitsPatch(reordered);
+    await db.characters.update(draft.id, { ...next, updatedAt: Date.now() });
+    patch(next);
   };
 
   const toggleSelfTag = async () => {
@@ -192,7 +210,15 @@ export function Cast() {
               border: `1px solid ${active ? 'rgba(255,255,255,0.14)' : 'transparent'}`,
               backdropFilter: active ? 'blur(18px)' : undefined
             }}>
-              <div style={{ ...avatarStyle(c.hue, 34), ...(c.portrait ? { backgroundImage: `url(${c.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}) }} />
+              {(() => {
+                const face = characterPortraits(c)[0];
+                return (
+                  <div style={{
+                    ...avatarStyle(c.hue, 34),
+                    ...(face ? { backgroundImage: `url(${face})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {})
+                  }} />
+                );
+              })()}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
                 <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9', whiteSpace: 'nowrap' }}>
                   {c.name || 'unnamed'}{c.selfTag ? ' · me' : ''}
@@ -245,36 +271,82 @@ export function Cast() {
           <>
             <div style={{ display: 'flex', gap: 26, flexWrap: 'wrap', alignItems: 'flex-start', marginBottom: 32 }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 11, width: narrow ? '100%' : 258 }}>
-                <div style={{
-                  height: narrow ? 160 : 306, borderRadius: 16, border: '1px solid rgba(255,255,255,0.12)',
-                  display: 'flex', alignItems: 'flex-end', padding: 12, position: 'relative', overflow: 'hidden',
-                  backgroundImage: d.portrait
-                    ? `url(${d.portrait})`
-                    : `linear-gradient(155deg, oklch(0.5 0.06 ${d.hue} / 0.7), rgba(8,9,12,0.9)), ${STRIPE('rgba(255,255,255,0.06)', 'rgba(255,255,255,0.015)')}`,
-                  backgroundSize: 'cover', backgroundPosition: 'center'
-                }}>
-                  {!d.portrait && (
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.62)', background: 'rgba(8,9,12,0.5)', backdropFilter: 'blur(6px)', padding: '5px 8px', borderRadius: 6 }}>
-                      portrait plate · no photo yet
-                    </span>
-                  )}
-                  {d.selfTag && (
-                    <span style={{
-                      position: 'absolute', top: 10, right: 10, fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5,
-                      letterSpacing: '0.08em', color: '#181307', background: 'oklch(0.85 0.1 62)', padding: '4px 8px', borderRadius: 6
-                    }}>this is me</span>
-                  )}
-                </div>
-                <input
-                  ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }}
-                  onChange={(e) => { const f = e.target.files?.[0]; if (f) void onPortraitFile(f); e.target.value = ''; }}
-                />
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                  <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }} disabled={portraitBusy} onClick={() => fileRef.current?.click()}>
-                    {portraitBusy ? 'Uploading…' : d.portrait ? 'Change photo' : 'Upload photo'}
-                  </button>
-                  {d.portrait && <button className="btn-quiet" style={{ fontSize: 11 }} onClick={() => void removePortrait()}>remove photo</button>}
-                </div>
+                {(() => {
+                  const gallery = characterPortraits(d);
+                  const primary = gallery[0] ?? null;
+                  return (
+                    <>
+                      <div style={{
+                        height: narrow ? 160 : 306, borderRadius: 16, border: '1px solid rgba(255,255,255,0.12)',
+                        display: 'flex', alignItems: 'flex-end', padding: 12, position: 'relative', overflow: 'hidden',
+                        backgroundImage: primary
+                          ? `url(${primary})`
+                          : `linear-gradient(155deg, oklch(0.5 0.06 ${d.hue} / 0.7), rgba(8,9,12,0.9)), ${STRIPE('rgba(255,255,255,0.06)', 'rgba(255,255,255,0.015)')}`,
+                        backgroundSize: 'cover', backgroundPosition: 'center'
+                      }}>
+                        {!primary && (
+                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.62)', background: 'rgba(8,9,12,0.5)', backdropFilter: 'blur(6px)', padding: '5px 8px', borderRadius: 6 }}>
+                            portrait plate · no photo yet
+                          </span>
+                        )}
+                        {d.selfTag && (
+                          <span style={{
+                            position: 'absolute', top: 10, right: 10, fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5,
+                            letterSpacing: '0.08em', color: '#181307', background: 'oklch(0.85 0.1 62)', padding: '4px 8px', borderRadius: 6
+                          }}>this is me</span>
+                        )}
+                      </div>
+                      {gallery.length > 0 && (
+                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                          {gallery.map((url, i) => (
+                            <div key={`${i}-${url.slice(0, 24)}`} style={{ position: 'relative' }}>
+                              <button
+                                type="button"
+                                title={i === 0 ? 'Primary face' : 'Make primary'}
+                                onClick={() => void setPrimaryPortrait(i)}
+                                style={{
+                                  width: 52, height: 52, borderRadius: 10, padding: 0, cursor: 'pointer',
+                                  border: i === 0 ? '2px solid oklch(0.85 0.1 62)' : '1px solid rgba(255,255,255,0.16)',
+                                  backgroundImage: `url(${url})`, backgroundSize: 'cover', backgroundPosition: 'center'
+                                }}
+                              />
+                              <button
+                                type="button"
+                                className="btn-quiet"
+                                title="Remove photo"
+                                onClick={() => void removePortraitAt(i)}
+                                style={{
+                                  position: 'absolute', top: -6, right: -6, width: 18, height: 18, padding: 0,
+                                  borderRadius: '50%', fontSize: 10, lineHeight: '18px',
+                                  background: 'rgba(8,9,12,0.85)', border: '1px solid rgba(255,255,255,0.2)'
+                                }}
+                              >×</button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <input
+                        ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }}
+                        onChange={(e) => { const f = e.target.files?.[0]; if (f) void onPortraitFile(f); e.target.value = ''; }}
+                      />
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <button
+                          className="btn-ghost"
+                          style={{ fontSize: 11, padding: '6px 12px' }}
+                          disabled={portraitBusy || gallery.length >= MAX_CHARACTER_PORTRAITS}
+                          onClick={() => fileRef.current?.click()}
+                        >
+                          {portraitBusy ? 'Uploading…' : gallery.length ? 'Add photo' : 'Upload photo'}
+                        </button>
+                        {gallery.length > 0 && (
+                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.45 }}>
+                            {gallery.length}/{MAX_CHARACTER_PORTRAITS} · tap a thumb to set primary
+                          </span>
+                        )}
+                      </div>
+                    </>
+                  );
+                })()}
                 {portraitError && <ErrorNote error={portraitError} onDismiss={() => setPortraitError('')} />}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <Mono style={{ fontSize: 9 }}>plate hue</Mono>

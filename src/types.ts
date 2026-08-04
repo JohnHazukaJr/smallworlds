@@ -140,8 +140,13 @@ export interface Character {
   isPlayer: boolean;
   /** marks this card as representing the author, for reference only — never changes who the narrator writes as "you" */
   selfTag: boolean;
-  /** uploaded portrait image, data URL — null/unset shows the placeholder plate */
+  /**
+   * Primary face for story avatars and list chips — kept in sync with portraits[0].
+   * Null/unset shows the hue placeholder plate.
+   */
   portrait?: string | null;
+  /** All uploaded photos as data URLs; index 0 is the primary face */
+  portraits?: string[];
   // identity
   age: string;
   appearance: string;

@@ -75,11 +75,26 @@ export async function createWorld(input: NewWorldInput): Promise<World> {
   return world;
 }
 
+export const MAX_CHARACTER_PORTRAITS = 6;
+
+/** Resolve the photo gallery, migrating a lone legacy `portrait` into the list. */
+export function characterPortraits(c: Pick<Character, 'portrait' | 'portraits'>): string[] {
+  if (c.portraits && c.portraits.length > 0) return c.portraits.filter(Boolean);
+  return c.portrait ? [c.portrait] : [];
+}
+
+/** Patch that keeps `portrait` (primary) aligned with `portraits[0]`. */
+export function portraitsPatch(urls: string[]): Pick<Character, 'portraits' | 'portrait'> {
+  const portraits = urls.filter(Boolean).slice(0, MAX_CHARACTER_PORTRAITS);
+  return { portraits, portrait: portraits[0] ?? null };
+}
+
 export function emptyCharacter(worldId: string, patch: Partial<Character> = {}): Character {
   const now = Date.now();
-  return {
+  const base: Character = {
     id: uid(), worldId,
     name: '', role: '', hue: Math.floor(Math.random() * 360), isPlayer: false, selfTag: false,
+    portrait: null, portraits: [],
     age: '', appearance: '', mannerisms: '', backstory: '', summary: '',
     speechStyle: '', exampleLines: [],
     traits: '', desires: '', fears: '', flaws: '',
@@ -89,6 +104,9 @@ export function emptyCharacter(worldId: string, patch: Partial<Character> = {}):
     createdAt: now, updatedAt: now,
     ...patch
   };
+  // Normalize primary ↔ gallery if the patch only set one of them.
+  const gallery = characterPortraits(base);
+  return { ...base, ...portraitsPatch(gallery) };
 }
 
 export function emptyLocation(worldId: string, patch: Partial<Location> = {}): Location {

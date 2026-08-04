@@ -104,6 +104,22 @@ function normalizeBeats(
   return beats;
 }
 
+/** Apply director enter/leave to episode cast; only known non-player ids may enter/leave. */
+function applyCastDelta(
+  castIds: string[],
+  characters: Character[],
+  delta?: { enter?: string[]; leave?: string[] }
+): string[] {
+  const npcIds = new Set(characters.filter((c) => !c.isPlayer).map((c) => c.id));
+  const playerId = characters.find((c) => c.isPlayer)?.id;
+  const enter = (delta?.enter ?? []).map((id) => id.trim()).filter((id) => npcIds.has(id));
+  const leave = new Set((delta?.leave ?? []).map((id) => id.trim()).filter((id) => npcIds.has(id)));
+  const known = (id: string) => id === playerId || npcIds.has(id);
+  const next = [...new Set([...castIds.filter(known), ...enter])].filter((id) => !leave.has(id));
+  if (playerId && castIds.includes(playerId) && !next.includes(playerId)) next.unshift(playerId);
+  return next;
+}
+
 /**
  * Core writing loop: persist the user turn (unless continue), plan beats with
  * the director, then stream narrator (narration-only) and character agents.
@@ -112,7 +128,8 @@ function normalizeBeats(
 export async function writeTurn(opts: WriteOptions): Promise<string> {
   const { provider, model } = proseModelFor(opts.world);
   const ctx = await loadContext(opts.world, opts.season, opts.episode);
-  const inScene = ctx.characters.filter((c) => opts.episode.castIds.includes(c.id) && !c.isPlayer);
+  let castIds = [...opts.episode.castIds];
+  let inScene = ctx.characters.filter((c) => castIds.includes(c.id) && !c.isPlayer);
 
   if (opts.mode !== 'continue' && opts.input.trim()) {
     const userTurn: Turn = {
@@ -123,16 +140,26 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
     ctx.turns.push(userTurn);
   }
 
-  // Director plans ordered narration / speak beats (utility model).
+  // Director plans cast changes + ordered narration / speak beats (utility model).
   let beats: DirectorBeat[];
   try {
-    const plan = await utilityJson<{ beats: Array<{ type?: string; brief?: string; characterId?: string }> }>(
+    const plan = await utilityJson<{
+      castDelta?: { enter?: string[]; leave?: string[] };
+      beats: Array<{ type?: string; brief?: string; characterId?: string }>;
+    }>(
       opts.world,
       directorSystemPrompt(),
       directorUserPrompt(ctx, opts.mode, opts.input.trim()),
       1200,
       opts.signal
     );
+    const nextCast = applyCastDelta(castIds, ctx.characters, plan.castDelta);
+    if (nextCast.join('\0') !== castIds.join('\0')) {
+      await db.episodes.update(opts.episode.id, { castIds: nextCast });
+      castIds = nextCast;
+      ctx.episode = { ...ctx.episode, castIds: nextCast };
+      inScene = ctx.characters.filter((c) => castIds.includes(c.id) && !c.isPlayer);
+    }
     beats = normalizeBeats(plan, inScene);
   } catch (e) {
     if ((e as Error).name === 'AbortError') throw e;
