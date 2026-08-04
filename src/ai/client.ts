@@ -47,6 +47,33 @@ function withTemperature<T extends Record<string, unknown>>(
   return { ...body, temperature: temperature ?? 0.9 };
 }
 
+/** Anthropic ephemeral prompt cache breakpoint on a text block. */
+const PROMPT_CACHE_CONTROL = { type: 'ephemeral' as const };
+const PROMPT_CACHE_BETA = 'prompt-caching-2024-07-31';
+
+function isOpenRouter(provider: ProviderConfig): boolean {
+  return provider.baseUrl.includes('openrouter.ai');
+}
+
+function isClaudeModel(model: string): boolean {
+  const m = model.toLowerCase();
+  return m.includes('claude') || m.includes('anthropic/');
+}
+
+/**
+ * True when we can attach Anthropic-style cache_control to the system prompt:
+ * direct Anthropic, or OpenRouter Claude (passthrough).
+ */
+export function supportsAnthropicPromptCache(provider: ProviderConfig, model: string): boolean {
+  if (provider.kind === 'anthropic') return true;
+  return provider.kind === 'openai' && isOpenRouter(provider) && isClaudeModel(model);
+}
+
+/** Single system text block with an ephemeral cache breakpoint. */
+function cachedSystemBlock(text: string) {
+  return { type: 'text' as const, text, cache_control: PROMPT_CACHE_CONTROL };
+}
+
 /**
  * Stream a chat completion from any configured provider.
  * Resolves with the full response text; onDelta fires as tokens arrive.
@@ -96,10 +123,14 @@ async function throwHttpError(res: Response): Promise<never> {
 async function streamOpenAI(req: StreamRequest): Promise<string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (req.provider.apiKey) headers['Authorization'] = `Bearer ${req.provider.apiKey}`;
-  if (req.provider.baseUrl.includes('openrouter.ai')) {
+  if (isOpenRouter(req.provider)) {
     headers['HTTP-Referer'] = 'https://smallworlds.local';
     headers['X-Title'] = 'Small Worlds AI';
   }
+  const cacheSystem = supportsAnthropicPromptCache(req.provider, req.model);
+  const systemMessage = cacheSystem
+    ? { role: 'system' as const, content: [cachedSystemBlock(req.system)] }
+    : { role: 'system' as const, content: req.system };
   const res = await fetch(`${req.provider.baseUrl}/chat/completions`, {
     method: 'POST',
     headers,
@@ -108,7 +139,7 @@ async function streamOpenAI(req: StreamRequest): Promise<string> {
       model: req.model,
       stream: true,
       max_tokens: req.maxTokens,
-      messages: [{ role: 'system', content: req.system }, ...req.messages]
+      messages: [systemMessage, ...req.messages]
     }, req.model, req.temperature))
   });
   if (!res.ok) await throwHttpError(res);
@@ -128,20 +159,23 @@ async function streamOpenAI(req: StreamRequest): Promise<string> {
 }
 
 async function streamAnthropic(req: StreamRequest): Promise<string> {
+  const cacheSystem = supportsAnthropicPromptCache(req.provider, req.model);
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'x-api-key': req.provider.apiKey,
+    'anthropic-version': '2023-06-01',
+    'anthropic-dangerous-direct-browser-access': 'true'
+  };
+  if (cacheSystem) headers['anthropic-beta'] = PROMPT_CACHE_BETA;
   const res = await fetch(`${req.provider.baseUrl}/messages`, {
     method: 'POST',
     signal: req.signal,
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': req.provider.apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true'
-    },
+    headers,
     body: JSON.stringify(withTemperature({
       model: req.model,
       stream: true,
       max_tokens: req.maxTokens,
-      system: req.system,
+      system: cacheSystem ? [cachedSystemBlock(req.system)] : req.system,
       messages: req.messages
     }, req.model, req.temperature))
   });
