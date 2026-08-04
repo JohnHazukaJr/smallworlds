@@ -29,7 +29,8 @@ export function Chip({
         background: active ? accent : 'rgba(255,255,255,0.05)',
         color: active ? '#181307' : 'rgba(236,234,230,0.62)',
         borderRadius: 9,
-        padding: '7px 13px',
+        padding: '10px 13px',
+        minHeight: 40,
         fontSize: 12,
         fontWeight: active ? 600 : 500,
         cursor: disabled ? 'default' : 'pointer',
@@ -109,10 +110,21 @@ export function ErrorNote({ error, onDismiss }: { error: string; onDismiss?: () 
   );
 }
 
-/** Right-side sheet on desktop, bottom sheet on mobile. */
+/**
+ * Right-side sheet on desktop, bottom sheet on mobile.
+ * Pass `footer` to pin actions above the safe area while the body scrolls
+ * (critical for portrait iPhone wrap flows).
+ */
 export function Sheet({
-  open, onClose, children, narrow, width = 440
-}: { open: boolean; onClose: () => void; children: ReactNode; narrow: boolean; width?: number }) {
+  open, onClose, children, footer, narrow, width = 440
+}: {
+  open: boolean;
+  onClose: () => void;
+  children: ReactNode;
+  footer?: ReactNode;
+  narrow: boolean;
+  width?: number;
+}) {
   if (!open) return null;
   return (
     <>
@@ -125,12 +137,33 @@ export function Sheet({
         ...(narrow
           ? { left: 0, right: 0, bottom: 0, top: '8vh', borderTop: '1px solid rgba(255,255,255,0.12)', borderRadius: '18px 18px 0 0', animation: 'wr-slide-up 0.25s ease both' }
           : { top: 0, right: 0, bottom: 0, width, borderLeft: '1px solid rgba(255,255,255,0.12)', animation: 'wr-fade 0.25s ease both' }),
-        display: 'flex', flexDirection: 'column', gap: 16,
-        padding: narrow ? '18px 16px calc(16px + env(safe-area-inset-bottom))' : '22px 22px 20px',
-        background: 'rgba(14,16,20,0.86)', backdropFilter: 'blur(30px) saturate(150%)',
-        boxShadow: '-30px 0 80px rgba(0,0,0,0.5)', overflow: 'auto'
+        display: 'flex', flexDirection: 'column', gap: 0,
+        padding: 0,
+        background: 'rgba(14,16,20,0.92)', backdropFilter: 'blur(30px) saturate(150%)',
+        boxShadow: '-30px 0 80px rgba(0,0,0,0.5)',
+        overflow: 'hidden',
+        minHeight: 0
       }}>
-        {children}
+        <div style={{
+          flex: 1, minHeight: 0, overflow: 'auto',
+          display: 'flex', flexDirection: 'column', gap: 16,
+          padding: narrow ? '18px 16px 12px' : '22px 22px 16px'
+        }}>
+          {children}
+        </div>
+        {footer != null && (
+          <div style={{
+            flexShrink: 0,
+            borderTop: '1px solid rgba(255,255,255,0.1)',
+            padding: narrow
+              ? '12px 16px calc(12px + env(safe-area-inset-bottom))'
+              : '14px 22px 18px',
+            background: 'rgba(10,12,16,0.96)',
+            display: 'flex', flexDirection: 'column', gap: 10
+          }}>
+            {footer}
+          </div>
+        )}
       </aside>
     </>
   );

@@ -1,6 +1,6 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef, useState } from 'react';
-import { draftCharacter, fleshOutCharacter } from '../ai/engine';
+import { draftCharacter, fleshOutCharacter, fleshOutRelationships } from '../ai/engine';
 import { db, recordTombstones } from '../db';
 import { useApp } from '../store/app';
 import type { Character, Relationship } from '../types';
@@ -129,7 +129,7 @@ export function Cast() {
     setFleshBusy(true);
     setFleshError('');
     try {
-      const result = await fleshOutCharacter(world ?? null, draft);
+      const result = await fleshOutCharacter(world ?? null, draft, cast);
       setUndoSnapshot(draft);
       patch(result);
     } catch (e) {
@@ -503,7 +503,26 @@ export function Cast() {
               )}
 
               {tab === 'relations' && (
-                <RelationsEditor character={d} cast={cast} onChange={(relationships) => patch({ relationships })} />
+                <RelationsEditor
+                  character={d}
+                  cast={cast}
+                  worldTitle={world?.title}
+                  onChange={(relationships) => patch({ relationships })}
+                  onFleshOut={async () => {
+                    setFleshBusy(true);
+                    setFleshError('');
+                    try {
+                      const next = await fleshOutRelationships(world ?? null, d, cast);
+                      setUndoSnapshot(draft);
+                      patch({ relationships: next });
+                    } catch (e) {
+                      setFleshError(e instanceof Error ? e.message : String(e));
+                    } finally {
+                      setFleshBusy(false);
+                    }
+                  }}
+                  fleshBusy={fleshBusy}
+                />
               )}
 
               {tab === 'anchors' && (
@@ -555,8 +574,13 @@ export function Cast() {
   );
 }
 
-function RelationsEditor({ character, cast, onChange }: {
-  character: Character; cast: Character[]; onChange: (r: Relationship[]) => void;
+function RelationsEditor({ character, cast, onChange, onFleshOut, fleshBusy }: {
+  character: Character;
+  cast: Character[];
+  worldTitle?: string;
+  onChange: (r: Relationship[]) => void;
+  onFleshOut: () => Promise<void>;
+  fleshBusy: boolean;
 }) {
   const others = cast.filter((c) => c.id !== character.id);
   const add = () => {
@@ -570,7 +594,22 @@ function RelationsEditor({ character, cast, onChange }: {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'rgba(236,234,230,0.6)' }}>
-        Typed links to other cast members. When both characters share a scene, the link is packed into the prompt.
+        Typed links to other cast members. When both share a scene, the link is packed into the prompt.
+        AI uses the rest of the cast and world context — you can edit or remove anything after.
+      </div>
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <button
+          className="btn-ghost"
+          disabled={fleshBusy || others.length === 0}
+          onClick={() => void onFleshOut()}
+        >
+          {fleshBusy ? 'Fleshing relationships…' : 'Flesh out relationships'}
+        </button>
+        {others.length === 0 && (
+          <span style={{ fontSize: 12, color: 'rgba(236,234,230,0.4)', alignSelf: 'center' }}>
+            Add another cast member first
+          </span>
+        )}
       </div>
       {character.relationships.map((r, i) => (
         <div key={i} className="glass" style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>

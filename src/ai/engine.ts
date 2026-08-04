@@ -2,13 +2,18 @@ import { db, guardStorage, recordTombstones, uid } from '../db';
 import { resolveModel, useSettings } from '../store/settings';
 import { GAP_DAYS, GAP_LABELS } from '../ui/theme';
 import type {
-  Character, ComposeMode, Episode, Location, ModelRef, Season, SeasonWrap, Turn, TurnLength, TurnRole, World, WrapBeat
+  Character, ComposeMode, Episode, EpisodeGuest, EpisodeWrap, EpisodeWrapBeat, Location, ModelRef,
+  Relationship, Season, SeasonWrap, Turn, TurnLength, TurnRole, World, WrapBeat
 } from '../types';
-import { emptyCharacter, emptyLocation, worldCalendar } from '../worldOps';
+import { emptyCharacter, emptyLocation, nextEpisode, worldCalendar } from '../worldOps';
 import { AIError, streamChat } from './client';
+import { normalizeSpeakText } from './dialogueFormat';
 import {
+  activeGuests,
   buildCharacterSpeakMessages,
   buildCharacterSystemPrompt,
+  buildGuestSpeakMessages,
+  buildGuestSystemPrompt,
   buildNarrationBeatMessages,
   buildNarratorSystemPrompt,
   characterSpeakTokens,
@@ -42,19 +47,24 @@ export function utilityModelFor(world: World | null) {
 // ---------- Prose generation ----------
 
 async function loadContext(world: World, season: Season, episode: Episode) {
-  const [characters, locations, continuity, threads, turns] = await Promise.all([
+  const [characters, locations, continuity, threads, turns, seasonEpisodes] = await Promise.all([
     db.characters.where('worldId').equals(world.id).toArray(),
     db.locations.where('worldId').equals(world.id).toArray(),
     db.continuity.where('seasonId').equals(season.id).toArray(),
     db.threads.where('worldId').equals(world.id).filter((t) => t.status === 'open').toArray(),
-    db.turns.where('episodeId').equals(episode.id).sortBy('createdAt')
+    db.turns.where('episodeId').equals(episode.id).sortBy('createdAt'),
+    db.episodes.where('seasonId').equals(season.id).sortBy('number')
   ]);
-  return { world, season, episode, characters, locations, continuity, threads, turns };
+  const priorEpisode = seasonEpisodes
+    .filter((e) => e.number < episode.number && e.status === 'ended')
+    .at(-1) ?? null;
+  return { world, season, episode, characters, locations, continuity, threads, turns, priorEpisode };
 }
 
 export interface StreamMeta {
   role: TurnRole;
   characterId?: string;
+  guestId?: string;
 }
 
 export interface WriteOptions {
@@ -75,20 +85,26 @@ const MAX_SPEAK_BEATS = 3;
 const MAX_TOTAL_BEATS = 5;
 const UTILITY_TIMEOUT_MS = 45_000;
 
-function labelTurn(t: Turn, characters: Character[]): string {
+function labelTurn(t: Turn, characters: Character[], guests: EpisodeGuest[] = []): string {
   if (t.role === 'user') return `[player ${t.mode ?? 'turn'}]: ${t.text}`;
   if (t.role === 'character') {
-    const name = characters.find((c) => c.id === t.characterId)?.name ?? 'NPC';
+    const name = t.guestId
+      ? (guests.find((g) => g.id === t.guestId)?.name ?? 'Walk-on')
+      : (characters.find((c) => c.id === t.characterId)?.name ?? 'NPC');
     return `[${name}]: ${t.text}`;
   }
   return `[narrator]: ${t.text}`;
 }
 
 function normalizeBeats(
-  raw: { beats?: Array<{ type?: string; brief?: string; characterId?: string }> },
-  inScene: Character[]
+  raw: { beats?: Array<{ type?: string; brief?: string; characterId?: string; guestId?: string }> },
+  inScene: Character[],
+  guests: EpisodeGuest[],
+  /** Map introduce-name → guest id for newly created walk-ons */
+  introduceNameToId: Map<string, string>
 ): DirectorBeat[] {
-  const allowed = new Set(inScene.map((c) => c.id));
+  const allowedCast = new Set(inScene.map((c) => c.id));
+  const allowedGuests = new Set(guests.map((g) => g.id));
   const beats: DirectorBeat[] = [];
   let speakCount = 0;
   for (const b of raw.beats ?? []) {
@@ -97,10 +113,17 @@ function normalizeBeats(
     if (!brief) continue;
     if (b.type === 'speak') {
       if (speakCount >= MAX_SPEAK_BEATS) continue;
-      const id = (b.characterId ?? '').trim();
-      if (!allowed.has(id)) continue;
-      beats.push({ type: 'speak', characterId: id, brief });
-      speakCount++;
+      const guestRaw = (b.guestId ?? '').trim();
+      const castId = (b.characterId ?? '').trim();
+      if (guestRaw) {
+        const byId = allowedGuests.has(guestRaw) ? guestRaw : introduceNameToId.get(guestRaw.toLowerCase());
+        if (!byId || !allowedGuests.has(byId)) continue;
+        beats.push({ type: 'speak', guestId: byId, brief });
+        speakCount++;
+      } else if (castId && allowedCast.has(castId)) {
+        beats.push({ type: 'speak', characterId: castId, brief });
+        speakCount++;
+      }
     } else if (b.type === 'narration') {
       beats.push({ type: 'narration', brief });
     }
@@ -145,6 +168,63 @@ function applyCastDelta(
   return next;
 }
 
+const MAX_INTRODUCE_GUESTS = 2;
+
+interface IntroduceSpec {
+  name?: string;
+  brief?: string;
+  voice?: string;
+}
+
+/** Merge new walk-ons into episode guests; returns updated episode fields + name→id map. */
+function applyGuestDelta(
+  episode: Episode,
+  introduce: IntroduceSpec[] | undefined,
+  leaveIds: string[] | undefined
+): {
+  guests: EpisodeGuest[];
+  activeGuestIds: string[];
+  nameToId: Map<string, string>;
+} {
+  const guests = [...(episode.guests ?? [])];
+  let active = episode.activeGuestIds
+    ? [...episode.activeGuestIds]
+    : guests.map((g) => g.id);
+  const nameToId = new Map<string, string>();
+  for (const g of guests) nameToId.set(g.name.toLowerCase(), g.id);
+
+  let introduced = 0;
+  for (const spec of introduce ?? []) {
+    if (introduced >= MAX_INTRODUCE_GUESTS) break;
+    const name = (spec.name ?? '').trim();
+    const brief = (spec.brief ?? '').trim();
+    if (!name || !brief) continue;
+    const key = name.toLowerCase();
+    const existing = guests.find((g) => g.name.toLowerCase() === key);
+    if (existing) {
+      nameToId.set(key, existing.id);
+      if (!active.includes(existing.id)) active.push(existing.id);
+      introduced++;
+      continue;
+    }
+    const guest: EpisodeGuest = {
+      id: uid(),
+      name,
+      brief,
+      ...(spec.voice?.trim() ? { voice: spec.voice.trim() } : {})
+    };
+    guests.push(guest);
+    active.push(guest.id);
+    nameToId.set(key, guest.id);
+    introduced++;
+  }
+
+  const leave = new Set((leaveIds ?? []).map((id) => id.trim()));
+  active = active.filter((id) => !leave.has(id));
+
+  return { guests, activeGuestIds: active, nameToId };
+}
+
 /** Thrown when the user aborts mid-write; completed beats are already persisted. */
 export class WriteAbortedError extends Error {
   readonly name = 'AbortError';
@@ -173,12 +253,19 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
   const ctx = await loadContext(opts.world, opts.season, opts.episode);
   let castIds = [...opts.episode.castIds];
   let inScene = ctx.characters.filter((c) => castIds.includes(c.id) && !c.isPlayer);
+  let guests = [...(ctx.episode.guests ?? [])];
+  let activeGuestIds = ctx.episode.activeGuestIds
+    ? [...ctx.episode.activeGuestIds]
+    : guests.map((g) => g.id);
   let beatsCompleted = 0;
 
   if (opts.mode !== 'continue' && opts.input.trim()) {
+    const userText = opts.mode === 'speak'
+      ? normalizeSpeakText(opts.input.trim())
+      : opts.input.trim();
     const userTurn: Turn = {
       id: uid(), episodeId: opts.episode.id, worldId: opts.world.id,
-      role: 'user', mode: opts.mode, text: opts.input.trim(), createdAt: Date.now()
+      role: 'user', mode: opts.mode, text: userText, createdAt: Date.now()
     };
     await guardStorage(() => db.turns.add(userTurn));
     ctx.turns.push(userTurn);
@@ -186,36 +273,61 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
 
   const progress = opts.onProgress ?? (() => {});
 
-  // Director plans cast changes + ordered narration / speak beats (utility model).
+  // Director plans cast/guest changes + ordered narration / speak beats (utility model).
   let beats: DirectorBeat[];
   try {
     progress('planning…');
     const plan = await utilityJson<{
-      castDelta?: { enter?: string[]; leave?: string[] };
-      beats: Array<{ type?: string; brief?: string; characterId?: string }>;
+      castDelta?: { enter?: string[]; leave?: string[]; introduce?: IntroduceSpec[] };
+      beats: Array<{ type?: string; brief?: string; characterId?: string; guestId?: string }>;
     }>(
       opts.world,
       directorSystemPrompt(),
       directorUserPrompt(ctx, opts.mode, opts.input.trim()),
-      1200,
+      1400,
       opts.signal
     );
     const nextCast = applyCastDelta(castIds, ctx.characters, plan.castDelta);
+    const guestDelta = applyGuestDelta(
+      { ...ctx.episode, castIds, guests, activeGuestIds },
+      plan.castDelta?.introduce,
+      plan.castDelta?.leave
+    );
+    guests = guestDelta.guests;
+    activeGuestIds = guestDelta.activeGuestIds;
+
+    const episodePatch: Partial<Episode> = { updatedAt: Date.now() };
+    let changed = false;
     if (nextCast.join('\0') !== castIds.join('\0')) {
-      await db.episodes.update(opts.episode.id, { castIds: nextCast, updatedAt: Date.now() });
       castIds = nextCast;
-      ctx.episode = { ...ctx.episode, castIds: nextCast };
+      episodePatch.castIds = nextCast;
+      changed = true;
+    }
+    const prevGuestKey = JSON.stringify({
+      g: ctx.episode.guests ?? [],
+      a: ctx.episode.activeGuestIds ?? (ctx.episode.guests ?? []).map((g) => g.id)
+    });
+    const nextGuestKey = JSON.stringify({ g: guests, a: activeGuestIds });
+    if (prevGuestKey !== nextGuestKey) {
+      episodePatch.guests = guests;
+      episodePatch.activeGuestIds = activeGuestIds;
+      changed = true;
+    }
+    if (changed) {
+      await db.episodes.update(opts.episode.id, episodePatch);
+      ctx.episode = { ...ctx.episode, ...episodePatch, castIds, guests, activeGuestIds };
       inScene = ctx.characters.filter((c) => castIds.includes(c.id) && !c.isPlayer);
     }
-    beats = normalizeBeats(plan, inScene);
+    beats = normalizeBeats(plan, inScene, activeGuests(ctx.episode), guestDelta.nameToId);
   } catch (e) {
     if ((e as Error).name === 'AbortError') asWriteAbort(e, beatsCompleted);
-    // Fall back to a single narration beat if the director fails.
     beats = [{
       type: 'narration',
       brief: 'Continue the scene with atmosphere and physical action; leave space for the player.'
     }];
   }
+
+  const sceneGuests = () => activeGuests(ctx.episode);
 
   let lastId = '';
   try {
@@ -230,7 +342,9 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         const text = await streamChat({
           provider, model,
           system: buildNarratorSystemPrompt(ctx),
-          messages: buildNarrationBeatMessages(ctx.turns, ctx.characters, beat.brief, opts.length),
+          messages: buildNarrationBeatMessages(
+            ctx.turns, ctx.characters, beat.brief, opts.length, sceneGuests()
+          ),
           maxTokens: narrationBeatTokens(opts.length),
           signal: opts.signal,
           onDelta: (d) => { acc += d; opts.onDelta(acc, meta); }
@@ -252,7 +366,42 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         continue;
       }
 
-      const speaking = ctx.characters.find((c) => c.id === beat.characterId);
+      if ('guestId' in beat && beat.guestId) {
+        const guest = (ctx.episode.guests ?? []).find((g) => g.id === beat.guestId);
+        if (!guest) continue;
+        const meta: StreamMeta = { role: 'character', guestId: guest.id };
+        progress(`${guest.name} speaking…`);
+        opts.onDelta('', meta);
+        let acc = '';
+        const text = await streamChat({
+          provider, model,
+          system: buildGuestSystemPrompt(ctx, guest),
+          messages: buildGuestSpeakMessages(
+            ctx.turns, ctx.characters, guest, beat.brief, sceneGuests()
+          ),
+          maxTokens: characterSpeakTokens(),
+          signal: opts.signal,
+          onDelta: (d) => { acc += d; opts.onDelta(acc, meta); }
+        });
+        const cleaned = normalizeSpeakText(text);
+        if (!cleaned) {
+          opts.onDelta('', meta);
+          continue;
+        }
+        const guestTurn: Turn = {
+          id: uid(), episodeId: opts.episode.id, worldId: opts.world.id,
+          role: 'character', mode: null, guestId: guest.id,
+          text: cleaned, createdAt: Date.now()
+        };
+        await guardStorage(() => db.turns.add(guestTurn));
+        ctx.turns.push(guestTurn);
+        lastId = guestTurn.id;
+        beatsCompleted++;
+        opts.onDelta('', meta);
+        continue;
+      }
+
+      const speaking = ctx.characters.find((c) => c.id === ('characterId' in beat ? beat.characterId : ''));
       if (!speaking || speaking.isPlayer) continue;
 
       const meta: StreamMeta = { role: 'character', characterId: speaking.id };
@@ -262,12 +411,14 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       const text = await streamChat({
         provider, model,
         system: buildCharacterSystemPrompt(ctx, speaking),
-        messages: buildCharacterSpeakMessages(ctx.turns, ctx.characters, speaking, beat.brief),
+        messages: buildCharacterSpeakMessages(
+          ctx.turns, ctx.characters, speaking, beat.brief, sceneGuests()
+        ),
         maxTokens: characterSpeakTokens(),
         signal: opts.signal,
         onDelta: (d) => { acc += d; opts.onDelta(acc, meta); }
       });
-      const cleaned = text.trim().replace(/^[A-Z][^:\n]{0,48}:\s*/, '').trim();
+      const cleaned = normalizeSpeakText(text);
       if (!cleaned) {
         opts.onDelta('', meta);
         continue;
@@ -394,7 +545,8 @@ export async function extractContinuity(world: World, season: Season, episode: E
   if (turns.length === 0) return;
   const existing = await db.continuity.where('seasonId').equals(season.id).toArray();
   const characters = await db.characters.where('worldId').equals(world.id).toArray();
-  const text = turns.map((t) => labelTurn(t, characters)).join('\n\n');
+  const guests = episode.guests ?? [];
+  const text = turns.map((t) => labelTurn(t, characters, guests)).join('\n\n');
 
   const result = await utilityJson<{ facts: string[]; threads: string[] }>(
     world,
@@ -416,6 +568,127 @@ export async function extractContinuity(world: World, season: Season, episode: E
   );
 }
 
+export interface EpisodeWrapDraft {
+  recap: string;
+  beats: EpisodeWrapBeat[];
+  facts: string[];
+  threads: string[];
+  guestEffects: string[];
+}
+
+/** Season-like episode analysis for the wrap review UI. */
+export async function analyzeEpisode(
+  world: World,
+  season: Season,
+  episode: Episode
+): Promise<EpisodeWrapDraft> {
+  const turns = await db.turns.where('episodeId').equals(episode.id).sortBy('createdAt');
+  const characters = await db.characters.where('worldId').equals(world.id).toArray();
+  const existing = await db.continuity.where('seasonId').equals(season.id).toArray();
+  const guests = episode.guests ?? [];
+  const text = turns.map((t) => labelTurn(t, characters, guests)).join('\n\n');
+
+  if (!text.trim()) {
+    return {
+      recap: 'The episode opened without lasting prose yet.',
+      beats: [],
+      facts: [],
+      threads: [],
+      guestEffects: []
+    };
+  }
+
+  const guestBlock = guests.length > 0
+    ? `Walk-ons this episode:\n${guests.map((g) => `- ${g.name}: ${g.brief}`).join('\n')}\n\n`
+    : '';
+
+  const result = await utilityJson<{
+    recap?: string;
+    beats?: { text?: string; consequence?: string }[];
+    facts?: string[];
+    threads?: string[];
+    guestEffects?: string[];
+  }>(
+    world,
+    'You are a story editor closing an interactive fiction episode. Respond with JSON only:\n' +
+    '{"recap":"<80-160 word previously-on paragraph for the NEXT episode>",' +
+    '"beats":[{"text":"<what happened, one sentence>","consequence":"<what it leaves for later, one sentence>"}],' +
+    '"facts":["<durable continuity facts, 0-6>"],' +
+    '"threads":["<unresolved tensions, 0-6>"],' +
+    '"guestEffects":["<how temporary walk-ons changed the story, if any — omit empties>"]}\n' +
+    'Beats: 2-5 events that matter later. Facts must not repeat known facts. Guest effects only for walk-ons, not Cast cards.',
+    `World: ${world.title}. Season ${season.number}, episode ${episode.number}.\n` +
+    `Known facts:\n${existing.map((f) => `- ${f.text}`).join('\n') || '(none)'}\n\n` +
+    guestBlock +
+    `Episode text:\n${text.slice(0, 24000)}`,
+    2500
+  );
+
+  return {
+    recap: (result.recap ?? '').trim() || 'The episode closed without a clear recap.',
+    beats: (result.beats ?? [])
+      .map((b) => ({ text: (b.text ?? '').trim(), consequence: (b.consequence ?? '').trim() }))
+      .filter((b) => b.text)
+      .slice(0, 7),
+    facts: (result.facts ?? []).map((f) => f.trim()).filter(Boolean).slice(0, 8),
+    threads: (result.threads ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 8),
+    guestEffects: (result.guestEffects ?? []).map((g) => g.trim()).filter(Boolean).slice(0, 6)
+  };
+}
+
+export interface CommitEpisodeWrapInput {
+  recap: string;
+  beats: EpisodeWrapBeat[];
+  facts: string[];
+  threads: string[];
+  guestEffects: string[];
+}
+
+/**
+ * Persist wrap onto the ended episode, file continuity/threads, open the next episode.
+ */
+export async function commitEpisodeWrap(
+  world: World,
+  season: Season,
+  episode: Episode,
+  input: CommitEpisodeWrapInput
+): Promise<Episode> {
+  const wrap: EpisodeWrap = {
+    recap: input.recap.trim(),
+    beats: input.beats.filter((b) => b.text.trim()),
+    guestEffects: input.guestEffects.map((g) => g.trim()).filter(Boolean)
+  };
+
+  await db.episodes.update(episode.id, { wrap, updatedAt: Date.now() });
+
+  const now = Date.now();
+  const factLines = [
+    ...input.facts.map((f) => f.trim()).filter(Boolean),
+    ...wrap.guestEffects
+  ];
+  if (factLines.length > 0) {
+    await db.continuity.bulkAdd(
+      factLines.map((text) => ({
+        id: uid(), worldId: world.id, seasonId: season.id, text, source: 'auto' as const, createdAt: now
+      }))
+    );
+  }
+  const threadLines = input.threads.map((t) => t.trim()).filter(Boolean);
+  if (threadLines.length > 0) {
+    await db.threads.bulkAdd(
+      threadLines.map((text) => ({
+        id: uid(), worldId: world.id, seasonId: season.id, text,
+        openedLabel: `opened S${season.number} · E${episode.number}`,
+        status: 'open' as const, createdAt: now
+      }))
+    );
+  }
+
+  const next = await nextEpisode({ ...episode, wrap });
+  await db.worlds.update(world.id, { updatedAt: Date.now() });
+  return next;
+}
+
 /** Step 1 of the sequel pipeline: read the season, propose beats + character outcomes. */
 export async function analyzeSeason(world: World, season: Season): Promise<SeasonWrap> {
   const episodes = await db.episodes.where('seasonId').equals(season.id).sortBy('number');
@@ -426,7 +699,8 @@ export async function analyzeSeason(world: World, season: Season): Promise<Seaso
   for (const ep of episodes) {
     const turns = await db.turns.where('episodeId').equals(ep.id).sortBy('createdAt');
     if (turns.length === 0) continue;
-    const text = turns.map((t) => labelTurn(t, characters)).join('\n\n');
+    const guests = ep.guests ?? [];
+    const text = turns.map((t) => labelTurn(t, characters, guests)).join('\n\n');
     if (text.length < 6000) {
       episodeSummaries.push(`Episode ${ep.number}${ep.title ? ` (${ep.title})` : ''}:\n${text}`);
     } else {
@@ -623,25 +897,94 @@ function keepIfBlank(existing: string, incoming: string | undefined): string {
   return incoming && incoming.trim() ? incoming : existing;
 }
 
+function resolveRelationshipsByName(
+  proposed: Array<{ targetName?: string; kind?: string; note?: string }>,
+  others: Character[]
+): Relationship[] {
+  const byName = new Map(others.map((c) => [c.name.trim().toLowerCase(), c.id]));
+  const out: Relationship[] = [];
+  const seen = new Set<string>();
+  for (const p of proposed) {
+    const key = (p.targetName ?? '').trim().toLowerCase();
+    if (!key) continue;
+    const targetId = byName.get(key);
+    if (!targetId || seen.has(targetId)) continue;
+    const kind = (p.kind ?? '').trim() || 'linked';
+    const note = (p.note ?? '').trim();
+    seen.add(targetId);
+    out.push({ targetId, kind, note });
+  }
+  return out;
+}
+
+/** Merge proposed relationships without deleting author links; enrich blank kind/note. */
+export function mergeRelationships(
+  existing: Relationship[],
+  incoming: Relationship[]
+): Relationship[] {
+  const map = new Map(existing.map((r) => [r.targetId, { ...r }]));
+  for (const r of incoming) {
+    const cur = map.get(r.targetId);
+    if (!cur) {
+      map.set(r.targetId, { ...r });
+      continue;
+    }
+    map.set(r.targetId, {
+      targetId: r.targetId,
+      kind: cur.kind.trim() ? cur.kind : r.kind,
+      note: cur.note.trim() ? (r.note.trim() && r.note.length > cur.note.length ? r.note : cur.note) : r.note
+    });
+  }
+  return [...map.values()];
+}
+
 /** AI-assisted flesh-out of an existing character sheet: fills blanks, enriches filled fields, never removes detail. */
-export async function fleshOutCharacter(world: World | null, character: Character): Promise<Partial<Character>> {
+export async function fleshOutCharacter(
+  world: World | null,
+  character: Character,
+  cast: Character[] = []
+): Promise<Partial<Character>> {
+  const others = cast.filter((c) => c.id !== character.id && c.name.trim());
   const current = {
     name: character.name, role: character.role, age: character.age, appearance: character.appearance,
     mannerisms: character.mannerisms, backstory: character.backstory, summary: character.summary,
     speechStyle: character.speechStyle, exampleLines: character.exampleLines, traits: character.traits,
     desires: character.desires, fears: character.fears, flaws: character.flaws, secrets: character.secrets,
-    anchors: character.anchors
+    anchors: character.anchors,
+    relationships: character.relationships.map((r) => {
+      const target = others.find((c) => c.id === r.targetId);
+      return { targetName: target?.name ?? '', kind: r.kind, note: r.note };
+    })
   };
+  const roster = others.map((c) => ({
+    name: c.name,
+    role: c.role,
+    summary: c.summary.slice(0, 160)
+  }));
+
   const result = await utilityJson<{
     name: string; role: string; age: string; appearance: string; mannerisms: string;
     backstory: string; summary: string;
     speechStyle: string; exampleLines: string[]; traits: string; desires: string;
     fears: string; flaws: string; secrets: string; anchors: string[];
+    relationships?: { targetName?: string; kind?: string; note?: string }[];
   }>(
     world,
-    `You flesh out NPC character sheets for longform interactive fiction. ${NON_DESTRUCTIVE_RULE}\nRespond with JSON only, same shape as the input: {"name": string, "role": string, "age": string, "appearance": string, "mannerisms": string, "backstory": string, "summary": string, "speechStyle": string, "exampleLines": string[], "traits": string, "desires": string, "fears": string, "flaws": string, "secrets": string, "anchors": string[]}`,
-    `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}Current character sheet (JSON, blank strings/arrays mean unset):\n${JSON.stringify(current, null, 2)}`
+    `You flesh out NPC character sheets for longform interactive fiction. ${NON_DESTRUCTIVE_RULE}\n` +
+    `Respond with JSON only: {"name": string, "role": string, "age": string, "appearance": string, "mannerisms": string, ` +
+    `"backstory": string, "summary": string, "speechStyle": string, "exampleLines": string[], "traits": string, ` +
+    `"desires": string, "fears": string, "flaws": string, "secrets": string, "anchors": string[], ` +
+    `"relationships":[{"targetName":"<exact name from Other cast>","kind":"ally|rival|lover|debt|family|…","note":"<one-line history>"}]}\n` +
+    `Only link to names listed in Other cast. If Other cast is empty, return relationships: [].`,
+    `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}` +
+    `Other cast (relationship targets):\n${JSON.stringify(roster, null, 2)}\n\n` +
+    `Current character sheet (JSON, blank strings/arrays mean unset):\n${JSON.stringify(current, null, 2)}`
   );
+
+  const relIncoming = others.length > 0
+    ? resolveRelationshipsByName(result.relationships ?? [], others)
+    : [];
+
   return {
     name: keepIfBlank(character.name, result.name),
     role: keepIfBlank(character.role, result.role),
@@ -657,8 +1000,48 @@ export async function fleshOutCharacter(world: World | null, character: Characte
     fears: keepIfBlank(character.fears, result.fears),
     flaws: keepIfBlank(character.flaws, result.flaws),
     secrets: keepIfBlank(character.secrets, result.secrets),
-    anchors: mergeLines(character.anchors, result.anchors ?? [])
+    anchors: mergeLines(character.anchors, result.anchors ?? []),
+    relationships: mergeRelationships(character.relationships, relIncoming)
   };
+}
+
+/** Focused AI pass: propose/enrich typed links to other cast members. */
+export async function fleshOutRelationships(
+  world: World | null,
+  character: Character,
+  cast: Character[]
+): Promise<Relationship[]> {
+  const others = cast.filter((c) => c.id !== character.id && c.name.trim());
+  if (others.length === 0) return character.relationships;
+
+  const roster = others.map((c) => ({
+    name: c.name,
+    role: c.role,
+    summary: c.summary.slice(0, 200),
+    traits: c.traits.slice(0, 120)
+  }));
+  const existing = character.relationships.map((r) => {
+    const target = others.find((c) => c.id === r.targetId);
+    return { targetName: target?.name ?? '', kind: r.kind, note: r.note };
+  });
+
+  const result = await utilityJson<{
+    relationships: { targetName?: string; kind?: string; note?: string }[];
+  }>(
+    world,
+    `You design relationship links between cast members for longform interactive fiction. ${NON_DESTRUCTIVE_RULE}\n` +
+    `Respond with JSON only: {"relationships":[{"targetName":"<exact name from roster>","kind":"ally|rival|lover|debt|family|mentor|…","note":"<concrete one-line history or tension>"}]}\n` +
+    `Propose 2-5 links grounded in both sheets and the world. Prefer specific history over vague adjectives. Never invent cast names not in the roster.`,
+    `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}` +
+    `Subject: ${character.name} (${character.role})\n` +
+    `Summary: ${character.summary.slice(0, 400)}\n` +
+    `Backstory: ${character.backstory.slice(0, 400)}\n` +
+    `Existing relationships:\n${JSON.stringify(existing, null, 2)}\n\n` +
+    `Other cast roster:\n${JSON.stringify(roster, null, 2)}`
+  );
+
+  const incoming = resolveRelationshipsByName(result.relationships ?? [], others);
+  return mergeRelationships(character.relationships, incoming);
 }
 
 /** AI-assisted flesh-out of an existing location sheet: fills blanks, enriches filled fields, never removes detail. */
@@ -825,7 +1208,7 @@ export async function fleshOutWorldEverything(
   const player = allChars.find((c) => c.isPlayer);
   if (player && !player.summary.trim() && !player.speechStyle.trim()) {
     progress('Fleshing you…');
-    const sheet = await fleshOutCharacter(live, player);
+    const sheet = await fleshOutCharacter(live, player, allChars);
     await db.characters.update(player.id, { ...sheet, isPlayer: true, updatedAt: Date.now() });
   }
 

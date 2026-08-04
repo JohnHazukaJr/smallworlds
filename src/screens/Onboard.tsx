@@ -201,7 +201,8 @@ export function Onboard() {
     setError('');
     try {
       const draft = emptyCharacter(worldId, { name: name || notes.slice(0, 40), summary: notes });
-      const sheet = await fleshOutCharacter(worldContext(), draft);
+      const existingCast = await db.characters.where('worldId').equals(worldId).toArray();
+      const sheet = await fleshOutCharacter(worldContext(), draft, existingCast);
       const c: Character = { ...draft, ...sheet, updatedAt: Date.now() };
       await db.characters.add(c);
       if (episode) await db.episodes.update(episode.id, { castIds: [...episode.castIds, c.id] });

@@ -77,6 +77,28 @@ export interface Season {
   updatedAt?: number;
 }
 
+/** Walk-on NPC for one episode only — not a Cast card. */
+export interface EpisodeGuest {
+  id: string;
+  name: string;
+  /** who they are in this scene */
+  brief: string;
+  /** optional one-line speech note */
+  voice?: string;
+}
+
+export interface EpisodeWrapBeat {
+  text: string;
+  consequence: string;
+}
+
+/** Filed when an episode ends — seeds the next episode's "previously" context. */
+export interface EpisodeWrap {
+  recap: string;
+  beats: EpisodeWrapBeat[];
+  guestEffects: string[];
+}
+
 export interface Episode {
   id: string;
   seasonId: string;
@@ -95,6 +117,12 @@ export interface Episode {
   moodPinned?: boolean;
   /** character ids present in the current scene */
   castIds: string[];
+  /** ephemeral walk-ons for this episode (not Cast cards) */
+  guests?: EpisodeGuest[];
+  /** guest ids currently in the scene; omitted means all guests are active */
+  activeGuestIds?: string[];
+  /** filled when the episode is ended via the wrap flow */
+  wrap?: EpisodeWrap | null;
   status: 'active' | 'ended';
   createdAt: number;
   /** bumped on mutating writes — used for sync LWW */
@@ -112,8 +140,10 @@ export interface Turn {
   role: TurnRole;
   /** for user turns: which mode produced it */
   mode: ComposeMode | null;
-  /** set when role === 'character' — which NPC spoke this turn */
+  /** set when role === 'character' — which NPC Cast card spoke this turn */
   characterId?: string;
+  /** set when role === 'character' — ephemeral episode guest spoke (no Cast card) */
+  guestId?: string;
   text: string;
   createdAt: number;
   updatedAt?: number;

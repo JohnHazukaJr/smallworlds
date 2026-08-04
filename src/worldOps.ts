@@ -127,15 +127,24 @@ export async function nextEpisode(current: Episode): Promise<Episode> {
     id: uid(), seasonId: current.seasonId, worldId: current.worldId,
     number: current.number + 1, title: '', location: current.location,
     locationId: current.locationId ?? null,
-    castIds: current.castIds, status: 'active', createdAt: Date.now()
+    castIds: current.castIds,
+    guests: [],
+    activeGuestIds: [],
+    wrap: null,
+    status: 'active',
+    createdAt: Date.now(),
+    updatedAt: Date.now()
   };
   await db.transaction('rw', [db.episodes, db.worlds], async () => {
-    await db.episodes.update(current.id, { status: 'ended' });
+    await db.episodes.update(current.id, { status: 'ended', updatedAt: Date.now() });
     await db.episodes.add(next);
     const world = await db.worlds.get(current.worldId);
     if (world) {
       const cal = worldCalendar(world);
-      await db.worlds.update(world.id, { calendar: { ...cal, currentDay: cal.currentDay + 1 } });
+      await db.worlds.update(world.id, {
+        calendar: { ...cal, currentDay: cal.currentDay + 1 },
+        updatedAt: Date.now()
+      });
     }
   });
   return next;

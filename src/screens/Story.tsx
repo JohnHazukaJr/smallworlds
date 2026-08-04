@@ -1,22 +1,45 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import {
-  deleteTurnsAfter, deleteTurnsFrom, extractContinuity, proseModelFor,
+  analyzeEpisode, commitEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, proseModelFor,
   rollbackTurnSnapshot, snapshotTurnsAfter, snapshotTurnsFrom, writeTurn,
-  WriteAbortedError, type StreamMeta
+  WriteAbortedError, type EpisodeWrapDraft, type StreamMeta
 } from '../ai/engine';
+import { parseSpeakSegments, type SpeakSegment } from '../ai/dialogueFormat';
 import { generateSceneImage } from '../ai/image';
 import {
-  episodeContextPressure, episodeHistoryChars, HISTORY_CHAR_BUDGET
+  episodeContextPressure, episodeHistoryChars, HISTORY_CHAR_BUDGET, resolveSpeakerName
 } from '../ai/prompts';
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
 import { db, guardStorage, recordTombstones, uid } from '../db';
 import { AVATAR_PX, DEFAULT_DISPLAY, moodFromHue, useApp, type AvatarSize, type StoryLayout } from '../store/app';
-import type { Character, ComposeMode, ContinuityFact, Episode, Location, OpenThread, Season, Turn, TurnLength, World } from '../types';
+import type {
+  Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, EpisodeWrapBeat,
+  Location, OpenThread, Season, Turn, TurnLength, World
+} from '../types';
 import { Chip, ErrorNote, Mono, Sheet, Spinner, Toggle, useVw } from '../ui/bits';
 import { fileToSceneImage } from '../ui/image';
 import { avatarStyle, BACKDROPS, MOODS, STRIPE } from '../ui/theme';
 import { characterPortraits, emptyLocation, nextEpisode, worldCalendar } from '../worldOps';
+
+/** Editable wrap draft with Keep/Drop flags for the review UI. */
+interface WrapReviewDraft {
+  recap: string;
+  beats: Array<EpisodeWrapBeat & { keep: boolean }>;
+  facts: Array<{ text: string; keep: boolean }>;
+  threads: Array<{ text: string; keep: boolean }>;
+  guestEffects: Array<{ text: string; keep: boolean }>;
+}
+
+function draftFromAnalysis(d: EpisodeWrapDraft): WrapReviewDraft {
+  return {
+    recap: d.recap,
+    beats: d.beats.map((b) => ({ ...b, keep: true })),
+    facts: d.facts.map((text) => ({ text, keep: true })),
+    threads: d.threads.map((text) => ({ text, keep: true })),
+    guestEffects: d.guestEffects.map((text) => ({ text, keep: true }))
+  };
+}
 
 // ---------- prose rendering ----------
 
@@ -25,7 +48,9 @@ interface ProseBlock {
   speaker?: string;
   hue?: number;
   portrait?: string | null;
-  kind: 'narration' | 'dialogue' | 'direction' | 'action';
+  kind: 'narration' | 'dialogue' | 'direction' | 'action' | 'speak';
+  /** For kind === 'speak': parsed *action* / "speech" segments */
+  segments?: SpeakSegment[];
 }
 
 const DIALOGUE_RE = /^([A-Z][^:\n]{0,48}?):\s*["“](.+?)["”]?\s*$/;
@@ -41,16 +66,23 @@ function portraitPlate(hue: number, size: number, portrait?: string | null, bord
   };
 }
 
-function parseTurn(turn: Turn, characters: Character[]): ProseBlock[] {
+function guestHue(guestId: string): number {
+  let h = 0;
+  for (let i = 0; i < guestId.length; i++) h = (h + guestId.charCodeAt(i) * 17) % 360;
+  return h;
+}
+
+function parseTurn(turn: Turn, characters: Character[], guests: EpisodeGuest[] = []): ProseBlock[] {
   if (turn.role === 'user') {
     const player = characters.find((c) => c.isPlayer);
     if (turn.mode === 'speak') {
       return [{
-        text: `"${turn.text.replace(/^"|"$/g, '')}"`,
+        text: turn.text,
         speaker: player?.name ?? 'you',
         hue: player?.hue ?? 60,
         portrait: player ? characterPortraits(player)[0] : null,
-        kind: 'dialogue'
+        kind: 'speak',
+        segments: parseSpeakSegments(turn.text)
       }];
     }
     if (turn.mode === 'act') {
@@ -65,14 +97,19 @@ function parseTurn(turn: Turn, characters: Character[]): ProseBlock[] {
     return [{ text: turn.text, kind: 'direction' }];
   }
   if (turn.role === 'character') {
-    const who = characters.find((c) => c.id === turn.characterId);
-    const line = turn.text.replace(/^["“]|["”]$/g, '').trim();
+    const who = turn.characterId
+      ? characters.find((c) => c.id === turn.characterId)
+      : undefined;
+    const guest = turn.guestId
+      ? guests.find((g) => g.id === turn.guestId)
+      : undefined;
     return [{
-      text: `"${line}"`,
-      speaker: who?.name ?? 'someone',
-      hue: who?.hue ?? 200,
+      text: turn.text,
+      speaker: who?.name ?? guest?.name ?? resolveSpeakerName(turn, characters, guests),
+      hue: who?.hue ?? (guest ? guestHue(guest.id) : 200),
       portrait: who ? characterPortraits(who)[0] : null,
-      kind: 'dialogue'
+      kind: 'speak',
+      segments: parseSpeakSegments(turn.text)
     }];
   }
   // Legacy narrator turns may still embed Name: "…" dialogue.
@@ -85,21 +122,66 @@ function parseTurn(turn: Turn, characters: Character[]): ProseBlock[] {
       if (m) {
         const who = findByName(characters, m[1]);
         return {
-          text: `"${m[2]}"`,
+          text: m[2],
           speaker: m[1].trim(),
           hue: who?.hue,
           portrait: who ? characterPortraits(who)[0] : null,
-          kind: 'dialogue'
+          kind: 'speak',
+          segments: [{ kind: 'speech', text: m[2] }]
         };
       }
       return { text: p, kind: 'narration' };
     });
 }
 
+function SpeakBody({
+  segments, accent, prose, fontPx
+}: {
+  segments: SpeakSegment[];
+  accent: string;
+  prose: string;
+  fontPx: number;
+}) {
+  return (
+    <p className="serif" style={{ fontSize: fontPx, lineHeight: 1.78, margin: 0, textWrap: 'pretty' }}>
+      {segments.map((seg, i) => {
+        if (seg.kind === 'action') {
+          return (
+            <span
+              key={i}
+              style={{
+                fontWeight: 600,
+                fontStyle: 'normal',
+                color: accent,
+                marginRight: 6
+              }}
+            >
+              {seg.text}
+            </span>
+          );
+        }
+        if (seg.kind === 'speech') {
+          return (
+            <span key={i} style={{ fontStyle: 'italic', color: prose }}>
+              “{seg.text}”
+              {i < segments.length - 1 ? ' ' : ''}
+            </span>
+          );
+        }
+        return (
+          <span key={i} style={{ color: 'rgba(236,234,230,0.55)', fontStyle: 'normal' }}>
+            {seg.text}{' '}
+          </span>
+        );
+      })}
+    </p>
+  );
+}
+
 function ProseBlockView({ b, accent, prose, fontPx, avatarPx }: {
   b: ProseBlock; accent: string; prose: string; fontPx: number; avatarPx: number;
 }) {
-  const isDialog = b.kind === 'dialogue' || b.kind === 'action';
+  const isDialog = b.kind === 'dialogue' || b.kind === 'action' || b.kind === 'speak';
   return (
     <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', marginBottom: isDialog ? 24 : 22 }}>
       {isDialog && b.hue !== undefined && (
@@ -124,6 +206,8 @@ function ProseBlockView({ b, accent, prose, fontPx, avatarPx }: {
           }}>
             you direct: {b.text}
           </p>
+        ) : b.kind === 'speak' && b.segments ? (
+          <SpeakBody segments={b.segments} accent={accent} prose={prose} fontPx={fontPx} />
         ) : (
           <p className="serif" style={{
             fontSize: fontPx, lineHeight: 1.78, margin: 0, color: prose,
@@ -200,6 +284,8 @@ export function Story() {
   useEffect(() => { setTurnWindow(60); }, [episode?.id]);
   const [wrapOpen, setWrapOpen] = useState<null | 'episode' | 'season'>(null);
   const [wrapBusy, setWrapBusy] = useState(false);
+  const [wrapPhase, setWrapPhase] = useState<'ready' | 'analyzing' | 'review'>('ready');
+  const [wrapDraft, setWrapDraft] = useState<WrapReviewDraft | null>(null);
   const [directorSheet, setDirectorSheet] = useState(false);
   const [worldEditOpen, setWorldEditOpen] = useState(false);
   const [displayOpen, setDisplayOpen] = useState(false);
@@ -240,6 +326,13 @@ export function Story() {
     setNudgeDismissedAtChars(0);
     setNudgeDismissedLocId(episode?.locationId ?? null);
   }, [episode?.id]);
+
+  // Fresh wrap sheet each time it opens or switches Episode/Season.
+  useEffect(() => {
+    setWrapPhase('ready');
+    setWrapDraft(null);
+    setWrapBusy(false);
+  }, [wrapOpen]);
 
   // Location hue → mood when the episode hasn't pinned a mood.
   useEffect(() => {
@@ -382,23 +475,67 @@ export function Story() {
     }
   };
 
-  const endEpisode = async () => {
+  const closeWrapSheet = () => {
+    setWrapOpen(null);
+    setWrapPhase('ready');
+    setWrapDraft(null);
+  };
+
+  const resetAfterEpisodeEnd = () => {
+    closeWrapSheet();
+    setNudgeDismissedAtChars(0);
+    setNudgeDismissedLocId(null);
+  };
+
+  /** Analyze the episode transcript into a reviewable wrap draft. */
+  const runEpisodeAnalyze = async () => {
     if (!world || !season || !episode) return;
+    setWrapBusy(true);
+    setWrapPhase('analyzing');
+    setError('');
+    try {
+      const draft = await analyzeEpisode(world, season, episode);
+      setWrapDraft(draftFromAnalysis(draft));
+      setWrapPhase('review');
+    } catch (e) {
+      setWrapPhase('ready');
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setWrapBusy(false);
+    }
+  };
+
+  /** End without filing a wrap — used when analysis fails or the author opts out. */
+  const skipWrapAndEnd = async () => {
+    if (!episode) return;
     setWrapBusy(true);
     setError('');
     try {
-      if (turns.length > 0) {
-        try {
-          await extractContinuity(world, season, episode);
-        } catch (e) {
-          // Continuity extraction is best-effort; the episode still ends.
-          console.warn('continuity extraction failed', e);
-        }
-      }
       await nextEpisode(episode);
-      setWrapOpen(null);
-      setNudgeDismissedAtChars(0);
-      setNudgeDismissedLocId(null);
+      resetAfterEpisodeEnd();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setWrapBusy(false);
+    }
+  };
+
+  /** Commit kept wrap items, file continuity, open the next episode. */
+  const confirmEpisodeWrap = async () => {
+    if (!world || !season || !episode || !wrapDraft) return;
+    setWrapBusy(true);
+    setError('');
+    try {
+      await commitEpisodeWrap(world, season, episode, {
+        recap: wrapDraft.recap,
+        beats: wrapDraft.beats
+          .filter((b) => b.keep && b.text.trim())
+          .map(({ text, consequence }) => ({ text, consequence })),
+        facts: wrapDraft.facts.filter((f) => f.keep).map((f) => f.text),
+        threads: wrapDraft.threads.filter((t) => t.keep).map((t) => t.text),
+        guestEffects: wrapDraft.guestEffects.filter((g) => g.keep).map((g) => g.text)
+      });
+      resetAfterEpisodeEnd();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -407,10 +544,11 @@ export function Story() {
   };
 
   const blocks = useMemo(() => {
+    const guestList = episode?.guests ?? [];
     const out: { turn: Turn; blocks: ProseBlock[] }[] = [];
-    for (const t of turns) out.push({ turn: t, blocks: parseTurn(t, characters) });
+    for (const t of turns) out.push({ turn: t, blocks: parseTurn(t, characters, guestList) });
     return out;
-  }, [turns, characters]);
+  }, [turns, characters, episode?.guests]);
 
   if (!world) {
     return (
@@ -428,10 +566,11 @@ export function Story() {
   }
 
   const inScene = characters.filter((c) => episode.castIds.includes(c.id));
+  const guests = episode.guests ?? [];
   const composerPlaceholder: Record<ComposeMode, string> = {
     continue: 'Press write on — the narrator takes the next beat from here.',
     steer: 'Tell the narrator what should happen, in your words. Everyone stays in character while it happens.',
-    speak: 'Dialogue only — no words will be put in your mouth beyond this.',
+    speak: '*smiles* "Hello." — looks and gestures in *stars*, spoken words in quotes.',
     act: 'You do something. No dialogue, no narration from you.'
   };
   const modeHint: Record<ComposeMode, string> = { continue: 'continue', steer: 'you direct', speak: 'you say', act: 'you do' };
@@ -658,9 +797,10 @@ export function Story() {
                 role: partialMeta.role,
                 mode: null,
                 characterId: partialMeta.characterId,
+                guestId: partialMeta.guestId,
                 text: partial,
                 createdAt: 0
-              }, characters)
+              }, characters, guests)
                 .map((b, i) => <ProseBlockView key={`p${i}`} b={b} accent={M.accent} prose={M.prose} fontPx={fontPx} avatarPx={avatarPx} />)
             )}
 
@@ -783,7 +923,12 @@ export function Story() {
           </div>
           {!narrow && !readMode && (
             <div style={{ display: 'flex', gap: 16, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.4, flexWrap: 'wrap' }}>
-              <span>{inScene.filter((c) => !c.isPlayer).map((c) => c.name).join(' · ') || 'no cast in scene'}</span>
+              <span>
+                {[
+                  ...inScene.filter((c) => !c.isPlayer).map((c) => c.name),
+                  ...guests.map((g) => `${g.name} (walk-on)`)
+                ].join(' · ') || 'no cast in scene'}
+              </span>
               <span>memory: {continuity.length} facts · {threads.length} open threads</span>
               <span>{world.ai.mature ? 'adult world · unrestricted' : 'general audience'}</span>
               <span>⌘↵ write on</span>
@@ -792,8 +937,61 @@ export function Story() {
         </div>
       )}
 
-      {/* wrap sheet */}
-      <Sheet open={wrapOpen !== null} onClose={() => setWrapOpen(null)} narrow={narrow}>
+      {/* wrap sheet — sticky footer keeps CTAs reachable in portrait */}
+      <Sheet
+        open={wrapOpen !== null}
+        onClose={closeWrapSheet}
+        narrow={narrow}
+        footer={
+          wrapOpen === 'season' ? (
+            <button
+              className="btn-primary"
+              style={{ width: '100%', minHeight: 44 }}
+              onClick={() => { closeWrapSheet(); go('sequel'); }}
+            >
+              Open the season review
+            </button>
+          ) : wrapPhase === 'review' ? (
+            <>
+              <button
+                className="btn-primary"
+                style={{ width: '100%', minHeight: 44 }}
+                disabled={wrapBusy || !wrapDraft}
+                onClick={() => void confirmEpisodeWrap()}
+              >
+                {wrapBusy ? 'Filing continuity…' : `Confirm · start episode ${episode.number + 1}`}
+              </button>
+              <button
+                className="btn-quiet"
+                style={{ width: '100%', minHeight: 40, fontSize: 12 }}
+                disabled={wrapBusy}
+                onClick={() => void skipWrapAndEnd()}
+              >
+                Skip summary · end anyway
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                className="btn-primary"
+                style={{ width: '100%', minHeight: 44 }}
+                disabled={wrapBusy}
+                onClick={() => void runEpisodeAnalyze()}
+              >
+                {wrapPhase === 'analyzing' || wrapBusy ? 'Reading the episode back…' : 'Analyze episode'}
+              </button>
+              <button
+                className="btn-quiet"
+                style={{ width: '100%', minHeight: 40, fontSize: 12 }}
+                disabled={wrapBusy}
+                onClick={() => void skipWrapAndEnd()}
+              >
+                Skip summary · end anyway
+              </button>
+            </>
+          )
+        }
+      >
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 14 }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: '0.14em', textTransform: 'uppercase', opacity: 0.5 }}>
@@ -805,52 +1003,60 @@ export function Story() {
             <div style={{ fontSize: 13, lineHeight: 1.6, opacity: 0.62, maxWidth: '48ch', color: '#eceae6' }}>
               {wrapOpen === 'season'
                 ? 'Opens the season review to choose what carries forward into the next season.'
-                : 'Files durable facts out of the hot transcript into continuity, then opens the next episode with the same cast — so key details survive when the narrator\'s memory fills up.'}
+                : wrapPhase === 'review'
+                  ? 'Edit the recap, Keep or Drop each beat and fact, then confirm to file continuity and open the next episode.'
+                  : 'The utility model reads this episode back and proposes a previously-on recap, beats, and continuity — you review before anything is filed.'}
             </div>
           </div>
-          <button className="btn-ghost" style={{ width: 30, height: 30, padding: 0, flexShrink: 0 }} onClick={() => setWrapOpen(null)}>×</button>
+          <button className="btn-ghost" style={{ width: 30, height: 30, padding: 0, flexShrink: 0 }} onClick={closeWrapSheet}>×</button>
         </div>
 
         <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
-          <Chip active={wrapOpen === 'episode'} onClick={() => setWrapOpen('episode')}>End episode</Chip>
-          <Chip active={wrapOpen === 'season'} onClick={() => setWrapOpen('season')}>End season</Chip>
-        </div>
-
-        <div style={{
-          fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.7)',
-          border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, padding: '12px 14px',
-          background: 'rgba(255,255,255,0.04)'
-        }}>
-          {wrapOpen === 'season'
-            ? 'The review reads the season back, proposes beats, and asks what to Drop / Soften / Keep / Raise. It runs on your utility model.'
-            : 'Continuity facts and open threads are extracted with your utility model. Episode prose stays saved; only the active episode stays in the writing loop.'}
-        </div>
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 9, flex: 1, minHeight: 0, overflow: 'auto' }}>
-          <Mono style={{ fontSize: 9 }}>held in continuity</Mono>
-          {continuity.slice(-6).map((f) => (
-            <div key={f.id} className="glass" style={{ borderRadius: 13, padding: '12px 14px', fontSize: 13, lineHeight: 1.5, color: 'rgba(236,234,230,0.8)' }}>
-              {f.text}
-            </div>
-          ))}
-          {continuity.length === 0 && <div style={{ fontSize: 12.5, opacity: 0.5, color: '#eceae6' }}>Nothing filed yet — end an episode to extract what mattered.</div>}
+          <Chip active={wrapOpen === 'episode'} onClick={() => setWrapOpen('episode')}>Episode</Chip>
+          <Chip active={wrapOpen === 'season'} onClick={() => setWrapOpen('season')}>Season</Chip>
         </div>
 
         {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 9, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 14 }}>
-          <div style={{ display: 'flex', gap: 9, alignItems: 'center', flexWrap: 'wrap' }}>
-            {wrapOpen === 'season' ? (
-              <button className="btn-primary" disabled={wrapBusy} onClick={() => { setWrapOpen(null); go('sequel'); }}>
-                Open the season review
-              </button>
-            ) : (
-              <button className="btn-primary" disabled={wrapBusy} onClick={() => void endEpisode()}>
-                {wrapBusy ? 'Filing continuity…' : `End episode · start ${episode.number + 1}`}
-              </button>
-            )}
+        {wrapOpen === 'season' ? (
+          <div style={{
+            fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.7)',
+            border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, padding: '12px 14px',
+            background: 'rgba(255,255,255,0.04)'
+          }}>
+            The season review reads every episode back, proposes beats, and asks what to Drop / Soften / Keep / Raise. It runs on your utility model.
           </div>
-        </div>
+        ) : wrapPhase === 'analyzing' ? (
+          <div style={{ padding: '20px 0' }}>
+            <Spinner label="extracting recap, beats, and continuity" />
+          </div>
+        ) : wrapPhase === 'review' && wrapDraft ? (
+          <WrapReviewBody draft={wrapDraft} onChange={setWrapDraft} guests={guests} />
+        ) : (
+          <>
+            <div style={{
+              fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.7)',
+              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, padding: '12px 14px',
+              background: 'rgba(255,255,255,0.04)'
+            }}>
+              Analyze builds a previously-on paragraph for the next episode and a Keep/Drop list of beats, facts, threads
+              {guests.length > 0 ? ', and walk-on effects' : ''}. Episode prose stays saved; only the active episode stays in the writing loop.
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+              <Mono style={{ fontSize: 9 }}>already held in continuity</Mono>
+              {continuity.slice(-6).map((f) => (
+                <div key={f.id} className="glass" style={{ borderRadius: 13, padding: '12px 14px', fontSize: 13, lineHeight: 1.5, color: 'rgba(236,234,230,0.8)' }}>
+                  {f.text}
+                </div>
+              ))}
+              {continuity.length === 0 && (
+                <div style={{ fontSize: 12.5, opacity: 0.5, color: '#eceae6' }}>
+                  Nothing filed yet — ending an episode with a summary fills this.
+                </div>
+              )}
+            </div>
+          </>
+        )}
       </Sheet>
 
       {/* director overlay — cast, places, continuity, threads (all widths) */}
@@ -1171,11 +1377,13 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, st
 // ---------- director sub-panels ----------
 
 function SceneCastPanel({ episode, characters, accent }: { episode: Episode; characters: Character[]; accent: string }) {
+  const guests = episode.guests ?? [];
+  const activeGuestIds = episode.activeGuestIds;
   const toggle = async (id: string) => {
     const castIds = episode.castIds.includes(id)
       ? episode.castIds.filter((x) => x !== id)
       : [...episode.castIds, id];
-    await db.episodes.update(episode.id, { castIds });
+    await db.episodes.update(episode.id, { castIds, updatedAt: Date.now() });
   };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
@@ -1204,6 +1412,36 @@ function SceneCastPanel({ episode, characters, accent }: { episode: Episode; cha
           </div>
         );
       })}
+      {guests.length > 0 && (
+        <>
+          <Mono style={{ fontSize: 9, marginTop: 8 }}>walk-ons · this episode only</Mono>
+          {guests.map((g) => {
+            const active = !activeGuestIds || activeGuestIds.length === 0 || activeGuestIds.includes(g.id);
+            return (
+              <div key={g.id} style={{
+                display: 'flex', gap: 10, alignItems: 'center', padding: 8, borderRadius: 12,
+                background: active ? 'rgba(255,255,255,0.04)' : 'transparent',
+                border: '1px solid rgba(255,255,255,0.06)',
+                opacity: active ? 1 : 0.4
+              }}>
+                <div style={portraitPlate(guestHue(g.id), 30, null, 'rgba(255,255,255,0.14)')} />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: '#f0eee9' }}>{g.name}</div>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {g.brief || 'walk-on'}
+                  </div>
+                </div>
+                <div style={{
+                  fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.08em',
+                  textTransform: 'uppercase', opacity: 0.45, flexShrink: 0
+                }}>
+                  guest
+                </div>
+              </div>
+            );
+          })}
+        </>
+      )}
     </div>
   );
 }
@@ -1449,6 +1687,154 @@ function DirectorContent(props: {
       <ContinuityPanel continuity={props.continuity} world={props.world} season={props.season} />
       <ThreadsPanel threads={props.threads} />
       <NudgesPanel threads={props.threads} inScene={inScene} onNudge={props.onNudge} />
+    </div>
+  );
+}
+
+function KeepDropChips({
+  keep, onKeep, onDrop
+}: {
+  keep: boolean;
+  onKeep: () => void;
+  onDrop: () => void;
+}) {
+  const btn = (active: boolean, label: string, onClick: () => void) => (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        flex: 1,
+        minHeight: 44,
+        border: `1px solid ${active ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.11)'}`,
+        background: active ? 'rgba(224,165,95,0.85)' : 'rgba(255,255,255,0.05)',
+        color: active ? '#181307' : 'rgba(236,234,230,0.62)',
+        borderRadius: 10,
+        fontSize: 13,
+        fontWeight: active ? 600 : 500,
+        cursor: 'pointer',
+        fontFamily: "'IBM Plex Mono', monospace",
+        letterSpacing: '0.06em',
+        textTransform: 'uppercase'
+      }}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div style={{ display: 'flex', gap: 8, width: '100%' }}>
+      {btn(keep, 'Keep', onKeep)}
+      {btn(!keep, 'Drop', onDrop)}
+    </div>
+  );
+}
+
+function WrapReviewBody({
+  draft, onChange, guests
+}: {
+  draft: WrapReviewDraft;
+  onChange: (d: WrapReviewDraft) => void;
+  guests: EpisodeGuest[];
+}) {
+  const patchBeat = (i: number, p: Partial<WrapReviewDraft['beats'][number]>) => {
+    onChange({ ...draft, beats: draft.beats.map((b, j) => (j === i ? { ...b, ...p } : b)) });
+  };
+  const patchLine = (
+    key: 'facts' | 'threads' | 'guestEffects',
+    i: number,
+    p: Partial<{ text: string; keep: boolean }>
+  ) => {
+    onChange({
+      ...draft,
+      [key]: draft[key].map((row, j) => (j === i ? { ...row, ...p } : row))
+    });
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <Mono style={{ fontSize: 9 }}>previously-on · next episode</Mono>
+        <textarea
+          className="serif"
+          rows={5}
+          value={draft.recap}
+          onChange={(e) => onChange({ ...draft, recap: e.target.value })}
+          style={{
+            fontFamily: 'Spectral, serif', fontSize: 15.5, lineHeight: 1.65, color: '#f0eee9',
+            width: '100%', background: 'rgba(255,255,255,0.04)'
+          }}
+        />
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <Mono style={{ fontSize: 9 }}>beats</Mono>
+        {draft.beats.length === 0 && (
+          <div style={{ fontSize: 12.5, opacity: 0.5 }}>No standout beats proposed — you can still confirm.</div>
+        )}
+        {draft.beats.map((b, i) => (
+          <div key={i} style={{
+            display: 'flex', flexDirection: 'column', gap: 10,
+            border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '14px 14px',
+            background: 'rgba(255,255,255,0.04)',
+            opacity: b.keep ? 1 : 0.42
+          }}>
+            <textarea
+              className="serif"
+              rows={2}
+              value={b.text}
+              onChange={(e) => patchBeat(i, { text: e.target.value })}
+              style={{ fontFamily: 'Spectral, serif', fontSize: 16, lineHeight: 1.45, background: 'transparent', border: 0, padding: 0, color: '#f0eee9' }}
+            />
+            <textarea
+              rows={2}
+              value={b.consequence}
+              onChange={(e) => patchBeat(i, { consequence: e.target.value })}
+              placeholder="what it leaves for later…"
+              style={{ fontSize: 12.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.55)', background: 'transparent', border: 0, padding: 0 }}
+            />
+            <KeepDropChips
+              keep={b.keep}
+              onKeep={() => patchBeat(i, { keep: true })}
+              onDrop={() => patchBeat(i, { keep: false })}
+            />
+          </div>
+        ))}
+      </div>
+
+      {([
+        ['facts', 'continuity facts'] as const,
+        ['threads', 'open threads'] as const,
+        ['guestEffects', guests.length > 0 ? 'walk-on effects' : 'walk-on effects'] as const
+      ]).map(([key, label]) => {
+        if (key === 'guestEffects' && draft.guestEffects.length === 0 && guests.length === 0) return null;
+        return (
+          <div key={key} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <Mono style={{ fontSize: 9 }}>{label}</Mono>
+            {draft[key].length === 0 && (
+              <div style={{ fontSize: 12.5, opacity: 0.5 }}>None proposed.</div>
+            )}
+            {draft[key].map((row, i) => (
+              <div key={i} style={{
+                display: 'flex', flexDirection: 'column', gap: 10,
+                border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '12px 14px',
+                background: 'rgba(255,255,255,0.04)',
+                opacity: row.keep ? 1 : 0.42
+              }}>
+                <textarea
+                  rows={2}
+                  value={row.text}
+                  onChange={(e) => patchLine(key, i, { text: e.target.value })}
+                  style={{ fontSize: 13.5, lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, color: '#eceae6' }}
+                />
+                <KeepDropChips
+                  keep={row.keep}
+                  onKeep={() => patchLine(key, i, { keep: true })}
+                  onDrop={() => patchLine(key, i, { keep: false })}
+                />
+              </div>
+            ))}
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -1,8 +1,9 @@
 import type {
-  Character, ComposeMode, ContinuityFact, Episode, Location, OpenThread, Season, Turn, TurnLength, World
+  Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, Location, OpenThread, Season, Turn, TurnLength, World
 } from '../types';
 import { worldCalendar } from '../worldOps';
 import type { ChatMessage } from './client';
+import { SPEAK_FORMAT_RULES } from './dialogueFormat';
 
 const LENGTH_SPEC: Record<TurnLength, { instruction: string; maxTokens: number }> = {
   beat: {
@@ -117,6 +118,30 @@ export interface PromptContext {
   continuity: ContinuityFact[];
   threads: OpenThread[];
   turns: Turn[];
+  /** Immediately prior episode in this season (for wrap.recap), if any */
+  priorEpisode?: Episode | null;
+}
+
+/** Guests currently in the scene (activeGuestIds omitted ⇒ all guests). */
+export function activeGuests(episode: Episode): EpisodeGuest[] {
+  const all = episode.guests ?? [];
+  if (!episode.activeGuestIds) return all;
+  const active = new Set(episode.activeGuestIds);
+  return all.filter((g) => active.has(g.id));
+}
+
+export function resolveSpeakerName(
+  turn: Turn,
+  characters: Character[],
+  guests: EpisodeGuest[] = []
+): string {
+  if (turn.guestId) {
+    return guests.find((g) => g.id === turn.guestId)?.name ?? 'Someone';
+  }
+  if (turn.characterId) {
+    return characters.find((c) => c.id === turn.characterId)?.name ?? 'Someone';
+  }
+  return 'Someone';
 }
 
 function proseDensityLine(ai: World['ai']): string {
@@ -156,6 +181,17 @@ function worldFrameSections(ctx: PromptContext): string[] {
     `## This season\nSeason ${season.number}${season.title ? ` — ${season.title}` : ''}. Premise: ${season.premise || 'unwritten; discover it in play.'}${season.timeGap ? ` It opens ${season.timeGap.toLowerCase()} after the previous season.` : ''}`
   );
 
+  const priorRecap = ctx.priorEpisode?.wrap?.recap?.trim();
+  if (priorRecap && ctx.priorEpisode && ctx.priorEpisode.number < episode.number) {
+    const priorBeats = (ctx.priorEpisode.wrap?.beats ?? [])
+      .map((b) => `- ${b.text}${b.consequence ? ` → ${b.consequence}` : ''}`)
+      .join('\n');
+    sections.push(
+      `## Previously this season (episode ${ctx.priorEpisode.number})\n${priorRecap}` +
+      (priorBeats ? `\n\nCarried episode beats:\n${priorBeats}` : '')
+    );
+  }
+
   const cal = worldCalendar(world);
   sections.push(
     `## Calendar\n${cal.system ? `${cal.system}\n` : ''}Today is day ${cal.currentDay} of the story.`
@@ -164,6 +200,14 @@ function worldFrameSections(ctx: PromptContext): string[] {
   sections.push(
     `## Current episode\nEpisode ${episode.number}${episode.title ? ` — ${episode.title}` : ''}.${episode.location ? ` Location: ${episode.location}.` : ''}`
   );
+
+  const guests = activeGuests(episode);
+  if (guests.length > 0) {
+    sections.push(
+      `## Walk-ons in this episode (not Cast cards — temporary)\n` +
+      guests.map((g) => `- ${g.name}: ${g.brief}${g.voice ? ` Voice: ${g.voice}` : ''}`).join('\n')
+    );
+  }
 
   let currentLocations: Location[] = [];
   if (locations.length > 0) {
@@ -278,12 +322,13 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
   const { world, characters } = ctx;
   const ai = world.ai;
   const others = characters.filter((c) => c.id !== character.id);
+  const guests = activeGuests(ctx.episode);
   const sections: string[] = [];
 
   sections.push(
     `You ARE ${character.name} in the story "${world.title}". You speak and act only as yourself. ` +
     `You are not the narrator. You do not write other characters' dialogue or the player's lines. ` +
-    `Reply in your own voice — what you say aloud, and at most a brief physical beat of your own body.`
+    `Reply in your own voice — looks/mannerisms plus what you say aloud.`
   );
 
   sections.push(`## The world\n${world.bible || world.line}`);
@@ -300,6 +345,12 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
       others.map((c) => briefSheet(c)).join('\n')
     );
   }
+  if (guests.length > 0) {
+    sections.push(
+      `## Walk-ons present\n` +
+      guests.map((g) => `- ${g.name}: ${g.brief}`).join('\n')
+    );
+  }
 
   if (ctx.continuity.length > 0) {
     sections.push(
@@ -311,14 +362,14 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
   sections.push(
     `## How you respond\n` +
     `- Speak as ${character.name}. Prefer one or two spoken lines in your natural voice.\n` +
-    `- Output ONLY your dialogue (and optionally one short physical beat of your own). No narration of the room, weather, or other people.\n` +
-    `- Do NOT prefix with your name. Do NOT write other speakers.\n` +
+    `- No narration of the room, weather, or other people — only your body and your words.\n` +
     `- Honour behaviour anchors and MUST NOT KNOW. Never soften yourself to please the player.\n` +
     (character.speechStyle ? `- Voice guide: ${character.speechStyle}\n` : '') +
     (character.exampleLines.length > 0
-      ? `- Example rhythm (never reuse verbatim):\n${character.exampleLines.map((l) => `  "${l}"`).join('\n')}\n`
+      ? `- Example spoken rhythm (wording only — still emit *actions* and "quotes" as required):\n${character.exampleLines.map((l) => `  ${l}`).join('\n')}\n`
       : '') +
-    `- Stay in ${ai.tense} tense for any physical beat; spoken words are in your voice as said aloud.`
+    `- Stay in ${ai.tense} tense for any physical beat.\n\n` +
+    SPEAK_FORMAT_RULES
   );
 
   sections.push(contentSection(ai));
@@ -327,6 +378,39 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
     sections.push(`## Author's world instructions\n${ai.customInstructions}`);
   }
 
+  return sections.join('\n\n');
+}
+
+/** Guest walk-on agent — short sheet, same speak format. */
+export function buildGuestSystemPrompt(ctx: PromptContext, guest: EpisodeGuest): string {
+  const { world, characters } = ctx;
+  const ai = world.ai;
+  const inScene = characters.filter((c) => ctx.episode.castIds.includes(c.id));
+  const sections: string[] = [];
+
+  sections.push(
+    `You ARE ${guest.name}, a temporary walk-on in "${world.title}" (not a permanent cast member). ` +
+    `You speak and act only as yourself for this scene.`
+  );
+  sections.push(`## The world\n${world.bible || world.line}`);
+  sections.push(`## Who you are this scene\n${guest.brief}${guest.voice ? `\nVoice: ${guest.voice}` : ''}`);
+  if (inScene.length > 0) {
+    sections.push(`## Others present\n${inScene.map((c) => briefSheet(c)).join('\n')}`);
+  }
+  if (ctx.continuity.length > 0) {
+    sections.push(
+      `## Continuity you may know if plausible\n` +
+      ctx.continuity.map((f) => `- ${f.text}`).join('\n')
+    );
+  }
+  sections.push(
+    `## How you respond\n` +
+    `- Prefer one or two spoken lines. Optional short physical beat of your own body.\n` +
+    `- Do not steal the scene from the main cast; add pressure or texture.\n` +
+    `- Stay in ${ai.tense} tense for physical beats.\n\n` +
+    SPEAK_FORMAT_RULES
+  );
+  sections.push(contentSection(ai));
   return sections.join('\n\n');
 }
 
@@ -360,7 +444,11 @@ export function episodeContextPressure(chars: number): 'ok' | 'warn' | 'escalate
   return 'ok';
 }
 
-function turnToChatContent(t: Turn, characters: Character[]): { role: 'user' | 'assistant'; content: string } {
+function turnToChatContent(
+  t: Turn,
+  characters: Character[],
+  guests: EpisodeGuest[] = []
+): { role: 'user' | 'assistant'; content: string } {
   if (t.role === 'user') {
     return {
       role: 'user',
@@ -368,9 +456,9 @@ function turnToChatContent(t: Turn, characters: Character[]): { role: 'user' | '
     };
   }
   if (t.role === 'character') {
-    const name = characters.find((c) => c.id === t.characterId)?.name ?? 'Someone';
-    const line = t.text.replace(/^["“]|["”]$/g, '').trim();
-    return { role: 'assistant', content: `${name}: "${line}"` };
+    const name = resolveSpeakerName(t, characters, guests);
+    // Keep canonical *action* "speech" markers in history so models continue the format.
+    return { role: 'assistant', content: `${name}: ${t.text}` };
   }
   return { role: 'assistant', content: t.text };
 }
@@ -406,10 +494,11 @@ export function buildMessages(
   mode: ComposeMode,
   input: string,
   length: TurnLength,
-  characters: Character[] = []
+  characters: Character[] = [],
+  guests: EpisodeGuest[] = []
 ): ChatMessage[] {
   const kept = packTurns(turns);
-  const messages: ChatMessage[] = kept.map((t) => turnToChatContent(t, characters));
+  const messages: ChatMessage[] = kept.map((t) => turnToChatContent(t, characters, guests));
 
   const userContent = `${MODE_PREFIX[mode](input)}\n\n(${LENGTH_SPEC[length].instruction})`;
   return mergeMessages([...messages, { role: 'user', content: userContent }]);
@@ -420,10 +509,11 @@ export function buildNarrationBeatMessages(
   turns: Turn[],
   characters: Character[],
   brief: string,
-  length: TurnLength
+  length: TurnLength,
+  guests: EpisodeGuest[] = []
 ): ChatMessage[] {
   const kept = packTurns(turns);
-  const messages: ChatMessage[] = kept.map((t) => turnToChatContent(t, characters));
+  const messages: ChatMessage[] = kept.map((t) => turnToChatContent(t, characters, guests));
   const sizeHint =
     length === 'beat' ? 'Keep this narration slice short (about 40–100 words).'
     : length === 'scene' ? 'This narration slice: about 80–180 words.'
@@ -439,32 +529,63 @@ export function buildCharacterSpeakMessages(
   turns: Turn[],
   characters: Character[],
   speaking: Character,
-  brief: string
+  brief: string,
+  guests: EpisodeGuest[] = []
 ): ChatMessage[] {
   const kept = packTurns(turns);
-  const messages: ChatMessage[] = kept.map((t) => turnToChatContent(t, characters));
+  const messages: ChatMessage[] = kept.map((t) => turnToChatContent(t, characters, guests));
   const userContent =
     `(You are ${speaking.name}. Respond now in character.)\n` +
     `Intent for this line: ${brief}\n\n` +
-    `Speak as yourself — one or two lines of dialogue. Optional: one short physical beat of your own. No other speakers.`;
+    `Use the required *action* "dialogue" format. No other speakers.\n` +
+    SPEAK_FORMAT_RULES;
+  return mergeMessages([...messages, { role: 'user', content: userContent }]);
+}
+
+/** History + a guest-speak instruction. */
+export function buildGuestSpeakMessages(
+  turns: Turn[],
+  characters: Character[],
+  guest: EpisodeGuest,
+  brief: string,
+  guests: EpisodeGuest[] = []
+): ChatMessage[] {
+  const kept = packTurns(turns);
+  const messages: ChatMessage[] = kept.map((t) => turnToChatContent(t, characters, guests));
+  const userContent =
+    `(You are ${guest.name}, a walk-on. Respond now.)\n` +
+    `Intent for this line: ${brief}\n\n` +
+    SPEAK_FORMAT_RULES;
   return mergeMessages([...messages, { role: 'user', content: userContent }]);
 }
 
 export type DirectorBeat =
   | { type: 'narration'; brief: string }
-  | { type: 'speak'; characterId: string; brief: string };
+  | { type: 'speak'; characterId: string; brief: string }
+  | { type: 'speak'; guestId: string; brief: string };
 
 export function directorSystemPrompt(): string {
   return (
     'You are the scene director for an interactive story. ' +
     'Plan cast changes and an ordered list of beats. ' +
     'Respond with JSON only: ' +
-    '{"castDelta":{"enter":["<characterId>",...],"leave":["<characterId>",...]},' +
-    '"beats":[{"type":"narration","brief":"..."}|{"type":"speak","characterId":"<id>","brief":"..."}]}' +
+    '{"castDelta":{' +
+    '"enter":["<characterId>",...],' +
+    '"leave":["<characterIdOrGuestId>",...],' +
+    '"introduce":[{"name":"<walk-on name>","brief":"<one sentence who they are>","voice":"<optional speech note>"}]' +
+    '},' +
+    '"beats":[' +
+    '{"type":"narration","brief":"..."}|' +
+    '{"type":"speak","characterId":"<id>","brief":"..."}|' +
+    '{"type":"speak","guestId":"<id-or-NEW>","brief":"..."}' +
+    ']}' +
     '\n' +
-    'castDelta.enter: NPCs who arrive or join this beat (from the off-scene list). ' +
-    'castDelta.leave: NPCs who exit and should leave the scene. Use empty arrays when unchanged. ' +
-    'After applying enter/leave, speak characterIds must be in the resulting in-scene cast (never the player). ' +
+    'castDelta.enter: saved Cast NPCs who arrive (from the off-scene list). ' +
+    'castDelta.leave: Cast ids or guest ids who exit the scene. ' +
+    'castDelta.introduce: optional walk-ons who are NOT Cast cards — temporary for this episode only. At most 2 per plan. ' +
+    'For a newly introduced guest\'s speak beat, set guestId to the exact name string from introduce (the app will bind ids). ' +
+    'For an existing guest already listed, use their guest id. ' +
+    'After applying enter/leave/introduce, speak characterIds must be in-scene Cast (never the player). ' +
     'Narration briefs describe atmosphere or physical action — never finished dialogue. ' +
     'Speak briefs are intent only (tone/goal), never the finished line. ' +
     'Not everyone must speak. Typical: 1–2 narration beats and at most 3 speak beats. ' +
@@ -481,18 +602,23 @@ export function directorUserPrompt(
 ): string {
   const inScene = ctx.characters.filter((c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer);
   const offScene = ctx.characters.filter((c) => !ctx.episode.castIds.includes(c.id) && !c.isPlayer);
+  const guests = activeGuests(ctx.episode);
   const castList = inScene.length > 0
     ? inScene.map((c) => `- ${c.id} · ${c.name}${c.role ? ` (${c.role})` : ''}`).join('\n')
     : '(no NPCs in scene yet)';
   const offList = offScene.length > 0
     ? offScene.map((c) => `- ${c.id} · ${c.name}${c.role ? ` (${c.role})` : ''}`).join('\n')
     : '(none)';
+  const guestList = guests.length > 0
+    ? guests.map((g) => `- ${g.id} · ${g.name}: ${g.brief}`).join('\n')
+    : '(none yet — you may introduce walk-ons via castDelta.introduce)';
 
   const recent = packTurns(ctx.turns).slice(-8);
+  const allGuests = ctx.episode.guests ?? [];
   const transcript = recent.map((t) => {
     if (t.role === 'user') return `[player ${t.mode ?? 'turn'}]: ${t.text}`;
     if (t.role === 'character') {
-      const name = ctx.characters.find((c) => c.id === t.characterId)?.name ?? 'NPC';
+      const name = resolveSpeakerName(t, ctx.characters, allGuests);
       return `[${name}]: ${t.text}`;
     }
     return `[narrator]: ${t.text}`;
@@ -503,6 +629,7 @@ export function directorUserPrompt(
     `Episode ${ctx.episode.number}${ctx.episode.location ? ` @ ${ctx.episode.location}` : ''}\n\n` +
     `In-scene cast:\n${castList}\n\n` +
     `Off-scene cast (may enter via castDelta.enter):\n${offList}\n\n` +
+    `Active walk-ons (guest ids):\n${guestList}\n\n` +
     `Latest player move: ${MODE_PREFIX[mode](input)}\n\n` +
     `Recent transcript:\n${transcript || '(episode just opened)'}\n\n` +
     `Plan castDelta and beats as JSON.`
