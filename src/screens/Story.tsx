@@ -1,6 +1,6 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { deleteTurnsAfter, deleteTurnsFrom, extractContinuity, proseModelFor, writeTurn } from '../ai/engine';
+import { deleteTurnsAfter, deleteTurnsFrom, extractContinuity, proseModelFor, writeTurn, type StreamMeta } from '../ai/engine';
 import { generateSceneImage } from '../ai/image';
 import {
   episodeContextPressure, episodeHistoryChars, HISTORY_CHAR_BUDGET
@@ -38,6 +38,17 @@ function parseTurn(turn: Turn, characters: Character[]): ProseBlock[] {
     }
     return [{ text: turn.text, kind: 'direction' }];
   }
+  if (turn.role === 'character') {
+    const who = characters.find((c) => c.id === turn.characterId);
+    const line = turn.text.replace(/^["“]|["”]$/g, '').trim();
+    return [{
+      text: `"${line}"`,
+      speaker: who?.name ?? 'someone',
+      hue: who?.hue ?? 200,
+      kind: 'dialogue'
+    }];
+  }
+  // Legacy narrator turns may still embed Name: "…" dialogue.
   return turn.text
     .split(/\n{2,}|\n(?=[A-Z][^:\n]{0,48}:\s*["“])/)
     .map((p) => p.trim())
@@ -144,6 +155,7 @@ export function Story() {
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [partial, setPartial] = useState('');
+  const [partialMeta, setPartialMeta] = useState<StreamMeta>({ role: 'narrator' });
   const [error, setError] = useState('');
   const [wrapOpen, setWrapOpen] = useState<null | 'episode' | 'season'>(null);
   const [wrapBusy, setWrapBusy] = useState(false);
@@ -214,12 +226,17 @@ export function Story() {
     setError('');
     setStreaming(true);
     setPartial('');
+    setPartialMeta({ role: 'narrator' });
     const controller = new AbortController();
     abortRef.current = controller;
     try {
       await writeTurn({
         world, season, episode, mode, input: text, length,
-        signal: controller.signal, onDelta: setPartial
+        signal: controller.signal,
+        onDelta: (p, meta) => {
+          setPartialMeta(meta);
+          setPartial(p);
+        }
       });
       setPartial('');
       return 'ok';
@@ -248,16 +265,16 @@ export function Story() {
   };
 
   /**
-   * Retry from a turn. For a narrator turn: that response and everything after
-   * are rewritten. For a player turn: the turn is kept (edits included) and
-   * everything after is rewritten from it.
+   * Retry from a turn. For narrator/character turns: that response and everything
+   * after are rewritten. For a player turn: the turn is kept and everything after
+   * is rewritten from it.
    */
   const retryFrom = async (turn: Turn) => {
     if (!episode || streaming) return;
     const idx = turns.findIndex((t) => t.id === turn.id);
     if (idx < 0) return;
     const below = turns.length - idx - 1;
-    if (turn.role === 'narrator') {
+    if (turn.role === 'narrator' || turn.role === 'character') {
       if (below > 0 && !confirm(`Rewrite this response? The ${below} turn${below > 1 ? 's' : ''} after it will be replaced.`)) return;
       await deleteTurnsFrom(turn.id, episode.id);
     } else {
@@ -390,7 +407,11 @@ export function Story() {
       {readMode ? (
         <div style={{
           position: 'relative', zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          gap: 12, padding: narrow ? '10px 14px' : '11px 22px',
+          gap: 12,
+          paddingTop: narrow ? 'calc(10px + env(safe-area-inset-top))' : 11,
+          paddingBottom: narrow ? 10 : 11,
+          paddingLeft: narrow ? 14 : 22,
+          paddingRight: narrow ? 14 : 22,
           borderBottom: '1px solid rgba(255,255,255,0.06)',
           background: 'rgba(8,9,12,0.28)', backdropFilter: 'blur(18px) saturate(140%)'
         }}>
@@ -416,7 +437,12 @@ export function Story() {
       ) : (
         <div style={{
           position: 'relative', zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          gap: 14, padding: narrow ? '11px 14px' : '13px 24px', borderBottom: '1px solid rgba(255,255,255,0.08)',
+          gap: 14,
+          paddingTop: narrow ? 'calc(11px + env(safe-area-inset-top))' : 13,
+          paddingBottom: narrow ? 11 : 13,
+          paddingLeft: narrow ? 14 : 24,
+          paddingRight: narrow ? 14 : 24,
+          borderBottom: '1px solid rgba(255,255,255,0.08)',
           flexWrap: 'wrap', background: 'rgba(8,9,12,0.35)', backdropFilter: 'blur(22px) saturate(140%)'
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 13, minWidth: 0 }}>
@@ -502,7 +528,7 @@ export function Story() {
                 <p className="serif" style={{ fontSize: 17 }}>
                   {season.premise
                     ? <>The premise is set: <em>{season.premise}</em></>
-                    : 'A blank page. Steer, speak, act — or just press Write on and see where the narrator opens.'}
+                    : 'A blank page. Steer, speak, act — or just press Write and see where the story opens.'}
                 </p>
               </div>
             )}
@@ -512,6 +538,7 @@ export function Story() {
                 key={turn.id}
                 turn={turn}
                 blocks={bs}
+                characters={characters}
                 accent={M.accent}
                 prose={M.prose}
                 fontPx={fontPx}
@@ -524,13 +551,31 @@ export function Story() {
             ))}
 
             {streaming && partial && (
-              parseTurn({ id: 'partial', episodeId: episode.id, worldId: world.id, role: 'narrator', mode: null, text: partial, createdAt: 0 }, characters)
+              parseTurn({
+                id: 'partial',
+                episodeId: episode.id,
+                worldId: world.id,
+                role: partialMeta.role,
+                mode: null,
+                characterId: partialMeta.characterId,
+                text: partial,
+                createdAt: 0
+              }, characters)
                 .map((b, i) => <ProseBlockView key={`p${i}`} b={b} accent={M.accent} prose={M.prose} fontPx={fontPx} avatarPx={avatarPx} />)
             )}
 
             {streaming && (
               <div style={{ marginTop: 22 }}>
-                <Spinner accent={M.accent} label={partial ? 'writing…' : 'thinking…'} />
+                <Spinner
+                  accent={M.accent}
+                  label={
+                    !partial
+                      ? 'planning…'
+                      : partialMeta.role === 'character'
+                        ? `${characters.find((c) => c.id === partialMeta.characterId)?.name ?? 'someone'} speaking…`
+                        : 'writing…'
+                  }
+                />
               </div>
             )}
 
@@ -939,9 +984,10 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
 
 // ---------- turn row with edit / retry / delete-below ----------
 
-function TurnRow({ turn, blocks, accent, prose, fontPx, avatarPx, streaming, hasBelow, onRetry, onDeleteBelow }: {
+function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, streaming, hasBelow, onRetry, onDeleteBelow }: {
   turn: Turn;
   blocks: ProseBlock[];
+  characters: Character[];
   accent: string;
   prose: string;
   fontPx: number;
@@ -953,6 +999,14 @@ function TurnRow({ turn, blocks, accent, prose, fontPx, avatarPx, streaming, has
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
+  const characterName = turn.role === 'character'
+    ? (characters.find((c) => c.id === turn.characterId)?.name ?? 'character')
+    : null;
+  const editLabel =
+    turn.role === 'narrator' ? 'the narrator'
+    : turn.role === 'character' ? characterName!
+    : `your ${turn.mode ?? 'turn'}`;
+  const retryLabel = turn.role === 'user' ? 'retry from here' : 'retry';
 
   const save = async () => {
     const text = draft.trim();
@@ -964,7 +1018,7 @@ function TurnRow({ turn, blocks, accent, prose, fontPx, avatarPx, streaming, has
     return (
       <div style={{ marginBottom: 22, display: 'flex', flexDirection: 'column', gap: 9 }}>
         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.5 }}>
-          editing {turn.role === 'narrator' ? 'the narrator' : `your ${turn.mode ?? 'turn'}`} — saved into story memory
+          editing {editLabel} — saved into story memory
         </div>
         <textarea
           autoFocus
@@ -993,7 +1047,7 @@ function TurnRow({ turn, blocks, accent, prose, fontPx, avatarPx, streaming, has
         <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} disabled={streaming}
           onClick={() => { setDraft(turn.text); setEditing(true); }}>✎ edit</button>
         <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} disabled={streaming}
-          onClick={onRetry}>↻ {turn.role === 'narrator' ? 'retry' : 'retry from here'}</button>
+          onClick={onRetry}>↻ {retryLabel}</button>
         {hasBelow && (
           <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} disabled={streaming}
             onClick={onDeleteBelow}>⌫ delete below</button>

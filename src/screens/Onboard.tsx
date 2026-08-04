@@ -1,6 +1,9 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useRef, useState } from 'react';
-import { fleshOutCharacter, fleshOutLocation, fleshOutNarratorRules, fleshOutPremise, fleshOutWorldLore } from '../ai/engine';
+import {
+  fleshOutCharacter, fleshOutLocation, fleshOutNarratorRules, fleshOutPremise,
+  fleshOutWorldEverything, fleshOutWorldLore
+} from '../ai/engine';
 import { db } from '../db';
 import { useApp } from '../store/app';
 import { useSettings } from '../store/settings';
@@ -16,6 +19,13 @@ const SHAPES = [
   { label: 'A single character I want to know', line: 'One person, deeply modelled, many conversations.' },
   { label: 'I want to see what happens', line: 'Start blank. Decide later.' }
 ];
+
+/** Cast/place counts for bulk flesh-out, tuned by story shape. */
+function rosterTargets(shapeIndex: number): { characters: number; locations: number } {
+  if (shapeIndex === 1) return { characters: 5, locations: 4 }; // wander
+  if (shapeIndex === 2) return { characters: 3, locations: 2 }; // intimate
+  return { characters: 4, locations: 3 };
+}
 
 const SEED_KINDS = [
   { label: 'A place', line: 'Somewhere with its own weather and its own rules.' },
@@ -274,6 +284,61 @@ export function Onboard() {
     openWorld(worldId);
   };
 
+  /**
+   * Bulk flesh-out after the world exists. Never opens Story — jumps to cast
+   * so the user can review generated people (places are on the next step).
+   */
+  const runFleshEverything = async () => {
+    if (!worldId || !seasonId || !episode || !hasAI) return;
+    setError('');
+    setBusy('Fleshing lore…');
+    try {
+      const world = await db.worlds.get(worldId);
+      const season = await db.seasons.get(seasonId);
+      if (!world || !season) throw new Error('World not found — finish giving it one true thing first.');
+      const targets = rosterTargets(shape);
+      await fleshOutWorldEverything(world, season, episode, {
+        shape: `${SHAPES[shape].label} — ${SHAPES[shape].line}`,
+        targetCharacters: targets.characters,
+        targetLocations: targets.locations,
+        onProgress: setBusy
+      });
+      const refreshed = await db.worlds.get(worldId);
+      if (refreshed) {
+        setTitle(refreshed.title);
+        setSeed(refreshed.bible);
+        setAi(refreshed.ai);
+      }
+      const refreshedSeason = await db.seasons.get(seasonId);
+      if (refreshedSeason) setPremise(refreshedSeason.premise);
+      setCastKind(0);
+      setPlaceKind(0);
+      setStep(3); // cast step — review before Finish
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const fleshEverythingPanel = worldId && hasAI ? (
+    <div className="glass" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>Flesh out everything</div>
+      <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
+        Fills bible, premise, and narrator rules, then invents opening cast and locations.
+        You stay here to review and edit — Story opens only when you finish.
+      </div>
+      <button
+        className="btn-primary"
+        style={{ padding: '9px 16px', fontSize: 12.5, alignSelf: 'flex-start' }}
+        disabled={!!busy}
+        onClick={() => void runFleshEverything()}
+      >
+        {busy || '✦ Flesh out everything'}
+      </button>
+    </div>
+  ) : null;
+
   const steps = [
     {
       title: 'Start from nothing.',
@@ -407,6 +472,7 @@ export function Onboard() {
               placeholder="Themes to circle, imagery to reuse, what the story is really about…"
             />
           </Field>
+          {fleshEverythingPanel}
         </div>
       )
     },
@@ -418,6 +484,7 @@ export function Onboard() {
       cta: 'Next — the first place',
       content: (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {fleshEverythingPanel}
           <OptionList options={CAST_KINDS} value={castKind} onChange={setCastKind} />
           {castKind === 0 && (
             <>
@@ -468,6 +535,7 @@ export function Onboard() {
       cta: busy ? busy : 'Enter the world',
       content: (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {fleshEverythingPanel}
           <OptionList options={PLACE_KINDS} value={placeKind} onChange={setPlaceKind} />
           {placeKind === 0 && (
             <>

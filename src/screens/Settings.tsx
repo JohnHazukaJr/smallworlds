@@ -22,7 +22,11 @@ export function Settings() {
   const [addOpen, setAddOpen] = useState(false);
 
   return (
-    <div className="fade-in" style={{ padding: narrow ? '26px 18px 70px' : '42px 46px 70px', maxWidth: 960 }}>
+    <div className="fade-in" style={{
+      padding: narrow ? '26px 18px 70px' : '42px 46px 70px',
+      paddingTop: narrow ? 'calc(26px + env(safe-area-inset-top))' : 42,
+      maxWidth: 960
+    }}>
       <div style={{ marginBottom: 30, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
         <div>
           <Mono style={{ letterSpacing: '0.16em', marginBottom: 10 }}>preferences</Mono>

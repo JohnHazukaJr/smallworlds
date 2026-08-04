@@ -95,7 +95,11 @@ export function Library() {
   };
 
   return (
-    <div className="fade-in" style={{ padding: narrow ? '26px 18px 60px' : '42px 46px 70px', maxWidth: 1260 }}>
+    <div className="fade-in" style={{
+      padding: narrow ? '26px 18px 60px' : '42px 46px 70px',
+      paddingTop: narrow ? 'calc(26px + env(safe-area-inset-top))' : 42,
+      maxWidth: 1260
+    }}>
       <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 24, flexWrap: 'wrap', marginBottom: 30 }}>
         <div>
           <Mono style={{ letterSpacing: '0.16em', marginBottom: 10 }}>nothing here you didn't make</Mono>

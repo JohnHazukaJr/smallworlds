@@ -97,7 +97,7 @@ export interface Episode {
   createdAt: number;
 }
 
-export type TurnRole = 'user' | 'narrator';
+export type TurnRole = 'user' | 'narrator' | 'character';
 export type ComposeMode = 'continue' | 'steer' | 'speak' | 'act';
 export type TurnLength = 'beat' | 'scene' | 'episode';
 
@@ -108,6 +108,8 @@ export interface Turn {
   role: TurnRole;
   /** for user turns: which mode produced it */
   mode: ComposeMode | null;
+  /** set when role === 'character' — which NPC spoke this turn */
+  characterId?: string;
   text: string;
   createdAt: number;
 }

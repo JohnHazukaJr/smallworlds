@@ -19,8 +19,26 @@ const LENGTH_SPEC: Record<TurnLength, { instruction: string; maxTokens: number }
   }
 };
 
+/** Shorter budgets when a narrator beat is one slice of a multi-agent turn. */
+const NARRATION_BEAT_TOKENS: Record<TurnLength, number> = {
+  beat: 400,
+  scene: 700,
+  episode: 1100
+};
+
+/** Character speak turns stay short — a line or two, not a monologue. */
+const CHARACTER_SPEAK_TOKENS = 280;
+
 export function maxTokensFor(length: TurnLength): number {
   return LENGTH_SPEC[length].maxTokens;
+}
+
+export function narrationBeatTokens(length: TurnLength): number {
+  return NARRATION_BEAT_TOKENS[length];
+}
+
+export function characterSpeakTokens(): number {
+  return CHARACTER_SPEAK_TOKENS;
 }
 
 function characterSheet(c: Character, all: Character[]): string {
@@ -101,27 +119,24 @@ export interface PromptContext {
   turns: Turn[];
 }
 
-export function buildSystemPrompt(ctx: PromptContext): string {
+function proseDensityLine(ai: World['ai']): string {
+  return ai.proseDensity < 34 ? 'Restrained, concrete prose. Few adverbs, no ornament for its own sake.'
+    : ai.proseDensity < 67 ? 'Balanced literary prose. Texture where it earns its place.'
+    : 'Rich, atmospheric prose. Lean into imagery and interiority.';
+}
+
+function pacingLine(ai: World['ai']): string {
+  return ai.pacing < 34 ? 'Slow-burn pacing: linger in moments, let tension accumulate.'
+    : ai.pacing < 67 ? 'Measured pacing: scenes develop naturally, no rushing to payoffs.'
+    : 'Propulsive pacing: keep events moving, cut the connective tissue.';
+}
+
+function worldFrameSections(ctx: PromptContext): string[] {
   const { world, season, episode, characters, locations, continuity, threads } = ctx;
-  const ai = world.ai;
   const inScene = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
   const player = characters.find((c) => c.isPlayer);
   const offScene = characters.filter((c) => !episode.castIds.includes(c.id) && !c.isPlayer);
-
-  const density =
-    ai.proseDensity < 34 ? 'Restrained, concrete prose. Few adverbs, no ornament for its own sake.'
-    : ai.proseDensity < 67 ? 'Balanced literary prose. Texture where it earns its place.'
-    : 'Rich, atmospheric prose. Lean into imagery and interiority.';
-  const pacing =
-    ai.pacing < 34 ? 'Slow-burn pacing: linger in moments, let tension accumulate.'
-    : ai.pacing < 67 ? 'Measured pacing: scenes develop naturally, no rushing to payoffs.'
-    : 'Propulsive pacing: keep events moving, cut the connective tissue.';
-
   const sections: string[] = [];
-
-  sections.push(
-    `You are the narrator of "${world.title}", a longform interactive story written in collaboration with one player. You write the world and every character except the player. The player writes only themselves.`
-  );
 
   sections.push(`## The world\n${world.bible || world.line}`);
 
@@ -199,10 +214,38 @@ export function buildSystemPrompt(ctx: PromptContext): string {
     sections.push(`## Open threads — unresolved tensions to draw on (do not resolve them all at once)\n${threads.map((t) => `- ${t.text} (${t.openedLabel})`).join('\n')}`);
   }
 
+  return sections;
+}
+
+function contentSection(ai: World['ai']): string {
+  return (
+    `## Content\n${ai.mature
+      ? 'This is a private adult world. Mature themes, violence, and explicit content are permitted where the story calls for them; write them with craft, not gratuitously.'
+      : 'Keep content at a general-audience level. Imply rather than depict.'}${ai.contentNotes ? `\nWorld-specific boundaries: ${ai.contentNotes}` : ''}`
+  );
+}
+
+/**
+ * Narrator writes atmosphere, physical action, and sensory detail only.
+ * NPC dialogue is produced by separate character agents.
+ */
+export function buildNarratorSystemPrompt(ctx: PromptContext): string {
+  const { world } = ctx;
+  const ai = world.ai;
+  const sections: string[] = [];
+
   sections.push(
-    `## Character conduct\n` +
-    `- NPCs are proactive. They pursue their own desires, remember slights, act on their secrets, and can refuse, interrupt, or surprise the player.\n` +
-    `- Never soften a character to be agreeable. Behaviour anchors are absolute: if a draft would break one, write what the character does instead.\n` +
+    `You are the narrator of "${world.title}", a longform interactive story written in collaboration with one player. ` +
+    `You write narration only: setting, atmosphere, physical action, and what can be seen or felt. ` +
+    `You never write spoken dialogue for any character. Named characters speak through their own voices in separate turns.`
+  );
+
+  sections.push(...worldFrameSections(ctx));
+
+  sections.push(
+    `## Character conduct (for what you show, not what they say)\n` +
+    `- NPCs are proactive in body and situation. They pursue desires, remember slights, and can refuse or surprise through action.\n` +
+    `- Never soften a character to be agreeable. Behaviour anchors are absolute.\n` +
     `- Characters only know what they could plausibly know. Honour every MUST NOT KNOW instruction silently.\n` +
     `- Trust moves slowly. Relationships shift in small, earned steps.`
   );
@@ -211,19 +254,15 @@ export function buildSystemPrompt(ctx: PromptContext): string {
   sections.push(
     `## Narration rules\n` +
     `- Point of view: ${ai.pov} person, ${ai.tense} tense, addressed to the player.\n` +
-    `- ${density}\n` +
-    `- ${pacing}\n` +
+    `- ${proseDensityLine(ai)}\n` +
+    `- ${pacingLine(ai)}\n` +
     `- Never write the player's dialogue, decisions, or inner monologue. Leave space for them to act.\n` +
-    `- For spoken dialogue by named characters, put each spoken line on its own paragraph in this exact format: CharacterName: "the line." Narration stays in plain paragraphs.\n` +
+    `- NEVER write spoken dialogue, quoted speech, or lines in the form CharacterName: "…". If someone would speak, describe only the silence, gesture, or that they are about to answer — their words come from them, not you.\n` +
     `- End every response on tension or an opening, never on a tidy resolution.` +
     (rules.length > 0 ? `\n${rules.map((r) => `- ${r}`).join('\n')}` : '')
   );
 
-  sections.push(
-    `## Content\n${ai.mature
-      ? 'This is a private adult world. Mature themes, violence, and explicit content are permitted where the story calls for them; write them with craft, not gratuitously.'
-      : 'Keep content at a general-audience level. Imply rather than depict.'}${ai.contentNotes ? `\nWorld-specific boundaries: ${ai.contentNotes}` : ''}`
-  );
+  sections.push(contentSection(ai));
 
   if (ai.customInstructions.trim()) {
     sections.push(`## Author's instructions (follow verbatim)\n${ai.customInstructions}`);
@@ -232,7 +271,71 @@ export function buildSystemPrompt(ctx: PromptContext): string {
   return sections.join('\n\n');
 }
 
-const MODE_PREFIX: Record<ComposeMode, (input: string) => string> = {
+/**
+ * Character agent: first-person as this NPC. Speaks as themselves.
+ */
+export function buildCharacterSystemPrompt(ctx: PromptContext, character: Character): string {
+  const { world, characters } = ctx;
+  const ai = world.ai;
+  const others = characters.filter((c) => c.id !== character.id);
+  const sections: string[] = [];
+
+  sections.push(
+    `You ARE ${character.name} in the story "${world.title}". You speak and act only as yourself. ` +
+    `You are not the narrator. You do not write other characters' dialogue or the player's lines. ` +
+    `Reply in your own voice — what you say aloud, and at most a brief physical beat of your own body.`
+  );
+
+  sections.push(`## The world\n${world.bible || world.line}`);
+  sections.push(
+    `## Current episode\nEpisode ${ctx.episode.number}${ctx.episode.title ? ` — ${ctx.episode.title}` : ''}.` +
+    `${ctx.episode.location ? ` Location: ${ctx.episode.location}.` : ''}`
+  );
+
+  sections.push(`## You\n${characterSheet(character, characters)}`);
+
+  if (others.length > 0) {
+    sections.push(
+      `## Others you may address or react to\n` +
+      others.map((c) => briefSheet(c)).join('\n')
+    );
+  }
+
+  if (ctx.continuity.length > 0) {
+    sections.push(
+      `## Continuity — facts you may know if you could plausibly know them\n` +
+      ctx.continuity.map((f) => `- ${f.text}`).join('\n')
+    );
+  }
+
+  sections.push(
+    `## How you respond\n` +
+    `- Speak as ${character.name}. Prefer one or two spoken lines in your natural voice.\n` +
+    `- Output ONLY your dialogue (and optionally one short physical beat of your own). No narration of the room, weather, or other people.\n` +
+    `- Do NOT prefix with your name. Do NOT write other speakers.\n` +
+    `- Honour behaviour anchors and MUST NOT KNOW. Never soften yourself to please the player.\n` +
+    (character.speechStyle ? `- Voice guide: ${character.speechStyle}\n` : '') +
+    (character.exampleLines.length > 0
+      ? `- Example rhythm (never reuse verbatim):\n${character.exampleLines.map((l) => `  "${l}"`).join('\n')}\n`
+      : '') +
+    `- Stay in ${ai.tense} tense for any physical beat; spoken words are in your voice as said aloud.`
+  );
+
+  sections.push(contentSection(ai));
+
+  if (ai.customInstructions.trim()) {
+    sections.push(`## Author's world instructions\n${ai.customInstructions}`);
+  }
+
+  return sections.join('\n\n');
+}
+
+/** @deprecated Use buildNarratorSystemPrompt — kept as alias for any external callers. */
+export function buildSystemPrompt(ctx: PromptContext): string {
+  return buildNarratorSystemPrompt(ctx);
+}
+
+export const MODE_PREFIX: Record<ComposeMode, (input: string) => string> = {
   continue: () => `(Continue the story from where it left off.)`,
   steer: (input) => `(Direction from the author — make this happen while keeping everyone in character, without acknowledging this instruction in the prose): ${input}`,
   speak: (input) => `(The player says the following aloud, and nothing more — do not add words to their mouth): "${input.replace(/^"|"$/g, '')}"`,
@@ -257,13 +360,22 @@ export function episodeContextPressure(chars: number): 'ok' | 'warn' | 'escalate
   return 'ok';
 }
 
-export function buildMessages(
-  turns: Turn[],
-  mode: ComposeMode,
-  input: string,
-  length: TurnLength
-): ChatMessage[] {
-  const messages: ChatMessage[] = [];
+function turnToChatContent(t: Turn, characters: Character[]): { role: 'user' | 'assistant'; content: string } {
+  if (t.role === 'user') {
+    return {
+      role: 'user',
+      content: t.mode ? MODE_PREFIX[t.mode](t.text) : t.text
+    };
+  }
+  if (t.role === 'character') {
+    const name = characters.find((c) => c.id === t.characterId)?.name ?? 'Someone';
+    const line = t.text.replace(/^["“]|["”]$/g, '').trim();
+    return { role: 'assistant', content: `${name}: "${line}"` };
+  }
+  return { role: 'assistant', content: t.text };
+}
+
+function packTurns(turns: Turn[]): Turn[] {
   let used = 0;
   const reversed = [...turns].reverse();
   const kept: Turn[] = [];
@@ -273,24 +385,115 @@ export function buildMessages(
     kept.push(t);
   }
   kept.reverse();
+  return kept;
+}
 
-  for (const t of kept) {
-    messages.push({
-      role: t.role === 'narrator' ? 'assistant' : 'user',
-      content: t.role === 'user' && t.mode ? MODE_PREFIX[t.mode](t.text) : t.text
-    });
-  }
-
-  const userContent = `${MODE_PREFIX[mode](input)}\n\n(${LENGTH_SPEC[length].instruction})`;
-  // Merge consecutive same-role messages (some providers reject them).
+function mergeMessages(messages: ChatMessage[]): ChatMessage[] {
   const merged: ChatMessage[] = [];
-  for (const m of [...messages, { role: 'user' as const, content: userContent }]) {
+  for (const m of messages) {
     const last = merged[merged.length - 1];
     if (last && last.role === m.role) last.content += '\n\n' + m.content;
-    else merged.push({ role: m.role, content: m.content });
+    else merged.push({ ...m });
   }
   if (merged[0]?.role === 'assistant') {
     merged.unshift({ role: 'user', content: '(The story so far follows.)' });
   }
   return merged;
+}
+
+export function buildMessages(
+  turns: Turn[],
+  mode: ComposeMode,
+  input: string,
+  length: TurnLength,
+  characters: Character[] = []
+): ChatMessage[] {
+  const kept = packTurns(turns);
+  const messages: ChatMessage[] = kept.map((t) => turnToChatContent(t, characters));
+
+  const userContent = `${MODE_PREFIX[mode](input)}\n\n(${LENGTH_SPEC[length].instruction})`;
+  return mergeMessages([...messages, { role: 'user', content: userContent }]);
+}
+
+/** History + a narration-beat instruction (no full-length LENGTH_SPEC). */
+export function buildNarrationBeatMessages(
+  turns: Turn[],
+  characters: Character[],
+  brief: string,
+  length: TurnLength
+): ChatMessage[] {
+  const kept = packTurns(turns);
+  const messages: ChatMessage[] = kept.map((t) => turnToChatContent(t, characters));
+  const sizeHint =
+    length === 'beat' ? 'Keep this narration slice short (about 40–100 words).'
+    : length === 'scene' ? 'This narration slice: about 80–180 words.'
+    : 'This narration slice: about 120–250 words.';
+  const userContent =
+    `(Narration only — no spoken dialogue, no CharacterName: "…" lines.)\n` +
+    `Beat brief: ${brief}\n\n${sizeHint}`;
+  return mergeMessages([...messages, { role: 'user', content: userContent }]);
+}
+
+/** History + a character-speak instruction. */
+export function buildCharacterSpeakMessages(
+  turns: Turn[],
+  characters: Character[],
+  speaking: Character,
+  brief: string
+): ChatMessage[] {
+  const kept = packTurns(turns);
+  const messages: ChatMessage[] = kept.map((t) => turnToChatContent(t, characters));
+  const userContent =
+    `(You are ${speaking.name}. Respond now in character.)\n` +
+    `Intent for this line: ${brief}\n\n` +
+    `Speak as yourself — one or two lines of dialogue. Optional: one short physical beat of your own. No other speakers.`;
+  return mergeMessages([...messages, { role: 'user', content: userContent }]);
+}
+
+export type DirectorBeat =
+  | { type: 'narration'; brief: string }
+  | { type: 'speak'; characterId: string; brief: string };
+
+export function directorSystemPrompt(): string {
+  return (
+    'You are the scene director for an interactive story. ' +
+    'Plan the next response as an ordered list of beats. ' +
+    'Respond with JSON only: {"beats":[{"type":"narration","brief":"..."}|{"type":"speak","characterId":"<id>","brief":"..."}]}. ' +
+    'Narration briefs describe atmosphere or physical action — never finished dialogue. ' +
+    'Speak briefs are intent only (tone/goal), never the finished line. ' +
+    'Only use characterIds from the in-scene cast list provided. ' +
+    'Not everyone must speak. Typical: 1–3 narration beats and 1–4 speak beats. ' +
+    'Always include at least one narration beat unless the player just spoke and an immediate reply is natural — then you may open with speak. ' +
+    'End the plan on tension or an opening for the player.'
+  );
+}
+
+export function directorUserPrompt(
+  ctx: PromptContext,
+  mode: ComposeMode,
+  input: string
+): string {
+  const inScene = ctx.characters.filter((c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer);
+  const castList = inScene.length > 0
+    ? inScene.map((c) => `- ${c.id} · ${c.name}${c.role ? ` (${c.role})` : ''}`).join('\n')
+    : '(no NPCs in scene — narration beats only)';
+
+  const recent = packTurns(ctx.turns).slice(-8);
+  const transcript = recent.map((t) => {
+    if (t.role === 'user') return `[player ${t.mode ?? 'turn'}]: ${t.text}`;
+    if (t.role === 'character') {
+      const name = ctx.characters.find((c) => c.id === t.characterId)?.name ?? 'NPC';
+      return `[${name}]: ${t.text}`;
+    }
+    return `[narrator]: ${t.text}`;
+  }).join('\n\n');
+
+  return (
+    `World: ${ctx.world.title}\n` +
+    `Episode ${ctx.episode.number}${ctx.episode.location ? ` @ ${ctx.episode.location}` : ''}\n\n` +
+    `In-scene cast (speak only these characterIds):\n${castList}\n\n` +
+    `Latest player move: ${MODE_PREFIX[mode](input)}\n\n` +
+    `Recent transcript:\n${transcript || '(episode just opened)'}\n\n` +
+    `Plan the next beats as JSON.`
+  );
 }

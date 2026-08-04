@@ -168,6 +168,7 @@ export function Cast() {
         borderRight: narrow ? 'none' : '1px solid rgba(255,255,255,0.07)',
         borderBottom: narrow ? '1px solid rgba(255,255,255,0.07)' : 'none',
         padding: narrow ? '18px 16px 12px' : '26px 16px',
+        paddingTop: narrow ? 'calc(18px + env(safe-area-inset-top))' : 26,
         display: 'flex', flexDirection: narrow ? 'row' : 'column', gap: narrow ? 8 : 16,
         background: 'rgba(255,255,255,0.02)', overflowX: narrow ? 'auto' : undefined,
         alignItems: narrow ? 'center' : undefined
@@ -383,11 +384,11 @@ export function Cast() {
 
               {tab === 'voice' && (
                 <>
-                  <Field label="How they speak" note="the narrator imitates rhythm, not vocabulary">
+                  <Field label="How they speak" note="they speak as themselves — rhythm and tone for their own lines">
                     <textarea rows={3} value={d.speechStyle} onChange={(e) => patch({ speechStyle: e.target.value })}
                       placeholder="Clipped. Rarely finishes a thought aloud if a look will do it." />
                   </Field>
-                  <Field label="Example lines" note="2–4 sample lines the model imitates — one per line">
+                  <Field label="Example lines" note="2–4 sample lines in their voice — one per line">
                     <textarea
                       rows={4}
                       value={d.exampleLines.join('\n')}

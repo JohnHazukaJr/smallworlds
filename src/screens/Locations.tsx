@@ -157,6 +157,7 @@ export function Locations() {
         borderRight: narrow ? 'none' : '1px solid rgba(255,255,255,0.07)',
         borderBottom: narrow ? '1px solid rgba(255,255,255,0.07)' : 'none',
         padding: narrow ? '18px 16px 12px' : '26px 16px',
+        paddingTop: narrow ? 'calc(18px + env(safe-area-inset-top))' : 26,
         display: 'flex', flexDirection: narrow ? 'row' : 'column', gap: narrow ? 8 : 16,
         background: 'rgba(255,255,255,0.02)', overflowX: narrow ? 'auto' : undefined,
         alignItems: narrow ? 'center' : undefined

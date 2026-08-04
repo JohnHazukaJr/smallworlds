@@ -2,11 +2,21 @@ import { db, uid } from '../db';
 import { resolveModel, useSettings } from '../store/settings';
 import { GAP_DAYS, GAP_LABELS } from '../ui/theme';
 import type {
-  Character, ComposeMode, Episode, Location, ModelRef, Season, SeasonWrap, TurnLength, World, WrapBeat
+  Character, ComposeMode, Episode, Location, ModelRef, Season, SeasonWrap, Turn, TurnLength, TurnRole, World, WrapBeat
 } from '../types';
-import { worldCalendar } from '../worldOps';
+import { emptyCharacter, emptyLocation, worldCalendar } from '../worldOps';
 import { AIError, streamChat } from './client';
-import { buildMessages, buildSystemPrompt, maxTokensFor } from './prompts';
+import {
+  buildCharacterSpeakMessages,
+  buildCharacterSystemPrompt,
+  buildNarrationBeatMessages,
+  buildNarratorSystemPrompt,
+  characterSpeakTokens,
+  directorSystemPrompt,
+  directorUserPrompt,
+  type DirectorBeat,
+  narrationBeatTokens
+} from './prompts';
 
 // ---------- Model resolution ----------
 
@@ -42,6 +52,11 @@ async function loadContext(world: World, season: Season, episode: Episode) {
   return { world, season, episode, characters, locations, continuity, threads, turns };
 }
 
+export interface StreamMeta {
+  role: TurnRole;
+  characterId?: string;
+}
+
 export interface WriteOptions {
   world: World;
   season: Season;
@@ -50,44 +65,148 @@ export interface WriteOptions {
   input: string;
   length: TurnLength;
   signal?: AbortSignal;
-  onDelta: (partial: string) => void;
+  /** Partial text of the beat currently streaming. */
+  onDelta: (partial: string, meta: StreamMeta) => void;
+}
+
+function labelTurn(t: Turn, characters: Character[]): string {
+  if (t.role === 'user') return `[player ${t.mode ?? 'turn'}]: ${t.text}`;
+  if (t.role === 'character') {
+    const name = characters.find((c) => c.id === t.characterId)?.name ?? 'NPC';
+    return `[${name}]: ${t.text}`;
+  }
+  return `[narrator]: ${t.text}`;
+}
+
+function normalizeBeats(
+  raw: { beats?: Array<{ type?: string; brief?: string; characterId?: string }> },
+  inScene: Character[]
+): DirectorBeat[] {
+  const allowed = new Set(inScene.map((c) => c.id));
+  const beats: DirectorBeat[] = [];
+  for (const b of raw.beats ?? []) {
+    const brief = (b.brief ?? '').trim();
+    if (!brief) continue;
+    if (b.type === 'speak') {
+      const id = (b.characterId ?? '').trim();
+      if (!allowed.has(id)) continue;
+      beats.push({ type: 'speak', characterId: id, brief });
+    } else if (b.type === 'narration') {
+      beats.push({ type: 'narration', brief });
+    }
+  }
+  if (beats.length === 0) {
+    beats.push({
+      type: 'narration',
+      brief: 'Continue the scene with atmosphere and physical action; leave space for the player.'
+    });
+  }
+  return beats;
 }
 
 /**
- * The core writing loop: persists the user turn (unless continue),
- * streams the narrator's response, persists it, and returns the turn id.
+ * Core writing loop: persist the user turn (unless continue), plan beats with
+ * the director, then stream narrator (narration-only) and character agents.
+ * Each completed beat is persisted immediately. Returns the last turn id.
  */
 export async function writeTurn(opts: WriteOptions): Promise<string> {
   const { provider, model } = proseModelFor(opts.world);
   const ctx = await loadContext(opts.world, opts.season, opts.episode);
+  const inScene = ctx.characters.filter((c) => opts.episode.castIds.includes(c.id) && !c.isPlayer);
 
   if (opts.mode !== 'continue' && opts.input.trim()) {
-    const userTurn = {
+    const userTurn: Turn = {
       id: uid(), episodeId: opts.episode.id, worldId: opts.world.id,
-      role: 'user' as const, mode: opts.mode, text: opts.input.trim(), createdAt: Date.now()
+      role: 'user', mode: opts.mode, text: opts.input.trim(), createdAt: Date.now()
     };
     await db.turns.add(userTurn);
     ctx.turns.push(userTurn);
   }
 
-  const system = buildSystemPrompt(ctx);
-  const messages = buildMessages(ctx.turns, opts.mode, opts.input.trim(), opts.length);
+  // Director plans ordered narration / speak beats (utility model).
+  let beats: DirectorBeat[];
+  try {
+    const plan = await utilityJson<{ beats: Array<{ type?: string; brief?: string; characterId?: string }> }>(
+      opts.world,
+      directorSystemPrompt(),
+      directorUserPrompt(ctx, opts.mode, opts.input.trim()),
+      1200,
+      opts.signal
+    );
+    beats = normalizeBeats(plan, inScene);
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') throw e;
+    // Fall back to a single narration beat if the director fails.
+    beats = [{
+      type: 'narration',
+      brief: 'Continue the scene with atmosphere and physical action; leave space for the player.'
+    }];
+  }
 
-  let acc = '';
-  const text = await streamChat({
-    provider, model, system, messages,
-    maxTokens: maxTokensFor(opts.length),
-    signal: opts.signal,
-    onDelta: (d) => { acc += d; opts.onDelta(acc); }
-  });
+  let lastId = '';
+  for (const beat of beats) {
+    if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
-  const narratorTurn = {
-    id: uid(), episodeId: opts.episode.id, worldId: opts.world.id,
-    role: 'narrator' as const, mode: null, text, createdAt: Date.now()
-  };
-  await db.turns.add(narratorTurn);
+    if (beat.type === 'narration') {
+      const meta: StreamMeta = { role: 'narrator' };
+      opts.onDelta('', meta);
+      let acc = '';
+      const text = await streamChat({
+        provider, model,
+        system: buildNarratorSystemPrompt(ctx),
+        messages: buildNarrationBeatMessages(ctx.turns, ctx.characters, beat.brief, opts.length),
+        maxTokens: narrationBeatTokens(opts.length),
+        signal: opts.signal,
+        onDelta: (d) => { acc += d; opts.onDelta(acc, meta); }
+      });
+      const narrText = text.trim();
+      if (!narrText) {
+        opts.onDelta('', meta);
+        continue;
+      }
+      const narratorTurn: Turn = {
+        id: uid(), episodeId: opts.episode.id, worldId: opts.world.id,
+        role: 'narrator', mode: null, text: narrText, createdAt: Date.now()
+      };
+      await db.turns.add(narratorTurn);
+      ctx.turns.push(narratorTurn);
+      lastId = narratorTurn.id;
+      opts.onDelta('', meta);
+      continue;
+    }
+
+    const speaking = ctx.characters.find((c) => c.id === beat.characterId);
+    if (!speaking || speaking.isPlayer) continue;
+
+    const meta: StreamMeta = { role: 'character', characterId: speaking.id };
+    opts.onDelta('', meta);
+    let acc = '';
+    const text = await streamChat({
+      provider, model,
+      system: buildCharacterSystemPrompt(ctx, speaking),
+      messages: buildCharacterSpeakMessages(ctx.turns, ctx.characters, speaking, beat.brief),
+      maxTokens: characterSpeakTokens(),
+      signal: opts.signal,
+      onDelta: (d) => { acc += d; opts.onDelta(acc, meta); }
+    });
+    const cleaned = text.trim().replace(/^[A-Z][^:\n]{0,48}:\s*/, '').trim();
+    if (!cleaned) {
+      opts.onDelta('', meta);
+      continue;
+    }
+    const characterTurn: Turn = {
+      id: uid(), episodeId: opts.episode.id, worldId: opts.world.id,
+      role: 'character', mode: null, characterId: speaking.id,
+      text: cleaned, createdAt: Date.now()
+    };
+    await db.turns.add(characterTurn);
+    ctx.turns.push(characterTurn);
+    lastId = characterTurn.id;
+    opts.onDelta('', meta);
+  }
+
   await db.worlds.update(opts.world.id, { updatedAt: Date.now() });
-  return narratorTurn.id;
+  return lastId;
 }
 
 /** Delete a turn and everything after it (used by regenerate / retry). */
@@ -125,12 +244,18 @@ function extractJson<T>(raw: string): T {
   }
 }
 
-async function utilityJson<T>(world: World | null, system: string, user: string, maxTokens = 3000): Promise<T> {
+async function utilityJson<T>(
+  world: World | null,
+  system: string,
+  user: string,
+  maxTokens = 3000,
+  signal?: AbortSignal
+): Promise<T> {
   const { provider, model } = utilityModelFor(world);
   const raw = await streamChat({
     provider, model, system,
     messages: [{ role: 'user', content: user }],
-    maxTokens, temperature: 0.4
+    maxTokens, temperature: 0.4, signal
   });
   return extractJson<T>(raw);
 }
@@ -140,7 +265,8 @@ export async function extractContinuity(world: World, season: Season, episode: E
   const turns = await db.turns.where('episodeId').equals(episode.id).sortBy('createdAt');
   if (turns.length === 0) return;
   const existing = await db.continuity.where('seasonId').equals(season.id).toArray();
-  const text = turns.map((t) => (t.role === 'user' ? `[player ${t.mode}]: ${t.text}` : t.text)).join('\n\n');
+  const characters = await db.characters.where('worldId').equals(world.id).toArray();
+  const text = turns.map((t) => labelTurn(t, characters)).join('\n\n');
 
   const result = await utilityJson<{ facts: string[]; threads: string[] }>(
     world,
@@ -172,7 +298,7 @@ export async function analyzeSeason(world: World, season: Season): Promise<Seaso
   for (const ep of episodes) {
     const turns = await db.turns.where('episodeId').equals(ep.id).sortBy('createdAt');
     if (turns.length === 0) continue;
-    const text = turns.map((t) => (t.role === 'user' ? `[player]: ${t.text}` : t.text)).join('\n\n');
+    const text = turns.map((t) => labelTurn(t, characters)).join('\n\n');
     if (text.length < 6000) {
       episodeSummaries.push(`Episode ${ep.number}${ep.title ? ` (${ep.title})` : ''}:\n${text}`);
     } else {
@@ -477,4 +603,155 @@ export async function draftWorld(seed: string, shape: string): Promise<{ title: 
     'You design story worlds for longform interactive fiction. Respond with JSON only:\n{"title": "<evocative 1-4 word title>", "line": "<one-sentence logline in second person>", "bible": "<the world bible: setting, atmosphere, rules of the world, pressures at work — 150-300 words of prose the narrator will follow>", "premise": "<season one premise: where the story opens, 2-3 sentences>"}\nBe specific and concrete. The world should have its own weather, its own rules, and at least one pressure that will not wait.',
     `Story shape the player wants: ${shape}\n\nThe one true thing about this world: ${seed}`
   );
+}
+
+export interface WorldRosterProposal {
+  characters: { description: string }[];
+  locations: { description: string }[];
+  openingLocationIndex: number;
+}
+
+/** Propose opening cast + place one-liners for a world (does not persist). */
+export async function proposeWorldRoster(
+  world: World,
+  shape: string,
+  counts: { characters: number; locations: number }
+): Promise<WorldRosterProposal> {
+  const nChars = Math.max(0, Math.min(6, counts.characters));
+  const nPlaces = Math.max(0, Math.min(5, counts.locations));
+  if (nChars === 0 && nPlaces === 0) {
+    return { characters: [], locations: [], openingLocationIndex: 0 };
+  }
+  const result = await utilityJson<WorldRosterProposal>(
+    world,
+    `You propose an opening cast and places for a longform interactive story world. Respond with JSON only:\n` +
+    `{"characters":[{"description":"<one specific sentence: who they are and their pressure on the protagonist>"}],` +
+    `"locations":[{"description":"<one specific sentence: what the place is and why it matters>"}],` +
+    `"openingLocationIndex":<0-based index into locations for where episode 1 opens>}\n` +
+    `Return exactly ${nChars} character description(s) and ${nPlaces} location description(s). ` +
+    `Use empty arrays when the count is 0. No player/protagonist. ` +
+    `Every description must be concrete and rooted in THIS world's weather, rules, and pressures — never generic fantasy filler.`,
+    `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1600)}\n` +
+    `Story shape the player wants: ${shape}\n\nPropose the roster.`
+  );
+  const characters = (result.characters ?? []).filter((c) => c.description?.trim()).slice(0, nChars);
+  const locations = (result.locations ?? []).filter((l) => l.description?.trim()).slice(0, nPlaces);
+  const openingLocationIndex = locations.length === 0
+    ? 0
+    : Number.isFinite(result.openingLocationIndex)
+      ? Math.max(0, Math.min(locations.length - 1, Math.floor(result.openingLocationIndex)))
+      : 0;
+  return { characters, locations, openingLocationIndex };
+}
+
+export interface FleshOutEverythingOpts {
+  /** e.g. "One long story… — Seasons, episodes…" */
+  shape: string;
+  targetCharacters: number;
+  targetLocations: number;
+  onProgress?: (label: string) => void;
+}
+
+export interface FleshOutEverythingResult {
+  characterIds: string[];
+  locationIds: string[];
+}
+
+/**
+ * Flesh lore/premise/rules, invent opening cast & places when the world is thin,
+ * and link them to episode 1. Does not open Story — caller leaves the user to review.
+ */
+export async function fleshOutWorldEverything(
+  world: World,
+  season: Season,
+  episode: Episode,
+  opts: FleshOutEverythingOpts
+): Promise<FleshOutEverythingResult> {
+  const progress = opts.onProgress ?? (() => {});
+
+  progress('Fleshing lore…');
+  const lore = await fleshOutWorldLore(world);
+  await db.worlds.update(world.id, {
+    title: lore.title, line: lore.line, bible: lore.bible, updatedAt: Date.now()
+  });
+  let live: World = { ...world, ...lore };
+
+  progress('Fleshing premise…');
+  const premise = await fleshOutPremise(live, season);
+  await db.seasons.update(season.id, { premise });
+
+  progress('Fleshing narrator rules…');
+  const rules = await fleshOutNarratorRules(live);
+  await db.worlds.update(live.id, {
+    ai: { ...live.ai, narratorRules: rules },
+    updatedAt: Date.now()
+  });
+  live = { ...live, ai: { ...live.ai, narratorRules: rules } };
+
+  const allChars = await db.characters.where('worldId').equals(live.id).toArray();
+  const player = allChars.find((c) => c.isPlayer);
+  if (player && !player.summary.trim() && !player.speechStyle.trim()) {
+    progress('Fleshing you…');
+    const sheet = await fleshOutCharacter(live, player);
+    await db.characters.update(player.id, { ...sheet, isPlayer: true, updatedAt: Date.now() });
+  }
+
+  const npcs = allChars.filter((c) => !c.isPlayer);
+  const existingPlaces = await db.locations.where('worldId').equals(live.id).toArray();
+  const needChars = npcs.length < 2;
+  const needPlaces = existingPlaces.length < 1;
+  const charSlots = needChars ? Math.max(0, opts.targetCharacters - npcs.length) : 0;
+  const placeSlots = needPlaces ? Math.max(0, opts.targetLocations - existingPlaces.length) : 0;
+
+  const createdCharacterIds: string[] = [];
+  const createdLocationIds: string[] = [];
+
+  if (charSlots > 0 || placeSlots > 0) {
+    progress('Planning cast & places…');
+    const roster = await proposeWorldRoster(live, opts.shape, {
+      characters: charSlots,
+      locations: placeSlots
+    });
+
+    const charDescs = roster.characters.slice(0, charSlots);
+    const placeDescs = roster.locations.slice(0, placeSlots);
+
+    for (const { description } of charDescs) {
+      const hint = description.trim().slice(0, 48);
+      progress(hint ? `Writing ${hint}…` : 'Writing cast…');
+      const draft = await draftCharacter(live, description);
+      const c = emptyCharacter(live.id, { ...draft, isPlayer: false, updatedAt: Date.now() });
+      if (!c.name.trim()) c.name = description.slice(0, 40);
+      await db.characters.add(c);
+      createdCharacterIds.push(c.id);
+    }
+
+    for (const { description } of placeDescs) {
+      const hint = description.trim().slice(0, 48);
+      progress(hint ? `Placing ${hint}…` : 'Placing the world…');
+      const draft = await draftLocation(live, description);
+      const l = emptyLocation(live.id, { ...draft, updatedAt: Date.now() });
+      if (!l.name.trim()) l.name = description.slice(0, 40);
+      await db.locations.add(l);
+      createdLocationIds.push(l.id);
+    }
+
+    // Link new NPCs into episode cast; set opening location if episode has none.
+    if (createdCharacterIds.length > 0) {
+      const castIds = [...new Set([...episode.castIds, ...createdCharacterIds])];
+      await db.episodes.update(episode.id, { castIds });
+    }
+
+    if (createdLocationIds.length > 0 && !episode.locationId && !episode.location.trim()) {
+      const idx = Math.max(0, Math.min(createdLocationIds.length - 1, roster.openingLocationIndex));
+      const openId = createdLocationIds[idx] ?? createdLocationIds[0];
+      const open = await db.locations.get(openId);
+      if (open) {
+        await db.episodes.update(episode.id, { location: open.name, locationId: open.id });
+      }
+    }
+  }
+
+  await db.worlds.update(live.id, { updatedAt: Date.now() });
+  return { characterIds: createdCharacterIds, locationIds: createdLocationIds };
 }
