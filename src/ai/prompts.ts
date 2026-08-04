@@ -1,5 +1,5 @@
 import type {
-  Character, ComposeMode, ContinuityFact, Episode, OpenThread, Season, Turn, TurnLength, World
+  Character, ComposeMode, ContinuityFact, Episode, Location, OpenThread, Season, Turn, TurnLength, World
 } from '../types';
 import type { ChatMessage } from './client';
 
@@ -67,18 +67,41 @@ function briefSheet(c: Character): string {
   return `- ${c.name} (${c.role || 'off-scene'}): ${c.summary.slice(0, 160) || 'no notes'}${c.state.location ? ` Currently: ${c.state.location}.` : ''}`;
 }
 
+function locationSheet(l: Location): string {
+  const lines = [
+    `### ${l.name}`,
+    l.tagline && `Tagline: ${l.tagline}`,
+    l.summary && `Overview: ${l.summary}`,
+    l.atmosphere && `Atmosphere (sensory detail to lean on): ${l.atmosphere}`,
+    l.features && `Notable features: ${l.features}`,
+    l.history && `History (reveal only in earned fragments, never as exposition): ${l.history}`,
+    l.inhabitants && `Typically found here: ${l.inhabitants}`,
+    l.rules.length > 0 &&
+      `HARD RULES for this place — non-negotiable, never broken:\n${l.rules.map((r, i) => `  ${String(i + 1).padStart(2, '0')}. ${r}`).join('\n')}`,
+    l.secrets && `Secrets hidden here (may surface, never announced): ${l.secrets}`,
+    l.currentState && `Current state: ${l.currentState}`,
+    l.customInstructions && `Author's directives for this location (follow verbatim): ${l.customInstructions}`
+  ];
+  return lines.filter(Boolean).join('\n');
+}
+
+function locationBrief(l: Location): string {
+  return `- ${l.name}${l.tagline ? ` (${l.tagline})` : ''}: ${l.summary.slice(0, 160) || 'no notes'}`;
+}
+
 export interface PromptContext {
   world: World;
   season: Season;
   episode: Episode;
   characters: Character[];
+  locations: Location[];
   continuity: ContinuityFact[];
   threads: OpenThread[];
   turns: Turn[];
 }
 
 export function buildSystemPrompt(ctx: PromptContext): string {
-  const { world, season, episode, characters, continuity, threads } = ctx;
+  const { world, season, episode, characters, locations, continuity, threads } = ctx;
   const ai = world.ai;
   const inScene = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
   const player = characters.find((c) => c.isPlayer);
@@ -120,6 +143,20 @@ export function buildSystemPrompt(ctx: PromptContext): string {
   sections.push(
     `## Current episode\nEpisode ${episode.number}${episode.title ? ` — ${episode.title}` : ''}.${episode.location ? ` Location: ${episode.location}.` : ''}`
   );
+
+  if (locations.length > 0) {
+    const epLoc = episode.location.trim().toLowerCase();
+    const current = epLoc
+      ? locations.filter((l) => l.name.trim() && (epLoc.includes(l.name.toLowerCase()) || l.name.toLowerCase().includes(epLoc)))
+      : [];
+    const others = locations.filter((l) => !current.includes(l));
+    if (current.length > 0) {
+      sections.push(`## Current location\n${current.map(locationSheet).join('\n\n')}`);
+    }
+    if (others.length > 0) {
+      sections.push(`## Other established locations (may be referenced or visited)\n${others.map(locationBrief).join('\n')}`);
+    }
+  }
 
   if (player) {
     sections.push(`## The player\n${characterSheet(player, characters)}`);

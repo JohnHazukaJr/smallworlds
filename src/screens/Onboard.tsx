@@ -1,12 +1,12 @@
 import { useState } from 'react';
-import { draftCharacter, draftWorld } from '../ai/engine';
+import { draftCharacter, draftLocation, draftWorld } from '../ai/engine';
 import { db } from '../db';
 import { useApp } from '../store/app';
 import { useSettings } from '../store/settings';
 import type { WorldAISettings } from '../types';
 import { Bar, Chip, ErrorNote, Field, Mono, Spinner, Toggle, useVw } from '../ui/bits';
 import { STRIPE } from '../ui/theme';
-import { createWorld, DEFAULT_AI, emptyCharacter } from '../worldOps';
+import { createWorld, DEFAULT_AI, emptyCharacter, emptyLocation } from '../worldOps';
 
 const SHAPES = [
   { label: 'One long story I keep returning to', line: 'Seasons, episodes, a cast that ages and remembers.' },
@@ -20,6 +20,12 @@ const SEED_KINDS = [
   { label: 'A rule', line: 'Something in this world cannot be undone.' },
   { label: 'A pressure', line: 'Something is coming and everyone knows it.' },
   { label: 'Notes I already have', line: 'Paste a paragraph of notes — it gets read into a world.' }
+];
+
+const PLACE_KINDS = [
+  { label: 'Describe it, get a full sheet', line: 'One sentence in, atmosphere, rules and history out — editable after.' },
+  { label: 'Write it myself, later', line: 'Places screen any time.' },
+  { label: 'Nowhere in particular yet', line: 'Skip for now — start the story and let it emerge.' }
 ];
 
 const CAST_KINDS = [
@@ -49,6 +55,8 @@ export function Onboard() {
   const [title, setTitle] = useState('');
   const [castKind, setCastKind] = useState(0);
   const [castDesc, setCastDesc] = useState('');
+  const [placeKind, setPlaceKind] = useState(0);
+  const [placeDesc, setPlaceDesc] = useState('');
   const [ai, setAi] = useState<WorldAISettings>(() => ({ ...DEFAULT_AI, mature: matureDefault }));
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState('');
@@ -106,6 +114,26 @@ export function Onboard() {
         } else {
           const c = emptyCharacter(world.id, { name: castDesc.trim().slice(0, 40), summary: castDesc.trim() });
           await db.characters.add(c);
+        }
+      }
+
+      if (placeKind === 0 && placeDesc.trim()) {
+        if (hasAI) {
+          setBusy('Drafting the first place…');
+          try {
+            const sheet = await draftLocation(world, placeDesc.trim());
+            const l = emptyLocation(world.id, sheet);
+            await db.locations.add(l);
+            const episode = await db.episodes.where('worldId').equals(world.id).first();
+            if (episode && !episode.location && l.name) await db.episodes.update(episode.id, { location: l.name });
+          } catch (e) {
+            console.warn('location drafting failed', e);
+          }
+        } else {
+          const l = emptyLocation(world.id, { name: placeDesc.trim().slice(0, 40), summary: placeDesc.trim() });
+          await db.locations.add(l);
+          const episode = await db.episodes.where('worldId').equals(world.id).first();
+          if (episode && !episode.location) await db.episodes.update(episode.id, { location: l.name });
         }
       }
 
@@ -228,7 +256,7 @@ export function Onboard() {
       body: hasAI
         ? 'Give them one sentence and the utility model drafts a full sheet — voice, desires, secrets, anchors — that you can edit on the Cast screen. Anchors are what stop them dissolving into an agreeable assistant.'
         : 'No AI provider configured yet — you can still create the world now and add a key in Settings before writing.',
-      cta: busy ? busy : 'Enter the world',
+      cta: 'Next — the first place',
       content: (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <OptionList options={CAST_KINDS} value={castKind} onChange={setCastKind} />
@@ -236,6 +264,24 @@ export function Onboard() {
             <textarea
               rows={2} value={castDesc} onChange={(e) => setCastDesc(e.target.value)}
               placeholder="e.g. The harbour registrar who has already noticed your handwriting"
+            />
+          )}
+        </div>
+      )
+    },
+    {
+      title: 'Where does it begin?',
+      body: hasAI
+        ? 'Give it one sentence and the utility model drafts a full sheet — atmosphere, features, hard rules — that you can edit on the Places screen. It becomes episode one’s location.'
+        : 'No AI provider configured yet — you can still create the world now and add a key in Settings before writing.',
+      cta: busy ? busy : 'Enter the world',
+      content: (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <OptionList options={PLACE_KINDS} value={placeKind} onChange={setPlaceKind} />
+          {placeKind === 0 && (
+            <textarea
+              rows={2} value={placeDesc} onChange={(e) => setPlaceDesc(e.target.value)}
+              placeholder="e.g. A harbour registry where every debt in the city is written under a false name"
             />
           )}
         </div>

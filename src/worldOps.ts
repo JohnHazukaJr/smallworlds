@@ -1,6 +1,6 @@
 import { db, uid } from './db';
 import { useSettings } from './store/settings';
-import type { Character, Episode, Season, World, WorldAISettings } from './types';
+import type { Character, Episode, Location, Season, World, WorldAISettings } from './types';
 
 export const DEFAULT_AI: WorldAISettings = {
   pov: 'second',
@@ -80,6 +80,18 @@ export function emptyCharacter(worldId: string, patch: Partial<Character> = {}):
     secrets: '', mustNotKnow: '',
     relationships: [], anchors: [], customInstructions: '',
     state: { goal: '', emotion: '', location: '', condition: '' },
+    createdAt: now, updatedAt: now,
+    ...patch
+  };
+}
+
+export function emptyLocation(worldId: string, patch: Partial<Location> = {}): Location {
+  const now = Date.now();
+  return {
+    id: uid(), worldId,
+    name: '', tagline: '', hue: Math.floor(Math.random() * 360),
+    summary: '', atmosphere: '', features: '', history: '', inhabitants: '',
+    rules: [], secrets: '', currentState: '', customInstructions: '',
     createdAt: now, updatedAt: now,
     ...patch
   };

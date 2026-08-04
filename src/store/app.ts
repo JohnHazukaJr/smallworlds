@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
-export type Screen = 'library' | 'story' | 'cast' | 'sequel' | 'profile' | 'settings' | 'onboard';
+export type Screen = 'library' | 'story' | 'cast' | 'locations' | 'sequel' | 'profile' | 'settings' | 'onboard';
 export type MoodId = 'ember' | 'ash' | 'frost' | 'rot';
 export type BackdropId = 'scene' | 'moment' | 'character' | 'none';
 export type AvatarSize = 'S' | 'M' | 'L';

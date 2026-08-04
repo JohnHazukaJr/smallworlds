@@ -152,6 +152,37 @@ export interface Character {
   updatedAt: number;
 }
 
+// ---------- Locations ----------
+
+export interface Location {
+  id: string;
+  worldId: string;
+  name: string;
+  /** short tagline, e.g. "harbour district · public square" */
+  tagline: string;
+  hue: number;
+  /** prose description — what the place is, first impression */
+  summary: string;
+  /** sensory detail: sight, sound, smell, feel — what the narrator leans on */
+  atmosphere: string;
+  /** notable landmarks, rooms, or features within it */
+  features: string;
+  /** how it came to be / what happened here — revealed only in earned fragments */
+  history: string;
+  /** who or what is typically found here */
+  inhabitants: string;
+  /** hazards, laws, or hard rules specific to this place — never broken */
+  rules: string[];
+  /** things hidden here, not common knowledge */
+  secrets: string;
+  /** current condition/status, e.g. "burned in the siege, still rebuilding" */
+  currentState: string;
+  /** free-text per-location AI directives, passed verbatim */
+  customInstructions: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 // ---------- Continuity ----------
 
 export interface ContinuityFact {

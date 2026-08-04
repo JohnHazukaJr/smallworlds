@@ -1,7 +1,7 @@
 import { db, uid } from '../db';
 import { resolveModel, useSettings } from '../store/settings';
 import type {
-  Character, ComposeMode, Episode, ModelRef, Season, SeasonWrap, TurnLength, World, WrapBeat
+  Character, ComposeMode, Episode, Location, ModelRef, Season, SeasonWrap, TurnLength, World, WrapBeat
 } from '../types';
 import { AIError, streamChat } from './client';
 import { buildMessages, buildSystemPrompt, maxTokensFor } from './prompts';
@@ -30,13 +30,14 @@ export function utilityModelFor(world: World | null) {
 // ---------- Prose generation ----------
 
 async function loadContext(world: World, season: Season, episode: Episode) {
-  const [characters, continuity, threads, turns] = await Promise.all([
+  const [characters, locations, continuity, threads, turns] = await Promise.all([
     db.characters.where('worldId').equals(world.id).toArray(),
+    db.locations.where('worldId').equals(world.id).toArray(),
     db.continuity.where('seasonId').equals(season.id).toArray(),
     db.threads.where('worldId').equals(world.id).filter((t) => t.status === 'open').toArray(),
     db.turns.where('episodeId').equals(episode.id).sortBy('createdAt')
   ]);
-  return { world, season, episode, characters, continuity, threads, turns };
+  return { world, season, episode, characters, locations, continuity, threads, turns };
 }
 
 export interface WriteOptions {
@@ -321,6 +322,19 @@ export async function draftCharacter(world: World | null, description: string): 
     world,
     'You design deep NPC character sheets for longform interactive fiction. Respond with JSON only:\n{"name": string, "role": "<role · relationship to protagonist>", "age": string, "appearance": string, "mannerisms": "<2-3 recurring physical habits or tics, concrete and observable>", "backstory": "<the history that shaped them, 2-3 sentences>", "summary": "<who they are, 2-4 sentences of prose>", "speechStyle": "<how they talk, 1-2 sentences>", "exampleLines": [<2-3 sample spoken lines>], "traits": string, "desires": string, "fears": string, "flaws": string, "secrets": "<something they hide>", "anchors": [<3-4 hard behavioural rules they never break, e.g. "Never lies in writing">]}\nMake them specific, contradictory in believable ways, never generic.',
     `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}Character to create: ${description}`
+  );
+  return result;
+}
+
+/** AI-assisted location draft from a one-line description. */
+export async function draftLocation(world: World | null, description: string): Promise<Partial<Location>> {
+  const result = await utilityJson<{
+    name: string; tagline: string; summary: string; atmosphere: string; features: string;
+    history: string; inhabitants: string; rules: string[]; secrets: string; currentState: string;
+  }>(
+    world,
+    'You design deep location sheets for longform interactive fiction. Respond with JSON only:\n{"name": string, "tagline": "<short tagline, e.g. \'harbour district · public square\'>", "summary": "<what the place is, first impression, 2-4 sentences of prose>", "atmosphere": "<sensory detail — sight, sound, smell, feel — the narrator leans on>", "features": "<notable landmarks, rooms, or geography within it>", "history": "<how it came to be / what happened here, 2-3 sentences>", "inhabitants": "<who or what is typically found here>", "rules": [<2-4 hazards, laws, or hard rules specific to this place that are never broken>], "secrets": "<something hidden here, not common knowledge>", "currentState": "<its condition right now, one sentence>"}\nMake it specific and concrete, with at least one pressure or danger, never generic.',
+    `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}Location to create: ${description}`
   );
   return result;
 }

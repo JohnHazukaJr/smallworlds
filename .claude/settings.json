@@ -10,7 +10,9 @@
       "Bash(curl -sL -o vendor/react.production.min.js \"https://unpkg.com/react@18.3.1/umd/react.production.min.js\")",
       "Bash(curl -sL -o vendor/react-dom.production.min.js \"https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js\")",
       "Bash(openssl dgst *)",
-      "Bash(openssl base64 *)"
+      "Bash(openssl base64 *)",
+      "Bash(npx --yes playwright --version)",
+      "Bash(node -e ' *)"
     ]
   }
 }

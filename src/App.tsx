@@ -6,6 +6,7 @@ import { useVw } from './ui/bits';
 import { Library } from './screens/Library';
 import { Story } from './screens/Story';
 import { Cast } from './screens/Cast';
+import { Locations } from './screens/Locations';
 import { Sequel } from './screens/Sequel';
 import { Profile } from './screens/Profile';
 import { Settings } from './screens/Settings';
@@ -42,6 +43,7 @@ export default function App() {
           {screen === 'library' && <Library />}
           {screen === 'story' && <Story />}
           {screen === 'cast' && <Cast />}
+          {screen === 'locations' && <Locations />}
           {screen === 'sequel' && <Sequel />}
           {screen === 'profile' && <Profile />}
           {screen === 'settings' && <Settings />}
