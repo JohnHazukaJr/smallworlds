@@ -3,12 +3,12 @@ import { fleshOutNarratorRules, fleshOutPremise, fleshOutWorldLore } from '../ai
 import { db } from '../db';
 import { ModelPicker } from '../screens/Settings';
 import { useApp } from '../store/app';
-import type { Character, Episode, Season, World, WorldAISettings } from '../types';
+import type { Character, Episode, Location, Season, World, WorldAISettings } from '../types';
 import { Bar, Chip, ErrorNote, Field, Mono, Sheet, Spinner, Toggle } from '../ui/bits';
 import { avatarStyle } from '../ui/theme';
-import { emptyCharacter, worldCalendar } from '../worldOps';
+import { emptyCharacter, emptyLocation, worldCalendar } from '../worldOps';
 
-type Tab = 'lore' | 'plot' | 'instructions' | 'settings' | 'cast';
+type Tab = 'lore' | 'plot' | 'instructions' | 'settings' | 'cast' | 'locations';
 
 const MONO_INPUT = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 } as const;
 
@@ -17,7 +17,7 @@ const MONO_INPUT = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 } as
  * database on blur; prompts are rebuilt from the database each turn, so changes
  * take effect on the very next AI response.
  */
-export function WorldEditorSheet({ open, onClose, narrow, world, season, episode, characters }: {
+export function WorldEditorSheet({ open, onClose, narrow, world, season, episode, characters, locations }: {
   open: boolean;
   onClose: () => void;
   narrow: boolean;
@@ -25,11 +25,14 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
   season: Season;
   episode: Episode;
   characters: Character[];
+  locations: Location[];
 }) {
   const go = useApp((s) => s.go);
   const [tab, setTab] = useState<Tab>('lore');
   const [charId, setCharId] = useState<string | null>(null);
+  const [locId, setLocId] = useState<string | null>(null);
   const selected = characters.find((c) => c.id === charId) ?? null;
+  const selectedLoc = locations.find((l) => l.id === locId) ?? null;
 
   const [aiVersion, setAiVersion] = useState(0);
   const [flesh, setFlesh] = useState<{ busy: 'lore' | 'plot' | 'rules' | null; error: string; errorFor: 'lore' | 'plot' | 'rules' | null }>(
@@ -45,6 +48,13 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
   const patchEpisode = (p: Partial<Episode>) => void db.episodes.update(episode.id, p);
   const patchChar = (id: string, p: Partial<Character>) =>
     void db.characters.update(id, { ...p, updatedAt: Date.now() });
+  const patchLoc = (id: string, p: Partial<Location>) =>
+    void db.locations.update(id, { ...p, updatedAt: Date.now() }).then(() => {
+      // Keep episode location name in sync if this place is the active setting.
+      if (episode.locationId === id && typeof p.name === 'string') {
+        void db.episodes.update(episode.id, { location: p.name });
+      }
+    });
 
   const runFlesh = async (kind: 'lore' | 'plot' | 'rules', task: () => Promise<void>) => {
     setFlesh({ busy: kind, error: '', errorFor: null });
@@ -88,7 +98,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
       </div>
 
       <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
-        {(['lore', 'plot', 'instructions', 'settings', 'cast'] as const).map((t) => (
+        {(['lore', 'plot', 'instructions', 'settings', 'cast', 'locations'] as const).map((t) => (
           <Chip key={t} active={tab === t} onClick={() => setTab(t)}>{t[0].toUpperCase() + t.slice(1)}</Chip>
         ))}
       </div>
@@ -165,9 +175,9 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <input key={episode.id + '-title'} defaultValue={episode.title}
                 onBlur={(e) => patchEpisode({ title: e.target.value })} />
             </Field>
-            <Field label="Episode location" note="where the scene is · feeds the prompt">
+            <Field label="Episode location note" note="free text · pick a saved location from the Locations tab or Story Direct">
               <textarea key={episode.id + '-loc'} rows={2} defaultValue={episode.location}
-                onBlur={(e) => patchEpisode({ location: e.target.value })} />
+                onBlur={(e) => patchEpisode({ location: e.target.value, locationId: null })} />
             </Field>
             {season.bible && (
               <Field label="Season recap — previously on" note="carried from the last season">
@@ -384,6 +394,93 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 </Field>
               ))}
             </div>
+          </>
+        )}
+
+        {tab === 'locations' && !selectedLoc && (
+          <>
+            <Mono style={{ fontSize: 9 }}>pick a location to edit</Mono>
+            {locations.map((l) => (
+              <div key={l.id} onClick={() => setLocId(l.id)} className="hover-bright" style={{
+                display: 'flex', gap: 11, alignItems: 'center', padding: '10px 12px', borderRadius: 13,
+                cursor: 'pointer', border: '1px solid rgba(255,255,255,0.09)', background: 'rgba(255,255,255,0.04)'
+              }}>
+                <div style={l.portrait
+                  ? { width: 34, height: 34, borderRadius: '50%', flexShrink: 0, backgroundImage: `url(${l.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center', border: '1px solid rgba(255,255,255,0.18)' }
+                  : avatarStyle(l.hue, 34)} />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>
+                    {l.name || 'unnamed'}{episode.locationId === l.id ? ' · scene' : ''}
+                  </div>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    {l.tagline || 'no tagline'}
+                  </div>
+                </div>
+              </div>
+            ))}
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <Chip onClick={() => {
+                const l = emptyLocation(world.id, { name: 'New location' });
+                void db.locations.add(l).then(() => setLocId(l.id));
+              }}>+ new location</Chip>
+              <Chip onClick={() => { onClose(); go('locations'); }}>full editor → Locations</Chip>
+            </div>
+          </>
+        )}
+
+        {tab === 'locations' && selectedLoc && (
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
+              <button className="btn-quiet" style={{ fontSize: 11, padding: '4px 6px' }} onClick={() => setLocId(null)}>← locations</button>
+              <div style={selectedLoc.portrait
+                ? { width: 30, height: 30, borderRadius: '50%', flexShrink: 0, backgroundImage: `url(${selectedLoc.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center', border: '1px solid rgba(255,255,255,0.18)' }
+                : avatarStyle(selectedLoc.hue, 30)} />
+              <div style={{ fontSize: 14, fontWeight: 600, color: '#f0eee9', flex: 1 }}>
+                {selectedLoc.name || 'unnamed'}
+              </div>
+              <button className="btn-quiet" style={{ fontSize: 10 }} onClick={() => {
+                void db.episodes.update(episode.id, {
+                  locationId: selectedLoc.id,
+                  location: selectedLoc.name,
+                  ...(selectedLoc.portrait ? { image: selectedLoc.portrait } : {})
+                });
+              }}>use as scene</button>
+              <button className="btn-quiet" style={{ fontSize: 10 }} onClick={() => { onClose(); go('locations'); }}>full editor</button>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+              <Field label="Name">
+                <input key={selectedLoc.id + '-name'} defaultValue={selectedLoc.name}
+                  onBlur={(e) => patchLoc(selectedLoc.id, { name: e.target.value })} />
+              </Field>
+              <Field label="Tagline">
+                <input key={selectedLoc.id + '-tag'} defaultValue={selectedLoc.tagline}
+                  onBlur={(e) => patchLoc(selectedLoc.id, { tagline: e.target.value })} />
+              </Field>
+            </div>
+            <Field label="Summary" note="what the place is">
+              <textarea key={selectedLoc.id + '-summary'} rows={3} defaultValue={selectedLoc.summary}
+                onBlur={(e) => patchLoc(selectedLoc.id, { summary: e.target.value })} />
+            </Field>
+            <Field label="Atmosphere" note="sensory detail the narrator leans on">
+              <textarea key={selectedLoc.id + '-atm'} rows={3} defaultValue={selectedLoc.atmosphere}
+                onBlur={(e) => patchLoc(selectedLoc.id, { atmosphere: e.target.value })} />
+            </Field>
+            <Field label="Features">
+              <textarea key={selectedLoc.id + '-feat'} rows={2} defaultValue={selectedLoc.features}
+                onBlur={(e) => patchLoc(selectedLoc.id, { features: e.target.value })} />
+            </Field>
+            <Field label="Hard rules" note="one per line — never broken here">
+              <textarea key={selectedLoc.id + '-rules'} rows={3} defaultValue={selectedLoc.rules.join('\n')}
+                onBlur={(e) => patchLoc(selectedLoc.id, { rules: e.target.value.split('\n').filter((x) => x.trim()) })} />
+            </Field>
+            <Field label="Current state">
+              <textarea key={selectedLoc.id + '-state'} rows={2} defaultValue={selectedLoc.currentState}
+                onBlur={(e) => patchLoc(selectedLoc.id, { currentState: e.target.value })} />
+            </Field>
+            <Field label="AI directives for this location" note="passed verbatim">
+              <textarea key={selectedLoc.id + '-ci'} rows={2} defaultValue={selectedLoc.customInstructions}
+                onBlur={(e) => patchLoc(selectedLoc.id, { customInstructions: e.target.value })} />
+            </Field>
           </>
         )}
       </div>

@@ -286,7 +286,8 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
 
   const firstEpisode: Episode = {
     id: uid(), seasonId: next.id, worldId: world.id, number: 1,
-    title: '', location: '', castIds: wrap.characters.filter((c) => c.returning).map((c) => c.characterId),
+    title: '', location: '', locationId: null,
+    castIds: wrap.characters.filter((c) => c.returning).map((c) => c.characterId),
     status: 'active', createdAt: Date.now()
   };
 

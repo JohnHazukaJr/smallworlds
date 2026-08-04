@@ -142,7 +142,7 @@ export function Locations() {
     return (
       <div className="fade-in" style={{ padding: narrow ? '40px 20px' : '80px 60px', display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 560 }}>
         <Mono>no world open</Mono>
-        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: '#f8f6f2' }}>Open a world to see its places.</div>
+        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: '#f8f6f2' }}>Open a world to see its locations.</div>
         <div><button className="btn-primary" onClick={() => go('library')}>Go to Worlds</button></div>
       </div>
     );
@@ -163,7 +163,7 @@ export function Locations() {
       }}>
         {!narrow && (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <Mono style={{ letterSpacing: '0.16em' }}>places · {world.title.toLowerCase()}</Mono>
+            <Mono style={{ letterSpacing: '0.16em' }}>locations · {world.title.toLowerCase()}</Mono>
             <button className="btn-ghost" style={{ padding: '5px 11px', fontSize: 11 }} onClick={() => setCreating(true)}>+ new</button>
           </div>
         )}
@@ -222,7 +222,7 @@ export function Locations() {
 
         {!d && !creating && (
           <div style={{ opacity: 0.6 }}>
-            <div className="serif" style={{ fontSize: 24, fontWeight: 300 }}>No places yet.</div>
+            <div className="serif" style={{ fontSize: 24, fontWeight: 300 }}>No locations yet.</div>
             <button className="btn-primary" style={{ marginTop: 14 }} onClick={() => setCreating(true)}>Create the first location</button>
           </div>
         )}

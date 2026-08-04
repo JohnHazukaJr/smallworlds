@@ -83,6 +83,8 @@ export interface Episode {
   title: string;
   /** where the episode takes place — feeds the scene plate + prompt */
   location: string;
+  /** saved Location id when the scene is set from the library; null = free-text / unset */
+  locationId?: string | null;
   /** optional scene image (data URL) shown behind the story text */
   image?: string | null;
   /** character ids present in the current scene */

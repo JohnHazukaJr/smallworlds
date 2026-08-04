@@ -151,10 +151,14 @@ export function buildSystemPrompt(ctx: PromptContext): string {
   );
 
   if (locations.length > 0) {
+    const byId = episode.locationId
+      ? locations.filter((l) => l.id === episode.locationId)
+      : [];
     const epLoc = episode.location.trim().toLowerCase();
-    const current = epLoc
+    const byName = byId.length === 0 && epLoc
       ? locations.filter((l) => l.name.trim() && (epLoc.includes(l.name.toLowerCase()) || l.name.toLowerCase().includes(epLoc)))
       : [];
+    const current = byId.length > 0 ? byId : byName;
     const others = locations.filter((l) => !current.includes(l));
     if (current.length > 0) {
       sections.push(`## Current location\n${current.map(locationSheet).join('\n\n')}`);

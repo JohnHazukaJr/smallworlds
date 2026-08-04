@@ -61,7 +61,7 @@ export async function createWorld(input: NewWorldInput): Promise<World> {
   });
 
   const episode: Episode = {
-    id: uid(), seasonId, worldId, number: 1, title: '', location: '',
+    id: uid(), seasonId, worldId, number: 1, title: '', location: '', locationId: null,
     castIds: [player.id], status: 'active', createdAt: now
   };
 
@@ -108,6 +108,7 @@ export async function nextEpisode(current: Episode): Promise<Episode> {
   const next: Episode = {
     id: uid(), seasonId: current.seasonId, worldId: current.worldId,
     number: current.number + 1, title: '', location: current.location,
+    locationId: current.locationId ?? null,
     castIds: current.castIds, status: 'active', createdAt: Date.now()
   };
   await db.transaction('rw', [db.episodes, db.worlds], async () => {

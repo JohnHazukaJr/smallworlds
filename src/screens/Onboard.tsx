@@ -26,7 +26,7 @@ const SEED_KINDS = [
 
 const PLACE_KINDS = [
   { label: 'Describe it, get a full sheet', line: 'One sentence in, atmosphere, rules and history out — editable after.' },
-  { label: 'Write it myself, later', line: 'Places screen any time.' },
+  { label: 'Write it myself, later', line: 'Locations screen any time.' },
   { label: 'Nowhere in particular yet', line: 'Skip for now — start the story and let it emerge.' }
 ];
 
@@ -122,7 +122,7 @@ export function Onboard() {
     const castNames = npcCast.map((c) => c.name).filter(Boolean).join(', ');
     const placeNames = places.map((l) => l.name).filter(Boolean).join(', ');
     if (castNames) bits.push(`Cast already in this world: ${castNames}.`);
-    if (placeNames) bits.push(`Places already in this world: ${placeNames}.`);
+    if (placeNames) bits.push(`Locations already in this world: ${placeNames}.`);
     return { ...base, bible: `${base.bible}\n\n${bits.join(' ')}`.trim() };
   };
 
@@ -224,7 +224,9 @@ export function Onboard() {
     if (!name && !notes) return;
     const l = emptyLocation(worldId, { name: name || notes.slice(0, 40), summary: notes });
     await db.locations.add(l);
-    if (episode && !episode.location && l.name) await db.episodes.update(episode.id, { location: l.name });
+    if (episode && !episode.locationId && !episode.location && l.name) {
+      await db.episodes.update(episode.id, { location: l.name, locationId: l.id });
+    }
     setPlaceName('');
     setPlaceNotes('');
   };
@@ -241,7 +243,9 @@ export function Onboard() {
       const sheet = await fleshOutLocation(worldContext(), draft);
       const l: Location = { ...draft, ...sheet, updatedAt: Date.now() };
       await db.locations.add(l);
-      if (episode && !episode.location && l.name) await db.episodes.update(episode.id, { location: l.name });
+      if (episode && !episode.locationId && !episode.location && l.name) {
+        await db.episodes.update(episode.id, { location: l.name, locationId: l.id });
+      }
       setPlaceName('');
       setPlaceNotes('');
     } catch (e) {
@@ -460,7 +464,7 @@ export function Onboard() {
       title: 'Where does it begin?',
       body: hasAI
         ? 'Give a name — or just an idea — and Generate drafts a full sheet: atmosphere, features, hard rules, all editable right here. The first one becomes episode one’s location. Add as many as you like, one at a time.'
-        : 'No AI provider configured yet — you can still add places by hand now and add a key in Settings before writing.',
+        : 'No AI provider configured yet — you can still add locations by hand now and add a key in Settings before writing.',
       cta: busy ? busy : 'Enter the world',
       content: (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -497,7 +501,7 @@ export function Onboard() {
               </div>
               {places.length > 0 && (
                 <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }} onClick={() => openFullEditor('locations')}>
-                  full editor → Places
+                  full editor → Locations
                 </button>
               )}
             </>

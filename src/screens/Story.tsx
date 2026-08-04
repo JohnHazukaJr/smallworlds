@@ -1,14 +1,14 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { deleteTurnsAfter, deleteTurnsFrom, extractContinuity, writeTurn } from '../ai/engine';
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
 import { db, uid } from '../db';
 import { AVATAR_PX, DEFAULT_DISPLAY, useApp, type AvatarSize } from '../store/app';
-import type { Character, ComposeMode, ContinuityFact, Episode, OpenThread, Season, Turn, TurnLength, World } from '../types';
+import type { Character, ComposeMode, ContinuityFact, Episode, Location, OpenThread, Season, Turn, TurnLength, World } from '../types';
 import { Chip, ErrorNote, Mono, Sheet, Spinner, useVw } from '../ui/bits';
 import { fileToSceneImage } from '../ui/image';
 import { avatarStyle, BACKDROPS, MOODS, STRIPE } from '../ui/theme';
-import { nextEpisode, worldCalendar } from '../worldOps';
+import { emptyLocation, nextEpisode, worldCalendar } from '../worldOps';
 
 // ---------- prose rendering ----------
 
@@ -92,6 +92,7 @@ export function Story() {
   const vw = useVw();
   const narrow = vw < 780;
   const { currentWorldId, layout, setLayout, mood, setMood, backdrop, setBackdrop, go, display } = useApp();
+  const goLocations = () => go('locations');
   const M = MOODS[mood];
   const BD = BACKDROPS[backdrop];
   const director = layout === 'director' && vw >= 940;
@@ -118,6 +119,10 @@ export function Story() {
   ) ?? [];
   const characters = useLiveQuery(
     async () => (world ? db.characters.where('worldId').equals(world.id).toArray() : []),
+    [world?.id]
+  ) ?? [];
+  const locations = useLiveQuery(
+    async () => (world ? db.locations.where('worldId').equals(world.id).toArray() : []),
     [world?.id]
   ) ?? [];
   const continuity = useLiveQuery(
@@ -271,8 +276,9 @@ export function Story() {
 
   const directorContent = (
     <DirectorContent
-      world={world} season={season} episode={episode} characters={characters}
+      world={world} season={season} episode={episode} characters={characters} locations={locations}
       continuity={continuity} threads={threads} accent={M.accent}
+      onGoLocations={goLocations}
       onNudge={(text) => { setComposeMode('steer'); setInput(text); setDirectorSheet(false); }}
     />
   );
@@ -376,6 +382,10 @@ export function Story() {
             flexDirection: 'column', gap: 22, overflow: 'auto', background: 'rgba(8,9,12,0.28)', backdropFilter: 'blur(20px)'
           }}>
             <SceneCastPanel episode={episode} characters={characters} accent={M.accent} />
+            <SceneLocationsPanel
+              episode={episode} locations={locations} accent={M.accent}
+              onGoLocations={goLocations}
+            />
             <ScenePlatePanel episode={episode} bd={BD} />
             <ContinuityPanel continuity={continuity} world={world} season={season} />
           </aside>
@@ -594,6 +604,7 @@ export function Story() {
         season={season}
         episode={episode}
         characters={characters}
+        locations={locations}
       />
 
       {/* display settings */}
@@ -832,13 +843,88 @@ function SceneCastPanel({ episode, characters, accent }: { episode: Episode; cha
   );
 }
 
+function locationThumb(l: Location, size = 30): CSSProperties {
+  if (l.portrait) {
+    return {
+      width: size, height: size, borderRadius: '50%', flexShrink: 0,
+      backgroundImage: `url(${l.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center',
+      border: '1px solid rgba(255,255,255,0.18)'
+    };
+  }
+  return avatarStyle(l.hue, size);
+}
+
+function SceneLocationsPanel({ episode, locations, accent, onGoLocations }: {
+  episode: Episode; locations: Location[]; accent: string; onGoLocations: () => void;
+}) {
+  const select = async (l: Location) => {
+    const active = episode.locationId === l.id;
+    if (active) {
+      await db.episodes.update(episode.id, { locationId: null, location: '' });
+      return;
+    }
+    const patch: Partial<Episode> = { locationId: l.id, location: l.name };
+    if (l.portrait) patch.image = l.portrait;
+    await db.episodes.update(episode.id, patch);
+  };
+
+  const addQuick = async () => {
+    const l = emptyLocation(episode.worldId, { name: 'New location' });
+    await db.locations.add(l);
+    await db.episodes.update(episode.id, {
+      locationId: l.id, location: l.name,
+      ...(l.portrait ? { image: l.portrait } : {})
+    });
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+      <Mono style={{ fontSize: 9 }}>locations</Mono>
+      {locations.map((l) => {
+        const active = episode.locationId === l.id
+          || (!episode.locationId && !!episode.location && l.name.trim()
+            && (episode.location.toLowerCase().includes(l.name.toLowerCase())
+              || l.name.toLowerCase().includes(episode.location.trim().toLowerCase())));
+        return (
+          <div key={l.id} onClick={() => void select(l)} style={{
+            display: 'flex', gap: 10, alignItems: 'center', padding: 8, borderRadius: 12, cursor: 'pointer',
+            background: active ? 'rgba(255,255,255,0.05)' : 'transparent',
+            border: `1px solid ${active ? 'rgba(255,255,255,0.08)' : 'transparent'}`,
+            opacity: active ? 1 : 0.45
+          }}>
+            <div style={locationThumb(l, 30)} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: '#f0eee9' }}>{l.name || 'unnamed'}</div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {active ? (l.tagline || l.currentState || 'scene setting') : (l.tagline || 'off-scene')}
+              </div>
+            </div>
+            <div style={{
+              width: 14, height: 14, borderRadius: 5, flexShrink: 0,
+              border: `1px solid ${active ? accent : 'rgba(255,255,255,0.18)'}`,
+              background: active ? accent : 'transparent'
+            }} />
+          </div>
+        );
+      })}
+      {locations.length === 0 && (
+        <div style={{ fontSize: 12, opacity: 0.5, color: '#eceae6' }}>No saved locations yet.</div>
+      )}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} onClick={() => void addQuick()}>+ new</button>
+        <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} onClick={onGoLocations}>full editor → Locations</button>
+      </div>
+    </div>
+  );
+}
+
 function ScenePlatePanel({ episode, bd }: { episode: Episode; bd: { tag: string; a: string; b: string } }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(episode.location);
   useEffect(() => setValue(episode.location), [episode.id, episode.location]);
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-      <Mono style={{ fontSize: 9 }}>scene plate</Mono>
+      <Mono style={{ fontSize: 9 }}>scene note — free text</Mono>
       <div style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, overflow: 'hidden', background: 'rgba(255,255,255,0.04)' }}>
         <div style={{
           height: 98, display: 'flex', alignItems: 'flex-end', padding: 9,
@@ -852,15 +938,17 @@ function ScenePlatePanel({ episode, bd }: { episode: Episode; bd: { tag: string;
         </div>
         {editing ? (
           <div style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <textarea rows={2} value={value} onChange={(e) => setValue(e.target.value)} style={{ fontSize: 12 }} />
+            <textarea rows={2} value={value} onChange={(e) => setValue(e.target.value)} style={{ fontSize: 12 }}
+              placeholder="One-off spot not in the library…" />
             <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 10px' }} onClick={async () => {
-              await db.episodes.update(episode.id, { location: value });
+              // Free-text override clears the library link so the cards don't fight it.
+              await db.episodes.update(episode.id, { location: value, locationId: null });
               setEditing(false);
-            }}>Save location</button>
+            }}>Save</button>
           </div>
         ) : (
           <div onClick={() => setEditing(true)} style={{ padding: '10px 12px', fontSize: 12, lineHeight: 1.5, opacity: 0.7, cursor: 'pointer', color: '#eceae6' }}>
-            {episode.location || 'Where does this episode take place? Click to set — it feeds the prompt.'}
+            {episode.location || 'Optional free-text override — or pick a location card above.'}
           </div>
         )}
       </div>
@@ -938,14 +1026,19 @@ function NudgesPanel({ threads, inScene, onNudge }: { threads: OpenThread[]; inS
 }
 
 function DirectorContent(props: {
-  world: World; season: Season; episode: Episode; characters: Character[];
+  world: World; season: Season; episode: Episode; characters: Character[]; locations: Location[];
   continuity: ContinuityFact[]; threads: OpenThread[]; accent: string;
+  onGoLocations: () => void;
   onNudge: (t: string) => void;
 }) {
   const inScene = props.characters.filter((c) => props.episode.castIds.includes(c.id));
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 22, overflow: 'auto' }}>
       <SceneCastPanel episode={props.episode} characters={props.characters} accent={props.accent} />
+      <SceneLocationsPanel
+        episode={props.episode} locations={props.locations} accent={props.accent}
+        onGoLocations={props.onGoLocations}
+      />
       <ScenePlatePanel episode={props.episode} bd={BACKDROPS.scene} />
       <ContinuityPanel continuity={props.continuity} world={props.world} season={props.season} />
       <ThreadsPanel threads={props.threads} />
