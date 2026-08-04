@@ -6,7 +6,9 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { getSupabase } from '../cloud/supabase';
-import { db, deleteWorld } from '../db';
+import {
+  clearTombstones, db, deleteWorld, type SyncTableName, type Tombstone
+} from '../db';
 import { decryptString, deriveKey, encryptString, randomSalt } from '../security/crypto';
 import { useSettings } from '../store/settings';
 import type {
@@ -14,10 +16,6 @@ import type {
 } from '../types';
 
 const SYNC_META_KEY = 'small-worlds-sync-meta';
-
-type TableName =
-  | 'worlds' | 'seasons' | 'episodes' | 'turns' | 'characters'
-  | 'locations' | 'continuity' | 'threads' | 'wraps';
 
 interface SyncRow {
   id: string;
@@ -59,8 +57,12 @@ function entityUpdatedAt(payload: { updatedAt?: number; createdAt?: number }): n
   return payload.updatedAt ?? payload.createdAt ?? 0;
 }
 
+function isoFromEntity(payload: { updatedAt?: number; createdAt?: number }): string {
+  return new Date(entityUpdatedAt(payload) || Date.now()).toISOString();
+}
+
 async function pullTable<T extends { id: string }>(
-  table: TableName,
+  table: SyncTableName,
   userId: string,
   since: number | null,
   apply: (payload: T, deleted: boolean, remoteUpdated: number) => Promise<void>
@@ -80,7 +82,7 @@ async function pullTable<T extends { id: string }>(
 }
 
 async function pushRows(
-  table: TableName,
+  table: SyncTableName,
   userId: string,
   rows: Array<{
     id: string;
@@ -110,7 +112,7 @@ async function pushRows(
 async function lwwPutWorld(remote: World, deleted: boolean, remoteMs: number) {
   if (deleted) {
     const local = await db.worlds.get(remote.id);
-    if (local && entityUpdatedAt(local) <= remoteMs) await deleteWorld(remote.id);
+    if (local && entityUpdatedAt(local) <= remoteMs) await deleteWorld(remote.id, { fromRemote: true });
     return;
   }
   const local = await db.worlds.get(remote.id);
@@ -131,6 +133,34 @@ async function lwwPut<T extends { id: string; updatedAt?: number; createdAt?: nu
   }
   const local = await table.get(remote.id) as T | undefined;
   if (!local || entityUpdatedAt(local) < remoteMs) await table.put(remote);
+}
+
+function tombstonePushRow(t: Tombstone) {
+  return {
+    id: t.id,
+    world_id: t.worldId,
+    season_id: t.seasonId,
+    episode_id: t.episodeId,
+    payload: t.payload,
+    updated_at: new Date(t.deletedAt).toISOString(),
+    deleted_at: new Date(t.deletedAt).toISOString()
+  };
+}
+
+async function pushTombstones(userId: string): Promise<number> {
+  const tombs = await db.tombstones.toArray();
+  if (tombs.length === 0) return 0;
+  const byTable = new Map<SyncTableName, Tombstone[]>();
+  for (const t of tombs) {
+    const list = byTable.get(t.table) ?? [];
+    list.push(t);
+    byTable.set(t.table, list);
+  }
+  for (const [table, rows] of byTable) {
+    await pushRows(table, userId, rows.map(tombstonePushRow));
+  }
+  await clearTombstones(tombs.map((t) => t.key));
+  return tombs.length;
 }
 
 export async function syncNow(): Promise<{ pulled: number; pushed: number }> {
@@ -155,6 +185,8 @@ export async function syncNow(): Promise<{ pulled: number; pushed: number }> {
     pulled += await pullTable<OpenThread>('threads', userId, since, (p, d, m) => lwwPut(db.threads, p, d, m));
     pulled += await pullTable<SeasonWrap>('wraps', userId, since, (p, d, m) => lwwPut(db.wraps, p, d, m));
 
+    const tombPushed = await pushTombstones(userId);
+
     // Push full local snapshot (LWW on server via upsert; remote older rows lose on next pull).
     const [worlds, seasons, episodes, turns, characters, locations, continuity, threads, wraps] = await Promise.all([
       db.worlds.toArray(),
@@ -168,37 +200,36 @@ export async function syncNow(): Promise<{ pulled: number; pushed: number }> {
       db.wraps.toArray()
     ]);
 
-    const iso = (ms: number) => new Date(ms || Date.now()).toISOString();
-
     await pushRows('worlds', userId, worlds.map((w) => ({
-      id: w.id, payload: w, updated_at: iso(w.updatedAt)
+      id: w.id, payload: w, updated_at: isoFromEntity(w), deleted_at: null
     })));
     await pushRows('seasons', userId, seasons.map((s) => ({
-      id: s.id, world_id: s.worldId, payload: s, updated_at: iso(s.createdAt)
+      id: s.id, world_id: s.worldId, payload: s, updated_at: isoFromEntity(s), deleted_at: null
     })));
     await pushRows('episodes', userId, episodes.map((e) => ({
-      id: e.id, world_id: e.worldId, season_id: e.seasonId, payload: e, updated_at: iso(e.createdAt)
+      id: e.id, world_id: e.worldId, season_id: e.seasonId, payload: e, updated_at: isoFromEntity(e), deleted_at: null
     })));
     await pushRows('turns', userId, turns.map((t) => ({
-      id: t.id, world_id: t.worldId, episode_id: t.episodeId, payload: t, updated_at: iso(t.createdAt)
+      id: t.id, world_id: t.worldId, episode_id: t.episodeId, payload: t, updated_at: isoFromEntity(t), deleted_at: null
     })));
     await pushRows('characters', userId, characters.map((c) => ({
-      id: c.id, world_id: c.worldId, payload: c, updated_at: iso(c.updatedAt ?? c.createdAt)
+      id: c.id, world_id: c.worldId, payload: c, updated_at: isoFromEntity(c), deleted_at: null
     })));
     await pushRows('locations', userId, locations.map((l) => ({
-      id: l.id, world_id: l.worldId, payload: l, updated_at: iso(l.updatedAt ?? l.createdAt)
+      id: l.id, world_id: l.worldId, payload: l, updated_at: isoFromEntity(l), deleted_at: null
     })));
     await pushRows('continuity', userId, continuity.map((c) => ({
-      id: c.id, world_id: c.worldId, season_id: c.seasonId, payload: c, updated_at: iso(c.createdAt)
+      id: c.id, world_id: c.worldId, season_id: c.seasonId, payload: c, updated_at: isoFromEntity(c), deleted_at: null
     })));
     await pushRows('threads', userId, threads.map((t) => ({
-      id: t.id, world_id: t.worldId, season_id: t.seasonId, payload: t, updated_at: iso(t.createdAt)
+      id: t.id, world_id: t.worldId, season_id: t.seasonId, payload: t, updated_at: isoFromEntity(t), deleted_at: null
     })));
     await pushRows('wraps', userId, wraps.map((w) => ({
-      id: w.id, world_id: w.worldId, season_id: w.seasonId, payload: w, updated_at: iso(w.createdAt)
+      id: w.id, world_id: w.worldId, season_id: w.seasonId, payload: w, updated_at: isoFromEntity(w), deleted_at: null
     })));
 
     const pushed =
+      tombPushed +
       worlds.length + seasons.length + episodes.length + turns.length +
       characters.length + locations.length + continuity.length + threads.length + wraps.length;
 
@@ -206,6 +237,7 @@ export async function syncNow(): Promise<{ pulled: number; pushed: number }> {
     useSyncMeta.setState({
       lastSyncedAt: now,
       busy: false,
+      error: '',
       lastResult: `Synced · pulled ${pulled} · pushed ${pushed}`
     });
     return { pulled, pushed };

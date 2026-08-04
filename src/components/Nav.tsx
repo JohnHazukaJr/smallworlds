@@ -2,6 +2,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db';
 import { useApp, type Screen } from '../store/app';
 import { resolveModel, useSettings } from '../store/settings';
+import { useSyncMeta } from '../sync/engine';
 import { Mono } from '../ui/bits';
 
 const ITEMS: Array<[string, string, Screen]> = [
@@ -25,6 +26,7 @@ export function Rail() {
     [currentWorldId]
   );
   const resolved = resolveModel(world?.proseModel ?? proseModel);
+  const syncError = useSyncMeta((s) => s.error);
 
   return (
     <nav style={{
@@ -38,6 +40,19 @@ export function Rail() {
           <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.14em', opacity: 0.5, paddingLeft: 6 }}>AI</span>
         </div>
         <Mono>everything you've ever wanted</Mono>
+        {syncError && (
+          <button
+            className="btn-quiet"
+            style={{
+              alignSelf: 'flex-start', marginTop: 6, fontSize: 10, padding: '4px 8px',
+              color: 'rgba(240,180,160,0.95)', border: '1px solid rgba(220,110,90,0.35)'
+            }}
+            onClick={() => go('profile')}
+            title={syncError}
+          >
+            sync failed · open Profile
+          </button>
+        )}
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>

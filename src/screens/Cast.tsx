@@ -1,7 +1,7 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef, useState } from 'react';
 import { draftCharacter, fleshOutCharacter } from '../ai/engine';
-import { db } from '../db';
+import { db, recordTombstones } from '../db';
 import { useApp } from '../store/app';
 import type { Character, Relationship } from '../types';
 import { Chip, ErrorNote, Field, Mono, Spinner, useVw } from '../ui/bits';
@@ -380,6 +380,7 @@ export function Cast() {
                     className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
                     onClick={async () => {
                       if (confirm(`Remove ${d.name || 'this character'} from the world?`)) {
+                        await recordTombstones([{ table: 'characters', id: d.id, worldId: d.worldId, payload: d }]);
                         await db.characters.delete(d.id);
                         setSelectedId(null);
                       }

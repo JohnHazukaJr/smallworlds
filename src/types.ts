@@ -73,6 +73,8 @@ export interface Season {
   bible: SeasonBible | null;
   status: 'active' | 'wrapped';
   createdAt: number;
+  /** bumped on mutating writes — used for sync LWW */
+  updatedAt?: number;
 }
 
 export interface Episode {
@@ -95,6 +97,8 @@ export interface Episode {
   castIds: string[];
   status: 'active' | 'ended';
   createdAt: number;
+  /** bumped on mutating writes — used for sync LWW */
+  updatedAt?: number;
 }
 
 export type TurnRole = 'user' | 'narrator' | 'character';
@@ -112,6 +116,7 @@ export interface Turn {
   characterId?: string;
   text: string;
   createdAt: number;
+  updatedAt?: number;
 }
 
 // ---------- Characters ----------
@@ -220,6 +225,7 @@ export interface ContinuityFact {
   text: string;
   source: 'auto' | 'manual';
   createdAt: number;
+  updatedAt?: number;
 }
 
 export interface OpenThread {
@@ -231,6 +237,7 @@ export interface OpenThread {
   openedLabel: string;
   status: 'open' | 'resolved';
   createdAt: number;
+  updatedAt?: number;
 }
 
 // ---------- Season wrap / sequel ----------
@@ -265,6 +272,7 @@ export interface SeasonWrap {
   premise: string;
   status: 'draft' | 'committed';
   createdAt: number;
+  updatedAt?: number;
 }
 
 // ---------- Providers & settings (persisted in localStorage) ----------

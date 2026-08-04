@@ -129,10 +129,11 @@ function SecuritySection() {
               )}
             </div>
             <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
-              Sets a passphrase that locks the app and encrypts your API keys at rest (AES-256-GCM; the key is derived
-              from your passphrase and never stored). Anyone opening this browser sees a lock screen instead of your
-              stories and keys. If you forget the passphrase, keys on this device are wiped — export a device backup
-              from Profile first so you can restore them. Stories stay either way.
+              Sets a passphrase that locks the app UI and encrypts your API keys at rest (AES-256-GCM; the key is
+              derived from your passphrase and never stored). Story text in IndexedDB is not encrypted by this lock —
+              only keys are. Anyone with device access can still read worlds via DevTools. If you forget the
+              passphrase, keys on this device are wiped — export a device backup from Profile first. Stories stay
+              either way.
             </div>
           </div>
           {!vault.enabled ? (
@@ -169,7 +170,7 @@ function SecuritySection() {
       <PassphraseDialog
         open={dialog === 'enable'}
         title="Set a passphrase"
-        description="Locks the app and encrypts your API keys on this device. Pick something you won't lose — it can't be recovered or reset without wiping the keys."
+        description="Locks the app UI and encrypts your API keys on this device. Story text in IndexedDB is not encrypted. Pick a passphrase you won't lose — it can't be recovered without wiping the keys."
         mode="set"
         submitLabel="Encrypt & lock in"
         busy={busy}

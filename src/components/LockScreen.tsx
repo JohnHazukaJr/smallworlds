@@ -37,7 +37,7 @@ export function LockScreen() {
             Small Worlds
             <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.14em', opacity: 0.5, paddingLeft: 6 }}>AI</span>
           </div>
-          <Mono>locked · your keys are encrypted on this device</Mono>
+          <Mono>locked · API keys encrypted · stories stay in IndexedDB</Mono>
         </div>
         <input
           type="password"
@@ -53,8 +53,10 @@ export function LockScreen() {
           {busy ? 'Unlocking…' : 'Unlock'}
         </button>
         <div style={{ fontSize: 12, lineHeight: 1.6, color: 'rgba(236,234,230,0.45)' }}>
-          Your stories are on this device and unaffected by the lock. The passphrase only protects your API keys —
-          it was never sent anywhere and cannot be recovered. If you reset it, any keys not in a device backup are gone.
+          The lock encrypts your API keys and hides the app UI. Story text stays readable in this browser&apos;s
+          IndexedDB — it is not encrypted by the passphrase. Protect the device (OS encryption) if that matters.
+          The passphrase was never sent anywhere and cannot be recovered. Resetting it wipes keys on this device
+          unless you have a device backup.
         </div>
         <button
           className="btn-quiet"

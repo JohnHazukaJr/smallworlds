@@ -44,8 +44,8 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
 
   const patchWorld = (p: Partial<World>) => void db.worlds.update(world.id, { ...p, updatedAt: Date.now() });
   const patchAI = (p: Partial<WorldAISettings>) => patchWorld({ ai: { ...world.ai, ...p } });
-  const patchSeason = (p: Partial<Season>) => void db.seasons.update(season.id, p);
-  const patchEpisode = (p: Partial<Episode>) => void db.episodes.update(episode.id, p);
+  const patchSeason = (p: Partial<Season>) => void db.seasons.update(season.id, { ...p, updatedAt: Date.now() });
+  const patchEpisode = (p: Partial<Episode>) => void db.episodes.update(episode.id, { ...p, updatedAt: Date.now() });
   const patchChar = (id: string, p: Partial<Character>) =>
     void db.characters.update(id, { ...p, updatedAt: Date.now() });
   const patchLoc = (id: string, p: Partial<Location>) =>

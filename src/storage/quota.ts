@@ -55,15 +55,24 @@ export function formatBytes(n: number): string {
 /** Persist a soft flag so we can nudge once after QuotaExceededError. */
 export const STORAGE_PRESSURE_KEY = 'small-worlds-storage-pressure';
 
+/** Dispatched on `window` when storage pressure is marked or cleared. */
+export const STORAGE_PRESSURE_EVENT = 'sw-storage-pressure';
+
 export function markStoragePressure(): void {
   try {
     localStorage.setItem(STORAGE_PRESSURE_KEY, String(Date.now()));
+  } catch { /* ignore */ }
+  try {
+    window.dispatchEvent(new Event(STORAGE_PRESSURE_EVENT));
   } catch { /* ignore */ }
 }
 
 export function clearStoragePressure(): void {
   try {
     localStorage.removeItem(STORAGE_PRESSURE_KEY);
+  } catch { /* ignore */ }
+  try {
+    window.dispatchEvent(new Event(STORAGE_PRESSURE_EVENT));
   } catch { /* ignore */ }
 }
 

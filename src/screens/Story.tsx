@@ -1,12 +1,16 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { deleteTurnsAfter, deleteTurnsFrom, extractContinuity, proseModelFor, writeTurn, type StreamMeta } from '../ai/engine';
+import {
+  deleteTurnsAfter, deleteTurnsFrom, extractContinuity, proseModelFor,
+  rollbackTurnSnapshot, snapshotTurnsAfter, snapshotTurnsFrom, writeTurn,
+  WriteAbortedError, type StreamMeta
+} from '../ai/engine';
 import { generateSceneImage } from '../ai/image';
 import {
   episodeContextPressure, episodeHistoryChars, HISTORY_CHAR_BUDGET
 } from '../ai/prompts';
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
-import { db, uid } from '../db';
+import { db, guardStorage, recordTombstones, uid } from '../db';
 import { AVATAR_PX, DEFAULT_DISPLAY, moodFromHue, useApp, type AvatarSize, type StoryLayout } from '../store/app';
 import type { Character, ComposeMode, ContinuityFact, Episode, Location, OpenThread, Season, Turn, TurnLength, World } from '../types';
 import { Chip, ErrorNote, Mono, Sheet, Spinner, Toggle, useVw } from '../ui/bits';
@@ -190,6 +194,7 @@ export function Story() {
   const [partialMeta, setPartialMeta] = useState<StreamMeta>({ role: 'narrator' });
   const [progressLabel, setProgressLabel] = useState('writing…');
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   /** How many turns from the end are mounted — keeps long episodes responsive. */
   const [turnWindow, setTurnWindow] = useState(60);
   useEffect(() => { setTurnWindow(60); }, [episode?.id]);
@@ -260,6 +265,7 @@ export function Story() {
   const runNarration = async (mode: ComposeMode, text: string): Promise<'ok' | 'error' | 'aborted'> => {
     if (!world || !season || !episode) return 'error';
     setError('');
+    setNotice('');
     setStreaming(true);
     setPartial('');
     setPartialMeta({ role: 'narrator' });
@@ -280,11 +286,20 @@ export function Story() {
       return 'ok';
     } catch (e) {
       setPartial('');
-      if ((e as Error).name === 'AbortError') return 'aborted';
+      if (e instanceof WriteAbortedError || (e as Error).name === 'AbortError') {
+        const n = e instanceof WriteAbortedError ? e.beatsCompleted : 0;
+        setNotice(
+          n === 0
+            ? 'Stopped before any beat finished.'
+            : `Stopped after ${n} beat${n === 1 ? '' : 's'}; incomplete beat discarded.`
+        );
+        return 'aborted';
+      }
       setError(e instanceof Error ? e.message : String(e));
       return 'error';
     } finally {
       setStreaming(false);
+      setProgressLabel('');
       abortRef.current = null;
     }
   };
@@ -305,21 +320,46 @@ export function Story() {
   /**
    * Retry from a turn. For narrator/character turns: that response and everything
    * after are rewritten. For a player turn: the turn is kept and everything after
-   * is rewritten from it.
+   * is rewritten from it. Deletion commits only after a successful regenerate;
+   * on failure the prior turns are restored.
    */
   const retryFrom = async (turn: Turn) => {
     if (!episode || streaming) return;
     const idx = turns.findIndex((t) => t.id === turn.id);
     if (idx < 0) return;
     const below = turns.length - idx - 1;
-    if (turn.role === 'narrator' || turn.role === 'character') {
-      if (below > 0 && !confirm(`Rewrite this response? The ${below} turn${below > 1 ? 's' : ''} after it will be replaced.`)) return;
-      await deleteTurnsFrom(turn.id, episode.id);
-    } else {
-      if (below > 0 && !confirm(`Retry from here? The ${below} turn${below > 1 ? 's' : ''} after this will be replaced.`)) return;
-      await deleteTurnsAfter(turn.id, episode.id);
+    const replaceSelf = turn.role === 'narrator' || turn.role === 'character';
+    if (below > 0) {
+      const msg = replaceSelf
+        ? `Rewrite this response? The ${below} turn${below > 1 ? 's' : ''} after it will be replaced.`
+        : `Retry from here? The ${below} turn${below > 1 ? 's' : ''} after this will be replaced.`;
+      if (!confirm(msg)) return;
     }
-    await runNarration('continue', '');
+    const snapshot = replaceSelf
+      ? await snapshotTurnsFrom(turn.id, episode.id)
+      : await snapshotTurnsAfter(turn.id, episode.id);
+    const retryStartedAt = Date.now();
+    if (replaceSelf) await deleteTurnsFrom(turn.id, episode.id);
+    else await deleteTurnsAfter(turn.id, episode.id);
+    const result = await runNarration('continue', '');
+    if (result === 'ok') {
+      if (snapshot.length > 0) {
+        await recordTombstones(snapshot.map((t) => ({
+          table: 'turns' as const,
+          id: t.id,
+          worldId: t.worldId,
+          episodeId: t.episodeId,
+          payload: t
+        })));
+      }
+    } else {
+      await rollbackTurnSnapshot(episode.id, snapshot, retryStartedAt);
+      if (result === 'error') {
+        setError((prev) => prev || 'Retry failed — previous turns were restored.');
+      } else {
+        setNotice('Retry cancelled — previous turns were restored.');
+      }
+    }
   };
 
   /** Delete everything after a turn, keeping the turn itself. */
@@ -329,7 +369,17 @@ export function Story() {
     const below = turns.length - idx - 1;
     if (idx < 0 || below === 0) return;
     if (!confirm(`Delete the ${below} turn${below > 1 ? 's' : ''} below this one? This cannot be undone.`)) return;
+    const snapshot = await snapshotTurnsAfter(turn.id, episode.id);
     await deleteTurnsAfter(turn.id, episode.id);
+    if (snapshot.length > 0) {
+      await recordTombstones(snapshot.map((t) => ({
+        table: 'turns' as const,
+        id: t.id,
+        worldId: t.worldId,
+        episodeId: t.episodeId,
+        payload: t
+      })));
+    }
   };
 
   const endEpisode = async () => {
@@ -671,6 +721,15 @@ export function Story() {
             </div>
           )}
           {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
+          {notice && (
+            <div style={{
+              border: '1px solid rgba(224,165,95,0.35)', borderRadius: 12, padding: '11px 14px',
+              background: 'rgba(224,165,95,0.08)', display: 'flex', gap: 12, alignItems: 'flex-start'
+            }}>
+              <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,220,190,0.95)', flex: 1 }}>{notice}</div>
+              <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 14 }} onClick={() => setNotice('')}>×</button>
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             {(['continue', 'steer', 'speak', 'act'] as const).map((m) => (
               <Chip key={m} active={composeMode === m} accent={M.accent} onClick={() => setComposeMode(m)}>
@@ -869,7 +928,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
     setImgError('');
     try {
       const image = await fileToSceneImage(file);
-      await db.episodes.update(episode.id, { image });
+      await guardStorage(() => db.episodes.update(episode.id, { image, updatedAt: Date.now() }));
     } catch (e) {
       setImgError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -890,7 +949,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
         provider, model, world, location: sceneLoc,
         atmosphereNote: episode.atmosphereNote
       });
-      await db.episodes.update(episode.id, { image });
+      await guardStorage(() => db.episodes.update(episode.id, { image, updatedAt: Date.now() }));
     } catch (e) {
       setImgError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1097,7 +1156,12 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, st
         )}
         <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} disabled={streaming}
           onClick={async () => {
-            if (confirm('Delete this turn? The turns after it are kept.')) await db.turns.delete(turn.id);
+            if (confirm('Delete this turn? The turns after it are kept.')) {
+              await recordTombstones([{
+                table: 'turns', id: turn.id, worldId: turn.worldId, episodeId: turn.episodeId, payload: turn
+              }]);
+              await db.turns.delete(turn.id);
+            }
           }}>× delete</button>
       </div>
     </div>
@@ -1199,7 +1263,7 @@ function SceneLocationsPanel({ episode, locations, accent, world, onGoLocations 
         provider, model, world, location: activeLoc,
         atmosphereNote: episode.atmosphereNote
       });
-      await db.episodes.update(episode.id, { image });
+      await guardStorage(() => db.episodes.update(episode.id, { image, updatedAt: Date.now() }));
     } catch (e) {
       setGenError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1303,7 +1367,12 @@ function ContinuityPanel({ continuity, world, season }: { continuity: Continuity
           <div style={{ fontSize: 12, lineHeight: 1.45, opacity: 0.68, paddingLeft: 12, borderLeft: '1px solid rgba(255,255,255,0.14)', flex: 1, color: '#eceae6' }}>
             {f.text}
           </div>
-          <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 12 }} onClick={() => void db.continuity.delete(f.id)}>×</button>
+          <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 12 }} onClick={() => void (async () => {
+            await recordTombstones([{
+              table: 'continuity', id: f.id, worldId: f.worldId, seasonId: f.seasonId, payload: f
+            }]);
+            await db.continuity.delete(f.id);
+          })()}>×</button>
         </div>
       ))}
       <div style={{ display: 'flex', gap: 6 }}>

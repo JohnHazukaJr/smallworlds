@@ -1,7 +1,7 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef, useState } from 'react';
 import { draftLocation, fleshOutLocation } from '../ai/engine';
-import { db } from '../db';
+import { db, recordTombstones } from '../db';
 import { useApp } from '../store/app';
 import type { Location } from '../types';
 import { ErrorNote, Field, Mono, Spinner, useVw } from '../ui/bits';
@@ -282,6 +282,7 @@ export function Locations() {
                   className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
                   onClick={async () => {
                     if (confirm(`Remove ${d.name || 'this location'} from the world?`)) {
+                      await recordTombstones([{ table: 'locations', id: d.id, worldId: d.worldId, payload: d }]);
                       await db.locations.delete(d.id);
                       setSelectedId(null);
                     }

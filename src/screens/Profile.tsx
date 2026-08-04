@@ -393,6 +393,12 @@ function AccountSection({ onError }: { onError: (msg: string) => void }) {
         last synced · {last}
         {sync.lastResult ? ` · ${sync.lastResult}` : ''}
       </div>
+      {sync.error && (
+        <ErrorNote
+          error={`Sync failed: ${sync.error}`}
+          onDismiss={() => useSyncMeta.setState({ error: '' })}
+        />
+      )}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button
           className="btn-primary"

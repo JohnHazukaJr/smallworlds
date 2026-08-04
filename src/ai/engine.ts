@@ -1,4 +1,4 @@
-import { db, uid } from '../db';
+import { db, guardStorage, recordTombstones, uid } from '../db';
 import { resolveModel, useSettings } from '../store/settings';
 import { GAP_DAYS, GAP_LABELS } from '../ui/theme';
 import type {
@@ -145,6 +145,24 @@ function applyCastDelta(
   return next;
 }
 
+/** Thrown when the user aborts mid-write; completed beats are already persisted. */
+export class WriteAbortedError extends Error {
+  readonly name = 'AbortError';
+  constructor(public beatsCompleted: number) {
+    super('Aborted');
+  }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined, beatsCompleted: number): void {
+  if (signal?.aborted) throw new WriteAbortedError(beatsCompleted);
+}
+
+function asWriteAbort(e: unknown, beatsCompleted: number): never {
+  if (e instanceof WriteAbortedError) throw e;
+  if ((e as Error)?.name === 'AbortError') throw new WriteAbortedError(beatsCompleted);
+  throw e;
+}
+
 /**
  * Core writing loop: persist the user turn (unless continue), plan beats with
  * the director, then stream narrator (narration-only) and character agents.
@@ -155,13 +173,14 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
   const ctx = await loadContext(opts.world, opts.season, opts.episode);
   let castIds = [...opts.episode.castIds];
   let inScene = ctx.characters.filter((c) => castIds.includes(c.id) && !c.isPlayer);
+  let beatsCompleted = 0;
 
   if (opts.mode !== 'continue' && opts.input.trim()) {
     const userTurn: Turn = {
       id: uid(), episodeId: opts.episode.id, worldId: opts.world.id,
       role: 'user', mode: opts.mode, text: opts.input.trim(), createdAt: Date.now()
     };
-    await db.turns.add(userTurn);
+    await guardStorage(() => db.turns.add(userTurn));
     ctx.turns.push(userTurn);
   }
 
@@ -183,14 +202,14 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
     );
     const nextCast = applyCastDelta(castIds, ctx.characters, plan.castDelta);
     if (nextCast.join('\0') !== castIds.join('\0')) {
-      await db.episodes.update(opts.episode.id, { castIds: nextCast });
+      await db.episodes.update(opts.episode.id, { castIds: nextCast, updatedAt: Date.now() });
       castIds = nextCast;
       ctx.episode = { ...ctx.episode, castIds: nextCast };
       inScene = ctx.characters.filter((c) => castIds.includes(c.id) && !c.isPlayer);
     }
     beats = normalizeBeats(plan, inScene);
   } catch (e) {
-    if ((e as Error).name === 'AbortError') throw e;
+    if ((e as Error).name === 'AbortError') asWriteAbort(e, beatsCompleted);
     // Fall back to a single narration beat if the director fails.
     beats = [{
       type: 'narration',
@@ -199,87 +218,129 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
   }
 
   let lastId = '';
-  for (const beat of beats) {
-    if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+  try {
+    for (const beat of beats) {
+      throwIfAborted(opts.signal, beatsCompleted);
 
-    if (beat.type === 'narration') {
-      const meta: StreamMeta = { role: 'narrator' };
-      progress('narrating…');
+      if (beat.type === 'narration') {
+        const meta: StreamMeta = { role: 'narrator' };
+        progress('narrating…');
+        opts.onDelta('', meta);
+        let acc = '';
+        const text = await streamChat({
+          provider, model,
+          system: buildNarratorSystemPrompt(ctx),
+          messages: buildNarrationBeatMessages(ctx.turns, ctx.characters, beat.brief, opts.length),
+          maxTokens: narrationBeatTokens(opts.length),
+          signal: opts.signal,
+          onDelta: (d) => { acc += d; opts.onDelta(acc, meta); }
+        });
+        const narrText = text.trim();
+        if (!narrText) {
+          opts.onDelta('', meta);
+          continue;
+        }
+        const narratorTurn: Turn = {
+          id: uid(), episodeId: opts.episode.id, worldId: opts.world.id,
+          role: 'narrator', mode: null, text: narrText, createdAt: Date.now()
+        };
+        await guardStorage(() => db.turns.add(narratorTurn));
+        ctx.turns.push(narratorTurn);
+        lastId = narratorTurn.id;
+        beatsCompleted++;
+        opts.onDelta('', meta);
+        continue;
+      }
+
+      const speaking = ctx.characters.find((c) => c.id === beat.characterId);
+      if (!speaking || speaking.isPlayer) continue;
+
+      const meta: StreamMeta = { role: 'character', characterId: speaking.id };
+      progress(`${speaking.name} speaking…`);
       opts.onDelta('', meta);
       let acc = '';
       const text = await streamChat({
         provider, model,
-        system: buildNarratorSystemPrompt(ctx),
-        messages: buildNarrationBeatMessages(ctx.turns, ctx.characters, beat.brief, opts.length),
-        maxTokens: narrationBeatTokens(opts.length),
+        system: buildCharacterSystemPrompt(ctx, speaking),
+        messages: buildCharacterSpeakMessages(ctx.turns, ctx.characters, speaking, beat.brief),
+        maxTokens: characterSpeakTokens(),
         signal: opts.signal,
         onDelta: (d) => { acc += d; opts.onDelta(acc, meta); }
       });
-      const narrText = text.trim();
-      if (!narrText) {
+      const cleaned = text.trim().replace(/^[A-Z][^:\n]{0,48}:\s*/, '').trim();
+      if (!cleaned) {
         opts.onDelta('', meta);
         continue;
       }
-      const narratorTurn: Turn = {
+      const characterTurn: Turn = {
         id: uid(), episodeId: opts.episode.id, worldId: opts.world.id,
-        role: 'narrator', mode: null, text: narrText, createdAt: Date.now()
+        role: 'character', mode: null, characterId: speaking.id,
+        text: cleaned, createdAt: Date.now()
       };
-      await db.turns.add(narratorTurn);
-      ctx.turns.push(narratorTurn);
-      lastId = narratorTurn.id;
+      await guardStorage(() => db.turns.add(characterTurn));
+      ctx.turns.push(characterTurn);
+      lastId = characterTurn.id;
+      beatsCompleted++;
       opts.onDelta('', meta);
-      continue;
     }
-
-    const speaking = ctx.characters.find((c) => c.id === beat.characterId);
-    if (!speaking || speaking.isPlayer) continue;
-
-    const meta: StreamMeta = { role: 'character', characterId: speaking.id };
-    progress(`${speaking.name} speaking…`);
-    opts.onDelta('', meta);
-    let acc = '';
-    const text = await streamChat({
-      provider, model,
-      system: buildCharacterSystemPrompt(ctx, speaking),
-      messages: buildCharacterSpeakMessages(ctx.turns, ctx.characters, speaking, beat.brief),
-      maxTokens: characterSpeakTokens(),
-      signal: opts.signal,
-      onDelta: (d) => { acc += d; opts.onDelta(acc, meta); }
-    });
-    const cleaned = text.trim().replace(/^[A-Z][^:\n]{0,48}:\s*/, '').trim();
-    if (!cleaned) {
-      opts.onDelta('', meta);
-      continue;
-    }
-    const characterTurn: Turn = {
-      id: uid(), episodeId: opts.episode.id, worldId: opts.world.id,
-      role: 'character', mode: null, characterId: speaking.id,
-      text: cleaned, createdAt: Date.now()
-    };
-    await db.turns.add(characterTurn);
-    ctx.turns.push(characterTurn);
-    lastId = characterTurn.id;
-    opts.onDelta('', meta);
+  } catch (e) {
+    asWriteAbort(e, beatsCompleted);
   }
 
   await db.worlds.update(opts.world.id, { updatedAt: Date.now() });
   return lastId;
 }
 
-/** Delete a turn and everything after it (used by regenerate / retry). */
-export async function deleteTurnsFrom(turnId: string, episodeId: string): Promise<void> {
+/** Snapshot turns that would be removed by deleteTurnsFrom (inclusive). */
+export async function snapshotTurnsFrom(turnId: string, episodeId: string): Promise<Turn[]> {
   const turns = await db.turns.where('episodeId').equals(episodeId).sortBy('createdAt');
   const idx = turns.findIndex((t) => t.id === turnId);
-  if (idx < 0) return;
-  await db.turns.bulkDelete(turns.slice(idx).map((t) => t.id));
+  if (idx < 0) return [];
+  return turns.slice(idx);
+}
+
+/** Snapshot turns that would be removed by deleteTurnsAfter (exclusive of turnId). */
+export async function snapshotTurnsAfter(turnId: string, episodeId: string): Promise<Turn[]> {
+  const turns = await db.turns.where('episodeId').equals(episodeId).sortBy('createdAt');
+  const idx = turns.findIndex((t) => t.id === turnId);
+  if (idx < 0) return [];
+  return turns.slice(idx + 1);
+}
+
+/** Restore previously snapshotted turns (e.g. after a failed retry). */
+export async function restoreTurns(turns: Turn[]): Promise<void> {
+  if (turns.length === 0) return;
+  await db.turns.bulkPut(turns);
+}
+
+/** Delete a turn and everything after it (used by regenerate / retry). */
+export async function deleteTurnsFrom(turnId: string, episodeId: string): Promise<void> {
+  const turns = await snapshotTurnsFrom(turnId, episodeId);
+  if (turns.length === 0) return;
+  await db.turns.bulkDelete(turns.map((t) => t.id));
 }
 
 /** Delete everything after a turn, keeping the turn itself. */
 export async function deleteTurnsAfter(turnId: string, episodeId: string): Promise<void> {
-  const turns = await db.turns.where('episodeId').equals(episodeId).sortBy('createdAt');
-  const idx = turns.findIndex((t) => t.id === turnId);
-  if (idx < 0) return;
-  await db.turns.bulkDelete(turns.slice(idx + 1).map((t) => t.id));
+  const turns = await snapshotTurnsAfter(turnId, episodeId);
+  if (turns.length === 0) return;
+  await db.turns.bulkDelete(turns.map((t) => t.id));
+}
+
+/**
+ * After a failed retry: remove turns written during the attempt and put the
+ * snapshot back. Does not record sync tombstones (caller handles that on success).
+ */
+export async function rollbackTurnSnapshot(
+  episodeId: string,
+  snapshot: Turn[],
+  retryStartedAt: number
+): Promise<void> {
+  const snapIds = new Set(snapshot.map((t) => t.id));
+  const current = await db.turns.where('episodeId').equals(episodeId).toArray();
+  const extras = current.filter((t) => !snapIds.has(t.id) && t.createdAt >= retryStartedAt);
+  if (extras.length > 0) await db.turns.bulkDelete(extras.map((t) => t.id));
+  await restoreTurns(snapshot);
 }
 
 // ---------- Utility calls (JSON tasks on the utility model) ----------
@@ -404,7 +465,12 @@ export async function analyzeSeason(world: World, season: Season): Promise<Seaso
   };
   // One draft wrap per season: replace any previous draft.
   const old = await db.wraps.where('seasonId').equals(season.id).filter((w) => w.status === 'draft').toArray();
-  await db.wraps.bulkDelete(old.map((w) => w.id));
+  if (old.length > 0) {
+    await recordTombstones(old.map((w) => ({
+      table: 'wraps' as const, id: w.id, worldId: w.worldId, seasonId: w.seasonId, payload: w
+    })));
+    await db.wraps.bulkDelete(old.map((w) => w.id));
+  }
   await db.wraps.add(wrap);
   return wrap;
 }
