@@ -5,6 +5,7 @@ import { db } from '../db';
 import { useApp } from '../store/app';
 import type { Location } from '../types';
 import { ErrorNote, Field, Mono, Spinner, useVw } from '../ui/bits';
+import { fileToSceneImage } from '../ui/image';
 import { avatarStyle, STRIPE } from '../ui/theme';
 import { emptyLocation } from '../worldOps';
 
@@ -44,6 +45,9 @@ export function Locations() {
   const [fleshBusy, setFleshBusy] = useState(false);
   const [fleshError, setFleshError] = useState('');
   const [undoSnapshot, setUndoSnapshot] = useState<Location | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [portraitBusy, setPortraitBusy] = useState(false);
+  const [portraitError, setPortraitError] = useState('');
 
   const world = useLiveQuery(
     async () => (currentWorldId ? db.worlds.get(currentWorldId) : undefined),
@@ -62,12 +66,34 @@ export function Locations() {
     if (!selected) setDraft(null);
     setFleshError('');
     setUndoSnapshot(null);
+    setPortraitError('');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id]);
 
   useAutosave(draft);
 
   const patch = (p: Partial<Location>) => setDraft((d) => (d ? { ...d, ...p } : d));
+
+  const onPortraitFile = async (file: File) => {
+    if (!draft) return;
+    setPortraitBusy(true);
+    setPortraitError('');
+    try {
+      const portrait = await fileToSceneImage(file, 900, 0.85);
+      await db.locations.update(draft.id, { portrait, updatedAt: Date.now() });
+      patch({ portrait });
+    } catch (e) {
+      setPortraitError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPortraitBusy(false);
+    }
+  };
+
+  const removePortrait = async () => {
+    if (!draft) return;
+    await db.locations.update(draft.id, { portrait: null, updatedAt: Date.now() });
+    patch({ portrait: null });
+  };
 
   const fleshOut = async () => {
     if (!draft) return;
@@ -154,7 +180,7 @@ export function Locations() {
               border: `1px solid ${active ? 'rgba(255,255,255,0.14)' : 'transparent'}`,
               backdropFilter: active ? 'blur(18px)' : undefined
             }}>
-              <div style={avatarStyle(l.hue, 34)} />
+              <div style={{ ...avatarStyle(l.hue, 34), ...(l.portrait ? { backgroundImage: `url(${l.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}) }} />
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
                 <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9', whiteSpace: 'nowrap' }}>{l.name || 'unnamed'}</div>
                 {!narrow && (
@@ -208,12 +234,28 @@ export function Locations() {
                 <div style={{
                   height: narrow ? 160 : 306, borderRadius: 16, border: '1px solid rgba(255,255,255,0.12)',
                   display: 'flex', alignItems: 'flex-end', padding: 12,
-                  background: `linear-gradient(155deg, oklch(0.5 0.06 ${d.hue} / 0.7), rgba(8,9,12,0.9)), ${STRIPE('rgba(255,255,255,0.06)', 'rgba(255,255,255,0.015)')}`
+                  backgroundImage: d.portrait
+                    ? `url(${d.portrait})`
+                    : `linear-gradient(155deg, oklch(0.5 0.06 ${d.hue} / 0.7), rgba(8,9,12,0.9)), ${STRIPE('rgba(255,255,255,0.06)', 'rgba(255,255,255,0.015)')}`,
+                  backgroundSize: 'cover', backgroundPosition: 'center'
                 }}>
-                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.62)', background: 'rgba(8,9,12,0.5)', backdropFilter: 'blur(6px)', padding: '5px 8px', borderRadius: 6 }}>
-                    location plate · imagery coming soon
-                  </span>
+                  {!d.portrait && (
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.62)', background: 'rgba(8,9,12,0.5)', backdropFilter: 'blur(6px)', padding: '5px 8px', borderRadius: 6 }}>
+                      location plate · no photo yet
+                    </span>
+                  )}
                 </div>
+                <input
+                  ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }}
+                  onChange={(e) => { const f = e.target.files?.[0]; if (f) void onPortraitFile(f); e.target.value = ''; }}
+                />
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }} disabled={portraitBusy} onClick={() => fileRef.current?.click()}>
+                    {portraitBusy ? 'Uploading…' : d.portrait ? 'Change photo' : 'Upload photo'}
+                  </button>
+                  {d.portrait && <button className="btn-quiet" style={{ fontSize: 11 }} onClick={() => void removePortrait()}>remove photo</button>}
+                </div>
+                {portraitError && <ErrorNote error={portraitError} onDismiss={() => setPortraitError('')} />}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <Mono style={{ fontSize: 9 }}>plate hue</Mono>
                   <input

@@ -6,7 +6,7 @@ import { useApp } from '../store/app';
 import type { Character, Episode, Season, World, WorldAISettings } from '../types';
 import { Bar, Chip, ErrorNote, Field, Mono, Sheet, Spinner, Toggle } from '../ui/bits';
 import { avatarStyle } from '../ui/theme';
-import { emptyCharacter } from '../worldOps';
+import { emptyCharacter, worldCalendar } from '../worldOps';
 
 type Tab = 'lore' | 'plot' | 'instructions' | 'settings' | 'cast';
 
@@ -145,6 +145,18 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 <ErrorNote error={flesh.error} onDismiss={() => setFlesh({ busy: null, error: '', errorFor: null })} />
               )}
             </div>
+            <Field label="Calendar" note="advances automatically each episode and season gap">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: '#f0eee9' }}>
+                  Day {worldCalendar(world).currentDay}
+                </div>
+                <Chip onClick={() => patchWorld({ calendar: { ...worldCalendar(world), currentDay: worldCalendar(world).currentDay + 1 } })}>+1 day</Chip>
+                <Chip onClick={() => patchWorld({ calendar: { ...worldCalendar(world), currentDay: worldCalendar(world).currentDay + 7 } })}>+7 days</Chip>
+              </div>
+              <textarea key={world.id + '-cal-system'} rows={2} defaultValue={worldCalendar(world).system}
+                onBlur={(e) => patchWorld({ calendar: { ...worldCalendar(world), system: e.target.value } })}
+                placeholder="Optional — describe this world's calendar system (month names, seasons, etc). Left blank, the narrator just tracks the day count." />
+            </Field>
             <Field label="Season title" note="optional">
               <input key={season.id + '-title'} defaultValue={season.title}
                 onBlur={(e) => patchSeason({ title: e.target.value })} />
@@ -307,7 +319,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               </div>
               <button className="btn-quiet" style={{ fontSize: 10 }} onClick={() => { onClose(); go('cast'); }}>full editor</button>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
               <Field label="Name">
                 <input key={selected.id + '-name'} defaultValue={selected.name}
                   onBlur={(e) => patchChar(selected.id, { name: e.target.value })} />
@@ -337,7 +349,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <textarea key={selected.id + '-voice'} rows={2} defaultValue={selected.speechStyle}
                 onBlur={(e) => patchChar(selected.id, { speechStyle: e.target.value })} />
             </Field>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
               <Field label="Desires">
                 <textarea key={selected.id + '-desires'} rows={2} defaultValue={selected.desires}
                   onBlur={(e) => patchChar(selected.id, { desires: e.target.value })} />
@@ -364,7 +376,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 onBlur={(e) => patchChar(selected.id, { customInstructions: e.target.value })} />
             </Field>
             <Mono style={{ fontSize: 9 }}>current state — right now in the story</Mono>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
               {([['goal', 'Goal'], ['emotion', 'Emotion'], ['location', 'Location'], ['condition', 'Condition']] as const).map(([k, label]) => (
                 <Field key={k} label={label}>
                   <input key={selected.id + '-st-' + k} defaultValue={selected.state[k]} style={MONO_INPUT}

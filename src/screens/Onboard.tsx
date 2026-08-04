@@ -1,12 +1,13 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { fleshOutCharacter, fleshOutLocation, fleshOutNarratorRules, fleshOutPremise, fleshOutWorldLore } from '../ai/engine';
 import { db } from '../db';
 import { useApp } from '../store/app';
 import { useSettings } from '../store/settings';
 import type { Character, Location, Season, World, WorldAISettings } from '../types';
 import { Bar, Chip, ErrorNote, Field, Mono, Spinner, Toggle, useVw } from '../ui/bits';
-import { STRIPE } from '../ui/theme';
+import { fileToSceneImage } from '../ui/image';
+import { avatarStyle, STRIPE } from '../ui/theme';
 import { createWorld, DEFAULT_AI, emptyCharacter, emptyLocation } from '../worldOps';
 
 const SHAPES = [
@@ -47,7 +48,7 @@ function previewWorld(title: string, seed: string, ai: WorldAISettings): World {
   return {
     id: '', title: title || 'Untitled world', line: seed.slice(0, 140), bible: seed,
     hue: 0, visibility: 'private', ai, proseModel: null, utilityModel: null,
-    activeSeasonId: null, createdAt: 0, updatedAt: 0
+    activeSeasonId: null, calendar: { currentDay: 1, system: '' }, createdAt: 0, updatedAt: 0
   };
 }
 
@@ -203,6 +204,17 @@ export function Onboard() {
   const removeCastEntry = async (id: string) => {
     await db.characters.delete(id);
     if (episode) await db.episodes.update(episode.id, { castIds: episode.castIds.filter((cid) => cid !== id) });
+  };
+
+  const toggleSelfTag = async (id: string) => {
+    const c = characters.find((x) => x.id === id);
+    if (!c) return;
+    const next = !c.selfTag;
+    if (next) {
+      const others = characters.filter((x) => x.id !== id && x.selfTag);
+      await Promise.all(others.map((x) => db.characters.update(x.id, { selfTag: false, updatedAt: Date.now() })));
+    }
+    await db.characters.update(id, { selfTag: next, updatedAt: Date.now() });
   };
 
   const addPlacePlain = async () => {
@@ -413,6 +425,7 @@ export function Onboard() {
                       onToggle={() => setExpandedCastId((id) => (id === c.id ? null : c.id))}
                       onRemove={() => void removeCastEntry(c.id)}
                       onPatch={(p) => void db.characters.update(c.id, { ...p, updatedAt: Date.now() })}
+                      onToggleSelfTag={() => void toggleSelfTag(c.id)}
                     />
                   ))}
                 </div>
@@ -616,14 +629,32 @@ function SliderCard({ label, value, onChange, note, valueLabel }: {
   );
 }
 
-function CastCard({ c, expanded, onToggle, onRemove, onPatch }: {
-  c: Character; expanded: boolean; onToggle: () => void; onRemove: () => void; onPatch: (p: Partial<Character>) => void;
+function CastCard({ c, expanded, onToggle, onRemove, onPatch, onToggleSelfTag }: {
+  c: Character; expanded: boolean; onToggle: () => void; onRemove: () => void;
+  onPatch: (p: Partial<Character>) => void; onToggleSelfTag: () => void;
 }) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const onFile = async (file: File) => {
+    setBusy(true);
+    setError('');
+    try {
+      onPatch({ portrait: await fileToSceneImage(file, 900, 0.85) });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="glass" style={{ borderRadius: 12, overflow: 'hidden' }}>
       <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }} onClick={onToggle}>
+        <div style={{ ...avatarStyle(c.hue, 34), flexShrink: 0, ...(c.portrait ? { backgroundImage: `url(${c.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}) }} />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>{c.name || 'unnamed'}</div>
+          <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>{c.name || 'unnamed'}{c.selfTag ? ' · me' : ''}</div>
           {c.role && (
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.5)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
               {c.role}
@@ -635,9 +666,23 @@ function CastCard({ c, expanded, onToggle, onRemove, onPatch }: {
       </div>
       {expanded && (
         <div style={{ padding: '2px 14px 14px', display: 'flex', flexDirection: 'column', gap: 10 }} onClick={(e) => e.stopPropagation()}>
+          <input
+            ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }}
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); e.target.value = ''; }}
+          />
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }} disabled={busy} onClick={() => fileRef.current?.click()}>
+              {busy ? 'Uploading…' : c.portrait ? 'Change photo' : 'Upload photo'}
+            </button>
+            {c.portrait && <button className="btn-quiet" style={{ fontSize: 11 }} onClick={() => onPatch({ portrait: null })}>remove photo</button>}
+            <button className="btn-quiet" style={{ fontSize: 11 }} onClick={onToggleSelfTag}>
+              {c.selfTag ? '✓ tagged as me — untag' : 'tag as "this is me"'}
+            </button>
+          </div>
+          {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
           <Field label="Who they are"><textarea rows={3} defaultValue={c.summary} onBlur={(e) => onPatch({ summary: e.target.value })} /></Field>
           <Field label="Backstory"><textarea rows={2} defaultValue={c.backstory} onBlur={(e) => onPatch({ backstory: e.target.value })} /></Field>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
             <Field label="Desires"><textarea rows={2} defaultValue={c.desires} onBlur={(e) => onPatch({ desires: e.target.value })} /></Field>
             <Field label="Fears"><textarea rows={2} defaultValue={c.fears} onBlur={(e) => onPatch({ fears: e.target.value })} /></Field>
           </div>
@@ -654,9 +699,26 @@ function CastCard({ c, expanded, onToggle, onRemove, onPatch }: {
 function PlaceCard({ l, expanded, onToggle, onRemove, onPatch }: {
   l: Location; expanded: boolean; onToggle: () => void; onRemove: () => void; onPatch: (p: Partial<Location>) => void;
 }) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const onFile = async (file: File) => {
+    setBusy(true);
+    setError('');
+    try {
+      onPatch({ portrait: await fileToSceneImage(file, 900, 0.85) });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="glass" style={{ borderRadius: 12, overflow: 'hidden' }}>
       <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }} onClick={onToggle}>
+        <div style={{ ...avatarStyle(l.hue, 34), flexShrink: 0, ...(l.portrait ? { backgroundImage: `url(${l.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}) }} />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
           <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>{l.name || 'unnamed'}</div>
           {l.tagline && (
@@ -670,6 +732,17 @@ function PlaceCard({ l, expanded, onToggle, onRemove, onPatch }: {
       </div>
       {expanded && (
         <div style={{ padding: '2px 14px 14px', display: 'flex', flexDirection: 'column', gap: 10 }} onClick={(e) => e.stopPropagation()}>
+          <input
+            ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }}
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); e.target.value = ''; }}
+          />
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }} disabled={busy} onClick={() => fileRef.current?.click()}>
+              {busy ? 'Uploading…' : l.portrait ? 'Change photo' : 'Upload photo'}
+            </button>
+            {l.portrait && <button className="btn-quiet" style={{ fontSize: 11 }} onClick={() => onPatch({ portrait: null })}>remove photo</button>}
+          </div>
+          {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
           <Field label="What it is"><textarea rows={3} defaultValue={l.summary} onBlur={(e) => onPatch({ summary: e.target.value })} /></Field>
           <Field label="Atmosphere"><textarea rows={2} defaultValue={l.atmosphere} onBlur={(e) => onPatch({ atmosphere: e.target.value })} /></Field>
           <Field label="History"><textarea rows={2} defaultValue={l.history} onBlur={(e) => onPatch({ history: e.target.value })} /></Field>

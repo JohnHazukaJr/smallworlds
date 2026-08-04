@@ -1,6 +1,11 @@
 import { db, uid } from './db';
 import { useSettings } from './store/settings';
-import type { Character, Episode, Location, Season, World, WorldAISettings } from './types';
+import type { Character, Episode, Location, Season, World, WorldAISettings, WorldCalendar } from './types';
+
+/** Worlds created before the calendar field existed won't have it — always read through this. */
+export function worldCalendar(world: World): WorldCalendar {
+  return world.calendar ?? { currentDay: 1, system: '' };
+}
 
 export const DEFAULT_AI: WorldAISettings = {
   pov: 'second',
@@ -41,6 +46,7 @@ export async function createWorld(input: NewWorldInput): Promise<World> {
     proseModel: null,
     utilityModel: null,
     activeSeasonId: seasonId,
+    calendar: { currentDay: 1, system: '' },
     createdAt: now,
     updatedAt: now
   };
@@ -73,7 +79,7 @@ export function emptyCharacter(worldId: string, patch: Partial<Character> = {}):
   const now = Date.now();
   return {
     id: uid(), worldId,
-    name: '', role: '', hue: Math.floor(Math.random() * 360), isPlayer: false,
+    name: '', role: '', hue: Math.floor(Math.random() * 360), isPlayer: false, selfTag: false,
     age: '', appearance: '', mannerisms: '', backstory: '', summary: '',
     speechStyle: '', exampleLines: [],
     traits: '', desires: '', fears: '', flaws: '',
@@ -104,9 +110,14 @@ export async function nextEpisode(current: Episode): Promise<Episode> {
     number: current.number + 1, title: '', location: current.location,
     castIds: current.castIds, status: 'active', createdAt: Date.now()
   };
-  await db.transaction('rw', [db.episodes], async () => {
+  await db.transaction('rw', [db.episodes, db.worlds], async () => {
     await db.episodes.update(current.id, { status: 'ended' });
     await db.episodes.add(next);
+    const world = await db.worlds.get(current.worldId);
+    if (world) {
+      const cal = worldCalendar(world);
+      await db.worlds.update(world.id, { calendar: { ...cal, currentDay: cal.currentDay + 1 } });
+    }
   });
   return next;
 }

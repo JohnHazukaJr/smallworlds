@@ -8,7 +8,7 @@ import type { Character, ComposeMode, ContinuityFact, Episode, OpenThread, Seaso
 import { Chip, ErrorNote, Mono, Sheet, Spinner, useVw } from '../ui/bits';
 import { fileToSceneImage } from '../ui/image';
 import { avatarStyle, BACKDROPS, MOODS, STRIPE } from '../ui/theme';
-import { nextEpisode } from '../worldOps';
+import { nextEpisode, worldCalendar } from '../worldOps';
 
 // ---------- prose rendering ----------
 
@@ -320,7 +320,7 @@ export function Story() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
             <div className="serif" style={{ fontSize: 16, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{world.title}</div>
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.1em', opacity: 0.5 }}>
-              season {season.number} · episode {episode.number}{episode.location ? ` · ${episode.location.split(',')[0].split('.')[0].toLowerCase()}` : ''} · {M.label.toLowerCase()}
+              season {season.number} · episode {episode.number}{episode.location ? ` · ${episode.location.split(',')[0].split('.')[0].toLowerCase()}` : ''} · day {worldCalendar(world).currentDay} · {M.label.toLowerCase()}
             </div>
           </div>
         </div>

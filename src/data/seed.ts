@@ -25,6 +25,7 @@ export async function seedStarterWorld(): Promise<string> {
     proseModel: null,
     utilityModel: null,
     activeSeasonId: seasonId,
+    calendar: { currentDay: 1, system: '' },
     createdAt: now,
     updatedAt: now
   };

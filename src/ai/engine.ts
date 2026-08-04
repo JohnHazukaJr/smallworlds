@@ -1,8 +1,10 @@
 import { db, uid } from '../db';
 import { resolveModel, useSettings } from '../store/settings';
+import { GAP_DAYS, GAP_LABELS } from '../ui/theme';
 import type {
   Character, ComposeMode, Episode, Location, ModelRef, Season, SeasonWrap, TurnLength, World, WrapBeat
 } from '../types';
+import { worldCalendar } from '../worldOps';
 import { AIError, streamChat } from './client';
 import { buildMessages, buildSystemPrompt, maxTokensFor } from './prompts';
 
@@ -292,7 +294,10 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
     await db.seasons.update(season.id, { status: 'wrapped' });
     await db.seasons.add(next);
     await db.episodes.add(firstEpisode);
-    await db.worlds.update(world.id, { activeSeasonId: next.id, updatedAt: Date.now() });
+    const gapIdx = GAP_LABELS.indexOf(gapLabel);
+    const cal = worldCalendar(world);
+    const bumpedCalendar = { ...cal, currentDay: cal.currentDay + (gapIdx >= 0 ? GAP_DAYS[gapIdx] : 0) };
+    await db.worlds.update(world.id, { activeSeasonId: next.id, calendar: bumpedCalendar, updatedAt: Date.now() });
     await db.wraps.update(wrap.id, { status: 'committed' });
     // Rewrite character current-state snapshots for the new season.
     for (const c of wrap.characters) {

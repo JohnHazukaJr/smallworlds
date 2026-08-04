@@ -27,6 +27,8 @@ export const VIS: Record<'private' | 'invited' | 'public', { label: string; line
 };
 
 export const GAP_LABELS = ['That same night', 'Three days', 'A season', 'Two years', 'A generation'];
+/** rough in-fiction day-equivalents for each GAP_LABELS entry — flavor for the calendar, not exact */
+export const GAP_DAYS = [0, 3, 90, 730, 9125];
 export const GAP_EFFECTS = [
   'Nothing has settled. Wounds, debts and tempers carry straight over.',
   'Enough for rumours to move. Characters have had time to decide how they feel.',
@@ -42,7 +44,7 @@ export function avatarStyle(hue: number, size: number, ring?: string): CSSProper
     borderRadius: size > 30 ? 12 : '50%',
     flexShrink: 0,
     border: `1px solid ${ring || 'rgba(255,255,255,0.16)'}`,
-    background: `linear-gradient(150deg, oklch(0.6 0.08 ${hue}), rgba(255,255,255,0.06)), ${STRIPE('rgba(255,255,255,0.1)', 'rgba(255,255,255,0.02)')}`,
+    backgroundImage: `linear-gradient(150deg, oklch(0.6 0.08 ${hue}), rgba(255,255,255,0.06)), ${STRIPE('rgba(255,255,255,0.1)', 'rgba(255,255,255,0.02)')}`,
     boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.18)'
   };
 }

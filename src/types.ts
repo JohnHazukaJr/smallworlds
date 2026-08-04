@@ -19,6 +19,13 @@ export interface WorldAISettings {
   mature: boolean;
 }
 
+export interface WorldCalendar {
+  /** in-fiction day count since the story began — day 1 is the start */
+  currentDay: number;
+  /** free-text calendar system the narrator follows verbatim, e.g. month/season names — optional */
+  system: string;
+}
+
 export interface World {
   id: string;
   title: string;
@@ -34,6 +41,8 @@ export interface World {
   /** provider/model override for utility tasks; null = use global default */
   utilityModel: ModelRef | null;
   activeSeasonId: string | null;
+  /** in-fiction date tracker — worlds created before this field existed may lack it; read via worldCalendar() */
+  calendar: WorldCalendar;
   createdAt: number;
   updatedAt: number;
 }
@@ -121,6 +130,10 @@ export interface Character {
   role: string;
   hue: number;
   isPlayer: boolean;
+  /** marks this card as representing the author, for reference only — never changes who the narrator writes as "you" */
+  selfTag: boolean;
+  /** uploaded portrait image, data URL — null/unset shows the placeholder plate */
+  portrait?: string | null;
   // identity
   age: string;
   appearance: string;
@@ -161,6 +174,8 @@ export interface Location {
   /** short tagline, e.g. "harbour district · public square" */
   tagline: string;
   hue: number;
+  /** uploaded portrait image, data URL — null/unset shows the placeholder plate */
+  portrait?: string | null;
   /** prose description — what the place is, first impression */
   summary: string;
   /** sensory detail: sight, sound, smell, feel — what the narrator leans on */

@@ -1,6 +1,7 @@
 import type {
   Character, ComposeMode, ContinuityFact, Episode, Location, OpenThread, Season, Turn, TurnLength, World
 } from '../types';
+import { worldCalendar } from '../worldOps';
 import type { ChatMessage } from './client';
 
 const LENGTH_SPEC: Record<TurnLength, { instruction: string; maxTokens: number }> = {
@@ -138,6 +139,11 @@ export function buildSystemPrompt(ctx: PromptContext): string {
 
   sections.push(
     `## This season\nSeason ${season.number}${season.title ? ` — ${season.title}` : ''}. Premise: ${season.premise || 'unwritten; discover it in play.'}${season.timeGap ? ` It opens ${season.timeGap.toLowerCase()} after the previous season.` : ''}`
+  );
+
+  const cal = worldCalendar(world);
+  sections.push(
+    `## Calendar\n${cal.system ? `${cal.system}\n` : ''}Today is day ${cal.currentDay} of the story.`
   );
 
   sections.push(
