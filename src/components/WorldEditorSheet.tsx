@@ -1,9 +1,10 @@
 import { useState } from 'react';
+import { fleshOutNarratorRules, fleshOutPremise, fleshOutWorldLore } from '../ai/engine';
 import { db } from '../db';
 import { ModelPicker } from '../screens/Settings';
 import { useApp } from '../store/app';
 import type { Character, Episode, Season, World, WorldAISettings } from '../types';
-import { Bar, Chip, Field, Mono, Sheet, Toggle } from '../ui/bits';
+import { Bar, Chip, ErrorNote, Field, Mono, Sheet, Spinner, Toggle } from '../ui/bits';
 import { avatarStyle } from '../ui/theme';
 import { emptyCharacter } from '../worldOps';
 
@@ -30,12 +31,51 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
   const [charId, setCharId] = useState<string | null>(null);
   const selected = characters.find((c) => c.id === charId) ?? null;
 
+  const [aiVersion, setAiVersion] = useState(0);
+  const [flesh, setFlesh] = useState<{ busy: 'lore' | 'plot' | 'rules' | null; error: string; errorFor: 'lore' | 'plot' | 'rules' | null }>(
+    { busy: null, error: '', errorFor: null }
+  );
+  const [undoLore, setUndoLore] = useState<{ title: string; line: string; bible: string } | null>(null);
+  const [undoPlot, setUndoPlot] = useState<string | null>(null);
+  const [undoRules, setUndoRules] = useState<string[] | null>(null);
+
   const patchWorld = (p: Partial<World>) => void db.worlds.update(world.id, { ...p, updatedAt: Date.now() });
   const patchAI = (p: Partial<WorldAISettings>) => patchWorld({ ai: { ...world.ai, ...p } });
   const patchSeason = (p: Partial<Season>) => void db.seasons.update(season.id, p);
   const patchEpisode = (p: Partial<Episode>) => void db.episodes.update(episode.id, p);
   const patchChar = (id: string, p: Partial<Character>) =>
     void db.characters.update(id, { ...p, updatedAt: Date.now() });
+
+  const runFlesh = async (kind: 'lore' | 'plot' | 'rules', task: () => Promise<void>) => {
+    setFlesh({ busy: kind, error: '', errorFor: null });
+    try {
+      await task();
+      setAiVersion((v) => v + 1);
+      setFlesh({ busy: null, error: '', errorFor: null });
+    } catch (e) {
+      setFlesh({ busy: null, error: e instanceof Error ? e.message : String(e), errorFor: kind });
+    }
+  };
+
+  const handleFleshLore = () => void runFlesh('lore', async () => {
+    const result = await fleshOutWorldLore(world);
+    setUndoLore({ title: world.title, line: world.line, bible: world.bible });
+    patchWorld(result);
+  });
+  const handleFleshPlot = () => void runFlesh('plot', async () => {
+    const premise = await fleshOutPremise(world, season);
+    setUndoPlot(season.premise);
+    patchSeason({ premise });
+  });
+  const handleFleshRules = () => void runFlesh('rules', async () => {
+    const narratorRules = await fleshOutNarratorRules(world);
+    setUndoRules(world.ai.narratorRules);
+    patchAI({ narratorRules });
+  });
+
+  const undoLoreFn = () => { if (undoLore) { patchWorld(undoLore); setAiVersion((v) => v + 1); } setUndoLore(null); };
+  const undoPlotFn = () => { if (undoPlot !== null) { patchSeason({ premise: undoPlot }); setAiVersion((v) => v + 1); } setUndoPlot(null); };
+  const undoRulesFn = () => { if (undoRules) { patchAI({ narratorRules: undoRules }); setAiVersion((v) => v + 1); } setUndoRules(null); };
 
   return (
     <Sheet open={open} onClose={onClose} narrow={narrow} width={520}>
@@ -57,28 +97,54 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
         {tab === 'lore' && (
           <>
             <Field label="Title">
-              <input key={world.id + '-title'} defaultValue={world.title}
+              <input key={world.id + '-title-' + aiVersion} defaultValue={world.title}
                 onBlur={(e) => patchWorld({ title: e.target.value.trim() || world.title })} />
             </Field>
             <Field label="Logline" note="the one-line pitch">
-              <input key={world.id + '-line'} defaultValue={world.line}
+              <input key={world.id + '-line-' + aiVersion} defaultValue={world.line}
                 onBlur={(e) => patchWorld({ line: e.target.value })} />
             </Field>
             <Field label="World bible — lore" note="setting, rules, pressures · in every prompt">
-              <textarea key={world.id + '-bible'} rows={14} defaultValue={world.bible}
+              <textarea key={world.id + '-bible-' + aiVersion} rows={14} defaultValue={world.bible}
                 onBlur={(e) => patchWorld({ bible: e.target.value })}
                 style={{ fontFamily: 'Spectral, serif', fontSize: 14.5, lineHeight: 1.65 }} />
             </Field>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }}
+                  disabled={flesh.busy === 'lore'} onClick={handleFleshLore}>
+                  {flesh.busy === 'lore' ? 'Working…' : '✦ Flesh out with AI'}
+                </button>
+                {undoLore && <button className="btn-quiet" style={{ fontSize: 11 }} onClick={undoLoreFn}>undo</button>}
+              </div>
+              {flesh.busy === 'lore' && <Spinner label="the utility model is fleshing out the lore" />}
+              {flesh.errorFor === 'lore' && (
+                <ErrorNote error={flesh.error} onDismiss={() => setFlesh({ busy: null, error: '', errorFor: null })} />
+              )}
+            </div>
           </>
         )}
 
         {tab === 'plot' && (
           <>
             <Field label={`Season ${season.number} premise`} note="the plot the narrator is steering toward">
-              <textarea key={season.id + '-premise'} rows={5} defaultValue={season.premise}
+              <textarea key={season.id + '-premise-' + aiVersion} rows={5} defaultValue={season.premise}
                 onBlur={(e) => patchSeason({ premise: e.target.value })}
                 style={{ fontFamily: 'Spectral, serif', fontSize: 14.5, lineHeight: 1.65 }} />
             </Field>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }}
+                  disabled={flesh.busy === 'plot'} onClick={handleFleshPlot}>
+                  {flesh.busy === 'plot' ? 'Working…' : '✦ Flesh out with AI'}
+                </button>
+                {undoPlot !== null && <button className="btn-quiet" style={{ fontSize: 11 }} onClick={undoPlotFn}>undo</button>}
+              </div>
+              {flesh.busy === 'plot' && <Spinner label="the utility model is fleshing out the premise" />}
+              {flesh.errorFor === 'plot' && (
+                <ErrorNote error={flesh.error} onDismiss={() => setFlesh({ busy: null, error: '', errorFor: null })} />
+              )}
+            </div>
             <Field label="Season title" note="optional">
               <input key={season.id + '-title'} defaultValue={season.title}
                 onBlur={(e) => patchSeason({ title: e.target.value })} />
@@ -109,10 +175,23 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 placeholder="Themes to circle, imagery to reuse, what the story is really about…" />
             </Field>
             <Field label="Narrator hard rules" note="one per line — never broken">
-              <textarea key={world.id + '-rules'} rows={4} defaultValue={world.ai.narratorRules.join('\n')}
+              <textarea key={world.id + '-rules-' + aiVersion} rows={4} defaultValue={world.ai.narratorRules.join('\n')}
                 onBlur={(e) => patchAI({ narratorRules: e.target.value.split('\n').filter((l) => l.trim()) })}
                 placeholder={'Never skip time without asking.\nNever kill a named character without the player in the scene.'} />
             </Field>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }}
+                  disabled={flesh.busy === 'rules'} onClick={handleFleshRules}>
+                  {flesh.busy === 'rules' ? 'Working…' : '✦ Flesh out with AI'}
+                </button>
+                {undoRules && <button className="btn-quiet" style={{ fontSize: 11 }} onClick={undoRulesFn}>undo</button>}
+              </div>
+              {flesh.busy === 'rules' && <Spinner label="the utility model is proposing narrator rules" />}
+              {flesh.errorFor === 'rules' && (
+                <ErrorNote error={flesh.error} onDismiss={() => setFlesh({ busy: null, error: '', errorFor: null })} />
+              )}
+            </div>
             <Field label="Content boundaries" note="lines that are never crossed">
               <textarea key={world.id + '-content'} rows={3} defaultValue={world.ai.contentNotes}
                 onBlur={(e) => patchAI({ contentNotes: e.target.value })} />

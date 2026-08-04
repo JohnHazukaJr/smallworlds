@@ -1,6 +1,6 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef, useState } from 'react';
-import { draftCharacter } from '../ai/engine';
+import { draftCharacter, fleshOutCharacter } from '../ai/engine';
 import { db } from '../db';
 import { useApp } from '../store/app';
 import type { Character, Relationship } from '../types';
@@ -41,6 +41,9 @@ export function Cast() {
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
   const [draft, setDraft] = useState<Character | null>(null);
+  const [fleshBusy, setFleshBusy] = useState(false);
+  const [fleshError, setFleshError] = useState('');
+  const [undoSnapshot, setUndoSnapshot] = useState<Character | null>(null);
 
   const world = useLiveQuery(
     async () => (currentWorldId ? db.worlds.get(currentWorldId) : undefined),
@@ -57,12 +60,34 @@ export function Cast() {
   useEffect(() => {
     if (selected && selected.id !== draft?.id) setDraft(selected);
     if (!selected) setDraft(null);
+    setFleshError('');
+    setUndoSnapshot(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id]);
 
   useAutosave(draft);
 
   const patch = (p: Partial<Character>) => setDraft((d) => (d ? { ...d, ...p } : d));
+
+  const fleshOut = async () => {
+    if (!draft) return;
+    setFleshBusy(true);
+    setFleshError('');
+    try {
+      const result = await fleshOutCharacter(world ?? null, draft);
+      setUndoSnapshot(draft);
+      patch(result);
+    } catch (e) {
+      setFleshError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFleshBusy(false);
+    }
+  };
+
+  const undoFleshOut = () => {
+    if (undoSnapshot) setDraft(undoSnapshot);
+    setUndoSnapshot(null);
+  };
 
   const addCharacter = async (fromAI?: Partial<Character>) => {
     if (!world) return;
@@ -196,6 +221,19 @@ export function Cast() {
                     onChange={(e) => patch({ hue: Number(e.target.value) })}
                     style={{ padding: 0, height: 4 }}
                   />
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <button
+                      className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }}
+                      disabled={fleshBusy} onClick={() => void fleshOut()}
+                    >{fleshBusy ? 'Working…' : '✦ Flesh out with AI'}</button>
+                    {undoSnapshot && (
+                      <button className="btn-quiet" style={{ fontSize: 11 }} onClick={undoFleshOut}>undo</button>
+                    )}
+                  </div>
+                  {fleshBusy && <Spinner label="the utility model is fleshing out the sheet" />}
+                  {fleshError && <ErrorNote error={fleshError} onDismiss={() => setFleshError('')} />}
                 </div>
                 {!d.isPlayer && (
                   <button

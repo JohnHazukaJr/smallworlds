@@ -339,6 +339,131 @@ export async function draftLocation(world: World | null, description: string): P
   return result;
 }
 
+// ---------- AI-assisted flesh-out (enrich existing cards, never remove detail) ----------
+
+const NON_DESTRUCTIVE_RULE =
+  'Fields that are empty: generate them fresh from the name/role and the world context provided. ' +
+  'Fields that already contain text: you may correct grammar and spelling and reformat for clarity, and you may add ' +
+  'supporting detail — but you must never delete, shorten, or contradict any detail already present. Every fact the ' +
+  'author already wrote must still be present in your output, verbatim or better-phrased.';
+
+/** Union two line lists without ever dropping an existing line (case-insensitive de-dupe). */
+function mergeLines(existing: string[], incoming: string[]): string[] {
+  const seen = new Set(existing.map((s) => s.trim().toLowerCase()));
+  return [...existing, ...incoming.filter((s) => s.trim() && !seen.has(s.trim().toLowerCase()))];
+}
+
+/** Defensive fallback: never let a blank AI response wipe out existing text. */
+function keepIfBlank(existing: string, incoming: string | undefined): string {
+  return incoming && incoming.trim() ? incoming : existing;
+}
+
+/** AI-assisted flesh-out of an existing character sheet: fills blanks, enriches filled fields, never removes detail. */
+export async function fleshOutCharacter(world: World | null, character: Character): Promise<Partial<Character>> {
+  const current = {
+    name: character.name, role: character.role, age: character.age, appearance: character.appearance,
+    mannerisms: character.mannerisms, backstory: character.backstory, summary: character.summary,
+    speechStyle: character.speechStyle, exampleLines: character.exampleLines, traits: character.traits,
+    desires: character.desires, fears: character.fears, flaws: character.flaws, secrets: character.secrets,
+    anchors: character.anchors
+  };
+  const result = await utilityJson<{
+    name: string; role: string; age: string; appearance: string; mannerisms: string;
+    backstory: string; summary: string;
+    speechStyle: string; exampleLines: string[]; traits: string; desires: string;
+    fears: string; flaws: string; secrets: string; anchors: string[];
+  }>(
+    world,
+    `You flesh out NPC character sheets for longform interactive fiction. ${NON_DESTRUCTIVE_RULE}\nRespond with JSON only, same shape as the input: {"name": string, "role": string, "age": string, "appearance": string, "mannerisms": string, "backstory": string, "summary": string, "speechStyle": string, "exampleLines": string[], "traits": string, "desires": string, "fears": string, "flaws": string, "secrets": string, "anchors": string[]}`,
+    `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}Current character sheet (JSON, blank strings/arrays mean unset):\n${JSON.stringify(current, null, 2)}`
+  );
+  return {
+    name: keepIfBlank(character.name, result.name),
+    role: keepIfBlank(character.role, result.role),
+    age: keepIfBlank(character.age, result.age),
+    appearance: keepIfBlank(character.appearance, result.appearance),
+    mannerisms: keepIfBlank(character.mannerisms, result.mannerisms),
+    backstory: keepIfBlank(character.backstory, result.backstory),
+    summary: keepIfBlank(character.summary, result.summary),
+    speechStyle: keepIfBlank(character.speechStyle, result.speechStyle),
+    exampleLines: mergeLines(character.exampleLines, result.exampleLines ?? []),
+    traits: keepIfBlank(character.traits, result.traits),
+    desires: keepIfBlank(character.desires, result.desires),
+    fears: keepIfBlank(character.fears, result.fears),
+    flaws: keepIfBlank(character.flaws, result.flaws),
+    secrets: keepIfBlank(character.secrets, result.secrets),
+    anchors: mergeLines(character.anchors, result.anchors ?? [])
+  };
+}
+
+/** AI-assisted flesh-out of an existing location sheet: fills blanks, enriches filled fields, never removes detail. */
+export async function fleshOutLocation(world: World | null, location: Location): Promise<Partial<Location>> {
+  const current = {
+    name: location.name, tagline: location.tagline, summary: location.summary, atmosphere: location.atmosphere,
+    features: location.features, history: location.history, inhabitants: location.inhabitants,
+    rules: location.rules, secrets: location.secrets, currentState: location.currentState
+  };
+  const result = await utilityJson<{
+    name: string; tagline: string; summary: string; atmosphere: string; features: string;
+    history: string; inhabitants: string; rules: string[]; secrets: string; currentState: string;
+  }>(
+    world,
+    `You flesh out location sheets for longform interactive fiction. ${NON_DESTRUCTIVE_RULE}\nRespond with JSON only, same shape as the input: {"name": string, "tagline": string, "summary": string, "atmosphere": string, "features": string, "history": string, "inhabitants": string, "rules": string[], "secrets": string, "currentState": string}`,
+    `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}Current location sheet (JSON, blank strings/arrays mean unset):\n${JSON.stringify(current, null, 2)}`
+  );
+  return {
+    name: keepIfBlank(location.name, result.name),
+    tagline: keepIfBlank(location.tagline, result.tagline),
+    summary: keepIfBlank(location.summary, result.summary),
+    atmosphere: keepIfBlank(location.atmosphere, result.atmosphere),
+    features: keepIfBlank(location.features, result.features),
+    history: keepIfBlank(location.history, result.history),
+    inhabitants: keepIfBlank(location.inhabitants, result.inhabitants),
+    rules: mergeLines(location.rules, result.rules ?? []),
+    secrets: keepIfBlank(location.secrets, result.secrets),
+    currentState: keepIfBlank(location.currentState, result.currentState)
+  };
+}
+
+/** AI-assisted flesh-out of the world's title/logline/bible. */
+export async function fleshOutWorldLore(world: World): Promise<{ title: string; line: string; bible: string }> {
+  const result = await utilityJson<{ title: string; line: string; bible: string }>(
+    world,
+    `You flesh out the lore of a story world for longform interactive fiction. ${NON_DESTRUCTIVE_RULE}\nRespond with JSON only: {"title": string, "line": "<one-sentence logline in second person>", "bible": "<setting, atmosphere, rules of the world, pressures at work — prose the narrator will follow>"}`,
+    `Current world sheet (JSON, blank strings mean unset):\n${JSON.stringify({ title: world.title, line: world.line, bible: world.bible }, null, 2)}`
+  );
+  return {
+    title: keepIfBlank(world.title, result.title),
+    line: keepIfBlank(world.line, result.line),
+    bible: keepIfBlank(world.bible, result.bible)
+  };
+}
+
+/** AI-assisted flesh-out of the season premise (the plot). */
+export async function fleshOutPremise(world: World, season: Season): Promise<string> {
+  const { provider, model } = utilityModelFor(world);
+  const premise = await streamChat({
+    provider, model,
+    system: `You flesh out season premises for longform interactive fiction. ${NON_DESTRUCTIVE_RULE} If the premise is blank, write one from the world context. One paragraph, 2-5 sentences, present tense, concrete and pressurized. Return only the premise.`,
+    messages: [{
+      role: 'user',
+      content: `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\nSeason ${season.number} current premise (may be blank):\n${season.premise || '(blank)'}`
+    }],
+    maxTokens: 500, temperature: 0.7
+  });
+  return keepIfBlank(season.premise, premise.trim());
+}
+
+/** AI-assisted flesh-out of the narrator's hard rules. */
+export async function fleshOutNarratorRules(world: World): Promise<string[]> {
+  const result = await utilityJson<{ rules: string[] }>(
+    world,
+    `You propose hard narrator rules for longform interactive fiction — non-negotiable behavioural constraints the narrator must never break. ${NON_DESTRUCTIVE_RULE} Respond with JSON only: {"rules": string[]}. Include every existing rule (reworded for clarity if needed) plus 2-5 new ones suited to this world.`,
+    `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\nExisting narrator rules (may be empty):\n${world.ai.narratorRules.join('\n') || '(none)'}`
+  );
+  return mergeLines(world.ai.narratorRules, result.rules ?? []);
+}
+
 /** AI-assisted world draft from onboarding inputs. */
 export async function draftWorld(seed: string, shape: string): Promise<{ title: string; line: string; bible: string; premise: string }> {
   return utilityJson<{ title: string; line: string; bible: string; premise: string }>(
