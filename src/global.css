@@ -12,6 +12,14 @@ a:hover { color: oklch(0.9 0.07 62); }
 @keyframes wr-drift { 0% { transform: translate3d(0,0,0) scale(1); } 50% { transform: translate3d(2%, -2%, 0) scale(1.06); } 100% { transform: translate3d(0,0,0) scale(1); } }
 @keyframes wr-slide-up { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
 @keyframes wr-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+@keyframes wr-scene-in { from { opacity: 0; } to { opacity: 1; } }
+
+.scene-crossfade {
+  animation: wr-scene-in 0.45s ease both;
+}
+.scene-backdrop-drift {
+  animation: wr-drift 48s ease-in-out infinite;
+}
 
 body { font-family: Archivo, system-ui, sans-serif; }
 

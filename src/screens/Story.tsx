@@ -1,11 +1,15 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { deleteTurnsAfter, deleteTurnsFrom, extractContinuity, writeTurn } from '../ai/engine';
+import { deleteTurnsAfter, deleteTurnsFrom, extractContinuity, proseModelFor, writeTurn } from '../ai/engine';
+import { generateSceneImage } from '../ai/image';
+import {
+  episodeContextPressure, episodeHistoryChars, HISTORY_CHAR_BUDGET
+} from '../ai/prompts';
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
 import { db, uid } from '../db';
-import { AVATAR_PX, DEFAULT_DISPLAY, useApp, type AvatarSize } from '../store/app';
+import { AVATAR_PX, DEFAULT_DISPLAY, moodFromHue, useApp, type AvatarSize, type StoryLayout } from '../store/app';
 import type { Character, ComposeMode, ContinuityFact, Episode, Location, OpenThread, Season, Turn, TurnLength, World } from '../types';
-import { Chip, ErrorNote, Mono, Sheet, Spinner, useVw } from '../ui/bits';
+import { Chip, ErrorNote, Mono, Sheet, Spinner, Toggle, useVw } from '../ui/bits';
 import { fileToSceneImage } from '../ui/image';
 import { avatarStyle, BACKDROPS, MOODS, STRIPE } from '../ui/theme';
 import { emptyLocation, nextEpisode, worldCalendar } from '../worldOps';
@@ -95,9 +99,9 @@ export function Story() {
   const goLocations = () => go('locations');
   const M = MOODS[mood];
   const BD = BACKDROPS[backdrop];
-  const director = layout === 'director' && vw >= 940;
+  const readMode = layout === 'read';
   const avatarPx = AVATAR_PX[display.avatarSize];
-  const fontPx = director ? display.textSize - 1.5 : display.textSize;
+  const fontPx = readMode ? display.textSize + 1 : display.textSize;
 
   const world = useLiveQuery(
     async () => (currentWorldId ? db.worlds.get(currentWorldId) : undefined),
@@ -146,12 +150,63 @@ export function Story() {
   const [directorSheet, setDirectorSheet] = useState(false);
   const [worldEditOpen, setWorldEditOpen] = useState(false);
   const [displayOpen, setDisplayOpen] = useState(false);
+  const [composerOpen, setComposerOpen] = useState(false);
+  const [sceneFadeKey, setSceneFadeKey] = useState(0);
+  /** Context-pressure nudge: dismiss until chars rise ~10% of budget or location changes. */
+  const [nudgeDismissedAtChars, setNudgeDismissedAtChars] = useState(0);
+  const [nudgeDismissedLocId, setNudgeDismissedLocId] = useState<string | null | undefined>(undefined);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLElement>(null);
+
+  const activeLocation = locations.find((l) => l.id === episode?.locationId)
+    ?? locations.find((l) => episode?.location && l.name && episode.location.toLowerCase().includes(l.name.toLowerCase()));
+
+  const episodeChars = useMemo(() => episodeHistoryChars(turns), [turns]);
+  const pressure = episodeContextPressure(episodeChars);
+  const locationShiftNudge = nudgeDismissedLocId !== undefined
+    && (episode?.locationId ?? null) !== nudgeDismissedLocId
+    && episodeChars >= HISTORY_CHAR_BUDGET * 0.25;
+  const pressurePastDismiss = pressure !== 'ok'
+    && episodeChars >= nudgeDismissedAtChars + HISTORY_CHAR_BUDGET * 0.1;
+  const showWrapNudge = !!episode && turns.length > 0 && (
+    (pressure !== 'ok' && (nudgeDismissedAtChars === 0 || pressurePastDismiss))
+    || locationShiftNudge
+  );
+
+  useEffect(() => {
+    setSceneFadeKey((k) => k + 1);
+  }, [episode?.image, mood, episode?.locationId]);
+
+  useEffect(() => {
+    if (!readMode) setComposerOpen(true);
+    else setComposerOpen(false);
+  }, [readMode]);
+
+  // Reset nudge baseline when the active episode changes.
+  useEffect(() => {
+    setNudgeDismissedAtChars(0);
+    setNudgeDismissedLocId(episode?.locationId ?? null);
+  }, [episode?.id]);
+
+  // Location hue → mood when the episode hasn't pinned a mood.
+  useEffect(() => {
+    if (!episode || !activeLocation || episode.moodPinned) return;
+    setMood(moodFromHue(activeLocation.hue));
+  }, [episode?.id, episode?.locationId, episode?.moodPinned, activeLocation?.id, activeLocation?.hue, setMood]);
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [turns.length, partial]);
+
+  const pinMood = (id: typeof mood) => {
+    setMood(id);
+    if (episode) void db.episodes.update(episode.id, { moodPinned: true });
+  };
+
+  const dismissWrapNudge = () => {
+    setNudgeDismissedAtChars(episodeChars);
+    setNudgeDismissedLocId(episode?.locationId ?? null);
+  };
 
   /** Shared streaming runner behind write / rewrite / retry. */
   const runNarration = async (mode: ComposeMode, text: string): Promise<'ok' | 'error' | 'aborted'> => {
@@ -237,6 +292,8 @@ export function Story() {
       }
       await nextEpisode(episode);
       setWrapOpen(null);
+      setNudgeDismissedAtChars(0);
+      setNudgeDismissedLocId(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -283,30 +340,44 @@ export function Story() {
     />
   );
 
+  const shellHeight = narrow && !readMode
+    ? 'calc(100vh - 58px - env(safe-area-inset-bottom))'
+    : '100vh';
+  const locLabel = (activeLocation?.name || episode.location || '')
+    .split(',')[0].split('.')[0].toLowerCase();
+
   return (
-    <div style={{ position: 'relative', minHeight: narrow ? 'auto' : '100vh', height: narrow ? 'calc(100vh - 58px - env(safe-area-inset-bottom))' : '100vh', display: 'flex', flexDirection: 'column', color: M.text }}>
+    <div style={{ position: 'relative', minHeight: narrow && !readMode ? 'auto' : '100vh', height: shellHeight, display: 'flex', flexDirection: 'column', color: M.text }}>
       {/* backdrop — scene image when the episode has one, mood gradient otherwise */}
       {episode.image ? (
         <>
-          <div style={{
-            position: 'absolute', inset: 0, zIndex: 0,
-            backgroundImage: `url(${episode.image})`, backgroundSize: 'cover', backgroundPosition: 'center',
-            filter: display.imageBlur > 0 ? `blur(${display.imageBlur}px)` : undefined,
-            transform: display.imageBlur > 0 ? 'scale(1.06)' : undefined
-          }} />
+          <div
+            key={`img-${sceneFadeKey}`}
+            className={display.imageBlur > 0 ? 'scene-crossfade' : 'scene-crossfade scene-backdrop-drift'}
+            style={{
+              position: 'absolute', inset: 0, zIndex: 0,
+              backgroundImage: `url(${episode.image})`, backgroundSize: 'cover', backgroundPosition: 'center',
+              filter: display.imageBlur > 0 ? `blur(${display.imageBlur}px)` : undefined,
+              transform: display.imageBlur > 0 ? 'scale(1.06)' : undefined
+            }}
+          />
           <div style={{
             position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none',
             background: `rgba(8,9,12,${(display.imageDim / 100).toFixed(2)})`,
-            transition: 'background 0.2s ease'
+            transition: 'background 0.35s ease'
           }} />
         </>
       ) : (
         <>
-          <div style={{
-            position: 'absolute', inset: 0, zIndex: 0,
-            background: `linear-gradient(160deg, ${BD.a}, ${BD.b}), ${STRIPE('rgba(255,255,255,0.05)', 'rgba(255,255,255,0.01)')}`,
-            opacity: backdrop === 'none' ? 0.25 : 1, transition: 'opacity 0.5s ease'
-          }} />
+          <div
+            key={`mood-${sceneFadeKey}`}
+            className="scene-crossfade"
+            style={{
+              position: 'absolute', inset: 0, zIndex: 0,
+              background: `linear-gradient(160deg, ${BD.a}, ${BD.b}), ${STRIPE('rgba(255,255,255,0.05)', 'rgba(255,255,255,0.01)')}`,
+              opacity: backdrop === 'none' ? 0.25 : 1, transition: 'opacity 0.45s ease'
+            }}
+          />
           <div style={{
             position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none',
             background: 'radial-gradient(720px 520px at 50% 40%, transparent, rgba(8,9,12,0.72) 78%), linear-gradient(180deg, rgba(8,9,12,0.5), rgba(8,9,12,0.2) 30%, rgba(8,9,12,0.6))',
@@ -315,88 +386,99 @@ export function Story() {
         </>
       )}
 
-      {/* header */}
-      <div style={{
-        position: 'relative', zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        gap: 14, padding: narrow ? '11px 14px' : '13px 24px', borderBottom: '1px solid rgba(255,255,255,0.08)',
-        flexWrap: 'wrap', background: 'rgba(8,9,12,0.35)', backdropFilter: 'blur(22px) saturate(140%)'
-      }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 13, minWidth: 0 }}>
-          <div style={{ width: 9, height: 9, borderRadius: '50%', flexShrink: 0, background: M.accent, boxShadow: `0 0 16px ${M.accent}` }} />
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-            <div className="serif" style={{ fontSize: 16, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{world.title}</div>
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.1em', opacity: 0.5 }}>
-              season {season.number} · episode {episode.number}{episode.location ? ` · ${episode.location.split(',')[0].split('.')[0].toLowerCase()}` : ''} · day {worldCalendar(world).currentDay} · {M.label.toLowerCase()}
+      {/* header — thin strip in Read mode */}
+      {readMode ? (
+        <div style={{
+          position: 'relative', zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          gap: 12, padding: narrow ? '10px 14px' : '11px 22px',
+          borderBottom: '1px solid rgba(255,255,255,0.06)',
+          background: 'rgba(8,9,12,0.28)', backdropFilter: 'blur(18px) saturate(140%)'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+            <div style={{ width: 7, height: 7, borderRadius: '50%', flexShrink: 0, background: M.accent, boxShadow: `0 0 12px ${M.accent}` }} />
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, letterSpacing: '0.08em', opacity: 0.72, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {world.title.toLowerCase()} · ep {episode.number}{locLabel ? ` · ${locLabel}` : ''}
             </div>
           </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+            {showWrapNudge && (
+              <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11 }}
+                onClick={() => setWrapOpen('episode')}>File episode?</button>
+            )}
+            <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 12 }}
+              onClick={() => setComposerOpen((o) => !o)}>
+              {composerOpen ? 'Hide write' : 'Write'}
+            </button>
+            <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 12 }}
+              onClick={() => setLayout('write')}>Exit read</button>
+          </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-          {vw >= 940 && (
+      ) : (
+        <div style={{
+          position: 'relative', zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          gap: 14, padding: narrow ? '11px 14px' : '13px 24px', borderBottom: '1px solid rgba(255,255,255,0.08)',
+          flexWrap: 'wrap', background: 'rgba(8,9,12,0.35)', backdropFilter: 'blur(22px) saturate(140%)'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 13, minWidth: 0 }}>
+            <div style={{ width: 9, height: 9, borderRadius: '50%', flexShrink: 0, background: M.accent, boxShadow: `0 0 16px ${M.accent}` }} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+              <div className="serif" style={{ fontSize: 16, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{world.title}</div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.1em', opacity: 0.5 }}>
+                season {season.number} · episode {episode.number}{locLabel ? ` · ${locLabel}` : ''} · day {worldCalendar(world).currentDay} · {M.label.toLowerCase()}
+              </div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <div style={{ display: 'flex', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, overflow: 'hidden', background: 'rgba(255,255,255,0.05)' }}>
-              {([['immersive', 'Read'], ['director', 'Direct']] as const).map(([id, label]) => (
-                <button key={id} onClick={() => setLayout(id)} style={{
+              {([['write', 'Write'], ['read', 'Read']] as const).map(([id, label]) => (
+                <button key={id} onClick={() => setLayout(id as StoryLayout)} style={{
                   border: 0, background: layout === id ? 'rgba(255,255,255,0.14)' : 'transparent',
-                  color: 'inherit', opacity: layout === id ? 1 : 0.55, padding: '7px 14px',
+                  color: 'inherit', opacity: layout === id ? 1 : 0.55, padding: '7px 12px',
                   fontSize: 12, fontWeight: 600, cursor: 'pointer'
                 }}>{label}</button>
               ))}
             </div>
-          )}
-          {vw < 940 && (
             <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11 }} onClick={() => setDirectorSheet(true)}>Direct</button>
-          )}
-          {!narrow && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 7, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px', background: 'rgba(255,255,255,0.05)' }}>
-              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.45 }}>backdrop</span>
-              {(Object.keys(BACKDROPS) as Array<keyof typeof BACKDROPS>).map((id) => (
-                <Chip key={id} active={backdrop === id} accent={M.accent} onClick={() => setBackdrop(id)}>
-                  {id === 'none' ? 'Off' : id[0].toUpperCase() + id.slice(1)}
-                </Chip>
+            {!narrow && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 7, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px', background: 'rgba(255,255,255,0.05)' }}>
+                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.45 }}>backdrop</span>
+                {(Object.keys(BACKDROPS) as Array<keyof typeof BACKDROPS>).map((id) => (
+                  <Chip key={id} active={backdrop === id} accent={M.accent} onClick={() => setBackdrop(id)}>
+                    {id === 'none' ? 'Off' : id[0].toUpperCase() + id.slice(1)}
+                  </Chip>
+                ))}
+              </div>
+            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px', background: 'rgba(255,255,255,0.05)' }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.45 }}>
+                mood{episode.moodPinned ? ' · pinned' : ''}
+              </span>
+              {(Object.entries(MOODS) as Array<[typeof mood, typeof M]>).map(([id, m]) => (
+                <button key={id} title={m.label} onClick={() => pinMood(id)} style={{
+                  width: 13, height: 13, borderRadius: '50%', cursor: 'pointer', background: m.accent,
+                  border: `1px solid ${mood === id ? 'rgba(255,255,255,0.85)' : 'transparent'}`,
+                  opacity: mood === id ? 1 : 0.45, padding: 0
+                }} />
               ))}
             </div>
-          )}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px', background: 'rgba(255,255,255,0.05)' }}>
-            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.45 }}>mood</span>
-            {(Object.entries(MOODS) as Array<[typeof mood, typeof M]>).map(([id, m]) => (
-              <button key={id} title={m.label} onClick={() => setMood(id)} style={{
-                width: 13, height: 13, borderRadius: '50%', cursor: 'pointer', background: m.accent,
-                border: `1px solid ${mood === id ? 'rgba(255,255,255,0.85)' : 'transparent'}`,
-                opacity: mood === id ? 1 : 0.45, padding: 0
-              }} />
-            ))}
+            <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setDisplayOpen(true)}>Display</button>
+            <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setWorldEditOpen(true)}>Edit world</button>
+            <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setWrapOpen('episode')}>Wrap</button>
           </div>
-          <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setDisplayOpen(true)}>Display</button>
-          <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setWorldEditOpen(true)}>Edit world</button>
-          <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setWrapOpen('episode')}>Wrap up</button>
         </div>
-      </div>
+      )}
 
-      {/* body */}
+      {/* body — single column; Director is always a sheet overlay */}
       <div style={{
         position: 'relative', zIndex: 2, flex: 1, display: 'grid', minHeight: 0,
-        gridTemplateColumns: director ? (vw >= 1240 ? '252px minmax(0, 1fr) 264px' : '238px minmax(0, 1fr)') : 'minmax(0, 1fr)'
+        gridTemplateColumns: 'minmax(0, 1fr)'
       }}>
-        {director && (
-          <aside style={{
-            borderRight: '1px solid rgba(255,255,255,0.07)', padding: '20px 16px', display: 'flex',
-            flexDirection: 'column', gap: 22, overflow: 'auto', background: 'rgba(8,9,12,0.28)', backdropFilter: 'blur(20px)'
-          }}>
-            <SceneCastPanel episode={episode} characters={characters} accent={M.accent} />
-            <SceneLocationsPanel
-              episode={episode} locations={locations} accent={M.accent}
-              onGoLocations={goLocations}
-            />
-            <ScenePlatePanel episode={episode} bd={BD} />
-            <ContinuityPanel continuity={continuity} world={world} season={season} />
-          </aside>
-        )}
-
         <section ref={scrollRef} style={{ overflow: 'auto', display: 'flex', flexDirection: 'column', position: 'relative' }}>
           <div style={{
-            maxWidth: director ? 680 : 740,
+            maxWidth: 740,
             margin: display.textScrim > 0 ? '18px auto' : '0 auto',
             width: display.textScrim > 0 ? 'calc(100% - 24px)' : '100%',
-            padding: narrow ? '26px 18px 40px' : director ? '32px 30px 56px' : '52px 28px 76px',
+            padding: narrow ? '26px 18px 40px' : '52px 28px 76px',
             // Optional plate behind the text so prose stays readable over scene images.
             ...(display.textScrim > 0 ? {
               background: `rgba(8,9,12,${(display.textScrim / 100).toFixed(2)})`,
@@ -454,83 +536,116 @@ export function Story() {
 
           </div>
         </section>
-
-        {director && vw >= 1240 && (
-          <aside style={{
-            borderLeft: '1px solid rgba(255,255,255,0.07)', padding: '20px 16px', display: 'flex',
-            flexDirection: 'column', gap: 22, overflow: 'auto', background: 'rgba(8,9,12,0.28)', backdropFilter: 'blur(20px)'
-          }}>
-            <ThreadsPanel threads={threads} />
-            <NudgesPanel threads={threads} inScene={inScene} onNudge={(t) => { setComposeMode('steer'); setInput(t); }} />
-          </aside>
-        )}
       </div>
 
-      {/* composer */}
-      <div style={{
-        position: 'relative', zIndex: 2, borderTop: '1px solid rgba(255,255,255,0.08)',
-        padding: narrow ? '11px 12px 12px' : '15px 24px 18px',
-        display: 'flex', flexDirection: 'column', gap: 11,
-        background: 'rgba(8,9,12,0.42)', backdropFilter: 'blur(24px) saturate(140%)'
-      }}>
-        {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-          {(['continue', 'steer', 'speak', 'act'] as const).map((m) => (
-            <Chip key={m} active={composeMode === m} accent={M.accent} onClick={() => setComposeMode(m)}>
-              {m[0].toUpperCase() + m.slice(1)}
-            </Chip>
-          ))}
-          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-            {!narrow && <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.45 }}>length</span>}
-            {(['beat', 'scene', 'episode'] as const).map((l) => (
-              <Chip key={l} active={length === l} accent={M.accent} onClick={() => setLength(l)}>
-                {l[0].toUpperCase() + l.slice(1)}
-              </Chip>
-            ))}
-          </div>
-        </div>
+      {/* composer — collapses to a handle in Read mode */}
+      {readMode && !composerOpen ? (
         <div style={{
-          display: 'flex', gap: 13, alignItems: 'flex-end', border: '1px solid rgba(255,255,255,0.14)',
-          borderRadius: 16, padding: narrow ? '10px 12px' : '14px 16px',
-          background: 'rgba(255,255,255,0.06)', backdropFilter: 'blur(20px) saturate(140%)'
+          position: 'relative', zIndex: 2, display: 'flex', justifyContent: 'center',
+          padding: '10px 16px calc(12px + env(safe-area-inset-bottom))',
+          background: 'linear-gradient(180deg, transparent, rgba(8,9,12,0.55))'
         }}>
-          {!narrow && (
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.42, paddingBottom: 8, whiteSpace: 'nowrap' }}>
-              {modeHint[composeMode]}
+          <button
+            onClick={() => setComposerOpen(true)}
+            style={{
+              border: '1px solid rgba(255,255,255,0.16)', background: 'rgba(8,9,12,0.55)',
+              color: 'inherit', borderRadius: 999, padding: '10px 22px', cursor: 'pointer',
+              fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.12em',
+              textTransform: 'uppercase', opacity: 0.85, backdropFilter: 'blur(16px)'
+            }}
+          >
+            Write · continue
+          </button>
+        </div>
+      ) : (
+        <div style={{
+          position: 'relative', zIndex: 2, borderTop: '1px solid rgba(255,255,255,0.08)',
+          padding: narrow ? '11px 12px 12px' : '15px 24px 18px',
+          display: 'flex', flexDirection: 'column', gap: 11,
+          background: 'rgba(8,9,12,0.42)', backdropFilter: 'blur(24px) saturate(140%)'
+        }}>
+          {showWrapNudge && (
+            <div style={{
+              display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
+              border: '1px solid rgba(255,255,255,0.14)', borderRadius: 14, padding: '12px 14px',
+              background: pressure === 'escalate' ? 'rgba(224,165,95,0.12)' : 'rgba(255,255,255,0.05)'
+            }}>
+              <div style={{ flex: 1, minWidth: 200, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.78)' }}>
+                {pressure === 'escalate'
+                  ? 'Earlier beats may already be dropping from context. File this episode so continuity keeps them.'
+                  : locationShiftNudge && pressure === 'ok'
+                    ? 'The scene moved. End the episode to file key details into continuity before they crowd the narrator\'s memory.'
+                    : 'This episode is getting long for the narrator\'s memory. End it to file key details into continuity.'}
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                <button className="btn-primary" style={{ padding: '7px 12px', fontSize: 12 }}
+                  disabled={wrapBusy} onClick={() => setWrapOpen('episode')}>End episode</button>
+                <button className="btn-quiet" style={{ fontSize: 11 }} onClick={dismissWrapNudge}>Not yet</button>
+              </div>
             </div>
           )}
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void write(); }
-            }}
-            placeholder={composerPlaceholder[composeMode]}
-            rows={narrow ? 2 : 2}
-            disabled={streaming || composeMode === 'continue'}
-            style={{
-              flex: 1, border: 0, background: 'transparent', padding: '4px 0',
-              fontFamily: 'Spectral, serif', fontSize: narrow ? 15 : 16.5, lineHeight: 1.6,
-              minHeight: 26, opacity: composeMode === 'continue' ? 0.45 : 1
-            }}
-          />
-          {streaming ? (
-            <button className="btn-ghost" style={{ alignSelf: 'flex-end' }} onClick={() => abortRef.current?.abort()}>Stop</button>
-          ) : (
-            <button className="btn-primary" style={{ alignSelf: 'flex-end', padding: '10px 19px' }} onClick={() => void write()}>
-              Write on
-            </button>
+          {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+            {(['continue', 'steer', 'speak', 'act'] as const).map((m) => (
+              <Chip key={m} active={composeMode === m} accent={M.accent} onClick={() => setComposeMode(m)}>
+                {m[0].toUpperCase() + m.slice(1)}
+              </Chip>
+            ))}
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+              {readMode && (
+                <button className="btn-quiet" style={{ fontSize: 11 }} onClick={() => setComposerOpen(false)}>collapse</button>
+              )}
+              {!narrow && <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.45 }}>length</span>}
+              {(['beat', 'scene', 'episode'] as const).map((l) => (
+                <Chip key={l} active={length === l} accent={M.accent} onClick={() => setLength(l)}>
+                  {l[0].toUpperCase() + l.slice(1)}
+                </Chip>
+              ))}
+            </div>
+          </div>
+          <div style={{
+            display: 'flex', gap: 13, alignItems: 'flex-end', border: '1px solid rgba(255,255,255,0.14)',
+            borderRadius: 16, padding: narrow ? '10px 12px' : '14px 16px',
+            background: 'rgba(255,255,255,0.06)', backdropFilter: 'blur(20px) saturate(140%)'
+          }}>
+            {!narrow && (
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.42, paddingBottom: 8, whiteSpace: 'nowrap' }}>
+                {modeHint[composeMode]}
+              </div>
+            )}
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void write(); }
+              }}
+              placeholder={composerPlaceholder[composeMode]}
+              rows={2}
+              disabled={streaming || composeMode === 'continue'}
+              style={{
+                flex: 1, border: 0, background: 'transparent', padding: '4px 0',
+                fontFamily: 'Spectral, serif', fontSize: narrow ? 15 : 16.5, lineHeight: 1.6,
+                minHeight: 26, opacity: composeMode === 'continue' ? 0.45 : 1
+              }}
+            />
+            {streaming ? (
+              <button className="btn-ghost" style={{ alignSelf: 'flex-end' }} onClick={() => abortRef.current?.abort()}>Stop</button>
+            ) : (
+              <button className="btn-primary" style={{ alignSelf: 'flex-end', padding: '10px 19px' }} onClick={() => void write()}>
+                Write on
+              </button>
+            )}
+          </div>
+          {!narrow && !readMode && (
+            <div style={{ display: 'flex', gap: 16, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.4, flexWrap: 'wrap' }}>
+              <span>{inScene.filter((c) => !c.isPlayer).map((c) => c.name).join(' · ') || 'no cast in scene'}</span>
+              <span>memory: {continuity.length} facts · {threads.length} open threads</span>
+              <span>{world.ai.mature ? 'adult world · unrestricted' : 'general audience'}</span>
+              <span>⌘↵ write on</span>
+            </div>
           )}
         </div>
-        {!narrow && (
-          <div style={{ display: 'flex', gap: 16, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.4, flexWrap: 'wrap' }}>
-            <span>{inScene.filter((c) => !c.isPlayer).map((c) => c.name).join(' · ') || 'no cast in scene'}</span>
-            <span>memory: {continuity.length} facts · {threads.length} open threads</span>
-            <span>{world.ai.mature ? 'adult world · unrestricted' : 'general audience'}</span>
-            <span>⌘↵ write on</span>
-          </div>
-        )}
-      </div>
+      )}
 
       {/* wrap sheet */}
       <Sheet open={wrapOpen !== null} onClose={() => setWrapOpen(null)} narrow={narrow}>
@@ -540,20 +655,30 @@ export function Story() {
               season {season.number} · episode {episode.number}
             </div>
             <div className="serif" style={{ fontWeight: 300, fontSize: 27, lineHeight: 1.15, color: '#f6f4f0' }}>
-              {wrapOpen === 'season' ? 'Close the season.' : 'Wrap this episode.'}
+              {wrapOpen === 'season' ? 'End the season.' : 'End the episode.'}
             </div>
-            <div style={{ fontSize: 13, lineHeight: 1.6, opacity: 0.62, maxWidth: '46ch', color: '#eceae6' }}>
+            <div style={{ fontSize: 13, lineHeight: 1.6, opacity: 0.62, maxWidth: '48ch', color: '#eceae6' }}>
               {wrapOpen === 'season'
-                ? 'The season review reads the whole season back, proposes the beats that mattered, and asks what carries into the next one. It runs on your utility model.'
-                : 'Ending the episode files what happened into continuity (via your utility model) and opens the next episode with the same cast.'}
+                ? 'Opens the season review to choose what carries forward into the next season.'
+                : 'Files durable facts out of the hot transcript into continuity, then opens the next episode with the same cast — so key details survive when the narrator\'s memory fills up.'}
             </div>
           </div>
           <button className="btn-ghost" style={{ width: 30, height: 30, padding: 0, flexShrink: 0 }} onClick={() => setWrapOpen(null)}>×</button>
         </div>
 
-        <div style={{ display: 'flex', gap: 7 }}>
+        <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
           <Chip active={wrapOpen === 'episode'} onClick={() => setWrapOpen('episode')}>End episode</Chip>
           <Chip active={wrapOpen === 'season'} onClick={() => setWrapOpen('season')}>End season</Chip>
+        </div>
+
+        <div style={{
+          fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.7)',
+          border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, padding: '12px 14px',
+          background: 'rgba(255,255,255,0.04)'
+        }}>
+          {wrapOpen === 'season'
+            ? 'The review reads the season back, proposes beats, and asks what to Drop / Soften / Keep / Raise. It runs on your utility model.'
+            : 'Continuity facts and open threads are extracted with your utility model. Episode prose stays saved; only the active episode stays in the writing loop.'}
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 9, flex: 1, minHeight: 0, overflow: 'auto' }}>
@@ -567,11 +692,6 @@ export function Story() {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 9, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 14 }}>
-          <div className="serif" style={{ fontSize: 15, lineHeight: 1.6, opacity: 0.7, color: '#eceae6' }}>
-            {wrapOpen === 'season'
-              ? `Season ${season.number} closes. The review opens on the Next season screen.`
-              : `Episode ${episode.number + 1} opens where this one leaves off, cast carried over.`}
-          </div>
           <div style={{ display: 'flex', gap: 9, alignItems: 'center', flexWrap: 'wrap' }}>
             {wrapOpen === 'season' ? (
               <button className="btn-primary" disabled={wrapBusy} onClick={() => { setWrapOpen(null); go('sequel'); }}>
@@ -579,15 +699,15 @@ export function Story() {
               </button>
             ) : (
               <button className="btn-primary" disabled={wrapBusy} onClick={() => void endEpisode()}>
-                {wrapBusy ? 'Filing continuity…' : `Start episode ${episode.number + 1}`}
+                {wrapBusy ? 'Filing continuity…' : `End episode · start ${episode.number + 1}`}
               </button>
             )}
           </div>
         </div>
       </Sheet>
 
-      {/* mobile director sheet */}
-      <Sheet open={directorSheet} onClose={() => setDirectorSheet(false)} narrow={narrow || vw < 940}>
+      {/* director overlay — cast, places, continuity, threads (all widths) */}
+      <Sheet open={directorSheet} onClose={() => setDirectorSheet(false)} narrow={narrow}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div className="serif" style={{ fontWeight: 300, fontSize: 24, color: '#f6f4f0' }}>Director</div>
           <button className="btn-ghost" style={{ width: 30, height: 30, padding: 0 }} onClick={() => setDirectorSheet(false)}>×</button>
@@ -608,7 +728,10 @@ export function Story() {
       />
 
       {/* display settings */}
-      <DisplaySheet open={displayOpen} onClose={() => setDisplayOpen(false)} narrow={narrow} episode={episode} />
+      <DisplaySheet
+        open={displayOpen} onClose={() => setDisplayOpen(false)} narrow={narrow}
+        episode={episode} world={world} locations={locations}
+      />
     </div>
   );
 }
@@ -635,13 +758,23 @@ function SliderRow({ label, value, min, max, unit, onChange }: {
   );
 }
 
-function DisplaySheet({ open, onClose, narrow, episode }: {
-  open: boolean; onClose: () => void; narrow: boolean; episode: Episode;
+function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
+  open: boolean; onClose: () => void; narrow: boolean;
+  episode: Episode; world: World; locations: Location[];
 }) {
-  const { display, setDisplay } = useApp();
+  const { display, setDisplay, mood, setMood } = useApp();
   const [imgError, setImgError] = useState('');
   const [imgBusy, setImgBusy] = useState(false);
+  const [genBusy, setGenBusy] = useState(false);
+  const [note, setNote] = useState(episode.atmosphereNote ?? '');
   const fileRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => { setNote(episode.atmosphereNote ?? ''); }, [episode.id, episode.atmosphereNote]);
+
+  const sceneLoc = locations.find((l) => l.id === episode.locationId)
+    ?? locations.find((l) => episode.location && l.name
+      && (episode.location.toLowerCase().includes(l.name.toLowerCase())
+        || l.name.toLowerCase().includes(episode.location.trim().toLowerCase())));
 
   const onFile = async (file: File) => {
     setImgBusy(true);
@@ -656,6 +789,27 @@ function DisplaySheet({ open, onClose, narrow, episode }: {
     }
   };
 
+  const generateFromLocation = async () => {
+    if (!sceneLoc) {
+      setImgError('Pick a location card first — generation uses its name, atmosphere, and features.');
+      return;
+    }
+    setGenBusy(true);
+    setImgError('');
+    try {
+      const { provider, model } = proseModelFor(world);
+      const image = await generateSceneImage({
+        provider, model, world, location: sceneLoc,
+        atmosphereNote: episode.atmosphereNote
+      });
+      await db.episodes.update(episode.id, { image });
+    } catch (e) {
+      setImgError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGenBusy(false);
+    }
+  };
+
   return (
     <Sheet open={open} onClose={onClose} narrow={narrow}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
@@ -667,6 +821,51 @@ function DisplaySheet({ open, onClose, narrow, episode }: {
       </div>
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 22, paddingRight: 2 }}>
+        {/* atmosphere */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <Mono style={{ fontSize: 9 }}>atmosphere for this scene</Mono>
+          <div style={{ fontSize: 12, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
+            Weather, time of day, or a sensory note the narrator should keep returning to.
+            Location hue also suggests mood unless you pin it.
+          </div>
+          <textarea
+            rows={2}
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            onBlur={() => {
+              const next = note.trim();
+              if (next !== (episode.atmosphereNote ?? '')) {
+                void db.episodes.update(episode.id, { atmosphereNote: next || undefined });
+              }
+            }}
+            placeholder="rain on the glass · late afternoon · cold iron smell…"
+            style={{ fontSize: 13 }}
+          />
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.5 }}>
+              mood {episode.moodPinned ? 'pinned' : 'follows location'}
+            </span>
+            <Toggle
+              on={!!episode.moodPinned}
+              onClick={() => {
+                const next = !episode.moodPinned;
+                void db.episodes.update(episode.id, { moodPinned: next });
+                if (!next && sceneLoc) setMood(moodFromHue(sceneLoc.hue));
+              }}
+            />
+            {(Object.entries(MOODS) as Array<[typeof mood, (typeof MOODS)[typeof mood]]>).map(([id, m]) => (
+              <button key={id} title={m.label} onClick={() => {
+                setMood(id);
+                void db.episodes.update(episode.id, { moodPinned: true });
+              }} style={{
+                width: 13, height: 13, borderRadius: '50%', cursor: 'pointer', background: m.accent,
+                border: `1px solid ${mood === id ? 'rgba(255,255,255,0.85)' : 'transparent'}`,
+                opacity: mood === id ? 1 : 0.45, padding: 0
+              }} />
+            ))}
+          </div>
+        </div>
+
         {/* scene image */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <Mono style={{ fontSize: 9 }}>scene image — episode {episode.number}</Mono>
@@ -682,8 +881,13 @@ function DisplaySheet({ open, onClose, narrow, episode }: {
           )}
           {imgError && <ErrorNote error={imgError} onDismiss={() => setImgError('')} />}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button className="btn-ghost" style={{ fontSize: 12 }} disabled={imgBusy} onClick={() => fileRef.current?.click()}>
-              {imgBusy ? 'Processing…' : episode.image ? 'Replace image' : 'Add an image'}
+            <button className="btn-primary" style={{ fontSize: 12, padding: '8px 14px' }}
+              disabled={genBusy || imgBusy || !sceneLoc}
+              onClick={() => void generateFromLocation()}>
+              {genBusy ? 'Generating…' : sceneLoc ? `Generate from ${sceneLoc.name}` : 'Generate from location'}
+            </button>
+            <button className="btn-ghost" style={{ fontSize: 12 }} disabled={imgBusy || genBusy} onClick={() => fileRef.current?.click()}>
+              {imgBusy ? 'Processing…' : episode.image ? 'Replace image' : 'Upload image'}
             </button>
             {episode.image && (
               <button className="btn-quiet" style={{ fontSize: 11 }}
@@ -854,9 +1058,18 @@ function locationThumb(l: Location, size = 30): CSSProperties {
   return avatarStyle(l.hue, size);
 }
 
-function SceneLocationsPanel({ episode, locations, accent, onGoLocations }: {
-  episode: Episode; locations: Location[]; accent: string; onGoLocations: () => void;
+function SceneLocationsPanel({ episode, locations, accent, world, onGoLocations }: {
+  episode: Episode; locations: Location[]; accent: string; world?: World; onGoLocations: () => void;
 }) {
+  const { setMood } = useApp();
+  const [genBusy, setGenBusy] = useState(false);
+  const [genError, setGenError] = useState('');
+
+  const activeLoc = locations.find((l) => l.id === episode.locationId)
+    ?? locations.find((l) => !!episode.location && l.name.trim()
+      && (episode.location.toLowerCase().includes(l.name.toLowerCase())
+        || l.name.toLowerCase().includes(episode.location.trim().toLowerCase())));
+
   const select = async (l: Location) => {
     const active = episode.locationId === l.id;
     if (active) {
@@ -866,6 +1079,7 @@ function SceneLocationsPanel({ episode, locations, accent, onGoLocations }: {
     const patch: Partial<Episode> = { locationId: l.id, location: l.name };
     if (l.portrait) patch.image = l.portrait;
     await db.episodes.update(episode.id, patch);
+    if (!episode.moodPinned) setMood(moodFromHue(l.hue));
   };
 
   const addQuick = async () => {
@@ -875,6 +1089,25 @@ function SceneLocationsPanel({ episode, locations, accent, onGoLocations }: {
       locationId: l.id, location: l.name,
       ...(l.portrait ? { image: l.portrait } : {})
     });
+    if (!episode.moodPinned) setMood(moodFromHue(l.hue));
+  };
+
+  const generate = async () => {
+    if (!world || !activeLoc) return;
+    setGenBusy(true);
+    setGenError('');
+    try {
+      const { provider, model } = proseModelFor(world);
+      const image = await generateSceneImage({
+        provider, model, world, location: activeLoc,
+        atmosphereNote: episode.atmosphereNote
+      });
+      await db.episodes.update(episode.id, { image });
+    } catch (e) {
+      setGenError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGenBusy(false);
+    }
   };
 
   return (
@@ -910,8 +1143,15 @@ function SceneLocationsPanel({ episode, locations, accent, onGoLocations }: {
       {locations.length === 0 && (
         <div style={{ fontSize: 12, opacity: 0.5, color: '#eceae6' }}>No saved locations yet.</div>
       )}
+      {genError && <ErrorNote error={genError} onDismiss={() => setGenError('')} />}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} onClick={() => void addQuick()}>+ new</button>
+        {activeLoc && world && (
+          <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} disabled={genBusy}
+            onClick={() => void generate()}>
+            {genBusy ? 'generating…' : 'generate scene image'}
+          </button>
+        )}
         <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} onClick={onGoLocations}>full editor → Locations</button>
       </div>
     </div>
@@ -1037,7 +1277,7 @@ function DirectorContent(props: {
       <SceneCastPanel episode={props.episode} characters={props.characters} accent={props.accent} />
       <SceneLocationsPanel
         episode={props.episode} locations={props.locations} accent={props.accent}
-        onGoLocations={props.onGoLocations}
+        world={props.world} onGoLocations={props.onGoLocations}
       />
       <ScenePlatePanel episode={props.episode} bd={BACKDROPS.scene} />
       <ContinuityPanel continuity={props.continuity} world={props.world} season={props.season} />

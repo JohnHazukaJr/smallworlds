@@ -14,7 +14,7 @@ export function Settings() {
   const vw = useVw();
   const narrow = vw < 780;
   const s = useSettings();
-  const { currentWorldId } = useApp();
+  const { currentWorldId, go } = useApp();
   const world = useLiveQuery(
     async () => (currentWorldId ? db.worlds.get(currentWorldId) : undefined),
     [currentWorldId]
@@ -23,9 +23,14 @@ export function Settings() {
 
   return (
     <div className="fade-in" style={{ padding: narrow ? '26px 18px 70px' : '42px 46px 70px', maxWidth: 960 }}>
-      <div style={{ marginBottom: 30 }}>
-        <Mono style={{ letterSpacing: '0.16em', marginBottom: 10 }}>preferences</Mono>
-        <h1 className="serif" style={{ fontWeight: 300, fontSize: narrow ? 32 : 40, margin: 0, color: '#f8f6f2' }}>Settings</h1>
+      <div style={{ marginBottom: 30, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+        <div>
+          <Mono style={{ letterSpacing: '0.16em', marginBottom: 10 }}>preferences</Mono>
+          <h1 className="serif" style={{ fontWeight: 300, fontSize: narrow ? 32 : 40, margin: 0, color: '#f8f6f2' }}>Settings</h1>
+        </div>
+        <button className="btn-ghost" style={{ fontSize: 12, marginTop: 8 }} onClick={() => go('profile')}>
+          Profile &amp; backups
+        </button>
       </div>
 
       {/* providers */}

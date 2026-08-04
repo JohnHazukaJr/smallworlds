@@ -87,6 +87,10 @@ export interface Episode {
   locationId?: string | null;
   /** optional scene image (data URL) shown behind the story text */
   image?: string | null;
+  /** free-text weather / time of day / sensory note for this scene */
+  atmosphereNote?: string;
+  /** when true, location changes won't auto-retarget the global mood */
+  moodPinned?: boolean;
   /** character ids present in the current scene */
   castIds: string[];
   status: 'active' | 'ended';

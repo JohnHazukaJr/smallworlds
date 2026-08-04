@@ -150,6 +150,7 @@ export function buildSystemPrompt(ctx: PromptContext): string {
     `## Current episode\nEpisode ${episode.number}${episode.title ? ` — ${episode.title}` : ''}.${episode.location ? ` Location: ${episode.location}.` : ''}`
   );
 
+  let currentLocations: Location[] = [];
   if (locations.length > 0) {
     const byId = episode.locationId
       ? locations.filter((l) => l.id === episode.locationId)
@@ -158,14 +159,26 @@ export function buildSystemPrompt(ctx: PromptContext): string {
     const byName = byId.length === 0 && epLoc
       ? locations.filter((l) => l.name.trim() && (epLoc.includes(l.name.toLowerCase()) || l.name.toLowerCase().includes(epLoc)))
       : [];
-    const current = byId.length > 0 ? byId : byName;
-    const others = locations.filter((l) => !current.includes(l));
-    if (current.length > 0) {
-      sections.push(`## Current location\n${current.map(locationSheet).join('\n\n')}`);
+    currentLocations = byId.length > 0 ? byId : byName;
+    const others = locations.filter((l) => !currentLocations.includes(l));
+    if (currentLocations.length > 0) {
+      sections.push(`## Current location\n${currentLocations.map(locationSheet).join('\n\n')}`);
     }
     if (others.length > 0) {
       sections.push(`## Other established locations (may be referenced or visited)\n${others.map(locationBrief).join('\n')}`);
     }
+  }
+
+  const sensoryBits = [
+    currentLocations[0]?.atmosphere,
+    episode.atmosphereNote
+  ].filter((s) => s && s.trim());
+  if (sensoryBits.length > 0) {
+    sections.push(
+      `## Sensory contract for this scene\n` +
+      `Hold the place in the body of the prose. From the notes below, keep returning to one or two concrete sensory anchors (sight, sound, smell, temperature, or touch) — never all at once, never as a tourist catalogue:\n` +
+      sensoryBits.map((s) => `- ${s!.trim()}`).join('\n')
+    );
   }
 
   if (player) {
@@ -227,7 +240,22 @@ const MODE_PREFIX: Record<ComposeMode, (input: string) => string> = {
 };
 
 /** Rough char budget for history packing (≈4 chars per token). */
-const HISTORY_CHAR_BUDGET = 48000;
+export const HISTORY_CHAR_BUDGET = 48000;
+
+/** Sum of turn text lengths for an episode — used for context-pressure UI. */
+export function episodeHistoryChars(turns: Array<{ text: string }>): number {
+  return turns.reduce((n, t) => n + t.text.length, 0);
+}
+
+/**
+ * How close the episode transcript is to rolling older beats out of the prompt.
+ * warn ≈ 55% of budget, escalate ≈ 75%.
+ */
+export function episodeContextPressure(chars: number): 'ok' | 'warn' | 'escalate' {
+  if (chars >= HISTORY_CHAR_BUDGET * 0.75) return 'escalate';
+  if (chars >= HISTORY_CHAR_BUDGET * 0.55) return 'warn';
+  return 'ok';
+}
 
 export function buildMessages(
   turns: Turn[],

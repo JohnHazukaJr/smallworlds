@@ -7,16 +7,12 @@ import { Mono } from '../ui/bits';
 const ITEMS: Array<[string, string, Screen]> = [
   ['01', 'Worlds', 'library'],
   ['02', 'Story', 'story'],
-  ['03', 'Cast', 'cast'],
-  ['04', 'Locations', 'locations'],
-  ['05', 'Next season', 'sequel'],
-  ['06', 'Profile', 'profile'],
-  ['07', 'Settings', 'settings'],
-  ['08', 'New world', 'onboard']
+  ['03', 'Settings', 'settings'],
+  ['04', 'New world', 'onboard']
 ];
 
 const TABS: Array<[string, Screen]> = [
-  ['Worlds', 'library'], ['Story', 'story'], ['Cast', 'cast'], ['Locations', 'locations'], ['Season', 'sequel'], ['Settings', 'settings']
+  ['Worlds', 'library'], ['Story', 'story'], ['Settings', 'settings']
 ];
 
 export function Rail() {
@@ -88,7 +84,7 @@ export function TabBar() {
       {TABS.map(([label, key]) => (
         <button key={key} className={screen === key ? 'active' : ''} onClick={() => go(key)}>
           <span style={{ fontSize: 14, fontFamily: 'Spectral, serif', textTransform: 'none', letterSpacing: 0 }}>
-            {label === 'Worlds' ? '◈' : label === 'Story' ? '¶' : label === 'Cast' ? '☰' : label === 'Locations' ? '◎' : label === 'Season' ? '⁂' : '⚙'}
+            {label === 'Worlds' ? '◈' : label === 'Story' ? '¶' : '⚙'}
           </span>
           {label}
         </button>

@@ -29,16 +29,34 @@ export const DEFAULT_DISPLAY: DisplayPrefs = {
 
 export const AVATAR_PX: Record<AvatarSize, number> = { S: 34, M: 50, L: 68 };
 
+/** Write = full chrome + composer; Read = distraction-free. Director is always an overlay. */
+export type StoryLayout = 'write' | 'read';
+
+/** Map legacy persisted layout ids onto write|read. */
+export function normalizeStoryLayout(raw: unknown): StoryLayout {
+  if (raw === 'read') return 'read';
+  return 'write'; // immersive, director, write, or anything else
+}
+
+/** Map a location plate hue to the closest story mood. */
+export function moodFromHue(hue: number): MoodId {
+  const h = ((hue % 360) + 360) % 360;
+  if (h < 45 || h >= 330) return 'ember';
+  if (h < 100) return 'rot';
+  if (h < 200) return 'frost';
+  return 'ash';
+}
+
 interface AppStore {
   screen: Screen;
   currentWorldId: string | null;
-  layout: 'immersive' | 'director';
+  layout: StoryLayout;
   mood: MoodId;
   backdrop: BackdropId;
   display: DisplayPrefs;
   go: (screen: Screen) => void;
   openWorld: (worldId: string) => void;
-  setLayout: (l: 'immersive' | 'director') => void;
+  setLayout: (l: StoryLayout) => void;
   setMood: (m: MoodId) => void;
   setBackdrop: (b: BackdropId) => void;
   setDisplay: (p: Partial<DisplayPrefs>) => void;
@@ -49,13 +67,13 @@ export const useApp = create<AppStore>()(
     (set) => ({
       screen: 'library',
       currentWorldId: null,
-      layout: 'immersive',
+      layout: 'write',
       mood: 'ember',
       backdrop: 'scene',
       display: DEFAULT_DISPLAY,
       go: (screen) => set({ screen }),
       openWorld: (currentWorldId) => set({ currentWorldId, screen: 'story' }),
-      setLayout: (layout) => set({ layout }),
+      setLayout: (layout) => set({ layout: normalizeStoryLayout(layout) }),
       setMood: (mood) => set({ mood }),
       setBackdrop: (backdrop) => set({ backdrop }),
       setDisplay: (p) => set((s) => ({ display: { ...s.display, ...p } }))
@@ -67,7 +85,12 @@ export const useApp = create<AppStore>()(
       }) as Partial<AppStore>,
       merge: (persisted, current) => {
         const p = (persisted ?? {}) as Partial<AppStore>;
-        return { ...current, ...p, display: { ...DEFAULT_DISPLAY, ...(p.display ?? {}) } };
+        return {
+          ...current,
+          ...p,
+          layout: normalizeStoryLayout(p.layout),
+          display: { ...DEFAULT_DISPLAY, ...(p.display ?? {}) }
+        };
       }
     }
   )
