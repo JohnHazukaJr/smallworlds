@@ -88,15 +88,16 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
   const undoLoreFn = () => { if (undoLore) { patchWorld(undoLore); setAiVersion((v) => v + 1); } setUndoLore(null); };
   const undoPlotFn = () => { if (undoPlot !== null) { patchSeason({ premise: undoPlot }); setAiVersion((v) => v + 1); } setUndoPlot(null); };
   const undoRulesFn = () => { if (undoRules) { patchAI({ narratorRules: undoRules }); setAiVersion((v) => v + 1); } setUndoRules(null); };
+  const monoPx = narrow ? 11 : 9;
 
   return (
     <Sheet open={open} onClose={onClose} narrow={narrow} width={520}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
           <div className="serif" style={{ fontWeight: 300, fontSize: 24, color: '#f6f4f0' }}>Edit the world</div>
-          <Mono style={{ fontSize: 9 }}>changes apply from the next turn</Mono>
+          <Mono style={{ fontSize: monoPx }}>changes apply from the next turn</Mono>
         </div>
-        <button className="btn-ghost" style={{ width: 30, height: 30, padding: 0, flexShrink: 0 }} onClick={onClose}>×</button>
+        <button className="btn-ghost" style={{ width: narrow ? 44 : 30, height: narrow ? 44 : 30, padding: 0, flexShrink: 0, fontSize: narrow ? 18 : undefined }} onClick={onClose}>×</button>
       </div>
 
       <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
@@ -342,7 +343,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
 
         {tab === 'cast' && !selected && (
           <>
-            <Mono style={{ fontSize: 9 }}>pick a character to edit</Mono>
+            <Mono style={{ fontSize: monoPx }}>pick a character to edit</Mono>
             {characters.map((c) => (
               <div key={c.id} onClick={() => setCharId(c.id)} className="hover-bright" style={{
                 display: 'flex', gap: 11, alignItems: 'center', padding: '10px 12px', borderRadius: 13,
@@ -435,7 +436,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <textarea key={selected.id + '-ci'} rows={3} defaultValue={selected.customInstructions}
                 onBlur={(e) => patchChar(selected.id, { customInstructions: e.target.value })} />
             </Field>
-            <Mono style={{ fontSize: 9 }}>current state — right now in the story</Mono>
+            <Mono style={{ fontSize: monoPx }}>current state — right now in the story</Mono>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
               {([['goal', 'Goal'], ['emotion', 'Emotion'], ['location', 'Location'], ['condition', 'Condition']] as const).map(([k, label]) => (
                 <Field key={k} label={label}>
@@ -449,7 +450,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
 
         {tab === 'locations' && !selectedLoc && (
           <>
-            <Mono style={{ fontSize: 9 }}>pick a location to edit</Mono>
+            <Mono style={{ fontSize: monoPx }}>pick a location to edit</Mono>
             {locations.map((l) => (
               <div key={l.id} onClick={() => setLocId(l.id)} className="hover-bright" style={{
                 display: 'flex', gap: 11, alignItems: 'center', padding: '10px 12px', borderRadius: 13,

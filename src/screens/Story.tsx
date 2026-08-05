@@ -1,5 +1,5 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
   analyzeEpisode, commitEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, proseModelFor,
   rollbackTurnSnapshot, snapshotTurnsAfter, snapshotTurnsFrom, writeTurn,
@@ -41,6 +41,20 @@ interface WrapReviewDraft {
     condition: string;
     keep: boolean;
   }>;
+  knowledgeUpdates: Array<{
+    name: string;
+    nowKnows: string;
+    clearMustNotKnow: string;
+    keep: boolean;
+  }>;
+  relationshipUpdates: Array<{
+    from: string;
+    to: string;
+    kind: string;
+    note: string;
+    keep: boolean;
+  }>;
+  premisePreview: string;
   storyDayStart: number;
   storyDayEnd: number;
   /** Day the next episode opens on */
@@ -64,6 +78,20 @@ function draftFromAnalysis(d: EpisodeWrapDraft): WrapReviewDraft {
       condition: u.condition ?? '',
       keep: true
     })),
+    knowledgeUpdates: d.knowledgeUpdates.map((u) => ({
+      name: u.name,
+      nowKnows: u.nowKnows ?? '',
+      clearMustNotKnow: u.clearMustNotKnow ?? '',
+      keep: true
+    })),
+    relationshipUpdates: d.relationshipUpdates.map((u) => ({
+      from: u.from,
+      to: u.to,
+      kind: u.kind ?? '',
+      note: u.note ?? '',
+      keep: true
+    })),
+    premisePreview: d.premisePreview,
     storyDayStart: d.storyDayStart,
     storyDayEnd: d.storyDayEnd,
     nextStoryDay: Math.max(d.storyDayEnd, d.nextStoryDay),
@@ -319,13 +347,36 @@ export function Story() {
   const [directorSheet, setDirectorSheet] = useState(false);
   const [worldEditOpen, setWorldEditOpen] = useState(false);
   const [displayOpen, setDisplayOpen] = useState(false);
+  const [moreSheet, setMoreSheet] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
+  const [composerFocused, setComposerFocused] = useState(false);
+  const [keyboardOffset, setKeyboardOffset] = useState(0);
   const [sceneFadeKey, setSceneFadeKey] = useState(0);
   /** Context-pressure nudge: dismiss until chars rise ~10% of budget or location changes. */
   const [nudgeDismissedAtChars, setNudgeDismissedAtChars] = useState(0);
   const [nudgeDismissedLocId, setNudgeDismissedLocId] = useState<string | null | undefined>(undefined);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    if (!narrow || !composerFocused) {
+      setKeyboardOffset(0);
+      return;
+    }
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const sync = () => {
+      const covered = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      setKeyboardOffset(covered > 40 ? covered : 0);
+    };
+    sync();
+    vv.addEventListener('resize', sync);
+    vv.addEventListener('scroll', sync);
+    return () => {
+      vv.removeEventListener('resize', sync);
+      vv.removeEventListener('scroll', sync);
+    };
+  }, [narrow, composerFocused]);
 
   const activeLocation = locations.find((l) => l.id === episode?.locationId)
     ?? locations.find((l) => episode?.location && l.name && episode.location.toLowerCase().includes(l.name.toLowerCase()));
@@ -574,6 +625,21 @@ export function Story() {
             location: location || undefined,
             condition: condition || undefined
           })),
+        knowledgeUpdates: wrapDraft.knowledgeUpdates
+          .filter((u) => u.keep && u.name.trim())
+          .map(({ name, nowKnows, clearMustNotKnow }) => ({
+            name,
+            nowKnows: nowKnows || undefined,
+            clearMustNotKnow: clearMustNotKnow || undefined
+          })),
+        relationshipUpdates: wrapDraft.relationshipUpdates
+          .filter((u) => u.keep && u.from.trim() && u.to.trim())
+          .map(({ from, to, kind, note }) => ({
+            from, to,
+            kind: kind || undefined,
+            note: note || undefined
+          })),
+        premisePreview: wrapDraft.premisePreview,
         storyDayStart: wrapDraft.storyDayStart,
         storyDayEnd: wrapDraft.storyDayEnd,
         nextStoryDay: wrapDraft.nextStoryDay,
@@ -622,20 +688,28 @@ export function Story() {
   const directorContent = (
     <DirectorContent
       world={world} season={season} episode={episode} characters={characters} locations={locations}
-      continuity={continuity} threads={threads} accent={M.accent}
+      continuity={continuity} threads={threads} accent={M.accent} narrow={narrow}
       onGoLocations={goLocations}
       onNudge={(text) => { setComposeMode('steer'); setInput(text); setDirectorSheet(false); }}
     />
   );
 
   const shellHeight = narrow && !readMode
-    ? 'calc(100vh - 58px - env(safe-area-inset-bottom))'
-    : '100vh';
+    ? 'calc(100dvh - 58px - env(safe-area-inset-bottom))'
+    : '100dvh';
   const locLabel = (activeLocation?.name || episode.location || '')
     .split(',')[0].split('.')[0].toLowerCase();
 
   return (
-    <div style={{ position: 'relative', minHeight: narrow && !readMode ? 'auto' : '100vh', height: shellHeight, display: 'flex', flexDirection: 'column', color: M.text }}>
+    <div style={{
+      position: 'relative',
+      minHeight: narrow && !readMode ? 'auto' : '100dvh',
+      height: shellHeight,
+      display: 'flex',
+      flexDirection: 'column',
+      color: M.text,
+      paddingBottom: keyboardOffset > 0 ? keyboardOffset : undefined
+    }}>
       {/* backdrop — scene image when the episode has one, mood gradient otherwise */}
       {episode.image ? (
         <>
@@ -731,36 +805,40 @@ export function Story() {
                 <button key={id} onClick={() => setLayout(id as StoryLayout)} style={{
                   border: 0, background: layout === id ? 'rgba(255,255,255,0.14)' : 'transparent',
                   color: 'inherit', opacity: layout === id ? 1 : 0.55, padding: '7px 12px',
-                  fontSize: 12, fontWeight: 600, cursor: 'pointer'
+                  fontSize: 12, fontWeight: 600, cursor: 'pointer', minHeight: 36
                 }}>{label}</button>
               ))}
             </div>
-            <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11 }} onClick={() => setDirectorSheet(true)}>Direct</button>
-            {!narrow && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 7, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px', background: 'rgba(255,255,255,0.05)' }}>
-                <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.45 }}>backdrop</span>
-                {(Object.keys(BACKDROPS) as Array<keyof typeof BACKDROPS>).map((id) => (
-                  <Chip key={id} active={backdrop === id} accent={M.accent} onClick={() => setBackdrop(id)}>
-                    {id === 'none' ? 'Off' : id[0].toUpperCase() + id.slice(1)}
-                  </Chip>
-                ))}
-              </div>
+            <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setDirectorSheet(true)}>Direct</button>
+            <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setWrapOpen('episode')}>Wrap</button>
+            {narrow ? (
+              <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setMoreSheet(true)}>More</button>
+            ) : (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 7, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px', background: 'rgba(255,255,255,0.05)' }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.45 }}>backdrop</span>
+                  {(Object.keys(BACKDROPS) as Array<keyof typeof BACKDROPS>).map((id) => (
+                    <Chip key={id} active={backdrop === id} accent={M.accent} onClick={() => setBackdrop(id)}>
+                      {id === 'none' ? 'Off' : id[0].toUpperCase() + id.slice(1)}
+                    </Chip>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px', background: 'rgba(255,255,255,0.05)' }}>
+                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.45 }}>
+                    mood{episode.moodPinned ? ' · pinned' : ''}
+                  </span>
+                  {(Object.entries(MOODS) as Array<[typeof mood, typeof M]>).map(([id, m]) => (
+                    <button key={id} title={m.label} onClick={() => pinMood(id)} style={{
+                      width: 28, height: 28, borderRadius: '50%', cursor: 'pointer', background: m.accent,
+                      border: `2px solid ${mood === id ? 'rgba(255,255,255,0.85)' : 'transparent'}`,
+                      opacity: mood === id ? 1 : 0.45, padding: 0
+                    }} />
+                  ))}
+                </div>
+                <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setDisplayOpen(true)}>Display</button>
+                <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setWorldEditOpen(true)}>Edit world</button>
+              </>
             )}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px', background: 'rgba(255,255,255,0.05)' }}>
-              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.45 }}>
-                mood{episode.moodPinned ? ' · pinned' : ''}
-              </span>
-              {(Object.entries(MOODS) as Array<[typeof mood, typeof M]>).map(([id, m]) => (
-                <button key={id} title={m.label} onClick={() => pinMood(id)} style={{
-                  width: 13, height: 13, borderRadius: '50%', cursor: 'pointer', background: m.accent,
-                  border: `1px solid ${mood === id ? 'rgba(255,255,255,0.85)' : 'transparent'}`,
-                  opacity: mood === id ? 1 : 0.45, padding: 0
-                }} />
-              ))}
-            </div>
-            <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setDisplayOpen(true)}>Display</button>
-            <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setWorldEditOpen(true)}>Edit world</button>
-            <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setWrapOpen('episode')}>Wrap</button>
           </div>
         </div>
       )}
@@ -880,7 +958,9 @@ export function Story() {
       ) : (
         <div style={{
           position: 'relative', zIndex: 2, borderTop: '1px solid rgba(255,255,255,0.08)',
-          padding: narrow ? '11px 12px 12px' : '15px 24px 18px',
+          padding: narrow
+            ? '11px 12px calc(12px + env(safe-area-inset-bottom))'
+            : '15px 24px 18px',
           display: 'flex', flexDirection: 'column', gap: 11,
           background: 'rgba(8,9,12,0.42)', backdropFilter: 'blur(24px) saturate(140%)'
         }}>
@@ -914,23 +994,47 @@ export function Story() {
               <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 14 }} onClick={() => setNotice('')}>×</button>
             </div>
           )}
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+            gap: 4,
+            border: '1px solid rgba(255,255,255,0.12)',
+            borderRadius: 12,
+            overflow: 'hidden',
+            background: 'rgba(255,255,255,0.04)'
+          }}>
             {(['continue', 'steer', 'speak', 'act'] as const).map((m) => (
-              <Chip key={m} active={composeMode === m} accent={M.accent} onClick={() => setComposeMode(m)}>
+              <button
+                key={m}
+                type="button"
+                onClick={() => setComposeMode(m)}
+                style={{
+                  border: 0,
+                  minHeight: 44,
+                  padding: '8px 4px',
+                  fontSize: narrow ? 12 : 13,
+                  fontWeight: composeMode === m ? 600 : 500,
+                  cursor: 'pointer',
+                  color: composeMode === m ? '#181307' : 'rgba(236,234,230,0.7)',
+                  background: composeMode === m ? M.accent : 'transparent'
+                }}
+              >
                 {m[0].toUpperCase() + m.slice(1)}
-              </Chip>
+              </button>
             ))}
-            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
-              {readMode && (
-                <button className="btn-quiet" style={{ fontSize: 11 }} onClick={() => setComposerOpen(false)}>collapse</button>
-              )}
-              {!narrow && <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.45 }}>length</span>}
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.45 }}>length</span>
               {(['beat', 'scene', 'episode'] as const).map((l) => (
                 <Chip key={l} active={length === l} accent={M.accent} onClick={() => setLength(l)}>
                   {l[0].toUpperCase() + l.slice(1)}
                 </Chip>
               ))}
             </div>
+            {readMode && (
+              <button className="btn-quiet" style={{ fontSize: 11, minHeight: 40 }} onClick={() => setComposerOpen(false)}>collapse</button>
+            )}
           </div>
           <div style={{
             display: 'flex', gap: 13, alignItems: 'flex-end', border: '1px solid rgba(255,255,255,0.14)',
@@ -945,6 +1049,8 @@ export function Story() {
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              onFocus={() => setComposerFocused(true)}
+              onBlur={() => setComposerFocused(false)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void write(); }
               }}
@@ -958,9 +1064,9 @@ export function Story() {
               }}
             />
             {streaming ? (
-              <button className="btn-ghost" style={{ alignSelf: 'flex-end' }} onClick={() => abortRef.current?.abort()}>Stop</button>
+              <button className="btn-ghost" style={{ alignSelf: 'flex-end', minHeight: 44 }} onClick={() => abortRef.current?.abort()}>Stop</button>
             ) : (
-              <button className="btn-primary" style={{ alignSelf: 'flex-end', padding: '10px 19px' }} onClick={() => void write()}>
+              <button className="btn-primary" style={{ alignSelf: 'flex-end', padding: '10px 19px', minHeight: 44 }} onClick={() => void write()}>
                 Write on
               </button>
             )}
@@ -1003,9 +1109,16 @@ export function Story() {
                 disabled={wrapBusy || !wrapDraft}
                 onClick={() => void confirmEpisodeWrap()}
               >
-                {wrapBusy
-                  ? 'Filing continuity…'
-                  : `Confirm · episode ${episode.number + 1} · ${formatStoryDate(worldCalendar(world), wrapDraft?.nextStoryDay ?? worldCalendar(world).currentDay).toLowerCase()}`}
+                {wrapBusy ? (
+                  'Filing continuity…'
+                ) : (
+                  <span style={{ display: 'flex', flexDirection: 'column', gap: 2, lineHeight: 1.25 }}>
+                    <span>Confirm · episode {episode.number + 1}</span>
+                    <span style={{ fontSize: 11, fontWeight: 500, opacity: 0.8 }}>
+                      {formatStoryDate(worldCalendar(world), wrapDraft?.nextStoryDay ?? worldCalendar(world).currentDay).toLowerCase()}
+                    </span>
+                  </span>
+                )}
               </button>
               <button
                 className="btn-quiet"
@@ -1106,12 +1219,48 @@ export function Story() {
       </Sheet>
 
       {/* director overlay — cast, places, continuity, threads (all widths) */}
-      <Sheet open={directorSheet} onClose={() => setDirectorSheet(false)} narrow={narrow}>
+      <Sheet
+        open={directorSheet}
+        onClose={() => setDirectorSheet(false)}
+        narrow={narrow}
+        footer={
+          <button className="btn-primary" style={{ width: '100%', minHeight: 44 }} onClick={() => setDirectorSheet(false)}>
+            Done
+          </button>
+        }
+      >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div className="serif" style={{ fontWeight: 300, fontSize: 24, color: '#f6f4f0' }}>Director</div>
-          <button className="btn-ghost" style={{ width: 30, height: 30, padding: 0 }} onClick={() => setDirectorSheet(false)}>×</button>
+          <button className="btn-ghost" style={{ width: 44, height: 44, padding: 0, fontSize: 18 }} onClick={() => setDirectorSheet(false)}>×</button>
         </div>
         {directorContent}
+      </Sheet>
+
+      {/* narrow overflow: display / edit / mood */}
+      <Sheet open={moreSheet} onClose={() => setMoreSheet(false)} narrow={narrow}
+        footer={
+          <button className="btn-primary" style={{ width: '100%', minHeight: 44 }} onClick={() => setMoreSheet(false)}>Done</button>
+        }
+      >
+        <div className="serif" style={{ fontWeight: 300, fontSize: 24, color: '#f6f4f0' }}>More</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setDisplayOpen(true); }}>
+            Display
+          </button>
+          <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setWorldEditOpen(true); }}>
+            Edit world
+          </button>
+          <Mono style={{ fontSize: 11 }}>mood{episode.moodPinned ? ' · pinned' : ''}</Mono>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+            {(Object.entries(MOODS) as Array<[typeof mood, typeof M]>).map(([id, m]) => (
+              <button key={id} title={m.label} onClick={() => pinMood(id)} style={{
+                width: 36, height: 36, borderRadius: '50%', cursor: 'pointer', background: m.accent,
+                border: `2px solid ${mood === id ? 'rgba(255,255,255,0.9)' : 'transparent'}`,
+                opacity: mood === id ? 1 : 0.5, padding: 0
+              }} />
+            ))}
+          </div>
+        </div>
       </Sheet>
 
       {/* live world editor */}
@@ -1397,24 +1546,25 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, st
   return (
     <div className="turn-row" style={{ position: 'relative' }}>
       {blocks.map((b, i) => <ProseBlockView key={i} b={b} accent={accent} prose={prose} fontPx={fontPx} avatarPx={avatarPx} />)}
-      <div className="turn-tools" style={{ display: 'flex', gap: 10, marginTop: -8, marginBottom: 20 }}>
-        <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} disabled={streaming}
-          onClick={() => { setDraft(turn.text); setEditing(true); }}>✎ edit</button>
-        <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} disabled={streaming}
-          onClick={onRetry}>↻ {retryLabel}</button>
+      <div className="turn-tools" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: -4, marginBottom: 20 }}>
+        <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
+          onClick={() => { setDraft(turn.text); setEditing(true); }}>Edit</button>
+        <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
+          onClick={onRetry}>{retryLabel}</button>
         {hasBelow && (
-          <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} disabled={streaming}
-            onClick={onDeleteBelow}>⌫ delete below</button>
+          <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
+            onClick={onDeleteBelow}>Delete below</button>
         )}
-        <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} disabled={streaming}
+        <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
           onClick={async () => {
             if (confirm('Delete this turn? The turns after it are kept.')) {
               await recordTombstones([{
                 table: 'turns', id: turn.id, worldId: turn.worldId, episodeId: turn.episodeId, payload: turn
               }]);
               await db.turns.delete(turn.id);
+              if (turn.episodeId) await db.episodes.update(turn.episodeId, { runningSummary: null, runningSummaryAtChars: 0, updatedAt: Date.now() });
             }
-          }}>× delete</button>
+          }}>Delete</button>
       </div>
     </div>
   );
@@ -1462,7 +1612,8 @@ function SceneCastPanel({ episode, characters, accent }: { episode: Episode; cha
         <>
           <Mono style={{ fontSize: 9, marginTop: 8 }}>walk-ons · this episode only</Mono>
           {guests.map((g) => {
-            const active = !activeGuestIds || activeGuestIds.length === 0 || activeGuestIds.includes(g.id);
+            // Omitted activeGuestIds ⇒ all guests; explicit [] ⇒ none (matches prompts).
+            const active = activeGuestIds == null || activeGuestIds.includes(g.id);
             return (
               <div key={g.id} style={{
                 display: 'flex', gap: 10, alignItems: 'center', padding: 8, borderRadius: 12,
@@ -1641,7 +1792,9 @@ function ScenePlatePanel({ episode, bd }: { episode: Episode; bd: { tag: string;
   );
 }
 
-function ContinuityPanel({ continuity, world, season }: { continuity: ContinuityFact[]; world: World; season: Season }) {
+function ContinuityPanel({ continuity, world, season, episode }: {
+  continuity: ContinuityFact[]; world: World; season: Season; episode: Episode;
+}) {
   const [adding, setAdding] = useState('');
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -1665,7 +1818,10 @@ function ContinuityPanel({ continuity, world, season }: { continuity: Continuity
           style={{ fontSize: 11.5, padding: '7px 9px' }}
           onKeyDown={async (e) => {
             if (e.key === 'Enter' && adding.trim()) {
-              await db.continuity.add({ id: uid(), worldId: world.id, seasonId: season.id, text: adding.trim(), source: 'manual', createdAt: Date.now() });
+              await db.continuity.add({
+                id: uid(), worldId: world.id, seasonId: season.id, episodeId: episode.id,
+                text: adding.trim(), source: 'manual', createdAt: Date.now()
+              });
               setAdding('');
             }
           }}
@@ -1715,25 +1871,72 @@ function NudgesPanel({ threads, inScene, onNudge }: { threads: OpenThread[]; inS
   );
 }
 
+function DirectorAccordion({
+  title, open, onToggle, children, labelSize
+}: {
+  title: string;
+  open: boolean;
+  onToggle: () => void;
+  children: ReactNode;
+  labelSize: number;
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: open ? 12 : 0 }}>
+      <button
+        type="button"
+        onClick={onToggle}
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          minHeight: 44, padding: '10px 0', border: 0, borderBottom: '1px solid rgba(255,255,255,0.1)',
+          background: 'transparent', color: 'inherit', cursor: 'pointer', textAlign: 'left'
+        }}
+      >
+        <Mono style={{ fontSize: labelSize }}>{title}</Mono>
+        <span style={{ opacity: 0.5, fontSize: 14 }}>{open ? '−' : '+'}</span>
+      </button>
+      {open && children}
+    </div>
+  );
+}
+
 function DirectorContent(props: {
   world: World; season: Season; episode: Episode; characters: Character[]; locations: Location[];
   continuity: ContinuityFact[]; threads: OpenThread[]; accent: string;
+  narrow?: boolean;
   onGoLocations: () => void;
   onNudge: (t: string) => void;
 }) {
   const inScene = props.characters.filter((c) => props.episode.castIds.includes(c.id));
+  const labelSize = props.narrow ? 11 : 9;
+  const [open, setOpen] = useState({ calendar: true, scene: true, memory: false, nudges: false });
+  const toggle = (key: keyof typeof open) => setOpen((o) => ({ ...o, [key]: !o[key] }));
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 22, overflow: 'auto' }}>
-      <CalendarTrackerPanel world={props.world} season={props.season} episode={props.episode} />
-      <SceneCastPanel episode={props.episode} characters={props.characters} accent={props.accent} />
-      <SceneLocationsPanel
-        episode={props.episode} locations={props.locations} accent={props.accent}
-        world={props.world} onGoLocations={props.onGoLocations}
-      />
-      <ScenePlatePanel episode={props.episode} bd={BACKDROPS.scene} />
-      <ContinuityPanel continuity={props.continuity} world={props.world} season={props.season} />
-      <ThreadsPanel threads={props.threads} />
-      <NudgesPanel threads={props.threads} inScene={inScene} onNudge={props.onNudge} />
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, overflow: 'auto' }}>
+      <DirectorAccordion title="calendar" open={open.calendar} onToggle={() => toggle('calendar')} labelSize={labelSize}>
+        <CalendarTrackerPanel world={props.world} season={props.season} episode={props.episode} />
+      </DirectorAccordion>
+      <DirectorAccordion title="scene" open={open.scene} onToggle={() => toggle('scene')} labelSize={labelSize}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+          <SceneCastPanel episode={props.episode} characters={props.characters} accent={props.accent} />
+          <SceneLocationsPanel
+            episode={props.episode} locations={props.locations} accent={props.accent}
+            world={props.world} onGoLocations={props.onGoLocations}
+          />
+          <ScenePlatePanel episode={props.episode} bd={BACKDROPS.scene} />
+        </div>
+      </DirectorAccordion>
+      <DirectorAccordion title="memory" open={open.memory} onToggle={() => toggle('memory')} labelSize={labelSize}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+          <ContinuityPanel
+            continuity={props.continuity} world={props.world} season={props.season} episode={props.episode}
+          />
+          <ThreadsPanel threads={props.threads} />
+        </div>
+      </DirectorAccordion>
+      <DirectorAccordion title="nudges" open={open.nudges} onToggle={() => toggle('nudges')} labelSize={labelSize}>
+        <NudgesPanel threads={props.threads} inScene={inScene} onNudge={props.onNudge} />
+      </DirectorAccordion>
     </div>
   );
 }
@@ -1982,6 +2185,20 @@ function WrapReviewBody({
         />
       </div>
 
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <Mono style={{ fontSize: 9 }}>premise (current pressure) → next episode</Mono>
+        <textarea
+          className="serif"
+          rows={4}
+          value={draft.premisePreview}
+          onChange={(e) => onChange({ ...draft, premisePreview: e.target.value })}
+          style={{
+            fontFamily: 'Spectral, serif', fontSize: 14.5, lineHeight: 1.6, color: '#f0eee9',
+            width: '100%', background: 'rgba(255,255,255,0.04)'
+          }}
+        />
+      </div>
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <Mono style={{ fontSize: 9 }}>episode date</Mono>
         <div style={{
@@ -2195,6 +2412,120 @@ function WrapReviewBody({
                 keep={u.keep}
                 onKeep={() => patchCast(i, { keep: true })}
                 onDrop={() => patchCast(i, { keep: false })}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {draft.knowledgeUpdates.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <Mono style={{ fontSize: 9 }}>knowledge updates</Mono>
+          {draft.knowledgeUpdates.map((u, i) => (
+            <div key={i} style={{
+              display: 'flex', flexDirection: 'column', gap: 8,
+              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '12px 14px',
+              background: 'rgba(255,255,255,0.04)',
+              opacity: u.keep ? 1 : 0.42
+            }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: '#f0eee9' }}>{u.name}</div>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <Mono style={{ fontSize: 8, opacity: 0.55 }}>now knows</Mono>
+                <textarea
+                  rows={2}
+                  value={u.nowKnows}
+                  onChange={(e) => {
+                    const knowledgeUpdates = draft.knowledgeUpdates.map((row, j) =>
+                      j === i ? { ...row, nowKnows: e.target.value } : row
+                    );
+                    onChange({ ...draft, knowledgeUpdates });
+                  }}
+                  style={{ fontSize: 13, lineHeight: 1.45, color: '#eceae6', background: 'transparent', border: 0, padding: 0 }}
+                />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <Mono style={{ fontSize: 8, opacity: 0.55 }}>clear from must-not-know</Mono>
+                <input
+                  value={u.clearMustNotKnow}
+                  onChange={(e) => {
+                    const knowledgeUpdates = draft.knowledgeUpdates.map((row, j) =>
+                      j === i ? { ...row, clearMustNotKnow: e.target.value } : row
+                    );
+                    onChange({ ...draft, knowledgeUpdates });
+                  }}
+                  style={{ fontSize: 13, color: '#eceae6', background: 'transparent', border: 0, padding: 0 }}
+                />
+              </label>
+              <KeepDropChips
+                keep={u.keep}
+                onKeep={() => {
+                  const knowledgeUpdates = draft.knowledgeUpdates.map((row, j) =>
+                    j === i ? { ...row, keep: true } : row
+                  );
+                  onChange({ ...draft, knowledgeUpdates });
+                }}
+                onDrop={() => {
+                  const knowledgeUpdates = draft.knowledgeUpdates.map((row, j) =>
+                    j === i ? { ...row, keep: false } : row
+                  );
+                  onChange({ ...draft, knowledgeUpdates });
+                }}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {draft.relationshipUpdates.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <Mono style={{ fontSize: 9 }}>relationship shifts</Mono>
+          {draft.relationshipUpdates.map((u, i) => (
+            <div key={i} style={{
+              display: 'flex', flexDirection: 'column', gap: 8,
+              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '12px 14px',
+              background: 'rgba(255,255,255,0.04)',
+              opacity: u.keep ? 1 : 0.42
+            }}>
+              <div style={{ fontSize: 14, color: '#f0eee9' }}>
+                <strong>{u.from}</strong> → <strong>{u.to}</strong>
+              </div>
+              <input
+                value={u.kind}
+                onChange={(e) => {
+                  const relationshipUpdates = draft.relationshipUpdates.map((row, j) =>
+                    j === i ? { ...row, kind: e.target.value } : row
+                  );
+                  onChange({ ...draft, relationshipUpdates });
+                }}
+                placeholder="kind (ally, rival…)"
+                style={{ fontSize: 13, color: '#eceae6', background: 'transparent', border: 0, padding: 0 }}
+              />
+              <textarea
+                rows={2}
+                value={u.note}
+                onChange={(e) => {
+                  const relationshipUpdates = draft.relationshipUpdates.map((row, j) =>
+                    j === i ? { ...row, note: e.target.value } : row
+                  );
+                  onChange({ ...draft, relationshipUpdates });
+                }}
+                placeholder="what changed…"
+                style={{ fontSize: 13, lineHeight: 1.45, color: '#eceae6', background: 'transparent', border: 0, padding: 0 }}
+              />
+              <KeepDropChips
+                keep={u.keep}
+                onKeep={() => {
+                  const relationshipUpdates = draft.relationshipUpdates.map((row, j) =>
+                    j === i ? { ...row, keep: true } : row
+                  );
+                  onChange({ ...draft, relationshipUpdates });
+                }}
+                onDrop={() => {
+                  const relationshipUpdates = draft.relationshipUpdates.map((row, j) =>
+                    j === i ? { ...row, keep: false } : row
+                  );
+                  onChange({ ...draft, relationshipUpdates });
+                }}
               />
             </div>
           ))}

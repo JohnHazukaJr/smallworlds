@@ -277,6 +277,8 @@ export interface ContinuityFact {
   id: string;
   worldId: string;
   seasonId: string;
+  /** Episode that filed this fact (optional for older rows). Used to keep cross-episode coverage in prompt caps. */
+  episodeId?: string;
   text: string;
   source: 'auto' | 'manual';
   createdAt: number;

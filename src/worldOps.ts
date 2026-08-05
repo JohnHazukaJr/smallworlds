@@ -223,7 +223,7 @@ export async function nextEpisode(current: Episode, opts: NextEpisodeOpts = {}):
     locationId: current.locationId ?? null,
     castIds: current.castIds,
     guests: [],
-    activeGuestIds: [],
+    // Omit activeGuestIds — empty guests; prompts treat omitted as "all" when guests exist.
     wrap: null,
     runningSummary: null,
     runningSummaryAtChars: 0,

@@ -119,10 +119,16 @@ async function loadContext(world: World, season: Season, episode: Episode) {
     db.turns.where('episodeId').equals(episode.id).sortBy('createdAt'),
     db.episodes.where('seasonId').equals(season.id).sortBy('number')
   ]);
-  const priorEpisode = seasonEpisodes
-    .filter((e) => e.number < episode.number && e.status === 'ended')
-    .at(-1) ?? null;
-  return { world, season, episode, characters, locations, continuity, threads, turns, priorEpisode };
+  const endedPriors = seasonEpisodes.filter(
+    (e) => e.number < episode.number && e.status === 'ended' && !!e.wrap?.recap?.trim()
+  );
+  /** Last up to 3 wrapped episodes — newest last (immediate prior is `.at(-1)`). */
+  const priorEpisodes = endedPriors.slice(-3);
+  const priorEpisode = priorEpisodes.at(-1) ?? null;
+  return {
+    world, season, episode, characters, locations, continuity, threads, turns,
+    priorEpisode, priorEpisodes
+  };
 }
 
 export interface StreamMeta {
@@ -302,7 +308,17 @@ function withTimeoutSignal(outer: AbortSignal | undefined, ms: number): { signal
   };
 }
 
-/** Apply director enter/leave to episode cast; only known non-player ids may enter/leave. */
+/** Resolve a cast NPC by id or case-insensitive name (never the player). */
+function resolveNpcId(raw: string, characters: Character[]): string | null {
+  const key = raw.trim();
+  if (!key) return null;
+  const npcs = characters.filter((c) => !c.isPlayer);
+  if (npcs.some((c) => c.id === key)) return key;
+  const byName = npcs.find((c) => c.name.toLowerCase() === key.toLowerCase());
+  return byName?.id ?? null;
+}
+
+/** Apply director enter/leave to episode cast; ids or exact names may enter/leave. */
 function applyCastDelta(
   castIds: string[],
   characters: Character[],
@@ -310,8 +326,14 @@ function applyCastDelta(
 ): string[] {
   const npcIds = new Set(characters.filter((c) => !c.isPlayer).map((c) => c.id));
   const playerId = characters.find((c) => c.isPlayer)?.id;
-  const enter = (delta?.enter ?? []).map((id) => id.trim()).filter((id) => npcIds.has(id));
-  const leave = new Set((delta?.leave ?? []).map((id) => id.trim()).filter((id) => npcIds.has(id)));
+  const enter = (delta?.enter ?? [])
+    .map((raw) => resolveNpcId(raw, characters))
+    .filter((id): id is string => !!id && npcIds.has(id));
+  const leave = new Set(
+    (delta?.leave ?? [])
+      .map((raw) => resolveNpcId(raw, characters))
+      .filter((id): id is string => !!id && npcIds.has(id))
+  );
   const known = (id: string) => id === playerId || npcIds.has(id);
   const next = [...new Set([...castIds.filter(known), ...enter])].filter((id) => !leave.has(id));
   if (playerId && castIds.includes(playerId) && !next.includes(playerId)) next.unshift(playerId);
@@ -691,11 +713,20 @@ export async function restoreTurns(turns: Turn[]): Promise<void> {
   await db.turns.bulkPut(turns);
 }
 
+async function clearEpisodeRunningSummary(episodeId: string): Promise<void> {
+  await db.episodes.update(episodeId, {
+    runningSummary: null,
+    runningSummaryAtChars: 0,
+    updatedAt: Date.now()
+  });
+}
+
 /** Delete a turn and everything after it (used by regenerate / retry). */
 export async function deleteTurnsFrom(turnId: string, episodeId: string): Promise<void> {
   const turns = await snapshotTurnsFrom(turnId, episodeId);
   if (turns.length === 0) return;
   await db.turns.bulkDelete(turns.map((t) => t.id));
+  await clearEpisodeRunningSummary(episodeId);
 }
 
 /** Delete everything after a turn, keeping the turn itself. */
@@ -703,6 +734,7 @@ export async function deleteTurnsAfter(turnId: string, episodeId: string): Promi
   const turns = await snapshotTurnsAfter(turnId, episodeId);
   if (turns.length === 0) return;
   await db.turns.bulkDelete(turns.map((t) => t.id));
+  await clearEpisodeRunningSummary(episodeId);
 }
 
 /**
@@ -846,7 +878,8 @@ export async function extractContinuity(world: World, season: Season, episode: E
   const now = Date.now();
   await db.continuity.bulkAdd(
     result.facts.filter((f) => f.trim()).map((f) => ({
-      id: uid(), worldId: world.id, seasonId: season.id, text: f.trim(), source: 'auto' as const, createdAt: now
+      id: uid(), worldId: world.id, seasonId: season.id, episodeId: episode.id,
+      text: f.trim(), source: 'auto' as const, createdAt: now
     }))
   );
   await db.threads.bulkAdd(
@@ -867,6 +900,21 @@ export interface EpisodeWrapCharacterUpdate {
   condition?: string;
 }
 
+export interface EpisodeWrapKnowledgeUpdate {
+  name: string;
+  /** Fact they now know — appended to continuity-facing sheet notes via mustNotKnow clear / fact */
+  nowKnows?: string;
+  /** Substring or clause to remove from mustNotKnow when they learned it */
+  clearMustNotKnow?: string;
+}
+
+export interface EpisodeWrapRelationshipUpdate {
+  from: string;
+  to: string;
+  kind?: string;
+  note?: string;
+}
+
 export interface EpisodeWrapDraft {
   recap: string;
   beats: EpisodeWrapBeat[];
@@ -876,6 +924,10 @@ export interface EpisodeWrapDraft {
   /** Open threads from earlier that this episode settled */
   resolvedThreads: string[];
   characterUpdates: EpisodeWrapCharacterUpdate[];
+  knowledgeUpdates: EpisodeWrapKnowledgeUpdate[];
+  relationshipUpdates: EpisodeWrapRelationshipUpdate[];
+  /** Evolved living premise preview for next episode (editable) */
+  premisePreview: string;
   /** Story day the episode opened (from tracker; editable in review) */
   storyDayStart: number;
   /** Story day the episode ended — may span multiple days */
@@ -915,6 +967,9 @@ export async function analyzeEpisode(
     guestEffects: [],
     resolvedThreads: [],
     characterUpdates: [],
+    knowledgeUpdates: [],
+    relationshipUpdates: [],
+    premisePreview: season.premise || '',
     storyDayStart: dayStart,
     storyDayEnd: Math.max(dayStart, dayNow),
     nextStoryDay: Math.max(dayStart, dayNow) + cal.episodeAdvanceDays,
@@ -933,7 +988,20 @@ export async function analyzeEpisode(
         c.state.location && `location=${c.state.location}`,
         c.state.condition && `condition=${c.state.condition}`
       ].filter(Boolean).join('; ');
-      return `- ${c.name}${c.role ? ` (${c.role})` : ''}${stateBits ? ` [${stateBits}]` : ''}`;
+      const relBits = c.relationships
+        .slice(0, 4)
+        .map((r) => {
+          const t = characters.find((x) => x.id === r.targetId)?.name;
+          return t ? `${r.kind}→${t}` : null;
+        })
+        .filter(Boolean)
+        .join(', ');
+      return (
+        `- ${c.name}${c.role ? ` (${c.role})` : ''}` +
+        `${stateBits ? ` [${stateBits}]` : ''}` +
+        `${c.mustNotKnow.trim() ? ` MUST NOT KNOW: ${c.mustNotKnow.trim()}` : ''}` +
+        `${relBits ? ` rels: ${relBits}` : ''}`
+      );
     })
     .join('\n');
 
@@ -972,6 +1040,17 @@ export async function analyzeEpisode(
       location?: string;
       condition?: string;
     }>;
+    knowledgeUpdates?: Array<{
+      name?: string;
+      nowKnows?: string;
+      clearMustNotKnow?: string;
+    }>;
+    relationshipUpdates?: Array<{
+      from?: string;
+      to?: string;
+      kind?: string;
+      note?: string;
+    }>;
     storyDayEnd?: number;
     nextStoryDay?: number;
     dateNote?: string;
@@ -987,6 +1066,8 @@ export async function analyzeEpisode(
     '"resolvedThreads":["<exact or near-exact text of prior open threads this episode settled — omit if none>"],' +
     '"guestEffects":["<how walk-ons changed the story, if any>"],' +
     '"characterUpdates":[{"name":"<exact cast name>","goal":"<current goal or empty>","emotion":"<emotional state>","location":"<where they are>","condition":"<injuries/status>"}],' +
+    '"knowledgeUpdates":[{"name":"<exact cast name>","nowKnows":"<what they learned>","clearMustNotKnow":"<clause from MUST NOT KNOW that is no longer secret to them>"}],' +
+    '"relationshipUpdates":[{"from":"<cast name>","to":"<cast name>","kind":"<ally|rival|lover|debt|…>","note":"<one line what changed>"}],' +
     '"storyDayEnd":<integer story day when this episode ends — >= storyDayStart; same day if no time passed>,' +
     '"nextStoryDay":<integer story day the NEXT episode should open on — >= storyDayEnd>,' +
     '"dateNote":"<one short sentence: how time passed — dawn, overnight, two days later, same afternoon, etc.>"}\n' +
@@ -996,6 +1077,8 @@ export async function analyzeEpisode(
     '- Facts: 4–12 new durable facts; do NOT repeat Known facts; each fact stands alone with names; date when relevant.\n' +
     '- Threads: only NEW open tensions (0–8). Put settled prior threads in resolvedThreads.\n' +
     '- characterUpdates: every non-player cast member who appeared or was meaningfully affected; omit empties.\n' +
+    '- knowledgeUpdates: only when someone learned something that was blocked or newly revealed; clearMustNotKnow should match their wall when possible.\n' +
+    '- relationshipUpdates: only real shifts (trust, debt, romance, enmity); use exact cast names.\n' +
     '- storyDayEnd: infer from the prose + calendar (night falling → often same day; "next morning" → +1; multi-day travel → higher). ' +
     `Default to ${dayNow} if unclear. Never go below the episode start day.\n` +
     `- nextStoryDay: when the following episode should open. Same as storyDayEnd for immediate continuation; ` +
@@ -1028,7 +1111,7 @@ export async function analyzeEpisode(
     : storyDayEnd + cal.episodeAdvanceDays;
   const nextStoryDay = Math.max(storyDayEnd, parsedNext);
 
-  return {
+  const draftCore: EpisodeWrapDraft = {
     recap: (result.recap ?? '').trim() || 'The episode closed without a clear recap.',
     beats: (result.beats ?? [])
       .map((b) => ({ text: (b.text ?? '').trim(), consequence: (b.consequence ?? '').trim() }))
@@ -1049,11 +1132,48 @@ export async function analyzeEpisode(
       .filter((u) => u.name && castNames.has(u.name.toLowerCase()))
       .filter((u) => u.goal || u.emotion || u.location || u.condition)
       .slice(0, 16),
+    knowledgeUpdates: (result.knowledgeUpdates ?? [])
+      .map((u) => ({
+        name: (u.name ?? '').trim(),
+        nowKnows: (u.nowKnows ?? '').trim() || undefined,
+        clearMustNotKnow: (u.clearMustNotKnow ?? '').trim() || undefined
+      }))
+      .filter((u) => u.name && castNames.has(u.name.toLowerCase()))
+      .filter((u) => u.nowKnows || u.clearMustNotKnow)
+      .slice(0, 12),
+    relationshipUpdates: (result.relationshipUpdates ?? [])
+      .map((u) => ({
+        from: (u.from ?? '').trim(),
+        to: (u.to ?? '').trim(),
+        kind: (u.kind ?? '').trim() || undefined,
+        note: (u.note ?? '').trim() || undefined
+      }))
+      .filter((u) =>
+        u.from && u.to &&
+        castNames.has(u.from.toLowerCase()) &&
+        (castNames.has(u.to.toLowerCase()) || characters.some((c) => c.isPlayer && c.name.toLowerCase() === u.to.toLowerCase()))
+      )
+      .slice(0, 12),
+    premisePreview: season.premise || '',
     storyDayStart: dayStart,
     storyDayEnd,
     nextStoryDay,
     dateNote: (result.dateNote ?? '').trim()
   };
+
+  try {
+    draftCore.premisePreview = await evolveSeasonPremise(world, season, {
+      recap: draftCore.recap,
+      beats: draftCore.beats,
+      facts: draftCore.facts,
+      threads: draftCore.threads,
+      guestEffects: draftCore.guestEffects
+    });
+  } catch {
+    draftCore.premisePreview = season.premise || '';
+  }
+
+  return draftCore;
 }
 
 export interface CommitEpisodeWrapInput {
@@ -1064,6 +1184,9 @@ export interface CommitEpisodeWrapInput {
   guestEffects: string[];
   resolvedThreads?: string[];
   characterUpdates?: EpisodeWrapCharacterUpdate[];
+  knowledgeUpdates?: EpisodeWrapKnowledgeUpdate[];
+  relationshipUpdates?: EpisodeWrapRelationshipUpdate[];
+  premisePreview?: string;
   storyDayStart?: number;
   storyDayEnd?: number;
   /** Story day the next episode should open on */
@@ -1194,7 +1317,8 @@ export async function commitEpisodeWrap(
   if (factLines.length > 0) {
     await db.continuity.bulkAdd(
       factLines.map((text) => ({
-        id: uid(), worldId: world.id, seasonId: season.id, text, source: 'auto' as const, createdAt: now
+        id: uid(), worldId: world.id, seasonId: season.id, episodeId: episode.id,
+        text, source: 'auto' as const, createdAt: now
       }))
     );
   }
@@ -1222,34 +1346,95 @@ export async function commitEpisodeWrap(
     }
   }
 
+  const cast = await db.characters.where('worldId').equals(world.id).toArray();
+  const byName = (name: string) =>
+    cast.find((x) => x.name.toLowerCase() === name.trim().toLowerCase());
+
   const updates = input.characterUpdates ?? [];
-  if (updates.length > 0) {
-    const cast = await db.characters.where('worldId').equals(world.id).toArray();
-    for (const u of updates) {
-      const c = cast.find((x) => !x.isPlayer && x.name.toLowerCase() === u.name.toLowerCase());
-      if (!c) continue;
-      const state = {
-        goal: u.goal?.trim() || c.state.goal,
-        emotion: u.emotion?.trim() || c.state.emotion,
-        location: u.location?.trim() || c.state.location,
-        condition: u.condition?.trim() || c.state.condition
-      };
-      await db.characters.update(c.id, { state, updatedAt: now });
+  for (const u of updates) {
+    const c = byName(u.name);
+    if (!c || c.isPlayer) continue;
+    const state = {
+      goal: u.goal?.trim() || c.state.goal,
+      emotion: u.emotion?.trim() || c.state.emotion,
+      location: u.location?.trim() || c.state.location,
+      condition: u.condition?.trim() || c.state.condition
+    };
+    await db.characters.update(c.id, { state, updatedAt: now });
+    c.state = state;
+  }
+
+  for (const k of input.knowledgeUpdates ?? []) {
+    const c = byName(k.name);
+    if (!c || c.isPlayer) continue;
+    let mustNotKnow = c.mustNotKnow;
+    const clear = k.clearMustNotKnow?.trim();
+    if (clear && mustNotKnow) {
+      const parts = mustNotKnow
+        .split(/[.;\n]+/)
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .filter((p) => {
+          const pl = p.toLowerCase();
+          const cl = clear.toLowerCase();
+          return !(pl.includes(cl) || cl.includes(pl));
+        });
+      mustNotKnow = parts.join('; ');
+    }
+    if (k.nowKnows?.trim()) {
+      await db.continuity.add({
+        id: uid(),
+        worldId: world.id,
+        seasonId: season.id,
+        episodeId: episode.id,
+        text: `${c.name} now knows: ${k.nowKnows.trim()}`,
+        source: 'auto',
+        createdAt: now
+      });
+    }
+    if (mustNotKnow !== c.mustNotKnow) {
+      await db.characters.update(c.id, { mustNotKnow, updatedAt: now });
+      c.mustNotKnow = mustNotKnow;
     }
   }
 
-  try {
-    const evolved = await evolveSeasonPremise(world, season, {
-      ...input,
-      recap: wrap.recap,
-      beats: wrap.beats,
-      guestEffects: wrap.guestEffects
-    });
-    if (evolved.trim()) {
-      await db.seasons.update(season.id, { premise: evolved.trim(), updatedAt: Date.now() });
+  for (const r of input.relationshipUpdates ?? []) {
+    const from = byName(r.from);
+    const to = byName(r.to);
+    if (!from || !to || from.id === to.id) continue;
+    const nextRels = normalizeRelationships(
+      [
+        ...from.relationships.filter((edge) => edge.targetId !== to.id),
+        {
+          targetId: to.id,
+          kind: (r.kind ?? '').trim() || 'linked',
+          note: (r.note ?? '').trim()
+        }
+      ],
+      cast.map((c) => c.id),
+      from.id
+    );
+    await db.characters.update(from.id, { relationships: nextRels, updatedAt: now });
+    from.relationships = nextRels;
+  }
+
+  const premiseNext = (input.premisePreview ?? '').trim();
+  if (premiseNext) {
+    await db.seasons.update(season.id, { premise: premiseNext, updatedAt: Date.now() });
+  } else {
+    try {
+      const evolved = await evolveSeasonPremise(world, season, {
+        ...input,
+        recap: wrap.recap,
+        beats: wrap.beats,
+        guestEffects: wrap.guestEffects
+      });
+      if (evolved.trim()) {
+        await db.seasons.update(season.id, { premise: evolved.trim(), updatedAt: Date.now() });
+      }
+    } catch {
+      // Non-fatal — wrap and next episode still proceed with the prior premise.
     }
-  } catch {
-    // Non-fatal — wrap and next episode still proceed with the prior premise.
   }
 
   const nextDay = Math.max(
@@ -1398,43 +1583,101 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
   const gapIdx = GAP_LABELS.indexOf(gapLabel);
   const seasonOpenDay = calForSeason.currentDay + (gapIdx >= 0 ? GAP_DAYS[gapIdx] : 0);
 
+  const allCharacters = await db.characters.where('worldId').equals(world.id).toArray();
+  const playerId = allCharacters.find((c) => c.isPlayer)?.id;
+  const returningIds = wrap.characters.filter((c) => c.returning).map((c) => c.characterId);
+  const castIds = playerId
+    ? [playerId, ...returningIds.filter((id) => id !== playerId)]
+    : returningIds;
+
   const firstEpisode: Episode = {
     id: uid(), seasonId: next.id, worldId: world.id, number: 1,
     title: '', location: '', locationId: null,
-    castIds: wrap.characters.filter((c) => c.returning).map((c) => c.characterId),
+    castIds,
     storyDay: Math.max(1, seasonOpenDay),
     storyDayEnd: null,
     dateNote: null,
     status: 'active', createdAt: Date.now()
   };
 
-  await db.transaction('rw', [db.seasons, db.episodes, db.worlds, db.wraps, db.characters, db.threads], async () => {
-    await db.seasons.update(season.id, { status: 'wrapped' });
-    await db.seasons.add(next);
-    await db.episodes.add(firstEpisode);
-    const cal = worldCalendar(world);
-    const bumpedCalendar = {
-      currentDay: Math.max(1, seasonOpenDay),
-      system: cal.system,
-      weekdays: cal.weekdays,
-      dayOneWeekday: cal.dayOneWeekday,
-      episodeAdvanceDays: cal.episodeAdvanceDays
-    };
-    await db.worlds.update(world.id, { activeSeasonId: next.id, calendar: bumpedCalendar, updatedAt: Date.now() });
-    await db.wraps.update(wrap.id, { status: 'committed' });
-    // Rewrite character current-state snapshots for the new season.
-    for (const c of wrap.characters) {
-      const patch = c.returning
-        ? { 'state.goal': '', 'state.condition': c.evolution || c.outcome, updatedAt: Date.now() }
-        : { 'state.location': 'departed — not in this season', updatedAt: Date.now() };
-      await db.characters.update(c.characterId, patch as never);
+  await db.transaction(
+    'rw',
+    [db.seasons, db.episodes, db.worlds, db.wraps, db.characters, db.threads, db.continuity],
+    async () => {
+      await db.seasons.update(season.id, { status: 'wrapped' });
+      await db.seasons.add(next);
+      await db.episodes.add(firstEpisode);
+      const cal = worldCalendar(world);
+      const bumpedCalendar = {
+        currentDay: Math.max(1, seasonOpenDay),
+        system: cal.system,
+        weekdays: cal.weekdays,
+        dayOneWeekday: cal.dayOneWeekday,
+        episodeAdvanceDays: cal.episodeAdvanceDays
+      };
+      await db.worlds.update(world.id, { activeSeasonId: next.id, calendar: bumpedCalendar, updatedAt: Date.now() });
+      await db.wraps.update(wrap.id, { status: 'committed' });
+      // Rewrite character current-state snapshots for the new season.
+      for (const c of wrap.characters) {
+        const patch = c.returning
+          ? { 'state.goal': '', 'state.condition': c.evolution || c.outcome, updatedAt: Date.now() }
+          : { 'state.location': 'departed — not in this season', updatedAt: Date.now() };
+        await db.characters.update(c.characterId, patch as never);
+      }
+
+      // Carry durable facts into the new season (prompts load by seasonId).
+      const priorFacts = await db.continuity.where('seasonId').equals(season.id).toArray();
+      const carriedFacts = [...priorFacts]
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .slice(0, 24);
+      const now = Date.now();
+      const beatFacts = kept
+        .filter((b) => b.disposition === 'raise' || b.disposition === 'keep')
+        .slice(0, 8)
+        .map((b) => ({
+          id: uid(),
+          worldId: world.id,
+          seasonId: next.id,
+          text: `${b.text.trim()}${b.consequence?.trim() ? ` → ${b.consequence.trim()}` : ''}`,
+          source: 'auto' as const,
+          createdAt: now
+        }))
+        .filter((f) => f.text.trim());
+      const migrated = carriedFacts.map((f) => ({
+        id: uid(),
+        worldId: world.id,
+        seasonId: next.id,
+        episodeId: f.episodeId,
+        text: f.text,
+        source: f.source,
+        createdAt: now
+      }));
+      // Prefer beat seeds first, then prior facts; dedupe by normalized text.
+      const seen = new Set<string>();
+      const toAdd = [...beatFacts, ...migrated].filter((f) => {
+        const key = f.text.trim().toLowerCase();
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).slice(0, 32);
+      if (toAdd.length > 0) await db.continuity.bulkAdd(toAdd);
+
+      // Dropped beats close matching threads; surviving open threads move to the new season.
+      const threads = await db.threads.where('worldId').equals(world.id).filter((t) => t.status === 'open').toArray();
+      const dropLines = wrap.beats
+        .filter((b) => b.disposition === 'drop')
+        .flatMap((b) => [b.text, b.consequence].map((s) => (s ?? '').trim()).filter(Boolean));
+      const droppedHits = matchOpenThreads(threads, dropLines);
+      const droppedIds = new Set(droppedHits.map((t) => t.id));
+      for (const t of droppedHits) {
+        await db.threads.update(t.id, { status: 'resolved', updatedAt: now });
+      }
+      for (const t of threads) {
+        if (droppedIds.has(t.id)) continue;
+        await db.threads.update(t.id, { seasonId: next.id });
+      }
     }
-    // Dropped beats close their threads; carried ones stay open in the new season.
-    const threads = await db.threads.where('worldId').equals(world.id).filter((t) => t.status === 'open').toArray();
-    for (const t of threads) {
-      await db.threads.update(t.id, { seasonId: next.id });
-    }
-  });
+  );
 
   return next;
 }

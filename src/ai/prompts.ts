@@ -136,8 +136,10 @@ export interface PromptContext {
   continuity: ContinuityFact[];
   threads: OpenThread[];
   turns: Turn[];
-  /** Immediately prior episode in this season (for wrap.recap), if any */
+  /** Immediately prior wrapped episode in this season (newest of priorEpisodes). */
   priorEpisode?: Episode | null;
+  /** Up to 3 most recent wrapped episodes before the current one (oldest → newest). */
+  priorEpisodes?: Episode[];
 }
 
 /** Guests currently in the scene (activeGuestIds omitted ⇒ all guests). */
@@ -174,8 +176,179 @@ function pacingLine(ai: World['ai']): string {
     : 'Propulsive pacing: keep events moving, cut the connective tissue.';
 }
 
-/** Newest-first cap for continuity bullets in every agent frame. */
+/** Cap for continuity bullets in every agent frame. */
 const CONTINUITY_FACT_CAP = 24;
+/** Cap open threads so the system frame does not drown the transcript. */
+const THREAD_CAP = 12;
+/** Tighter caps for the director utility prompt. */
+const DIRECTOR_FACT_CAP = 12;
+const DIRECTOR_THREAD_CAP = 8;
+/** How many prior wrapped episodes to surface in prompts. */
+const PRIOR_EPISODE_DIGEST_COUNT = 3;
+
+/**
+ * Pick up to `cap` items while keeping coverage across episode buckets
+ * (not pure newest-first, which erases early-episode memory mid-season).
+ */
+function pickAcrossBuckets<T extends { id: string; createdAt: number }>(
+  items: T[],
+  bucketOf: (t: T) => string,
+  cap: number,
+  preferBuckets: string[] = []
+): T[] {
+  if (items.length <= cap) {
+    return [...items].sort((a, b) => b.createdAt - a.createdAt);
+  }
+  const sorted = [...items].sort((a, b) => b.createdAt - a.createdAt);
+  const byBucket = new Map<string, T[]>();
+  for (const item of sorted) {
+    const key = bucketOf(item);
+    const list = byBucket.get(key);
+    if (list) list.push(item);
+    else byBucket.set(key, [item]);
+  }
+  const buckets: string[] = [];
+  for (const b of preferBuckets) {
+    if (byBucket.has(b) && !buckets.includes(b)) buckets.push(b);
+  }
+  for (const b of byBucket.keys()) {
+    if (!buckets.includes(b)) buckets.push(b);
+  }
+  const minPer = Math.max(1, Math.floor(cap / Math.max(buckets.length, 1)));
+  const picked: T[] = [];
+  const seen = new Set<string>();
+  for (const b of buckets) {
+    for (const item of (byBucket.get(b) ?? []).slice(0, minPer)) {
+      if (picked.length >= cap) break;
+      if (seen.has(item.id)) continue;
+      picked.push(item);
+      seen.add(item.id);
+    }
+  }
+  for (const item of sorted) {
+    if (picked.length >= cap) break;
+    if (seen.has(item.id)) continue;
+    picked.push(item);
+    seen.add(item.id);
+  }
+  return picked.sort((a, b) => b.createdAt - a.createdAt);
+}
+
+function episodeNumFromOpenedLabel(label: string): string | null {
+  const m = label.match(/E(\d+)/i);
+  return m ? `E${m[1]}` : null;
+}
+
+function preferEpisodeBuckets(ctx: PromptContext): string[] {
+  const priors = resolvedPriorEpisodes(ctx);
+  // Newest episode buckets first so round-robin still favours recent pressure.
+  return [
+    ...[...priors].reverse().map((e) => e.id),
+    ...[...priors].reverse().map((e) => `E${e.number}`),
+    'legacy'
+  ];
+}
+
+function factBucket(f: ContinuityFact): string {
+  return f.episodeId || 'legacy';
+}
+
+function threadBucket(t: OpenThread): string {
+  return episodeNumFromOpenedLabel(t.openedLabel) || t.seasonId || 'legacy';
+}
+
+function cappedThreadLines(threads: OpenThread[], preferBuckets: string[] = []): string[] {
+  return pickAcrossBuckets(threads, threadBucket, THREAD_CAP, preferBuckets)
+    .map((t) => `- ${t.text} (${t.openedLabel})`);
+}
+
+function cappedContinuityLines(continuity: ContinuityFact[], preferBuckets: string[] = []): string[] {
+  return pickAcrossBuckets(continuity, factBucket, CONTINUITY_FACT_CAP, preferBuckets)
+    .map((f) => `- ${f.text}`);
+}
+
+function resolvedPriorEpisodes(ctx: PromptContext): Episode[] {
+  const fromList = (ctx.priorEpisodes ?? []).filter(
+    (e) => e.number < ctx.episode.number && !!e.wrap?.recap?.trim()
+  );
+  if (fromList.length > 0) return fromList.slice(-PRIOR_EPISODE_DIGEST_COUNT);
+  if (
+    ctx.priorEpisode &&
+    ctx.priorEpisode.number < ctx.episode.number &&
+    ctx.priorEpisode.wrap?.recap?.trim()
+  ) {
+    return [ctx.priorEpisode];
+  }
+  return [];
+}
+
+function clipText(text: string, max: number): string {
+  const t = text.trim();
+  if (t.length <= max) return t;
+  return `${t.slice(0, max - 1).trimEnd()}…`;
+}
+
+/** Immediate prior: full wrap. Older priors: short digests so mid-season still remembers them. */
+function formatPriorEpisodesSection(
+  ctx: PromptContext,
+  opts: { beatCapImmediate: number; beatCapDigest: number; recapDigestChars: number }
+): string | null {
+  const priors = resolvedPriorEpisodes(ctx);
+  if (priors.length === 0) return null;
+  const blocks = [...priors].reverse().map((ep, idx) => {
+    const immediate = idx === 0;
+    const recap = (ep.wrap?.recap ?? '').trim();
+    const beats = (ep.wrap?.beats ?? [])
+      .slice(0, immediate ? opts.beatCapImmediate : opts.beatCapDigest)
+      .map((b) => `- ${b.text}${b.consequence ? ` → ${b.consequence}` : ''}`)
+      .join('\n');
+    const guestFx = immediate
+      ? (ep.wrap?.guestEffects ?? [])
+        .map((g) => g.trim())
+        .filter(Boolean)
+        .map((g) => `- ${g}`)
+        .join('\n')
+      : '';
+    const title = ep.title ? ` — ${ep.title}` : '';
+    const body = immediate
+      ? recap
+      : clipText(recap, opts.recapDigestChars);
+    const heading = immediate
+      ? `### Episode ${ep.number}${title} (immediate prior)`
+      : `### Episode ${ep.number}${title}`;
+    return (
+      `${heading}\n${body}` +
+      (beats ? `\n\n${immediate ? 'Carried episode beats' : 'Beats that still matter'}:\n${beats}` : '') +
+      (guestFx ? `\n\nWalk-on effects that still matter:\n${guestFx}` : '')
+    );
+  });
+  return `## Recent episodes this season\n${blocks.join('\n\n')}`;
+}
+
+function seasonBibleSection(season: Season): string | null {
+  if (!season.bible) return null;
+  const beats = season.bible.carriedBeats
+    .filter((b) => b.disposition !== 'drop')
+    .map((b) => `- [${b.disposition.toUpperCase()}] ${b.text} → ${b.consequence}`)
+    .join('\n');
+  return (
+    `## Previously (season ${season.number - 1} recap)\n${season.bible.recap}` +
+    (beats ? `\n\nCarried beats:\n${beats}` : '') +
+    (season.bible.offscreenChanges ? `\n\nWhat changed during the gap:\n${season.bible.offscreenChanges}` : '')
+  );
+}
+
+function resolveCurrentLocations(episode: Episode, locations: Location[]): Location[] {
+  if (locations.length === 0) return [];
+  const byId = episode.locationId
+    ? locations.filter((l) => l.id === episode.locationId)
+    : [];
+  const epLoc = episode.location.trim().toLowerCase();
+  const byName = byId.length === 0 && epLoc
+    ? locations.filter((l) => l.name.trim() && (epLoc.includes(l.name.toLowerCase()) || l.name.toLowerCase().includes(epLoc)))
+    : [];
+  return byId.length > 0 ? byId : byName;
+}
 
 function worldFrameSections(ctx: PromptContext): string[] {
   const { world, season, episode, characters, locations, continuity, threads } = ctx;
@@ -186,15 +359,13 @@ function worldFrameSections(ctx: PromptContext): string[] {
 
   sections.push(`## The world\n${world.bible || world.line}`);
 
-  if (season.bible) {
-    const beats = season.bible.carriedBeats
-      .filter((b) => b.disposition !== 'drop')
-      .map((b) => `- [${b.disposition.toUpperCase()}] ${b.text} → ${b.consequence}`)
-      .join('\n');
+  const bible = seasonBibleSection(season);
+  if (bible) {
     sections.push(
-      `## Previously (season ${season.number - 1} recap)\n${season.bible.recap}` +
-      (beats ? `\n\nCarried beats — RAISE means active pressure now, KEEP means alive background, SOFTEN means distant echo:\n${beats}` : '') +
-      (season.bible.offscreenChanges ? `\n\nWhat changed during the gap:\n${season.bible.offscreenChanges}` : '')
+      bible.replace(
+        'Carried beats:',
+        'Carried beats — RAISE means active pressure now, KEEP means alive background, SOFTEN means distant echo:'
+      )
     );
   }
 
@@ -204,22 +375,12 @@ function worldFrameSections(ctx: PromptContext): string[] {
     `${season.timeGap ? ` It opens ${season.timeGap.toLowerCase()} after the previous season.` : ''}`
   );
 
-  const priorRecap = ctx.priorEpisode?.wrap?.recap?.trim();
-  if (priorRecap && ctx.priorEpisode && ctx.priorEpisode.number < episode.number) {
-    const priorBeats = (ctx.priorEpisode.wrap?.beats ?? [])
-      .map((b) => `- ${b.text}${b.consequence ? ` → ${b.consequence}` : ''}`)
-      .join('\n');
-    const guestFx = (ctx.priorEpisode.wrap?.guestEffects ?? [])
-      .map((g) => g.trim())
-      .filter(Boolean)
-      .map((g) => `- ${g}`)
-      .join('\n');
-    sections.push(
-      `## Previously this season (episode ${ctx.priorEpisode.number})\n${priorRecap}` +
-      (priorBeats ? `\n\nCarried episode beats:\n${priorBeats}` : '') +
-      (guestFx ? `\n\nWalk-on effects that still matter:\n${guestFx}` : '')
-    );
-  }
+  const priorEps = formatPriorEpisodesSection(ctx, {
+    beatCapImmediate: 12,
+    beatCapDigest: 3,
+    recapDigestChars: 360
+  });
+  if (priorEps) sections.push(priorEps);
 
   const running = episode.runningSummary?.trim();
   if (running) {
@@ -252,16 +413,8 @@ function worldFrameSections(ctx: PromptContext): string[] {
     );
   }
 
-  let currentLocations: Location[] = [];
+  const currentLocations = resolveCurrentLocations(episode, locations);
   if (locations.length > 0) {
-    const byId = episode.locationId
-      ? locations.filter((l) => l.id === episode.locationId)
-      : [];
-    const epLoc = episode.location.trim().toLowerCase();
-    const byName = byId.length === 0 && epLoc
-      ? locations.filter((l) => l.name.trim() && (epLoc.includes(l.name.toLowerCase()) || l.name.toLowerCase().includes(epLoc)))
-      : [];
-    currentLocations = byId.length > 0 ? byId : byName;
     const others = locations.filter((l) => !currentLocations.includes(l));
     if (currentLocations.length > 0) {
       sections.push(`## Current location\n${currentLocations.map(locationSheet).join('\n\n')}`);
@@ -294,18 +447,20 @@ function worldFrameSections(ctx: PromptContext): string[] {
     sections.push(`## Off-scene cast (may be referenced, may arrive if the story calls them)\n${offScene.map(briefSheet).join('\n')}`);
   }
 
-  if (continuity.length > 0) {
-    // Newest facts first — cap so the system frame does not crowd out transcript history.
-    const capped = [...continuity]
-      .sort((a, b) => b.createdAt - a.createdAt)
-      .slice(0, CONTINUITY_FACT_CAP);
+  const prefer = preferEpisodeBuckets(ctx);
+  const contLines = cappedContinuityLines(continuity, prefer);
+  if (contLines.length > 0) {
     sections.push(
       `## Continuity — established facts, never contradict these\n` +
-      capped.map((f) => `- ${f.text}`).join('\n')
+      contLines.join('\n')
     );
   }
-  if (threads.length > 0) {
-    sections.push(`## Open threads — unresolved tensions to draw on (do not resolve them all at once)\n${threads.map((t) => `- ${t.text} (${t.openedLabel})`).join('\n')}`);
+  const threadLines = cappedThreadLines(threads, prefer);
+  if (threadLines.length > 0) {
+    sections.push(
+      `## Open threads — unresolved tensions to draw on (do not resolve them all at once)\n` +
+      threadLines.join('\n')
+    );
   }
 
   return sections;
@@ -368,26 +523,6 @@ export function buildNarratorSystemPrompt(ctx: PromptContext): string {
 /**
  * Character agent: first-person as this NPC. Speaks as themselves.
  */
-function priorEpisodeSection(ctx: PromptContext): string | null {
-  const priorRecap = ctx.priorEpisode?.wrap?.recap?.trim();
-  if (!priorRecap || !ctx.priorEpisode || ctx.priorEpisode.number >= ctx.episode.number) return null;
-  const priorBeats = (ctx.priorEpisode.wrap?.beats ?? [])
-    .slice(0, 5)
-    .map((b) => `- ${b.text}${b.consequence ? ` → ${b.consequence}` : ''}`)
-    .join('\n');
-  return (
-    `## Previously this season (episode ${ctx.priorEpisode.number})\n${priorRecap}` +
-    (priorBeats ? `\n\nWhat still hangs:\n${priorBeats}` : '')
-  );
-}
-
-function cappedContinuityLines(continuity: ContinuityFact[]): string[] {
-  return [...continuity]
-    .sort((a, b) => b.createdAt - a.createdAt)
-    .slice(0, CONTINUITY_FACT_CAP)
-    .map((f) => `- ${f.text}`);
-}
-
 export function buildCharacterSystemPrompt(ctx: PromptContext, character: Character): string {
   const { world, characters, season } = ctx;
   const ai = world.ai;
@@ -402,10 +537,16 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
   );
 
   sections.push(`## The world\n${world.bible || world.line}`);
+  const charBible = seasonBibleSection(season);
+  if (charBible) sections.push(charBible);
   sections.push(
     `## This season\nPremise (current pressure): ${season.premise || 'unwritten; discover it in play.'}`
   );
-  const prior = priorEpisodeSection(ctx);
+  const prior = formatPriorEpisodesSection(ctx, {
+    beatCapImmediate: 5,
+    beatCapDigest: 2,
+    recapDigestChars: 280
+  });
   if (prior) sections.push(prior);
   const running = ctx.episode.runningSummary?.trim();
   if (running) sections.push(`## Earlier this episode (running summary)\n${running}`);
@@ -417,6 +558,10 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
       `${ctx.episode.location ? ` Location: ${ctx.episode.location}.` : ''} Date: ${dateLine}.` +
       `\nToday is ${formatStoryDate(cal, cal.currentDay)}.`
     );
+  }
+  const here = resolveCurrentLocations(ctx.episode, ctx.locations);
+  if (here.length > 0) {
+    sections.push(`## Current location\n${here.map(locationSheet).join('\n\n')}`);
   }
 
   sections.push(`## You\n${characterSheet(character, characters)}`);
@@ -434,17 +579,19 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
     );
   }
 
-  const contLines = cappedContinuityLines(ctx.continuity);
+  const prefer = preferEpisodeBuckets(ctx);
+  const contLines = cappedContinuityLines(ctx.continuity, prefer);
   if (contLines.length > 0) {
     sections.push(
       `## Continuity — facts you may know if you could plausibly know them\n` +
       contLines.join('\n')
     );
   }
-  if (ctx.threads.length > 0) {
+  const charThreads = cappedThreadLines(ctx.threads, prefer);
+  if (charThreads.length > 0) {
     sections.push(
       `## Open threads — tensions you may lean on if you know them\n` +
-      ctx.threads.map((t) => `- ${t.text} (${t.openedLabel})`).join('\n')
+      charThreads.join('\n')
     );
   }
 
@@ -482,26 +629,35 @@ export function buildGuestSystemPrompt(ctx: PromptContext, guest: EpisodeGuest):
     `You speak and act only as yourself for this scene.`
   );
   sections.push(`## The world\n${world.bible || world.line}`);
+  const guestBible = seasonBibleSection(season);
+  if (guestBible) sections.push(guestBible);
   sections.push(
     `## This season\nPremise (current pressure): ${season.premise || 'unwritten; discover it in play.'}`
   );
-  const prior = priorEpisodeSection(ctx);
+  const prior = formatPriorEpisodesSection(ctx, {
+    beatCapImmediate: 5,
+    beatCapDigest: 2,
+    recapDigestChars: 240
+  });
   if (prior) sections.push(prior);
   const running = ctx.episode.runningSummary?.trim();
   if (running) sections.push(`## Earlier this episode (running summary)\n${running}`);
+  const guestHere = resolveCurrentLocations(ctx.episode, ctx.locations);
+  if (guestHere.length > 0) {
+    sections.push(`## Current location\n${guestHere.map(locationSheet).join('\n\n')}`);
+  }
   sections.push(`## Who you are this scene\n${guest.brief}${guest.voice ? `\nVoice: ${guest.voice}` : ''}`);
   if (inScene.length > 0) {
     sections.push(`## Others present\n${inScene.map((c) => briefSheet(c)).join('\n')}`);
   }
-  const contLines = cappedContinuityLines(ctx.continuity);
+  const prefer = preferEpisodeBuckets(ctx);
+  const contLines = cappedContinuityLines(ctx.continuity, prefer);
   if (contLines.length > 0) {
     sections.push(`## Continuity you may know if plausible\n${contLines.join('\n')}`);
   }
-  if (ctx.threads.length > 0) {
-    sections.push(
-      `## Open threads\n` +
-      ctx.threads.map((t) => `- ${t.text} (${t.openedLabel})`).join('\n')
-    );
+  const guestThreads = cappedThreadLines(ctx.threads, prefer);
+  if (guestThreads.length > 0) {
+    sections.push(`## Open threads\n${guestThreads.join('\n')}`);
   }
   sections.push(
     `## How you respond\n` +
@@ -775,8 +931,9 @@ export function directorSystemPrompt(mode: ComposeMode, hasSpeakers: boolean): s
     '{"type":"speak","guestId":"<id-or-NEW-or-name>","brief":"..."}' +
     ']}' +
     '\n' +
-    'castDelta.enter: saved Cast NPCs who arrive (from the off-scene list). ' +
-    'castDelta.leave: Cast ids or guest ids who exit the scene. ' +
+    'castDelta.enter: saved Cast NPCs who arrive — use character id OR exact name. ' +
+    'castDelta.leave: Cast ids/names or guest ids who exit the scene. ' +
+    'Never contradict Continuity facts or Knowledge walls below. ' +
     'castDelta.introduce: optional walk-ons who are NOT Cast cards — temporary for this episode only. At most 2 per plan. ' +
     'For a newly introduced guest\'s speak beat, set guestId to the exact name string from introduce (the app will bind ids). ' +
     'For an existing guest already listed, use their guest id or exact name. ' +
@@ -820,25 +977,66 @@ export function directorUserPrompt(
     return `[narrator]: ${t.text}`;
   }).join('\n\n');
 
-  const priorOneLiner = ctx.priorEpisode?.wrap?.recap?.trim()
-    ? ctx.priorEpisode.wrap!.recap!.trim().slice(0, 480)
-    : '';
   const running = ctx.episode.runningSummary?.trim();
-
   const cal = worldCalendar(ctx.world);
   const dateLine = formatEpisodeDateRange(cal, ctx.episode.storyDay, ctx.episode.storyDayEnd);
+  const prefer = preferEpisodeBuckets(ctx);
+
+  const factLines = pickAcrossBuckets(ctx.continuity, factBucket, DIRECTOR_FACT_CAP, prefer)
+    .map((f) => `- ${f.text}`)
+    .join('\n');
+  const threadLines = pickAcrossBuckets(ctx.threads, threadBucket, DIRECTOR_THREAD_CAP, prefer)
+    .map((t) => `- ${t.text}`)
+    .join('\n');
+  const knowledgeWalls = inScene
+    .filter((c) => c.mustNotKnow.trim())
+    .map((c) => `- ${c.name}: must not know — ${c.mustNotKnow.trim()}`)
+    .join('\n');
+
+  const bible = ctx.season.bible;
+  const seasonBibleClip = bible
+    ? `Season bible (prior season): ${clipText(bible.recap, 320)}` +
+      (bible.carriedBeats.some((b) => b.disposition === 'raise' || b.disposition === 'keep')
+        ? `\nCarried season beats:\n${bible.carriedBeats
+          .filter((b) => b.disposition === 'raise' || b.disposition === 'keep')
+          .slice(0, 4)
+          .map((b) => `- [${b.disposition.toUpperCase()}] ${b.text}`)
+          .join('\n')}`
+        : '')
+    : '';
+
+  const priorBlocks = resolvedPriorEpisodes(ctx);
+  const priorMemory = priorBlocks.length > 0
+    ? [...priorBlocks].reverse().map((ep, idx) => {
+      const immediate = idx === 0;
+      const recap = clipText((ep.wrap?.recap ?? '').trim(), immediate ? 520 : 220);
+      const beats = (ep.wrap?.beats ?? [])
+        .slice(0, immediate ? 6 : 2)
+        .map((b) => `  - ${b.text}${b.consequence ? ` → ${b.consequence}` : ''}`)
+        .join('\n');
+      return (
+        `Episode ${ep.number}${ep.title ? ` — ${ep.title}` : ''}${immediate ? ' (immediate prior)' : ''}:\n` +
+        `${recap}` +
+        (beats ? `\nBeats:\n${beats}` : '')
+      );
+    }).join('\n\n')
+    : '';
 
   return (
     `World: ${ctx.world.title}\n` +
     `Episode ${ctx.episode.number}${ctx.episode.location ? ` @ ${ctx.episode.location}` : ''} · ${dateLine}\n` +
     `Today: ${formatStoryDate(cal, cal.currentDay)}\n` +
     `Premise (current pressure): ${ctx.season.premise || '(unwritten)'}\n` +
-    (priorOneLiner ? `Prior episode recap (clip): ${priorOneLiner}\n` : '') +
+    (seasonBibleClip ? `${seasonBibleClip}\n` : '') +
+    (priorMemory ? `\nRecent episode memory:\n${priorMemory}\n` : '') +
     (running ? `Earlier this episode (summary): ${running.slice(0, 400)}\n` : '') +
     `\n` +
     `In-scene cast:\n${castList}\n\n` +
     `Off-scene cast (may enter via castDelta.enter):\n${offList}\n\n` +
     `Active walk-ons (guest ids):\n${guestList}\n\n` +
+    `Continuity (do not contradict):\n${factLines || '(none)'}\n\n` +
+    `Open threads (draw on sparingly):\n${threadLines || '(none)'}\n\n` +
+    `Knowledge walls:\n${knowledgeWalls || '(none)'}\n\n` +
     `Latest player move: ${MODE_PREFIX[mode](input)}\n\n` +
     `Recent transcript:\n${transcript || '(episode just opened)'}\n\n` +
     `Plan castDelta and beats as JSON.`

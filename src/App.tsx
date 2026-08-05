@@ -43,8 +43,8 @@ export default function App() {
   if (vaultLocked) return <LockScreen />;
 
   return (
-    <div style={{
-      position: 'relative', minHeight: '100vh', background: '#08090c',
+    <div className="app-shell" style={{
+      position: 'relative', background: '#08090c',
       color: '#eceae6', overflowX: 'hidden'
     }}>
       {!readMode && (
@@ -73,8 +73,8 @@ export default function App() {
         </div>
       )}
 
-      <div style={{
-        position: 'relative', zIndex: 1, minHeight: '100vh',
+      <div className="app-shell" style={{
+        position: 'relative', zIndex: 1,
         display: narrow || readMode ? 'block' : 'grid',
         gridTemplateColumns: narrow || readMode ? undefined : '226px minmax(0, 1fr)',
         paddingBottom: narrow && !readMode ? 'calc(58px + env(safe-area-inset-bottom))' : 0

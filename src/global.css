@@ -1,6 +1,6 @@
 html, body { margin: 0; padding: 0; background: #08090c; color: #eceae6; }
 * { box-sizing: border-box; }
-#root { min-height: 100vh; }
+#root, .app-shell { min-height: 100vh; min-height: 100dvh; }
 a { color: oklch(0.82 0.09 62); text-decoration: none; }
 a:hover { color: oklch(0.9 0.07 62); }
 ::selection { background: oklch(0.6 0.1 62 / 0.35); }
@@ -155,10 +155,14 @@ select { appearance: none; cursor: pointer; }
 }
 .tabbar button.active { color: #f6f4f0; }
 
-/* Per-turn tools in the story: hidden until hover on desktop, dimly visible on touch */
+/* Per-turn tools in the story: hidden until hover on desktop, clearer on touch */
 .turn-tools { opacity: 0; transition: opacity 0.15s ease; }
 .turn-row:hover .turn-tools,
 .turn-row:focus-within .turn-tools { opacity: 1; }
 @media (hover: none) {
-  .turn-tools { opacity: 0.55; }
+  .turn-tools { opacity: 0.9; }
+}
+@media (max-width: 780px) {
+  /* Beat tiny 8–9px director / editor labels on phones (inline sizes lose to this). */
+  .mono { font-size: 11px !important; letter-spacing: 0.1em; }
 }

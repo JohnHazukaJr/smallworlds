@@ -157,9 +157,9 @@ export async function seedStarterWorld(): Promise<string> {
         createdAt: now
       });
       await db.continuity.bulkAdd([
-        { id: uid(), worldId, seasonId, text: 'Your name on the manifest is false and Marisol knows.', source: 'manual', createdAt: now },
-        { id: uid(), worldId, seasonId, text: 'Ivo\u2019s guild debt is unspoken between you.', source: 'manual', createdAt: now },
-        { id: uid(), worldId, seasonId, text: 'The Cartwright trades, never threatens.', source: 'manual', createdAt: now }
+        { id: uid(), worldId, seasonId, episodeId, text: 'Your name on the manifest is false and Marisol knows.', source: 'manual', createdAt: now },
+        { id: uid(), worldId, seasonId, episodeId, text: 'Ivo\u2019s guild debt is unspoken between you.', source: 'manual', createdAt: now },
+        { id: uid(), worldId, seasonId, episodeId, text: 'The Cartwright trades, never threatens.', source: 'manual', createdAt: now }
       ]);
       await db.threads.bulkAdd([
         { id: uid(), worldId, seasonId, text: 'The Cartwright\u2019s trade is on the table, unanswered.', openedLabel: 'opened S1 · E1', status: 'open', createdAt: now },
