@@ -27,8 +27,15 @@ const NARRATION_BEAT_TOKENS: Record<TurnLength, number> = {
   episode: 1100
 };
 
-/** Character speak turns stay short — a line or two, not a monologue. */
-const CHARACTER_SPEAK_TOKENS = 280;
+/**
+ * Character/guest speak budgets — scaled by turn length so *action* + "dialogue"
+ * does not hit max_tokens mid-sentence on longer scenes.
+ */
+const CHARACTER_SPEAK_TOKENS: Record<TurnLength, number> = {
+  beat: 500,
+  scene: 720,
+  episode: 900
+};
 
 export function maxTokensFor(length: TurnLength): number {
   return LENGTH_SPEC[length].maxTokens;
@@ -38,8 +45,8 @@ export function narrationBeatTokens(length: TurnLength): number {
   return NARRATION_BEAT_TOKENS[length];
 }
 
-export function characterSpeakTokens(): number {
-  return CHARACTER_SPEAK_TOKENS;
+export function characterSpeakTokens(length: TurnLength = 'scene'): number {
+  return CHARACTER_SPEAK_TOKENS[length];
 }
 
 function characterSheet(c: Character, all: Character[]): string {
@@ -49,6 +56,16 @@ function characterSheet(c: Character, all: Character[]): string {
       return target ? `- ${r.kind} of ${target.name}: ${r.note}` : null;
     })
     .filter(Boolean)
+    .join('\n');
+  // How others see this character — inbound edges (max 4) for narrator/full-sheet context.
+  const knownTo = all
+    .filter((other) => other.id !== c.id)
+    .flatMap((other) =>
+      other.relationships
+        .filter((r) => r.targetId === c.id)
+        .map((r) => `- ${other.name} sees them as ${r.kind}${r.note ? `: ${r.note}` : ''}`)
+    )
+    .slice(0, 4)
     .join('\n');
   const lines = [
     `### ${c.name}${c.isPlayer ? ' (THE PLAYER — never write their dialogue, decisions, or inner thoughts)' : ''}`,
@@ -69,6 +86,7 @@ function characterSheet(c: Character, all: Character[]): string {
     c.mustNotKnow &&
       `MUST NOT KNOW YET (never let this character learn, reference, or act on this): ${c.mustNotKnow}`,
     rel && `Relationships:\n${rel}`,
+    knownTo && `Known to others:\n${knownTo}`,
     c.anchors.length > 0 &&
       `BEHAVIOUR ANCHORS — non-negotiable, never break these under any circumstances:\n${c.anchors.map((a, i) => `  ${String(i + 1).padStart(2, '0')}. ${a}`).join('\n')}`,
     c.customInstructions && `Author's directives for this character (follow verbatim): ${c.customInstructions}`,

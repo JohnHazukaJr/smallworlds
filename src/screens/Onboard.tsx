@@ -73,7 +73,7 @@ function previewSeason(premise: string): Season {
 export function Onboard() {
   const vw = useVw();
   const narrow = vw < 1000;
-  const { go, openWorld } = useApp();
+  const { go, openWorld, goCast, goLocations } = useApp();
   const matureDefault = useSettings((s) => s.matureDefault);
   const providers = useSettings((s) => s.providers);
 
@@ -275,8 +275,15 @@ export function Onboard() {
 
   const openFullEditor = (screen: 'cast' | 'locations') => {
     if (!worldId) return;
-    openWorld(worldId);
-    go(screen);
+    // openWorld jumps to Story — set world then open the full editor on the focused sheet.
+    useApp.setState({ currentWorldId: worldId });
+    if (screen === 'cast') {
+      const focus = expandedCastId ?? npcCast[0]?.id ?? null;
+      goCast(focus);
+    } else {
+      const focus = expandedPlaceId ?? places[0]?.id ?? null;
+      goLocations(focus);
+    }
   };
 
   const finish = async () => {

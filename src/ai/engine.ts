@@ -5,8 +5,9 @@ import type {
   Character, ComposeMode, Episode, EpisodeGuest, EpisodeWrap, EpisodeWrapBeat, Location, ModelRef,
   Relationship, Season, SeasonWrap, Turn, TurnLength, TurnRole, World, WrapBeat
 } from '../types';
+import { normalizeRelationships } from '../relationships';
 import { emptyCharacter, emptyLocation, nextEpisode, worldCalendar } from '../worldOps';
-import { AIError, streamChat } from './client';
+import { AIError, streamChat, type ChatMessage, type StreamRequest } from './client';
 import { normalizeSpeakText } from './dialogueFormat';
 import {
   activeGuests,
@@ -45,6 +46,61 @@ export function utilityModelFor(world: World | null) {
 }
 
 // ---------- Prose generation ----------
+
+const SPEAK_CONTINUE_NUDGE =
+  'Your previous reply was cut off mid-line. Continue from exactly where you stopped — ' +
+  'finish the unfinished *action* or "dialogue" only. Do not restart or repeat completed words. ' +
+  'Keep the same *action* / "speech" format.';
+
+/**
+ * Stream a character/guest speak beat; if the provider stops for length, make one
+ * continuation call and stitch before normalizing.
+ */
+async function streamSpeakComplete(opts: {
+  provider: StreamRequest['provider'];
+  model: string;
+  system: string;
+  messages: ChatMessage[];
+  length: TurnLength;
+  signal?: AbortSignal;
+  onProgress: (label: string) => void;
+  onAccumulated: (text: string) => void;
+}): Promise<string> {
+  const maxTokens = characterSpeakTokens(opts.length);
+  let acc = '';
+  const first = await streamChat({
+    provider: opts.provider,
+    model: opts.model,
+    system: opts.system,
+    messages: opts.messages,
+    maxTokens,
+    signal: opts.signal,
+    onDelta: (d) => {
+      acc += d;
+      opts.onAccumulated(acc);
+    }
+  });
+  if (first.truncated && acc.trim()) {
+    opts.onProgress('finishing line…');
+    await streamChat({
+      provider: opts.provider,
+      model: opts.model,
+      system: opts.system,
+      messages: [
+        ...opts.messages,
+        { role: 'assistant', content: acc },
+        { role: 'user', content: SPEAK_CONTINUE_NUDGE }
+      ],
+      maxTokens,
+      signal: opts.signal,
+      onDelta: (d) => {
+        acc += d;
+        opts.onAccumulated(acc);
+      }
+    });
+  }
+  return normalizeSpeakText(acc);
+}
 
 async function loadContext(world: World, season: Season, episode: Episode) {
   const [characters, locations, continuity, threads, turns, seasonEpisodes] = await Promise.all([
@@ -339,7 +395,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         progress('narrating…');
         opts.onDelta('', meta);
         let acc = '';
-        const text = await streamChat({
+        const { text } = await streamChat({
           provider, model,
           system: buildNarratorSystemPrompt(ctx),
           messages: buildNarrationBeatMessages(
@@ -372,18 +428,17 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         const meta: StreamMeta = { role: 'character', guestId: guest.id };
         progress(`${guest.name} speaking…`);
         opts.onDelta('', meta);
-        let acc = '';
-        const text = await streamChat({
+        const cleaned = await streamSpeakComplete({
           provider, model,
           system: buildGuestSystemPrompt(ctx, guest),
           messages: buildGuestSpeakMessages(
             ctx.turns, ctx.characters, guest, beat.brief, sceneGuests()
           ),
-          maxTokens: characterSpeakTokens(),
+          length: opts.length,
           signal: opts.signal,
-          onDelta: (d) => { acc += d; opts.onDelta(acc, meta); }
+          onProgress: progress,
+          onAccumulated: (acc) => opts.onDelta(acc, meta)
         });
-        const cleaned = normalizeSpeakText(text);
         if (!cleaned) {
           opts.onDelta('', meta);
           continue;
@@ -407,18 +462,17 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       const meta: StreamMeta = { role: 'character', characterId: speaking.id };
       progress(`${speaking.name} speaking…`);
       opts.onDelta('', meta);
-      let acc = '';
-      const text = await streamChat({
+      const cleaned = await streamSpeakComplete({
         provider, model,
         system: buildCharacterSystemPrompt(ctx, speaking),
         messages: buildCharacterSpeakMessages(
           ctx.turns, ctx.characters, speaking, beat.brief, sceneGuests()
         ),
-        maxTokens: characterSpeakTokens(),
+        length: opts.length,
         signal: opts.signal,
-        onDelta: (d) => { acc += d; opts.onDelta(acc, meta); }
+        onProgress: progress,
+        onAccumulated: (acc) => opts.onDelta(acc, meta)
       });
-      const cleaned = normalizeSpeakText(text);
       if (!cleaned) {
         opts.onDelta('', meta);
         continue;
@@ -523,7 +577,7 @@ async function utilityJson<T>(
   const { provider, model } = utilityModelFor(world);
   const { signal: timed, cancel } = withTimeoutSignal(signal, UTILITY_TIMEOUT_MS);
   try {
-    const raw = await streamChat({
+    const { text: raw } = await streamChat({
       provider, model, system,
       messages: [{ role: 'user', content: user }],
       maxTokens, temperature: 0.4, signal: timed
@@ -705,7 +759,7 @@ export async function analyzeSeason(world: World, season: Season): Promise<Seaso
       episodeSummaries.push(`Episode ${ep.number}${ep.title ? ` (${ep.title})` : ''}:\n${text}`);
     } else {
       const { provider, model } = utilityModelFor(world);
-      const summary = await streamChat({
+      const { text: summary } = await streamChat({
         provider, model,
         system: 'Summarize this story episode in 150-250 words, keeping every event that could matter later: decisions, revelations, injuries, promises, relationship shifts.',
         messages: [{ role: 'user', content: text.slice(0, 48000) }],
@@ -774,7 +828,7 @@ export async function evolveCharacters(world: World, wrap: SeasonWrap, gapLabel:
 /** Draft (or redraft) the next-season premise from the wrap sheet. */
 export async function draftPremise(world: World, season: Season, wrap: SeasonWrap, gapLabel: string): Promise<string> {
   const { provider, model } = utilityModelFor(world);
-  const premise = await streamChat({
+  const { text: premise } = await streamChat({
     provider, model,
     system: 'You write season premises for longform interactive fiction. One paragraph, 2-4 sentences, present tense, concrete and pressurized. Open on the raised beats. No preamble — return only the premise.',
     messages: [{
@@ -791,7 +845,7 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
   const { provider, model } = utilityModelFor(world);
 
   const kept = wrap.beats.filter((b) => b.disposition !== 'drop');
-  const recap = await streamChat({
+  const { text: recap } = await streamChat({
     provider, model,
     system: 'You write "previously on" recaps for longform stories. Write one recap paragraph (120-220 words) weighted by disposition: RAISE beats vivid and present, KEEP beats brief, SOFTEN beats a single distant clause. Do not mention dropped events at all. Return only the recap.',
     messages: [{
@@ -886,6 +940,36 @@ const NON_DESTRUCTIVE_RULE =
   'supporting detail — but you must never delete, shorten, or contradict any detail already present. Every fact the ' +
   'author already wrote must still be present in your output, verbatim or better-phrased.';
 
+const RELATIONSHIP_POV_RULES =
+  'Write each relationship FROM the Subject TO the target, in third person about the Subject ' +
+  '(e.g. "Mara still owes Ivo for the forge debt"). Never address the Subject as "you". ' +
+  'Never treat the Subject as the player/reader unless Subject.isPlayer is true. ' +
+  'When the target is the player protagonist (isPlayer true, often named "you"), refer to them as ' +
+  '"the protagonist" or by their role — not as if the Subject were the reader. ' +
+  'Prefer 2-5 concrete links. When other NPCs are on the roster, include peer NPC links, not only Subject↔protagonist.';
+
+function worldFleshPreamble(world: World | null): string {
+  if (!world) return '';
+  return (
+    `World: ${world.title}\n` +
+    `World logline (addresses the player protagonist in second person; does NOT describe the Subject): ${world.line}\n` +
+    `World bible: ${world.bible.slice(0, 1200)}\n\n`
+  );
+}
+
+function castRosterEntry(c: Character, summaryLen = 200) {
+  return {
+    name: c.name,
+    role: c.role,
+    isPlayer: !!c.isPlayer,
+    label: c.isPlayer
+      ? 'player protagonist (second person in story — do not confuse with Subject)'
+      : 'npc',
+    summary: c.summary.slice(0, summaryLen),
+    traits: c.traits.slice(0, 120)
+  };
+}
+
 /** Union two line lists without ever dropping an existing line (case-insensitive de-dupe). */
 function mergeLines(existing: string[], incoming: string[]): string[] {
   const seen = new Set(existing.map((s) => s.trim().toLowerCase()));
@@ -945,7 +1029,11 @@ export async function fleshOutCharacter(
   cast: Character[] = []
 ): Promise<Partial<Character>> {
   const others = cast.filter((c) => c.id !== character.id && c.name.trim());
+  const subjectFrame = character.isPlayer
+    ? 'SUBJECT is the player protagonist sheet (second person in play). Fill their card; relationships still use third-person notes about them as the protagonist.'
+    : 'SUBJECT is this NPC — not the player. Do not rewrite them as the reader or address them as "you".';
   const current = {
+    isPlayer: !!character.isPlayer,
     name: character.name, role: character.role, age: character.age, appearance: character.appearance,
     mannerisms: character.mannerisms, backstory: character.backstory, summary: character.summary,
     speechStyle: character.speechStyle, exampleLines: character.exampleLines, traits: character.traits,
@@ -956,11 +1044,7 @@ export async function fleshOutCharacter(
       return { targetName: target?.name ?? '', kind: r.kind, note: r.note };
     })
   };
-  const roster = others.map((c) => ({
-    name: c.name,
-    role: c.role,
-    summary: c.summary.slice(0, 160)
-  }));
+  const roster = others.map((c) => castRosterEntry(c, 160));
 
   const result = await utilityJson<{
     name: string; role: string; age: string; appearance: string; mannerisms: string;
@@ -970,17 +1054,18 @@ export async function fleshOutCharacter(
     relationships?: { targetName?: string; kind?: string; note?: string }[];
   }>(
     world,
-    `You flesh out NPC character sheets for longform interactive fiction. ${NON_DESTRUCTIVE_RULE}\n` +
+    `You flesh out character sheets for longform interactive fiction. ${subjectFrame} ${NON_DESTRUCTIVE_RULE}\n` +
     `Respond with JSON only: {"name": string, "role": string, "age": string, "appearance": string, "mannerisms": string, ` +
     `"backstory": string, "summary": string, "speechStyle": string, "exampleLines": string[], "traits": string, ` +
     `"desires": string, "fears": string, "flaws": string, "secrets": string, "anchors": string[], ` +
     `"relationships":[{"targetName":"<exact name from Other cast>","kind":"ally|rival|lover|debt|family|…","note":"<one-line history>"}]}\n` +
-    `Only link to names listed in Other cast. If Other cast is empty, return relationships: [].`,
-    `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}` +
+    `Only link to names listed in Other cast. Prefer unlinked cast first. If Other cast is empty, return relationships: []. ${RELATIONSHIP_POV_RULES}`,
+    worldFleshPreamble(world) +
     `Other cast (relationship targets):\n${JSON.stringify(roster, null, 2)}\n\n` +
-    `Current character sheet (JSON, blank strings/arrays mean unset):\n${JSON.stringify(current, null, 2)}`
+    `SUBJECT sheet (JSON, blank strings/arrays mean unset):\n${JSON.stringify(current, null, 2)}`
   );
 
+  const castIds = cast.map((c) => c.id);
   const relIncoming = others.length > 0
     ? resolveRelationshipsByName(result.relationships ?? [], others)
     : [];
@@ -1001,7 +1086,11 @@ export async function fleshOutCharacter(
     flaws: keepIfBlank(character.flaws, result.flaws),
     secrets: keepIfBlank(character.secrets, result.secrets),
     anchors: mergeLines(character.anchors, result.anchors ?? []),
-    relationships: mergeRelationships(character.relationships, relIncoming)
+    relationships: normalizeRelationships(
+      mergeRelationships(character.relationships, relIncoming),
+      castIds,
+      character.id
+    )
   };
 }
 
@@ -1014,16 +1103,29 @@ export async function fleshOutRelationships(
   const others = cast.filter((c) => c.id !== character.id && c.name.trim());
   if (others.length === 0) return character.relationships;
 
-  const roster = others.map((c) => ({
-    name: c.name,
-    role: c.role,
-    summary: c.summary.slice(0, 200),
-    traits: c.traits.slice(0, 120)
-  }));
+  const roster = others.map((c) => castRosterEntry(c, 200));
   const existing = character.relationships.map((r) => {
     const target = others.find((c) => c.id === r.targetId);
     return { targetName: target?.name ?? '', kind: r.kind, note: r.note };
   });
+  const subject = {
+    isPlayer: !!character.isPlayer,
+    name: character.name,
+    role: character.role,
+    age: character.age,
+    appearance: character.appearance.slice(0, 280),
+    mannerisms: character.mannerisms.slice(0, 200),
+    summary: character.summary.slice(0, 500),
+    backstory: character.backstory.slice(0, 600),
+    traits: character.traits.slice(0, 280),
+    desires: character.desires.slice(0, 280),
+    fears: character.fears.slice(0, 280),
+    flaws: character.flaws.slice(0, 280),
+    secrets: character.secrets.slice(0, 280),
+    anchors: character.anchors.slice(0, 8),
+    speechStyle: character.speechStyle.slice(0, 200),
+    existingRelationships: existing
+  };
 
   const result = await utilityJson<{
     relationships: { targetName?: string; kind?: string; note?: string }[];
@@ -1031,17 +1133,20 @@ export async function fleshOutRelationships(
     world,
     `You design relationship links between cast members for longform interactive fiction. ${NON_DESTRUCTIVE_RULE}\n` +
     `Respond with JSON only: {"relationships":[{"targetName":"<exact name from roster>","kind":"ally|rival|lover|debt|family|mentor|…","note":"<concrete one-line history or tension>"}]}\n` +
-    `Propose 2-5 links grounded in both sheets and the world. Prefer specific history over vague adjectives. Never invent cast names not in the roster.`,
-    `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}` +
-    `Subject: ${character.name} (${character.role})\n` +
-    `Summary: ${character.summary.slice(0, 400)}\n` +
-    `Backstory: ${character.backstory.slice(0, 400)}\n` +
-    `Existing relationships:\n${JSON.stringify(existing, null, 2)}\n\n` +
+    `${RELATIONSHIP_POV_RULES} Prefer roster members the Subject is not yet linked to. Never invent cast names not in the roster.`,
+    worldFleshPreamble(world) +
+    `SUBJECT (the character whose outbound relationships you are writing — not the player unless isPlayer is true):\n` +
+    `${JSON.stringify(subject, null, 2)}\n\n` +
     `Other cast roster:\n${JSON.stringify(roster, null, 2)}`
   );
 
+  const castIds = cast.map((c) => c.id);
   const incoming = resolveRelationshipsByName(result.relationships ?? [], others);
-  return mergeRelationships(character.relationships, incoming);
+  return normalizeRelationships(
+    mergeRelationships(character.relationships, incoming),
+    castIds,
+    character.id
+  );
 }
 
 /** AI-assisted flesh-out of an existing location sheet: fills blanks, enriches filled fields, never removes detail. */
@@ -1090,7 +1195,7 @@ export async function fleshOutWorldLore(world: World): Promise<{ title: string; 
 /** AI-assisted flesh-out of the season premise (the plot). */
 export async function fleshOutPremise(world: World, season: Season): Promise<string> {
   const { provider, model } = utilityModelFor(world);
-  const premise = await streamChat({
+  const { text: premise } = await streamChat({
     provider, model,
     system: `You flesh out season premises for longform interactive fiction. ${NON_DESTRUCTIVE_RULE} If the premise is blank, write one from the world context. One paragraph, 2-5 sentences, present tense, concrete and pressurized. Return only the premise.`,
     messages: [{

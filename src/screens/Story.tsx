@@ -226,8 +226,7 @@ function ProseBlockView({ b, accent, prose, fontPx, avatarPx }: {
 export function Story() {
   const vw = useVw();
   const narrow = vw < 780;
-  const { currentWorldId, layout, setLayout, mood, setMood, backdrop, setBackdrop, go, display } = useApp();
-  const goLocations = () => go('locations');
+  const { currentWorldId, layout, setLayout, mood, setMood, backdrop, setBackdrop, go, display, goLocations: openLocations } = useApp();
   const M = MOODS[mood];
   const BD = BACKDROPS[backdrop];
   const readMode = layout === 'read';
@@ -248,6 +247,7 @@ export function Story() {
       : undefined,
     [season?.id]
   );
+  const goLocations = () => openLocations(episode?.locationId ?? null);
   const turns = useLiveQuery(
     async () => (episode ? db.turns.where('episodeId').equals(episode.id).sortBy('createdAt') : []),
     [episode?.id]

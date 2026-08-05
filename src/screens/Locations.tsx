@@ -34,7 +34,7 @@ function useAutosave(draft: Location | null) {
 export function Locations() {
   const vw = useVw();
   const narrow = vw < 900;
-  const { currentWorldId, go } = useApp();
+  const { currentWorldId, go, pendingLocationId, clearPendingLocation } = useApp();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('overview');
   const [aiDesc, setAiDesc] = useState('');
@@ -58,7 +58,18 @@ export function Locations() {
     [world?.id]
   ) ?? [];
 
-  const selected = places.find((l) => l.id === selectedId) ?? places[0];
+  const selected = places.find((l) => l.id === selectedId)
+    ?? (pendingLocationId ? places.find((l) => l.id === pendingLocationId) : undefined)
+    ?? places[0];
+
+  // Honor one-shot focus from World editor / Director.
+  useEffect(() => {
+    if (!pendingLocationId || places.length === 0) return;
+    if (places.some((l) => l.id === pendingLocationId)) {
+      setSelectedId(pendingLocationId);
+      clearPendingLocation();
+    }
+  }, [pendingLocationId, places, clearPendingLocation]);
 
   // Sync draft when the selected location changes.
   useEffect(() => {

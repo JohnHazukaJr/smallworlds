@@ -54,7 +54,17 @@ interface AppStore {
   mood: MoodId;
   backdrop: BackdropId;
   display: DisplayPrefs;
+  /** One-shot: Cast selects this id when the screen opens (not persisted). */
+  pendingCharacterId: string | null;
+  /** One-shot: Locations selects this id when the screen opens (not persisted). */
+  pendingLocationId: string | null;
   go: (screen: Screen) => void;
+  /** Open Cast, optionally focusing a character sheet. */
+  goCast: (characterId?: string | null) => void;
+  /** Open Locations, optionally focusing a place sheet. */
+  goLocations: (locationId?: string | null) => void;
+  clearPendingCharacter: () => void;
+  clearPendingLocation: () => void;
   openWorld: (worldId: string) => void;
   setLayout: (l: StoryLayout) => void;
   setMood: (m: MoodId) => void;
@@ -71,7 +81,19 @@ export const useApp = create<AppStore>()(
       mood: 'ember',
       backdrop: 'scene',
       display: DEFAULT_DISPLAY,
+      pendingCharacterId: null,
+      pendingLocationId: null,
       go: (screen) => set({ screen }),
+      goCast: (characterId) => set({
+        screen: 'cast',
+        pendingCharacterId: characterId ?? null
+      }),
+      goLocations: (locationId) => set({
+        screen: 'locations',
+        pendingLocationId: locationId ?? null
+      }),
+      clearPendingCharacter: () => set({ pendingCharacterId: null }),
+      clearPendingLocation: () => set({ pendingLocationId: null }),
       openWorld: (currentWorldId) => set({ currentWorldId, screen: 'story' }),
       setLayout: (layout) => set({ layout: normalizeStoryLayout(layout) }),
       setMood: (mood) => set({ mood }),
@@ -89,7 +111,10 @@ export const useApp = create<AppStore>()(
           ...current,
           ...p,
           layout: normalizeStoryLayout(p.layout),
-          display: { ...DEFAULT_DISPLAY, ...(p.display ?? {}) }
+          display: { ...DEFAULT_DISPLAY, ...(p.display ?? {}) },
+          // Never restore one-shot focus from disk.
+          pendingCharacterId: null,
+          pendingLocationId: null
         };
       }
     }

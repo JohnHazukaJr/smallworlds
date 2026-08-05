@@ -28,6 +28,8 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
   locations: Location[];
 }) {
   const go = useApp((s) => s.go);
+  const goCast = useApp((s) => s.goCast);
+  const goLocations = useApp((s) => s.goLocations);
   const [tab, setTab] = useState<Tab>('lore');
   const [charId, setCharId] = useState<string | null>(null);
   const [locId, setLocId] = useState<string | null>(null);
@@ -314,7 +316,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 const c = emptyCharacter(world.id, { name: 'New character' });
                 void db.characters.add(c).then(() => setCharId(c.id));
               }}>+ new character</Chip>
-              <Chip onClick={() => { onClose(); go('cast'); }}>full editor → Cast</Chip>
+              <Chip onClick={() => { onClose(); goCast(); }}>full editor → Cast</Chip>
             </div>
           </>
         )}
@@ -327,7 +329,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <div style={{ fontSize: 14, fontWeight: 600, color: '#f0eee9', flex: 1 }}>
                 {selected.name || 'unnamed'}{selected.isPlayer ? ' · player' : ''}
               </div>
-              <button className="btn-quiet" style={{ fontSize: 10 }} onClick={() => { onClose(); go('cast'); }}>full editor</button>
+              <button className="btn-quiet" style={{ fontSize: 10 }} onClick={() => { onClose(); goCast(selected.id); }}>full editor</button>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
               <Field label="Name">
@@ -423,7 +425,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 const l = emptyLocation(world.id, { name: 'New location' });
                 void db.locations.add(l).then(() => setLocId(l.id));
               }}>+ new location</Chip>
-              <Chip onClick={() => { onClose(); go('locations'); }}>full editor → Locations</Chip>
+              <Chip onClick={() => { onClose(); goLocations(); }}>full editor → Locations</Chip>
             </div>
           </>
         )}
@@ -445,7 +447,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                   ...(selectedLoc.portrait ? { image: selectedLoc.portrait } : {})
                 });
               }}>use as scene</button>
-              <button className="btn-quiet" style={{ fontSize: 10 }} onClick={() => { onClose(); go('locations'); }}>full editor</button>
+              <button className="btn-quiet" style={{ fontSize: 10 }} onClick={() => { onClose(); goLocations(selectedLoc.id); }}>full editor</button>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
               <Field label="Name">

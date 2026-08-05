@@ -1,7 +1,12 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef, useState } from 'react';
 import { draftCharacter, fleshOutCharacter, fleshOutRelationships } from '../ai/engine';
+import { RelationshipMap, type RelationshipMapMode } from '../components/RelationshipMap';
 import { db, recordTombstones } from '../db';
+import {
+  hasLink, inboundFor, KIND_PRESETS, normalizeRelationships, pruneRelationshipsToCast,
+  removeLink, suggestInverseKind, unlinkedOthers, upsertLink
+} from '../relationships';
 import { useApp } from '../store/app';
 import type { Character, Relationship } from '../types';
 import { Chip, ErrorNote, Field, Mono, Spinner, useVw } from '../ui/bits';
@@ -34,7 +39,7 @@ function useAutosave(draft: Character | null) {
 export function Cast() {
   const vw = useVw();
   const narrow = vw < 900;
-  const { currentWorldId, go } = useApp();
+  const { currentWorldId, go, pendingCharacterId, clearPendingCharacter } = useApp();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('persona');
   const [aiDesc, setAiDesc] = useState('');
@@ -58,7 +63,19 @@ export function Cast() {
     [world?.id]
   ) ?? [];
 
-  const selected = cast.find((c) => c.id === selectedId) ?? cast.find((c) => !c.isPlayer) ?? cast[0];
+  const selected = cast.find((c) => c.id === selectedId)
+    ?? (pendingCharacterId ? cast.find((c) => c.id === pendingCharacterId) : undefined)
+    ?? cast.find((c) => !c.isPlayer)
+    ?? cast[0];
+
+  // Honor one-shot focus from World editor / other screens.
+  useEffect(() => {
+    if (!pendingCharacterId || cast.length === 0) return;
+    if (cast.some((c) => c.id === pendingCharacterId)) {
+      setSelectedId(pendingCharacterId);
+      clearPendingCharacter();
+    }
+  }, [pendingCharacterId, cast, clearPendingCharacter]);
 
   // Sync draft when the selected character changes.
   useEffect(() => {
@@ -381,7 +398,21 @@ export function Cast() {
                     onClick={async () => {
                       if (confirm(`Remove ${d.name || 'this character'} from the world?`)) {
                         await recordTombstones([{ table: 'characters', id: d.id, worldId: d.worldId, payload: d }]);
-                        await db.characters.delete(d.id);
+                        const remaining = cast.filter((c) => c.id !== d.id);
+                        const pruned = pruneRelationshipsToCast(remaining);
+                        await db.transaction('rw', db.characters, async () => {
+                          await db.characters.delete(d.id);
+                          for (const c of pruned) {
+                            const before = remaining.find((x) => x.id === c.id);
+                            if (!before) continue;
+                            if (JSON.stringify(before.relationships) !== JSON.stringify(c.relationships)) {
+                              await db.characters.update(c.id, {
+                                relationships: c.relationships,
+                                updatedAt: Date.now()
+                              });
+                            }
+                          }
+                        });
                         setSelectedId(null);
                       }
                     }}
@@ -506,15 +537,20 @@ export function Cast() {
                 <RelationsEditor
                   character={d}
                   cast={cast}
-                  worldTitle={world?.title}
-                  onChange={(relationships) => patch({ relationships })}
+                  narrow={narrow}
+                  onChange={(relationships) => {
+                    const ids = cast.map((c) => c.id);
+                    patch({ relationships: normalizeRelationships(relationships, ids, d.id) });
+                  }}
+                  onSelectCharacter={(id) => setSelectedId(id)}
                   onFleshOut={async () => {
                     setFleshBusy(true);
                     setFleshError('');
                     try {
                       const next = await fleshOutRelationships(world ?? null, d, cast);
                       setUndoSnapshot(draft);
-                      patch({ relationships: next });
+                      const ids = cast.map((c) => c.id);
+                      patch({ relationships: normalizeRelationships(next, ids, d.id) });
                     } catch (e) {
                       setFleshError(e instanceof Error ? e.message : String(e));
                     } finally {
@@ -574,59 +610,295 @@ export function Cast() {
   );
 }
 
-function RelationsEditor({ character, cast, onChange, onFleshOut, fleshBusy }: {
+function RelationsEditor({
+  character, cast, narrow, onChange, onSelectCharacter, onFleshOut, fleshBusy
+}: {
   character: Character;
   cast: Character[];
-  worldTitle?: string;
+  narrow: boolean;
   onChange: (r: Relationship[]) => void;
+  onSelectCharacter: (id: string) => void;
   onFleshOut: () => Promise<void>;
   fleshBusy: boolean;
 }) {
+  const [mode, setMode] = useState<RelationshipMapMode | 'list'>('map');
+  const [focusTargetId, setFocusTargetId] = useState<string | null>(null);
+  const [notice, setNotice] = useState('');
+  const cardRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const others = cast.filter((c) => c.id !== character.id);
-  const add = () => {
-    if (others.length === 0) return;
-    onChange([...character.relationships, { targetId: others[0].id, kind: 'ally', note: '' }]);
+  const available = unlinkedOthers(character, cast);
+  const inbound = inboundFor(character.id, cast);
+
+  useEffect(() => {
+    if (!focusTargetId) return;
+    const el = cardRefs.current[focusTargetId];
+    el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [focusTargetId, character.relationships]);
+
+  const setRels = (rels: Relationship[]) => onChange(rels);
+
+  const updateByTarget = (targetId: string, p: Partial<Relationship>) => {
+    const cur = character.relationships.find((r) => r.targetId === targetId);
+    if (!cur) return;
+    setRels(upsertLink(character.relationships, { ...cur, ...p, targetId }));
   };
-  const update = (i: number, p: Partial<Relationship>) =>
-    onChange(character.relationships.map((r, j) => (j === i ? { ...r, ...p } : r)));
-  const remove = (i: number) => onChange(character.relationships.filter((_, j) => j !== i));
+
+  const add = () => {
+    if (available.length === 0) return;
+    setRels(upsertLink(character.relationships, {
+      targetId: available[0].id, kind: 'ally', note: ''
+    }));
+    setFocusTargetId(available[0].id);
+  };
+
+  const addReverseOnThem = async (target: Character, fromRel: Relationship) => {
+    if (hasLink(target.relationships, character.id)) {
+      setNotice(`${target.name || 'They'} already link back.`);
+      return;
+    }
+    const ids = cast.map((c) => c.id);
+    const next = normalizeRelationships(
+      upsertLink(target.relationships, {
+        targetId: character.id,
+        kind: suggestInverseKind(fromRel.kind),
+        note: fromRel.note
+      }),
+      ids,
+      target.id
+    );
+    await db.characters.update(target.id, { relationships: next, updatedAt: Date.now() });
+    setNotice(`Added reverse on ${target.name || 'them'}.`);
+  };
+
+  const addReverseHere = (from: Character, theirRel: Relationship) => {
+    if (hasLink(character.relationships, from.id)) return;
+    setRels(upsertLink(character.relationships, {
+      targetId: from.id,
+      kind: suggestInverseKind(theirRel.kind),
+      note: theirRel.note
+    }));
+    setFocusTargetId(from.id);
+    setNotice(`Added outbound link to ${from.name || 'them'}.`);
+  };
+
+  const showMap = mode === 'map' || mode === 'web';
+  // On phone, keep the editor under Map/Web so every feature stays reachable without mode juggling.
+  const showEditor = mode === 'list' || mode === 'map' || narrow;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+    <div style={{
+      display: 'flex', flexDirection: 'column', gap: 16,
+      paddingBottom: narrow ? 'calc(72px + env(safe-area-inset-bottom))' : 0
+    }}>
       <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'rgba(236,234,230,0.6)' }}>
-        Typed links to other cast members. When both share a scene, the link is packed into the prompt.
-        AI uses the rest of the cast and world context — you can edit or remove anything after.
+        Outbound links from <strong style={{ color: 'rgba(236,234,230,0.85)', fontWeight: 600 }}>{character.name || 'this character'}</strong>.
+        Map shows the web; dashed edges are inbound-only. The cast card named “you” is the story protagonist — not you the author.
       </div>
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+
+      <div style={{
+        display: 'flex', flexDirection: 'column', gap: 10,
+        ...(narrow ? {
+          position: 'sticky' as const,
+          top: 0,
+          zIndex: 5,
+          margin: '0 -4px',
+          padding: '8px 4px 10px',
+          background: 'rgba(10,12,16,0.92)',
+          backdropFilter: 'blur(16px)',
+          borderBottom: '1px solid rgba(255,255,255,0.08)'
+        } : {})
+      }}>
+        <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', alignItems: 'center' }}>
+          {([
+            ['map', 'Map'] as const,
+            ['web', 'Web'] as const,
+            ['list', 'List'] as const
+          ]).map(([id, label]) => (
+            <Chip key={id} active={mode === id} onClick={() => setMode(id)}>{label}</Chip>
+          ))}
+        </div>
         <button
           className="btn-ghost"
+          style={{ width: narrow ? '100%' : undefined, alignSelf: narrow ? 'stretch' : 'flex-start', fontSize: 12, minHeight: 44 }}
           disabled={fleshBusy || others.length === 0}
           onClick={() => void onFleshOut()}
         >
           {fleshBusy ? 'Fleshing relationships…' : 'Flesh out relationships'}
         </button>
-        {others.length === 0 && (
-          <span style={{ fontSize: 12, color: 'rgba(236,234,230,0.4)', alignSelf: 'center' }}>
-            Add another cast member first
-          </span>
-        )}
       </div>
-      {character.relationships.map((r, i) => (
-        <div key={i} className="glass" style={{ padding: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-            <select value={r.targetId} onChange={(e) => update(i, { targetId: e.target.value })} style={{ width: 'auto', minWidth: 140 }}>
-              {others.map((c) => <option key={c.id} value={c.id}>{c.name || 'unnamed'}</option>)}
-            </select>
-            <input
-              value={r.kind} onChange={(e) => update(i, { kind: e.target.value })}
-              placeholder="ally / rival / lover / debt…" style={{ width: 160 }}
-            />
-            <button className="btn-quiet" style={{ marginLeft: 'auto' }} onClick={() => remove(i)}>remove</button>
-          </div>
-          <input value={r.note} onChange={(e) => update(i, { note: e.target.value })} placeholder="the history between them, one line" />
+
+      {notice && (
+        <div style={{
+          fontSize: 12.5, color: 'rgba(236,220,190,0.95)',
+          border: '1px solid rgba(224,165,95,0.3)', borderRadius: 10, padding: '10px 12px',
+          background: 'rgba(224,165,95,0.08)', display: 'flex', gap: 10
+        }}>
+          <span style={{ flex: 1 }}>{notice}</span>
+          <button className="btn-quiet" style={{ fontSize: 12, minHeight: 40 }} onClick={() => setNotice('')}>×</button>
         </div>
-      ))}
-      <div><Chip onClick={add}>+ add relationship</Chip></div>
+      )}
+
+      {showMap && others.length > 0 && (
+        <RelationshipMap
+          mode={mode === 'web' ? 'web' : 'map'}
+          subject={character}
+          cast={cast}
+          narrow={narrow}
+          onSelectCharacter={(id) => {
+            if (id === character.id) return;
+            onSelectCharacter(id);
+          }}
+          onFocusEdge={(targetId) => {
+            setMode(narrow ? 'map' : 'map');
+            setFocusTargetId(targetId);
+          }}
+        />
+      )}
+
+      {others.length === 0 && (
+        <div style={{ fontSize: 12.5, opacity: 0.5 }}>Add another cast member to map relationships.</div>
+      )}
+
+      {showEditor && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <Mono style={{ fontSize: 9 }}>outbound from {character.name || 'subject'}</Mono>
+          {character.relationships.map((r) => {
+            const target = cast.find((c) => c.id === r.targetId);
+            const kindIsPreset = KIND_PRESETS.includes(r.kind as typeof KIND_PRESETS[number]);
+            const hot = focusTargetId === r.targetId;
+            return (
+              <div
+                key={r.targetId}
+                ref={(el) => { cardRefs.current[r.targetId] = el; }}
+                className="glass"
+                style={{
+                  padding: narrow ? 14 : 14, display: 'flex', flexDirection: 'column', gap: 10,
+                  border: hot ? '1px solid rgba(224,165,95,0.45)' : undefined
+                }}
+              >
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <select
+                    value={r.targetId}
+                    onChange={(e) => {
+                      const nextId = e.target.value;
+                      if (nextId === r.targetId) return;
+                      if (hasLink(character.relationships, nextId)) return;
+                      setRels(
+                        upsertLink(
+                          removeLink(character.relationships, r.targetId),
+                          { ...r, targetId: nextId }
+                        )
+                      );
+                      setFocusTargetId(nextId);
+                    }}
+                    style={{ width: narrow ? '100%' : 'auto', minWidth: 140, minHeight: 44 }}
+                  >
+                    {target && <option value={target.id}>{target.name || 'unnamed'}</option>}
+                    {available.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name || 'unnamed'}</option>
+                    ))}
+                  </select>
+                  <button
+                    className="btn-quiet"
+                    style={{ marginLeft: narrow ? 0 : 'auto', fontSize: 12, minHeight: 44 }}
+                    onClick={() => setRels(removeLink(character.relationships, r.targetId))}
+                  >remove</button>
+                </div>
+                <div style={{
+                  display: 'flex', gap: 6, flexWrap: narrow ? 'nowrap' : 'wrap',
+                  overflowX: narrow ? 'auto' : undefined,
+                  WebkitOverflowScrolling: 'touch',
+                  paddingBottom: narrow ? 4 : 0,
+                  marginRight: narrow ? -4 : 0
+                }}>
+                  {KIND_PRESETS.map((k) => (
+                    <Chip key={k} active={r.kind === k} onClick={() => updateByTarget(r.targetId, { kind: k })}>
+                      {k}
+                    </Chip>
+                  ))}
+                  <Chip
+                    active={!kindIsPreset}
+                    onClick={() => {
+                      if (kindIsPreset) updateByTarget(r.targetId, { kind: 'linked' });
+                    }}
+                  >custom</Chip>
+                </div>
+                {!kindIsPreset && (
+                  <input
+                    value={r.kind}
+                    onChange={(e) => updateByTarget(r.targetId, { kind: e.target.value })}
+                    placeholder="custom kind…"
+                    style={{ width: '100%', maxWidth: narrow ? '100%' : 220, minHeight: 44 }}
+                  />
+                )}
+                <input
+                  value={r.note}
+                  onChange={(e) => updateByTarget(r.targetId, { note: e.target.value })}
+                  placeholder="the history between them, one line"
+                  style={{ minHeight: 44 }}
+                />
+                {target && (
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    <button className="btn-quiet" style={{ fontSize: 12, minHeight: 44 }} onClick={() => onSelectCharacter(target.id)}>
+                      Open {target.name || 'them'}
+                    </button>
+                    {!hasLink(target.relationships, character.id) ? (
+                      <button
+                        className="btn-quiet"
+                        style={{ fontSize: 12, minHeight: 44 }}
+                        onClick={() => void addReverseOnThem(target, r)}
+                      >
+                        Add reverse on them
+                      </button>
+                    ) : (
+                      <span style={{ fontSize: 11, opacity: 0.45, alignSelf: 'center' }}>they link back</span>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {available.length > 0 ? (
+            <div><Chip onClick={add}>+ add relationship</Chip></div>
+          ) : character.relationships.length > 0 ? (
+            <div style={{ fontSize: 12, opacity: 0.45 }}>Linked to everyone in the cast.</div>
+          ) : null}
+        </div>
+      )}
+
+      {!narrow && mode === 'web' && character.relationships.length > 0 && (
+        <button className="btn-quiet" style={{ fontSize: 12, alignSelf: 'flex-start' }} onClick={() => setMode('list')}>
+          Edit outbound list
+        </button>
+      )}
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <Mono style={{ fontSize: 9 }}>linked from · inbound</Mono>
+        {inbound.length === 0 && (
+          <div style={{ fontSize: 12.5, opacity: 0.45 }}>No one links here yet.</div>
+        )}
+        {inbound.map(({ from, rel }) => (
+          <div key={from.id} className="glass" style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ fontSize: 13, color: '#f0eee9' }}>
+              <strong>{from.name || 'unnamed'}</strong>
+              <span style={{ opacity: 0.55 }}> · {rel.kind}</span>
+            </div>
+            {rel.note && (
+              <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.6)' }}>{rel.note}</div>
+            )}
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button className="btn-quiet" style={{ fontSize: 12, minHeight: 44 }} onClick={() => onSelectCharacter(from.id)}>
+                Open
+              </button>
+              {!hasLink(character.relationships, from.id) && (
+                <button className="btn-quiet" style={{ fontSize: 12, minHeight: 44 }} onClick={() => addReverseHere(from, rel)}>
+                  Add reverse here
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

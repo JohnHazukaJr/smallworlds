@@ -16,6 +16,12 @@ export interface StreamRequest {
   onDelta?: (text: string) => void;
 }
 
+/** Full streamed text plus whether the provider stopped for length. */
+export interface StreamResult {
+  text: string;
+  truncated: boolean;
+}
+
 export class AIError extends Error {
   constructor(message: string, public status?: number) {
     super(message);
@@ -74,11 +80,17 @@ function cachedSystemBlock(text: string) {
   return { type: 'text' as const, text, cache_control: PROMPT_CACHE_CONTROL };
 }
 
+function isLengthStop(reason: string | undefined | null): boolean {
+  if (!reason) return false;
+  const r = reason.toUpperCase();
+  return r === 'LENGTH' || r === 'MAX_TOKENS' || r === 'MAX_TOKEN' || r === 'MAXTOKENS';
+}
+
 /**
  * Stream a chat completion from any configured provider.
- * Resolves with the full response text; onDelta fires as tokens arrive.
+ * Resolves with full text and whether generation stopped for length.
  */
-export async function streamChat(req: StreamRequest): Promise<string> {
+export async function streamChat(req: StreamRequest): Promise<StreamResult> {
   switch (req.provider.kind) {
     case 'openai': return streamOpenAI(req);
     case 'anthropic': return streamAnthropic(req);
@@ -120,7 +132,7 @@ async function throwHttpError(res: Response): Promise<never> {
   throw new AIError(`${res.status} ${res.statusText}${detail ? ` — ${detail}` : ''}`, res.status);
 }
 
-async function streamOpenAI(req: StreamRequest): Promise<string> {
+async function streamOpenAI(req: StreamRequest): Promise<StreamResult> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (req.provider.apiKey) headers['Authorization'] = `Bearer ${req.provider.apiKey}`;
   if (isOpenRouter(req.provider)) {
@@ -144,6 +156,7 @@ async function streamOpenAI(req: StreamRequest): Promise<string> {
   });
   if (!res.ok) await throwHttpError(res);
   let full = '';
+  let truncated = false;
   await readSSE(res, (data) => {
     try {
       const json = JSON.parse(data);
@@ -152,13 +165,15 @@ async function streamOpenAI(req: StreamRequest): Promise<string> {
         full += delta;
         req.onDelta?.(delta);
       }
+      const reason: string | undefined = json.choices?.[0]?.finish_reason;
+      if (isLengthStop(reason)) truncated = true;
     } catch { /* keep-alive or malformed chunk */ }
   });
   if (!full) throw new AIError('The model returned an empty response.');
-  return full;
+  return { text: full, truncated };
 }
 
-async function streamAnthropic(req: StreamRequest): Promise<string> {
+async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
   const cacheSystem = supportsAnthropicPromptCache(req.provider, req.model);
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -181,6 +196,7 @@ async function streamAnthropic(req: StreamRequest): Promise<string> {
   });
   if (!res.ok) await throwHttpError(res);
   let full = '';
+  let truncated = false;
   await readSSE(res, (data) => {
     try {
       const json = JSON.parse(data);
@@ -188,16 +204,21 @@ async function streamAnthropic(req: StreamRequest): Promise<string> {
         full += json.delta.text;
         req.onDelta?.(json.delta.text);
       }
+      // Final chunk: { type: 'message_delta', delta: { stop_reason: 'max_tokens' | 'end_turn' | ... } }
+      if (json.type === 'message_delta') {
+        const reason: string | undefined = json.delta?.stop_reason ?? json.stop_reason;
+        if (isLengthStop(reason)) truncated = true;
+      }
       if (json.type === 'error') throw new AIError(json.error?.message ?? 'Provider error');
     } catch (e) {
       if (e instanceof AIError) throw e;
     }
   });
   if (!full) throw new AIError('The model returned an empty response.');
-  return full;
+  return { text: full, truncated };
 }
 
-async function streamGemini(req: StreamRequest): Promise<string> {
+async function streamGemini(req: StreamRequest): Promise<StreamResult> {
   const url = `${req.provider.baseUrl}/models/${encodeURIComponent(req.model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(req.provider.apiKey)}`;
   const res = await fetch(url, {
     method: 'POST',
@@ -216,6 +237,7 @@ async function streamGemini(req: StreamRequest): Promise<string> {
   });
   if (!res.ok) await throwHttpError(res);
   let full = '';
+  let truncated = false;
   await readSSE(res, (data) => {
     try {
       const json = JSON.parse(data);
@@ -225,10 +247,12 @@ async function streamGemini(req: StreamRequest): Promise<string> {
         full += text;
         req.onDelta?.(text);
       }
+      const reason: string | undefined = json.candidates?.[0]?.finishReason;
+      if (isLengthStop(reason)) truncated = true;
     } catch { /* ignore malformed chunk */ }
   });
   if (!full) throw new AIError('The model returned an empty response.');
-  return full;
+  return { text: full, truncated };
 }
 
 /** Cheap non-streaming sanity check used by "Test connection". */
