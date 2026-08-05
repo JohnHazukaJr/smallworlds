@@ -24,6 +24,18 @@ export interface WorldCalendar {
   currentDay: number;
   /** free-text calendar system the narrator follows verbatim, e.g. month/season names — optional */
   system: string;
+  /**
+   * Weekday names in cycle order (e.g. Earth week, or a custom 5-day market week).
+   * Omitted / empty → default Monday–Sunday via worldCalendar().
+   */
+  weekdays?: string[];
+  /** Index into weekdays for what weekday story day 1 falls on (default 0). */
+  dayOneWeekday?: number;
+  /**
+   * How many story days to advance when an episode ends and the next opens.
+   * 0 = same day (overnight continuation), 1 = next morning (default), etc.
+   */
+  episodeAdvanceDays?: number;
 }
 
 export interface World {
@@ -115,6 +127,12 @@ export interface Episode {
   atmosphereNote?: string;
   /** when true, location changes won't auto-retarget the global mood */
   moodPinned?: boolean;
+  /** Story day this episode opened on (stamped from world calendar). */
+  storyDay?: number | null;
+  /** Story day this episode ended on (filed at wrap / end); null while active. */
+  storyDayEnd?: number | null;
+  /** Optional free-text date note from wrap analysis (e.g. "two nights; ends at dawn"). */
+  dateNote?: string | null;
   /** character ids present in the current scene */
   castIds: string[];
   /** ephemeral walk-ons for this episode (not Cast cards) */
@@ -123,6 +141,13 @@ export interface Episode {
   activeGuestIds?: string[];
   /** filled when the episode is ended via the wrap flow */
   wrap?: EpisodeWrap | null;
+  /**
+   * Compressed mid-episode digest when the transcript outgrows the history budget.
+   * Injected into prompts so early beats survive packing.
+   */
+  runningSummary?: string | null;
+  /** Episode transcript char count when runningSummary was last refreshed */
+  runningSummaryAtChars?: number;
   status: 'active' | 'ended';
   createdAt: number;
   /** bumped on mutating writes — used for sync LWW */

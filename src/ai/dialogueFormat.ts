@@ -98,4 +98,5 @@ export const SPEAK_FORMAT_RULES =
   '- Physical looks, gestures, mannerisms, and body language go inside *asterisks* — never inside the spoken quotes.\n' +
   '- Words said aloud go inside "double quotes" only.\n' +
   '- Example: *she smiled shyly, showing her dimples* "It\'s good to see you."\n' +
-  '- You may use action-only or dialogue-only. Do NOT prefix with your name. Do NOT wrap the whole reply in one outer quote.';
+  '- You may use dialogue-only. Action-only (*gestures* with no quotes) is allowed only when the beat brief says so; otherwise prefer at least one spoken line. ' +
+  'Do NOT prefix with your name. Do NOT wrap the whole reply in one outer quote.';

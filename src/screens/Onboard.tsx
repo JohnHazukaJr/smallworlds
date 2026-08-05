@@ -61,7 +61,7 @@ function previewWorld(title: string, seed: string, ai: WorldAISettings): World {
   return {
     id: '', title: title || 'Untitled world', line: seed.slice(0, 140), bible: seed,
     hue: 0, visibility: 'private', ai, proseModel: null, utilityModel: null,
-    activeSeasonId: null, calendar: { currentDay: 1, system: '' }, createdAt: 0, updatedAt: 0
+    activeSeasonId: null, calendar: { currentDay: 1, system: '', weekdays: undefined, dayOneWeekday: 0, episodeAdvanceDays: 1 }, createdAt: 0, updatedAt: 0
   };
 }
 

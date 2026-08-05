@@ -6,7 +6,7 @@ import { useApp } from '../store/app';
 import type { Character, Episode, Location, Season, World, WorldAISettings } from '../types';
 import { Bar, Chip, ErrorNote, Field, Mono, Sheet, Spinner, Toggle } from '../ui/bits';
 import { avatarStyle } from '../ui/theme';
-import { emptyCharacter, emptyLocation, worldCalendar } from '../worldOps';
+import { calendarPatch, emptyCharacter, emptyLocation, formatStoryDate, worldCalendar } from '../worldOps';
 
 type Tab = 'lore' | 'plot' | 'instructions' | 'settings' | 'cast' | 'locations';
 
@@ -139,7 +139,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
 
         {tab === 'plot' && (
           <>
-            <Field label={`Season ${season.number} premise`} note="the plot the narrator is steering toward">
+            <Field label={`Season ${season.number} premise`} note="living plot pressure — updates when you wrap an episode">
               <textarea key={season.id + '-premise-' + aiVersion} rows={5} defaultValue={season.premise}
                 onBlur={(e) => patchSeason({ premise: e.target.value })}
                 style={{ fontFamily: 'Spectral, serif', fontSize: 14.5, lineHeight: 1.65 }} />
@@ -157,17 +157,65 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 <ErrorNote error={flesh.error} onDismiss={() => setFlesh({ busy: null, error: '', errorFor: null })} />
               )}
             </div>
-            <Field label="Calendar" note="advances automatically each episode and season gap">
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: '#f0eee9' }}>
-                  Day {worldCalendar(world).currentDay}
-                </div>
-                <Chip onClick={() => patchWorld({ calendar: { ...worldCalendar(world), currentDay: worldCalendar(world).currentDay + 1 } })}>+1 day</Chip>
-                <Chip onClick={() => patchWorld({ calendar: { ...worldCalendar(world), currentDay: worldCalendar(world).currentDay + 7 } })}>+7 days</Chip>
-              </div>
-              <textarea key={world.id + '-cal-system'} rows={2} defaultValue={worldCalendar(world).system}
-                onBlur={(e) => patchWorld({ calendar: { ...worldCalendar(world), system: e.target.value } })}
-                placeholder="Optional — describe this world's calendar system (month names, seasons, etc). Left blank, the narrator just tracks the day count." />
+            <Field label="Calendar" note="full tracker also lives in Story → Direct; advances on episode end by your rule">
+              {(() => {
+                const cal = worldCalendar(world);
+                const patchCal = (p: Parameters<typeof calendarPatch>[1]) =>
+                  patchWorld({ calendar: calendarPatch(world, p) });
+                return (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: '#f0eee9' }}>
+                      {formatStoryDate(cal, cal.currentDay)}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                      <Chip onClick={() => patchCal({ currentDay: Math.max(1, cal.currentDay - 1) })}>−1</Chip>
+                      <Chip onClick={() => patchCal({ currentDay: cal.currentDay + 1 })}>+1 day</Chip>
+                      <Chip onClick={() => patchCal({ currentDay: cal.currentDay + 7 })}>+7 days</Chip>
+                      <input
+                        type="number"
+                        min={1}
+                        value={cal.currentDay}
+                        onChange={(e) => patchCal({ currentDay: Math.max(1, Number(e.target.value) || 1) })}
+                        style={{ width: 72, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}
+                      />
+                    </div>
+                    <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, opacity: 0.75 }}>
+                      Days to advance when an episode ends
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                        {[0, 1, 2, 7].map((n) => (
+                          <Chip key={n} active={cal.episodeAdvanceDays === n} onClick={() => patchCal({ episodeAdvanceDays: n })}>
+                            {n === 0 ? 'same day' : `+${n}`}
+                          </Chip>
+                        ))}
+                      </div>
+                    </label>
+                    <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, opacity: 0.75 }}>
+                      Weekday of story day 1
+                      <select
+                        value={cal.dayOneWeekday}
+                        onChange={(e) => patchCal({ dayOneWeekday: Number(e.target.value) })}
+                        style={{ fontSize: 13, padding: '8px 10px' }}
+                      >
+                        {cal.weekdays.map((name, i) => (
+                          <option key={name + i} value={i}>{name}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <input
+                      key={world.id + '-weekdays'}
+                      defaultValue={cal.weekdays.join(', ')}
+                      onBlur={(e) => {
+                        const weekdays = e.target.value.split(',').map((s) => s.trim()).filter(Boolean);
+                        if (weekdays.length) patchCal({ weekdays });
+                      }}
+                      placeholder="Weekday names, comma-separated"
+                    />
+                    <textarea key={world.id + '-cal-system'} rows={2} defaultValue={cal.system}
+                      onBlur={(e) => patchCal({ system: e.target.value })}
+                      placeholder="Optional — month names, seasons, feast days. Narrator follows this verbatim." />
+                  </div>
+                );
+              })()}
             </Field>
             <Field label="Season title" note="optional">
               <input key={season.id + '-title'} defaultValue={season.title}

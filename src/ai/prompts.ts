@@ -1,7 +1,7 @@
 import type {
   Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, Location, OpenThread, Season, Turn, TurnLength, World
 } from '../types';
-import { worldCalendar } from '../worldOps';
+import { formatEpisodeDateRange, formatStoryDate, worldCalendar } from '../worldOps';
 import type { ChatMessage } from './client';
 import { SPEAK_FORMAT_RULES } from './dialogueFormat';
 
@@ -174,6 +174,9 @@ function pacingLine(ai: World['ai']): string {
     : 'Propulsive pacing: keep events moving, cut the connective tissue.';
 }
 
+/** Newest-first cap for continuity bullets in every agent frame. */
+const CONTINUITY_FACT_CAP = 24;
+
 function worldFrameSections(ctx: PromptContext): string[] {
   const { world, season, episode, characters, locations, continuity, threads } = ctx;
   const inScene = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
@@ -196,7 +199,9 @@ function worldFrameSections(ctx: PromptContext): string[] {
   }
 
   sections.push(
-    `## This season\nSeason ${season.number}${season.title ? ` — ${season.title}` : ''}. Premise: ${season.premise || 'unwritten; discover it in play.'}${season.timeGap ? ` It opens ${season.timeGap.toLowerCase()} after the previous season.` : ''}`
+    `## This season\nSeason ${season.number}${season.title ? ` — ${season.title}` : ''}. ` +
+    `Premise (current pressure): ${season.premise || 'unwritten; discover it in play.'}` +
+    `${season.timeGap ? ` It opens ${season.timeGap.toLowerCase()} after the previous season.` : ''}`
   );
 
   const priorRecap = ctx.priorEpisode?.wrap?.recap?.trim();
@@ -204,19 +209,39 @@ function worldFrameSections(ctx: PromptContext): string[] {
     const priorBeats = (ctx.priorEpisode.wrap?.beats ?? [])
       .map((b) => `- ${b.text}${b.consequence ? ` → ${b.consequence}` : ''}`)
       .join('\n');
+    const guestFx = (ctx.priorEpisode.wrap?.guestEffects ?? [])
+      .map((g) => g.trim())
+      .filter(Boolean)
+      .map((g) => `- ${g}`)
+      .join('\n');
     sections.push(
       `## Previously this season (episode ${ctx.priorEpisode.number})\n${priorRecap}` +
-      (priorBeats ? `\n\nCarried episode beats:\n${priorBeats}` : '')
+      (priorBeats ? `\n\nCarried episode beats:\n${priorBeats}` : '') +
+      (guestFx ? `\n\nWalk-on effects that still matter:\n${guestFx}` : '')
     );
   }
 
+  const running = episode.runningSummary?.trim();
+  if (running) {
+    sections.push(`## Earlier this episode (running summary)\n${running}`);
+  }
+
   const cal = worldCalendar(world);
+  const epStart = episode.storyDay ?? cal.currentDay;
+  const epEnd = episode.storyDayEnd ?? null;
+  const dateLine = formatEpisodeDateRange(cal, epStart, epEnd);
   sections.push(
-    `## Calendar\n${cal.system ? `${cal.system}\n` : ''}Today is day ${cal.currentDay} of the story.`
+    `## Calendar\n` +
+    (cal.system ? `${cal.system}\n` : '') +
+    `Week cycle: ${cal.weekdays.join(', ')} (day 1 of the story was a ${cal.weekdays[cal.dayOneWeekday]}).\n` +
+    `Today is ${formatStoryDate(cal, cal.currentDay)}.\n` +
+    `This episode's date: ${dateLine}.` +
+    (episode.dateNote?.trim() ? `\nDate note: ${episode.dateNote.trim()}` : '')
   );
 
   sections.push(
-    `## Current episode\nEpisode ${episode.number}${episode.title ? ` — ${episode.title}` : ''}.${episode.location ? ` Location: ${episode.location}.` : ''}`
+    `## Current episode\nEpisode ${episode.number}${episode.title ? ` — ${episode.title}` : ''}.` +
+    `${episode.location ? ` Location: ${episode.location}.` : ''} Date: ${dateLine}.`
   );
 
   const guests = activeGuests(episode);
@@ -270,7 +295,14 @@ function worldFrameSections(ctx: PromptContext): string[] {
   }
 
   if (continuity.length > 0) {
-    sections.push(`## Continuity — established facts, never contradict these\n${continuity.map((f) => `- ${f.text}`).join('\n')}`);
+    // Newest facts first — cap so the system frame does not crowd out transcript history.
+    const capped = [...continuity]
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, CONTINUITY_FACT_CAP);
+    sections.push(
+      `## Continuity — established facts, never contradict these\n` +
+      capped.map((f) => `- ${f.text}`).join('\n')
+    );
   }
   if (threads.length > 0) {
     sections.push(`## Open threads — unresolved tensions to draw on (do not resolve them all at once)\n${threads.map((t) => `- ${t.text} (${t.openedLabel})`).join('\n')}`);
@@ -319,7 +351,7 @@ export function buildNarratorSystemPrompt(ctx: PromptContext): string {
     `- ${proseDensityLine(ai)}\n` +
     `- ${pacingLine(ai)}\n` +
     `- Never write the player's dialogue, decisions, or inner monologue. Leave space for them to act.\n` +
-    `- NEVER write spoken dialogue, quoted speech, or lines in the form CharacterName: "…". If someone would speak, describe only the silence, gesture, or that they are about to answer — their words come from them, not you.\n` +
+    `- NEVER write spoken dialogue, quoted speech, or lines in the form CharacterName: "…". Named characters speak in separate turns — do not stage mute pantomime, prolonged silence, or "about to answer" beats in place of their words; cover setting and physical action, then stop.\n` +
     `- End every response on tension or an opening, never on a tidy resolution.` +
     (rules.length > 0 ? `\n${rules.map((r) => `- ${r}`).join('\n')}` : '')
   );
@@ -336,8 +368,28 @@ export function buildNarratorSystemPrompt(ctx: PromptContext): string {
 /**
  * Character agent: first-person as this NPC. Speaks as themselves.
  */
+function priorEpisodeSection(ctx: PromptContext): string | null {
+  const priorRecap = ctx.priorEpisode?.wrap?.recap?.trim();
+  if (!priorRecap || !ctx.priorEpisode || ctx.priorEpisode.number >= ctx.episode.number) return null;
+  const priorBeats = (ctx.priorEpisode.wrap?.beats ?? [])
+    .slice(0, 5)
+    .map((b) => `- ${b.text}${b.consequence ? ` → ${b.consequence}` : ''}`)
+    .join('\n');
+  return (
+    `## Previously this season (episode ${ctx.priorEpisode.number})\n${priorRecap}` +
+    (priorBeats ? `\n\nWhat still hangs:\n${priorBeats}` : '')
+  );
+}
+
+function cappedContinuityLines(continuity: ContinuityFact[]): string[] {
+  return [...continuity]
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, CONTINUITY_FACT_CAP)
+    .map((f) => `- ${f.text}`);
+}
+
 export function buildCharacterSystemPrompt(ctx: PromptContext, character: Character): string {
-  const { world, characters } = ctx;
+  const { world, characters, season } = ctx;
   const ai = world.ai;
   const others = characters.filter((c) => c.id !== character.id);
   const guests = activeGuests(ctx.episode);
@@ -351,9 +403,21 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
 
   sections.push(`## The world\n${world.bible || world.line}`);
   sections.push(
-    `## Current episode\nEpisode ${ctx.episode.number}${ctx.episode.title ? ` — ${ctx.episode.title}` : ''}.` +
-    `${ctx.episode.location ? ` Location: ${ctx.episode.location}.` : ''}`
+    `## This season\nPremise (current pressure): ${season.premise || 'unwritten; discover it in play.'}`
   );
+  const prior = priorEpisodeSection(ctx);
+  if (prior) sections.push(prior);
+  const running = ctx.episode.runningSummary?.trim();
+  if (running) sections.push(`## Earlier this episode (running summary)\n${running}`);
+  {
+    const cal = worldCalendar(ctx.world);
+    const dateLine = formatEpisodeDateRange(cal, ctx.episode.storyDay, ctx.episode.storyDayEnd);
+    sections.push(
+      `## Current episode\nEpisode ${ctx.episode.number}${ctx.episode.title ? ` — ${ctx.episode.title}` : ''}.` +
+      `${ctx.episode.location ? ` Location: ${ctx.episode.location}.` : ''} Date: ${dateLine}.` +
+      `\nToday is ${formatStoryDate(cal, cal.currentDay)}.`
+    );
+  }
 
   sections.push(`## You\n${characterSheet(character, characters)}`);
 
@@ -370,10 +434,17 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
     );
   }
 
-  if (ctx.continuity.length > 0) {
+  const contLines = cappedContinuityLines(ctx.continuity);
+  if (contLines.length > 0) {
     sections.push(
       `## Continuity — facts you may know if you could plausibly know them\n` +
-      ctx.continuity.map((f) => `- ${f.text}`).join('\n')
+      contLines.join('\n')
+    );
+  }
+  if (ctx.threads.length > 0) {
+    sections.push(
+      `## Open threads — tensions you may lean on if you know them\n` +
+      ctx.threads.map((t) => `- ${t.text} (${t.openedLabel})`).join('\n')
     );
   }
 
@@ -401,7 +472,7 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
 
 /** Guest walk-on agent — short sheet, same speak format. */
 export function buildGuestSystemPrompt(ctx: PromptContext, guest: EpisodeGuest): string {
-  const { world, characters } = ctx;
+  const { world, characters, season } = ctx;
   const ai = world.ai;
   const inScene = characters.filter((c) => ctx.episode.castIds.includes(c.id));
   const sections: string[] = [];
@@ -411,14 +482,25 @@ export function buildGuestSystemPrompt(ctx: PromptContext, guest: EpisodeGuest):
     `You speak and act only as yourself for this scene.`
   );
   sections.push(`## The world\n${world.bible || world.line}`);
+  sections.push(
+    `## This season\nPremise (current pressure): ${season.premise || 'unwritten; discover it in play.'}`
+  );
+  const prior = priorEpisodeSection(ctx);
+  if (prior) sections.push(prior);
+  const running = ctx.episode.runningSummary?.trim();
+  if (running) sections.push(`## Earlier this episode (running summary)\n${running}`);
   sections.push(`## Who you are this scene\n${guest.brief}${guest.voice ? `\nVoice: ${guest.voice}` : ''}`);
   if (inScene.length > 0) {
     sections.push(`## Others present\n${inScene.map((c) => briefSheet(c)).join('\n')}`);
   }
-  if (ctx.continuity.length > 0) {
+  const contLines = cappedContinuityLines(ctx.continuity);
+  if (contLines.length > 0) {
+    sections.push(`## Continuity you may know if plausible\n${contLines.join('\n')}`);
+  }
+  if (ctx.threads.length > 0) {
     sections.push(
-      `## Continuity you may know if plausible\n` +
-      ctx.continuity.map((f) => `- ${f.text}`).join('\n')
+      `## Open threads\n` +
+      ctx.threads.map((t) => `- ${t.text} (${t.openedLabel})`).join('\n')
     );
   }
   sections.push(
@@ -445,7 +527,13 @@ export const MODE_PREFIX: Record<ComposeMode, (input: string) => string> = {
 };
 
 /** Rough char budget for history packing (≈4 chars per token). */
-export const HISTORY_CHAR_BUDGET = 48000;
+export const HISTORY_CHAR_BUDGET = 96000;
+
+/** Minimum turns kept even when over budget. */
+const PACK_MIN_TURNS = 4;
+
+/** Target size for deterministic omitted-turn digests. */
+const OMITTED_DIGEST_CHARS = 1100;
 
 /** Sum of turn text lengths for an episode — used for context-pressure UI. */
 export function episodeHistoryChars(turns: Array<{ text: string }>): number {
@@ -481,17 +569,93 @@ function turnToChatContent(
   return { role: 'assistant', content: t.text };
 }
 
-function packTurns(turns: Turn[]): Turn[] {
+function labelTurnCompact(
+  t: Turn,
+  characters: Character[],
+  guests: EpisodeGuest[] = []
+): string {
+  if (t.role === 'user') return `[player ${t.mode ?? 'turn'}]: ${t.text}`;
+  if (t.role === 'character') {
+    return `[${resolveSpeakerName(t, characters, guests)}]: ${t.text}`;
+  }
+  return `[narrator]: ${t.text}`;
+}
+
+export interface PackedTurns {
+  kept: Turn[];
+  omitted: Turn[];
+}
+
+/** Pack newest turns into the char budget; expose what fell off the front. */
+export function packTurnsDetailed(turns: Turn[]): PackedTurns {
   let used = 0;
   const reversed = [...turns].reverse();
   const kept: Turn[] = [];
   for (const t of reversed) {
     used += t.text.length;
-    if (used > HISTORY_CHAR_BUDGET && kept.length > 4) break;
+    if (used > HISTORY_CHAR_BUDGET && kept.length > PACK_MIN_TURNS) break;
     kept.push(t);
   }
   kept.reverse();
-  return kept;
+  const omitCount = turns.length - kept.length;
+  const omitted = omitCount > 0 ? turns.slice(0, omitCount) : [];
+  return { kept, omitted };
+}
+
+function packTurns(turns: Turn[]): Turn[] {
+  return packTurnsDetailed(turns).kept;
+}
+
+/**
+ * Deterministic compressed digest of turns dropped by packing.
+ * Takes head + tail slices so early setup and the cutover survive.
+ */
+export function compressOmittedTurns(
+  omitted: Turn[],
+  characters: Character[],
+  guests: EpisodeGuest[] = []
+): string {
+  if (omitted.length === 0) return '';
+  const labeled = omitted.map((t) => labelTurnCompact(t, characters, guests)).join('\n\n');
+  if (labeled.length <= OMITTED_DIGEST_CHARS) return labeled;
+  const half = Math.floor(OMITTED_DIGEST_CHARS / 2) - 20;
+  return (
+    labeled.slice(0, half).trimEnd() +
+    '\n\n…\n\n' +
+    labeled.slice(-half).trimStart()
+  );
+}
+
+/** History prefix when older turns were packed out (running summary + omitted digest). */
+function earlierEpisodePrefix(
+  episode: Episode | undefined,
+  omitted: Turn[],
+  characters: Character[],
+  guests: EpisodeGuest[]
+): ChatMessage | null {
+  const parts: string[] = [];
+  const running = episode?.runningSummary?.trim();
+  if (running) parts.push(`Running summary:\n${running}`);
+  const digest = compressOmittedTurns(omitted, characters, guests);
+  if (digest) parts.push(`Compressed earlier beats:\n${digest}`);
+  if (parts.length === 0) return null;
+  return {
+    role: 'user',
+    content: `(Earlier this episode — compressed; recent turns follow.)\n\n${parts.join('\n\n')}`
+  };
+}
+
+function historyMessages(
+  turns: Turn[],
+  characters: Character[],
+  guests: EpisodeGuest[] = [],
+  episode?: Episode
+): ChatMessage[] {
+  const { kept, omitted } = packTurnsDetailed(turns);
+  const messages: ChatMessage[] = kept.map((t) => turnToChatContent(t, characters, guests));
+  const prefix = earlierEpisodePrefix(episode, omitted, characters, guests);
+  if (prefix) messages.unshift(prefix);
+  return messages;
 }
 
 function mergeMessages(messages: ChatMessage[]): ChatMessage[] {
@@ -513,11 +677,10 @@ export function buildMessages(
   input: string,
   length: TurnLength,
   characters: Character[] = [],
-  guests: EpisodeGuest[] = []
+  guests: EpisodeGuest[] = [],
+  episode?: Episode
 ): ChatMessage[] {
-  const kept = packTurns(turns);
-  const messages: ChatMessage[] = kept.map((t) => turnToChatContent(t, characters, guests));
-
+  const messages = historyMessages(turns, characters, guests, episode);
   const userContent = `${MODE_PREFIX[mode](input)}\n\n(${LENGTH_SPEC[length].instruction})`;
   return mergeMessages([...messages, { role: 'user', content: userContent }]);
 }
@@ -528,10 +691,10 @@ export function buildNarrationBeatMessages(
   characters: Character[],
   brief: string,
   length: TurnLength,
-  guests: EpisodeGuest[] = []
+  guests: EpisodeGuest[] = [],
+  episode?: Episode
 ): ChatMessage[] {
-  const kept = packTurns(turns);
-  const messages: ChatMessage[] = kept.map((t) => turnToChatContent(t, characters, guests));
+  const messages = historyMessages(turns, characters, guests, episode);
   const sizeHint =
     length === 'beat' ? 'Keep this narration slice short (about 40–100 words).'
     : length === 'scene' ? 'This narration slice: about 80–180 words.'
@@ -542,21 +705,27 @@ export function buildNarrationBeatMessages(
   return mergeMessages([...messages, { role: 'user', content: userContent }]);
 }
 
+/** Extra rule when the player just spoke or acted — action-only replies are not enough. */
+export const SPEAK_MUST_DIALOGUE =
+  'This reply MUST include at least one spoken line in "double quotes". ' +
+  'Action-only (*gestures*) is not enough — answer the player aloud.';
+
 /** History + a character-speak instruction. */
 export function buildCharacterSpeakMessages(
   turns: Turn[],
   characters: Character[],
   speaking: Character,
   brief: string,
-  guests: EpisodeGuest[] = []
+  guests: EpisodeGuest[] = [],
+  opts?: { requireDialogue?: boolean; episode?: Episode }
 ): ChatMessage[] {
-  const kept = packTurns(turns);
-  const messages: ChatMessage[] = kept.map((t) => turnToChatContent(t, characters, guests));
+  const messages = historyMessages(turns, characters, guests, opts?.episode);
   const userContent =
     `(You are ${speaking.name}. Respond now in character.)\n` +
     `Intent for this line: ${brief}\n\n` +
     `Use the required *action* "dialogue" format. No other speakers.\n` +
-    SPEAK_FORMAT_RULES;
+    SPEAK_FORMAT_RULES +
+    (opts?.requireDialogue ? `\n\n${SPEAK_MUST_DIALOGUE}` : '');
   return mergeMessages([...messages, { role: 'user', content: userContent }]);
 }
 
@@ -566,14 +735,15 @@ export function buildGuestSpeakMessages(
   characters: Character[],
   guest: EpisodeGuest,
   brief: string,
-  guests: EpisodeGuest[] = []
+  guests: EpisodeGuest[] = [],
+  opts?: { requireDialogue?: boolean; episode?: Episode }
 ): ChatMessage[] {
-  const kept = packTurns(turns);
-  const messages: ChatMessage[] = kept.map((t) => turnToChatContent(t, characters, guests));
+  const messages = historyMessages(turns, characters, guests, opts?.episode);
   const userContent =
     `(You are ${guest.name}, a walk-on. Respond now.)\n` +
     `Intent for this line: ${brief}\n\n` +
-    SPEAK_FORMAT_RULES;
+    SPEAK_FORMAT_RULES +
+    (opts?.requireDialogue ? `\n\n${SPEAK_MUST_DIALOGUE}` : '');
   return mergeMessages([...messages, { role: 'user', content: userContent }]);
 }
 
@@ -582,7 +752,14 @@ export type DirectorBeat =
   | { type: 'speak'; characterId: string; brief: string }
   | { type: 'speak'; guestId: string; brief: string };
 
-export function directorSystemPrompt(): string {
+export function directorSystemPrompt(mode: ComposeMode, hasSpeakers: boolean): string {
+  const engageReply =
+    hasSpeakers && (mode === 'speak' || mode === 'act')
+      ? 'CRITICAL: The player just spoke or acted with at least one NPC/walk-on present. ' +
+        'You MUST include at least one speak beat that responds directly to that move. ' +
+        'Narration-only plans are forbidden in this case. '
+      : 'Not everyone must speak on every turn. ';
+
   return (
     'You are the scene director for an interactive story. ' +
     'Plan cast changes and an ordered list of beats. ' +
@@ -594,19 +771,20 @@ export function directorSystemPrompt(): string {
     '},' +
     '"beats":[' +
     '{"type":"narration","brief":"..."}|' +
-    '{"type":"speak","characterId":"<id>","brief":"..."}|' +
-    '{"type":"speak","guestId":"<id-or-NEW>","brief":"..."}' +
+    '{"type":"speak","characterId":"<id-or-exact-name>","brief":"..."}|' +
+    '{"type":"speak","guestId":"<id-or-NEW-or-name>","brief":"..."}' +
     ']}' +
     '\n' +
     'castDelta.enter: saved Cast NPCs who arrive (from the off-scene list). ' +
     'castDelta.leave: Cast ids or guest ids who exit the scene. ' +
     'castDelta.introduce: optional walk-ons who are NOT Cast cards — temporary for this episode only. At most 2 per plan. ' +
     'For a newly introduced guest\'s speak beat, set guestId to the exact name string from introduce (the app will bind ids). ' +
-    'For an existing guest already listed, use their guest id. ' +
-    'After applying enter/leave/introduce, speak characterIds must be in-scene Cast (never the player). ' +
+    'For an existing guest already listed, use their guest id or exact name. ' +
+    'Speak characterId may be the cast id OR the exact character name (never the player). ' +
     'Narration briefs describe atmosphere or physical action — never finished dialogue. ' +
     'Speak briefs are intent only (tone/goal), never the finished line. ' +
-    'Not everyone must speak. Typical: 1–2 narration beats and at most 3 speak beats. ' +
+    engageReply +
+    'Typical: 1–2 narration beats and at most 3 speak beats. ' +
     'Hard cap: at most 3 speak beats and at most 5 beats total. ' +
     'Always include at least one narration beat unless the player just spoke and an immediate reply is natural — then you may open with speak. ' +
     'End the plan on tension or an opening for the player.'
@@ -631,7 +809,7 @@ export function directorUserPrompt(
     ? guests.map((g) => `- ${g.id} · ${g.name}: ${g.brief}`).join('\n')
     : '(none yet — you may introduce walk-ons via castDelta.introduce)';
 
-  const recent = packTurns(ctx.turns).slice(-8);
+  const recent = packTurns(ctx.turns).slice(-20);
   const allGuests = ctx.episode.guests ?? [];
   const transcript = recent.map((t) => {
     if (t.role === 'user') return `[player ${t.mode ?? 'turn'}]: ${t.text}`;
@@ -642,9 +820,22 @@ export function directorUserPrompt(
     return `[narrator]: ${t.text}`;
   }).join('\n\n');
 
+  const priorOneLiner = ctx.priorEpisode?.wrap?.recap?.trim()
+    ? ctx.priorEpisode.wrap!.recap!.trim().slice(0, 480)
+    : '';
+  const running = ctx.episode.runningSummary?.trim();
+
+  const cal = worldCalendar(ctx.world);
+  const dateLine = formatEpisodeDateRange(cal, ctx.episode.storyDay, ctx.episode.storyDayEnd);
+
   return (
     `World: ${ctx.world.title}\n` +
-    `Episode ${ctx.episode.number}${ctx.episode.location ? ` @ ${ctx.episode.location}` : ''}\n\n` +
+    `Episode ${ctx.episode.number}${ctx.episode.location ? ` @ ${ctx.episode.location}` : ''} · ${dateLine}\n` +
+    `Today: ${formatStoryDate(cal, cal.currentDay)}\n` +
+    `Premise (current pressure): ${ctx.season.premise || '(unwritten)'}\n` +
+    (priorOneLiner ? `Prior episode recap (clip): ${priorOneLiner}\n` : '') +
+    (running ? `Earlier this episode (summary): ${running.slice(0, 400)}\n` : '') +
+    `\n` +
     `In-scene cast:\n${castList}\n\n` +
     `Off-scene cast (may enter via castDelta.enter):\n${offList}\n\n` +
     `Active walk-ons (guest ids):\n${guestList}\n\n` +

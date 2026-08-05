@@ -25,7 +25,7 @@ export async function seedStarterWorld(): Promise<string> {
     proseModel: null,
     utilityModel: null,
     activeSeasonId: seasonId,
-    calendar: { currentDay: 1, system: '' },
+    calendar: { currentDay: 1, system: 'Tide-time and guild-time — the harbour keeps both, and they do not agree.', weekdays: undefined, dayOneWeekday: 0, episodeAdvanceDays: 1 },
     createdAt: now,
     updatedAt: now
   };
@@ -146,6 +146,7 @@ export async function seedStarterWorld(): Promise<string> {
         id: episodeId, seasonId, worldId, number: 1, title: 'The long room',
         location: 'The long room, above the customs house. Lamplit, tide-loud, one door.',
         castIds: [player.id, marisol.id, cartwright.id],
+        storyDay: 1, storyDayEnd: null, dateNote: null,
         status: 'active', createdAt: now
       });
       await db.characters.bulkAdd(characters);

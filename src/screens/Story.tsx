@@ -20,7 +20,10 @@ import type {
 import { Chip, ErrorNote, Mono, Sheet, Spinner, Toggle, useVw } from '../ui/bits';
 import { fileToSceneImage } from '../ui/image';
 import { avatarStyle, BACKDROPS, MOODS, STRIPE } from '../ui/theme';
-import { characterPortraits, emptyLocation, nextEpisode, worldCalendar } from '../worldOps';
+import {
+  calendarPatch, characterPortraits, emptyLocation, formatStoryDate,
+  nextEpisode, weekdayForDay, worldCalendar
+} from '../worldOps';
 
 /** Editable wrap draft with Keep/Drop flags for the review UI. */
 interface WrapReviewDraft {
@@ -29,6 +32,20 @@ interface WrapReviewDraft {
   facts: Array<{ text: string; keep: boolean }>;
   threads: Array<{ text: string; keep: boolean }>;
   guestEffects: Array<{ text: string; keep: boolean }>;
+  resolvedThreads: Array<{ text: string; keep: boolean }>;
+  characterUpdates: Array<{
+    name: string;
+    goal: string;
+    emotion: string;
+    location: string;
+    condition: string;
+    keep: boolean;
+  }>;
+  storyDayStart: number;
+  storyDayEnd: number;
+  /** Day the next episode opens on */
+  nextStoryDay: number;
+  dateNote: string;
 }
 
 function draftFromAnalysis(d: EpisodeWrapDraft): WrapReviewDraft {
@@ -37,7 +54,20 @@ function draftFromAnalysis(d: EpisodeWrapDraft): WrapReviewDraft {
     beats: d.beats.map((b) => ({ ...b, keep: true })),
     facts: d.facts.map((text) => ({ text, keep: true })),
     threads: d.threads.map((text) => ({ text, keep: true })),
-    guestEffects: d.guestEffects.map((text) => ({ text, keep: true }))
+    guestEffects: d.guestEffects.map((text) => ({ text, keep: true })),
+    resolvedThreads: d.resolvedThreads.map((text) => ({ text, keep: true })),
+    characterUpdates: d.characterUpdates.map((u) => ({
+      name: u.name,
+      goal: u.goal ?? '',
+      emotion: u.emotion ?? '',
+      location: u.location ?? '',
+      condition: u.condition ?? '',
+      keep: true
+    })),
+    storyDayStart: d.storyDayStart,
+    storyDayEnd: d.storyDayEnd,
+    nextStoryDay: Math.max(d.storyDayEnd, d.nextStoryDay),
+    dateNote: d.dateNote
   };
 }
 
@@ -533,7 +563,21 @@ export function Story() {
           .map(({ text, consequence }) => ({ text, consequence })),
         facts: wrapDraft.facts.filter((f) => f.keep).map((f) => f.text),
         threads: wrapDraft.threads.filter((t) => t.keep).map((t) => t.text),
-        guestEffects: wrapDraft.guestEffects.filter((g) => g.keep).map((g) => g.text)
+        guestEffects: wrapDraft.guestEffects.filter((g) => g.keep).map((g) => g.text),
+        resolvedThreads: wrapDraft.resolvedThreads.filter((t) => t.keep).map((t) => t.text),
+        characterUpdates: wrapDraft.characterUpdates
+          .filter((u) => u.keep && u.name.trim())
+          .map(({ name, goal, emotion, location, condition }) => ({
+            name,
+            goal: goal || undefined,
+            emotion: emotion || undefined,
+            location: location || undefined,
+            condition: condition || undefined
+          })),
+        storyDayStart: wrapDraft.storyDayStart,
+        storyDayEnd: wrapDraft.storyDayEnd,
+        nextStoryDay: wrapDraft.nextStoryDay,
+        dateNote: wrapDraft.dateNote
       });
       resetAfterEpisodeEnd();
     } catch (e) {
@@ -677,7 +721,7 @@ export function Story() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
               <div className="serif" style={{ fontSize: 16, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{world.title}</div>
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.1em', opacity: 0.5 }}>
-                season {season.number} · episode {episode.number}{locLabel ? ` · ${locLabel}` : ''} · day {worldCalendar(world).currentDay} · {M.label.toLowerCase()}
+                season {season.number} · episode {episode.number}{locLabel ? ` · ${locLabel}` : ''} · {formatStoryDate(worldCalendar(world), worldCalendar(world).currentDay).toLowerCase()} · {M.label.toLowerCase()}
               </div>
             </div>
           </div>
@@ -754,7 +798,7 @@ export function Story() {
               <div style={{ opacity: 0.55, fontSize: 14, lineHeight: 1.7 }}>
                 <p className="serif" style={{ fontSize: 17 }}>
                   {season.premise
-                    ? <>The premise is set: <em>{season.premise}</em></>
+                    ? <>Current pressure: <em>{season.premise}</em></>
                     : 'A blank page. Steer, speak, act — or just press Write and see where the story opens.'}
                 </p>
               </div>
@@ -959,7 +1003,9 @@ export function Story() {
                 disabled={wrapBusy || !wrapDraft}
                 onClick={() => void confirmEpisodeWrap()}
               >
-                {wrapBusy ? 'Filing continuity…' : `Confirm · start episode ${episode.number + 1}`}
+                {wrapBusy
+                  ? 'Filing continuity…'
+                  : `Confirm · episode ${episode.number + 1} · ${formatStoryDate(worldCalendar(world), wrapDraft?.nextStoryDay ?? worldCalendar(world).currentDay).toLowerCase()}`}
               </button>
               <button
                 className="btn-quiet"
@@ -1004,8 +1050,8 @@ export function Story() {
               {wrapOpen === 'season'
                 ? 'Opens the season review to choose what carries forward into the next season.'
                 : wrapPhase === 'review'
-                  ? 'Edit the recap, Keep or Drop each beat and fact, then confirm to file continuity and open the next episode.'
-                  : 'The utility model reads this episode back and proposes a previously-on recap, beats, and continuity — you review before anything is filed.'}
+                  ? 'Edit the recap, Keep or Drop beats/facts/threads/cast state, then confirm to file memory and open the next episode.'
+                  : 'The utility model reads the full episode (compressing long ones) and proposes a previously-on recap, beats, continuity, resolved threads, and cast state — you review before anything is filed.'}
             </div>
           </div>
           <button className="btn-ghost" style={{ width: 30, height: 30, padding: 0, flexShrink: 0 }} onClick={closeWrapSheet}>×</button>
@@ -1031,7 +1077,7 @@ export function Story() {
             <Spinner label="extracting recap, beats, and continuity" />
           </div>
         ) : wrapPhase === 'review' && wrapDraft ? (
-          <WrapReviewBody draft={wrapDraft} onChange={setWrapDraft} guests={guests} />
+          <WrapReviewBody draft={wrapDraft} onChange={setWrapDraft} guests={guests} world={world} />
         ) : (
           <>
             <div style={{
@@ -1039,7 +1085,7 @@ export function Story() {
               border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, padding: '12px 14px',
               background: 'rgba(255,255,255,0.04)'
             }}>
-              Analyze builds a previously-on paragraph for the next episode and a Keep/Drop list of beats, facts, threads
+              Analyze builds a dense previously-on for the next episode plus Keep/Drop beats, facts, threads, resolutions, and cast state
               {guests.length > 0 ? ', and walk-on effects' : ''}. Episode prose stays saved; only the active episode stays in the writing loop.
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
@@ -1678,6 +1724,7 @@ function DirectorContent(props: {
   const inScene = props.characters.filter((c) => props.episode.castIds.includes(c.id));
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 22, overflow: 'auto' }}>
+      <CalendarTrackerPanel world={props.world} season={props.season} episode={props.episode} />
       <SceneCastPanel episode={props.episode} characters={props.characters} accent={props.accent} />
       <SceneLocationsPanel
         episode={props.episode} locations={props.locations} accent={props.accent}
@@ -1687,6 +1734,165 @@ function DirectorContent(props: {
       <ContinuityPanel continuity={props.continuity} world={props.world} season={props.season} />
       <ThreadsPanel threads={props.threads} />
       <NudgesPanel threads={props.threads} inScene={inScene} onNudge={props.onNudge} />
+    </div>
+  );
+}
+
+/** Controllable in-fiction calendar: day, weekday, episode stamp, advance rules. */
+function CalendarTrackerPanel({
+  world, season, episode
+}: {
+  world: World;
+  season: Season;
+  episode: Episode;
+}) {
+  const cal = worldCalendar(world);
+  const epDay = episode.storyDay && episode.storyDay > 0 ? episode.storyDay : cal.currentDay;
+  const loc = episode.location.trim() || 'no location set';
+
+  // Backfill storyDay on older episodes the first time the tracker is shown.
+  useEffect(() => {
+    if (episode.storyDay == null || episode.storyDay < 1) {
+      void db.episodes.update(episode.id, { storyDay: cal.currentDay, updatedAt: Date.now() });
+    }
+  }, [episode.id, episode.storyDay, cal.currentDay]);
+
+  const setDay = (day: number) => {
+    const next = Math.max(1, Math.floor(day));
+    void db.worlds.update(world.id, {
+      calendar: calendarPatch(world, { currentDay: next }),
+      updatedAt: Date.now()
+    });
+  };
+
+  const setAdvance = (n: number) => {
+    void db.worlds.update(world.id, {
+      calendar: calendarPatch(world, { episodeAdvanceDays: Math.max(0, Math.min(30, Math.floor(n))) }),
+      updatedAt: Date.now()
+    });
+  };
+
+  const setDayOneWeekday = (idx: number) => {
+    void db.worlds.update(world.id, {
+      calendar: calendarPatch(world, { dayOneWeekday: idx }),
+      updatedAt: Date.now()
+    });
+  };
+
+  const stampEpisodeDay = () => {
+    void db.episodes.update(episode.id, { storyDay: cal.currentDay, updatedAt: Date.now() });
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <Mono style={{ fontSize: 9 }}>calendar tracker</Mono>
+      <div style={{
+        border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '14px 14px',
+        background: 'rgba(255,255,255,0.04)', display: 'flex', flexDirection: 'column', gap: 12
+      }}>
+        <div className="serif" style={{ fontSize: 20, lineHeight: 1.3, color: '#f0eee9' }}>
+          {formatStoryDate(cal, cal.currentDay)}
+        </div>
+        <div style={{ fontSize: 12.5, lineHeight: 1.45, opacity: 0.65, color: '#eceae6' }}>
+          S{season.number} · E{episode.number} · {loc}
+          <br />
+          Episode opened {formatStoryDate(cal, epDay)}
+          {episode.storyDayEnd ? ` → ended ${formatStoryDate(cal, episode.storyDayEnd)}` : ''}
+        </div>
+
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+          <Chip onClick={() => setDay(cal.currentDay - 1)}>−1</Chip>
+          <Chip onClick={() => setDay(cal.currentDay + 1)}>+1 day</Chip>
+          <Chip onClick={() => setDay(cal.currentDay + 7)}>+7</Chip>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, opacity: 0.8 }}>
+            day
+            <input
+              type="number"
+              min={1}
+              value={cal.currentDay}
+              onChange={(e) => setDay(Number(e.target.value) || 1)}
+              style={{
+                width: 64, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12,
+                background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.12)',
+                borderRadius: 8, padding: '6px 8px', color: '#f0eee9'
+              }}
+            />
+          </label>
+        </div>
+
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <Mono style={{ fontSize: 8, opacity: 0.5 }}>weekday of day 1</Mono>
+          <select
+            value={cal.dayOneWeekday}
+            onChange={(e) => setDayOneWeekday(Number(e.target.value))}
+            style={{
+              fontSize: 13, background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.12)',
+              borderRadius: 8, padding: '8px 10px', color: '#f0eee9'
+            }}
+          >
+            {cal.weekdays.map((name, i) => (
+              <option key={name + i} value={i}>
+                Day 1 = {name} → today {weekdayForDay({ ...cal, dayOneWeekday: i }, cal.currentDay)}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <Mono style={{ fontSize: 8, opacity: 0.5 }}>days to advance when episode ends</Mono>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {[0, 1, 2, 7].map((n) => (
+              <Chip
+                key={n}
+                active={cal.episodeAdvanceDays === n}
+                onClick={() => setAdvance(n)}
+              >
+                {n === 0 ? 'same day' : n === 1 ? '+1 day' : `+${n}`}
+              </Chip>
+            ))}
+          </div>
+        </label>
+
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <Mono style={{ fontSize: 8, opacity: 0.5 }}>calendar system (optional)</Mono>
+          <textarea
+            key={world.id + '-dir-cal-system'}
+            rows={2}
+            defaultValue={cal.system}
+            onBlur={(e) => {
+              void db.worlds.update(world.id, {
+                calendar: calendarPatch(world, { system: e.target.value }),
+                updatedAt: Date.now()
+              });
+            }}
+            placeholder="Month names, seasons, feast days — narrator follows this verbatim"
+            style={{ fontSize: 12.5, lineHeight: 1.45, color: '#eceae6' }}
+          />
+        </label>
+
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <Mono style={{ fontSize: 8, opacity: 0.5 }}>custom weekdays (comma-separated)</Mono>
+          <input
+            key={world.id + '-weekdays'}
+            defaultValue={cal.weekdays.join(', ')}
+            onBlur={(e) => {
+              const weekdays = e.target.value.split(',').map((s) => s.trim()).filter(Boolean);
+              if (weekdays.length === 0) return;
+              void db.worlds.update(world.id, {
+                calendar: calendarPatch(world, { weekdays, dayOneWeekday: Math.min(cal.dayOneWeekday, weekdays.length - 1) }),
+                updatedAt: Date.now()
+              });
+            }}
+            style={{ fontSize: 12.5, color: '#eceae6' }}
+          />
+        </label>
+
+        {epDay !== cal.currentDay && (
+          <button className="btn-ghost" style={{ fontSize: 11, alignSelf: 'flex-start' }} onClick={stampEpisodeDay}>
+            Stamp episode open day → {formatStoryDate(cal, cal.currentDay)}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -1729,17 +1935,19 @@ function KeepDropChips({
 }
 
 function WrapReviewBody({
-  draft, onChange, guests
+  draft, onChange, guests, world
 }: {
   draft: WrapReviewDraft;
   onChange: (d: WrapReviewDraft) => void;
   guests: EpisodeGuest[];
+  world: World;
 }) {
+  const cal = worldCalendar(world);
   const patchBeat = (i: number, p: Partial<WrapReviewDraft['beats'][number]>) => {
     onChange({ ...draft, beats: draft.beats.map((b, j) => (j === i ? { ...b, ...p } : b)) });
   };
   const patchLine = (
-    key: 'facts' | 'threads' | 'guestEffects',
+    key: 'facts' | 'threads' | 'guestEffects' | 'resolvedThreads',
     i: number,
     p: Partial<{ text: string; keep: boolean }>
   ) => {
@@ -1748,6 +1956,15 @@ function WrapReviewBody({
       [key]: draft[key].map((row, j) => (j === i ? { ...row, ...p } : row))
     });
   };
+  const patchCast = (i: number, p: Partial<WrapReviewDraft['characterUpdates'][number]>) => {
+    onChange({
+      ...draft,
+      characterUpdates: draft.characterUpdates.map((u, j) => (j === i ? { ...u, ...p } : u))
+    });
+  };
+  const setNextDay = (day: number) => {
+    onChange({ ...draft, nextStoryDay: Math.max(draft.storyDayEnd, Math.floor(day)) });
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
@@ -1755,7 +1972,7 @@ function WrapReviewBody({
         <Mono style={{ fontSize: 9 }}>previously-on · next episode</Mono>
         <textarea
           className="serif"
-          rows={5}
+          rows={7}
           value={draft.recap}
           onChange={(e) => onChange({ ...draft, recap: e.target.value })}
           style={{
@@ -1763,6 +1980,113 @@ function WrapReviewBody({
             width: '100%', background: 'rgba(255,255,255,0.04)'
           }}
         />
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <Mono style={{ fontSize: 9 }}>episode date</Mono>
+        <div style={{
+          border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '12px 14px',
+          background: 'rgba(255,255,255,0.04)', display: 'flex', flexDirection: 'column', gap: 10
+        }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 100px' }}>
+              <Mono style={{ fontSize: 8, opacity: 0.5 }}>opens day</Mono>
+              <input
+                type="number"
+                min={1}
+                value={draft.storyDayStart}
+                onChange={(e) => {
+                  const start = Math.max(1, Number(e.target.value) || 1);
+                  const end = Math.max(start, draft.storyDayEnd);
+                  onChange({
+                    ...draft,
+                    storyDayStart: start,
+                    storyDayEnd: end,
+                    nextStoryDay: Math.max(end, draft.nextStoryDay)
+                  });
+                }}
+                style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: '#f0eee9' }}
+              />
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 100px' }}>
+              <Mono style={{ fontSize: 8, opacity: 0.5 }}>ends day</Mono>
+              <input
+                type="number"
+                min={draft.storyDayStart}
+                value={draft.storyDayEnd}
+                onChange={(e) => {
+                  const end = Math.max(draft.storyDayStart, Number(e.target.value) || draft.storyDayStart);
+                  onChange({
+                    ...draft,
+                    storyDayEnd: end,
+                    nextStoryDay: Math.max(end, draft.nextStoryDay)
+                  });
+                }}
+                style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: '#f0eee9' }}
+              />
+            </label>
+          </div>
+          <textarea
+            rows={2}
+            value={draft.dateNote}
+            onChange={(e) => onChange({ ...draft, dateNote: e.target.value })}
+            placeholder="How time passed — overnight, two days on the road, same afternoon…"
+            style={{ fontSize: 13, lineHeight: 1.5, color: '#eceae6', background: 'transparent', border: 0, padding: 0 }}
+          />
+
+          <div style={{
+            borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 12,
+            display: 'flex', flexDirection: 'column', gap: 10
+          }}>
+            <Mono style={{ fontSize: 8, opacity: 0.5 }}>next episode opens</Mono>
+            <div className="serif" style={{ fontSize: 17, color: '#f0eee9' }}>
+              {formatStoryDate(cal, draft.nextStoryDay)}
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+              <Chip
+                active={draft.nextStoryDay === draft.storyDayEnd}
+                onClick={() => setNextDay(draft.storyDayEnd)}
+              >
+                same day
+              </Chip>
+              <Chip
+                active={draft.nextStoryDay === draft.storyDayEnd + 1}
+                onClick={() => setNextDay(draft.storyDayEnd + 1)}
+              >
+                +1 day
+              </Chip>
+              <Chip
+                active={draft.nextStoryDay === draft.storyDayEnd + 2}
+                onClick={() => setNextDay(draft.storyDayEnd + 2)}
+              >
+                +2
+              </Chip>
+              <Chip
+                active={draft.nextStoryDay === draft.storyDayEnd + 7}
+                onClick={() => setNextDay(draft.storyDayEnd + 7)}
+              >
+                +7
+              </Chip>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, opacity: 0.8 }}>
+                day
+                <input
+                  type="number"
+                  min={draft.storyDayEnd}
+                  value={draft.nextStoryDay}
+                  onChange={(e) => setNextDay(Number(e.target.value) || draft.storyDayEnd)}
+                  style={{
+                    width: 64, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12,
+                    background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.12)',
+                    borderRadius: 8, padding: '6px 8px', color: '#f0eee9'
+                  }}
+                />
+              </label>
+            </div>
+            <div style={{ fontSize: 12, opacity: 0.55, lineHeight: 1.4 }}>
+              Confirm opens the next episode on {formatStoryDate(cal, draft.nextStoryDay).toLowerCase()}.
+            </div>
+          </div>
+        </div>
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -1802,10 +2126,12 @@ function WrapReviewBody({
 
       {([
         ['facts', 'continuity facts'] as const,
-        ['threads', 'open threads'] as const,
-        ['guestEffects', guests.length > 0 ? 'walk-on effects' : 'walk-on effects'] as const
+        ['threads', 'new open threads'] as const,
+        ['resolvedThreads', 'threads resolved this episode'] as const,
+        ['guestEffects', 'walk-on effects'] as const
       ]).map(([key, label]) => {
         if (key === 'guestEffects' && draft.guestEffects.length === 0 && guests.length === 0) return null;
+        if (key === 'resolvedThreads' && draft.resolvedThreads.length === 0) return null;
         return (
           <div key={key} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <Mono style={{ fontSize: 9 }}>{label}</Mono>
@@ -1835,6 +2161,45 @@ function WrapReviewBody({
           </div>
         );
       })}
+
+      {draft.characterUpdates.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <Mono style={{ fontSize: 9 }}>cast state → next episode</Mono>
+          {draft.characterUpdates.map((u, i) => (
+            <div key={i} style={{
+              display: 'flex', flexDirection: 'column', gap: 8,
+              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '12px 14px',
+              background: 'rgba(255,255,255,0.04)',
+              opacity: u.keep ? 1 : 0.42
+            }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: '#f0eee9' }}>{u.name}</div>
+              {([
+                ['goal', 'goal'] as const,
+                ['emotion', 'emotion'] as const,
+                ['location', 'location'] as const,
+                ['condition', 'condition'] as const
+              ]).map(([field, label]) => (
+                <label key={field} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <Mono style={{ fontSize: 8, opacity: 0.55 }}>{label}</Mono>
+                  <input
+                    value={u[field]}
+                    onChange={(e) => patchCast(i, { [field]: e.target.value })}
+                    style={{
+                      fontSize: 13, lineHeight: 1.4, color: '#eceae6',
+                      background: 'transparent', border: 0, padding: 0
+                    }}
+                  />
+                </label>
+              ))}
+              <KeepDropChips
+                keep={u.keep}
+                onKeep={() => patchCast(i, { keep: true })}
+                onDrop={() => patchCast(i, { keep: false })}
+              />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
