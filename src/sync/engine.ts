@@ -9,6 +9,7 @@ import { getSupabase } from '../cloud/supabase';
 import {
   clearTombstones, db, deleteWorld, type SyncTableName, type Tombstone
 } from '../db';
+import { formatUserError } from '../errors';
 import { decryptString, deriveKey, encryptString, randomSalt } from '../security/crypto';
 import { useSettings } from '../store/settings';
 import type {
@@ -242,8 +243,7 @@ export async function syncNow(): Promise<{ pulled: number; pushed: number }> {
     });
     return { pulled, pushed };
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    useSyncMeta.setState({ busy: false, error: msg, lastResult: '' });
+    useSyncMeta.setState({ busy: false, error: formatUserError(e), lastResult: '' });
     throw e;
   }
 }

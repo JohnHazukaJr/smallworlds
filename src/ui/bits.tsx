@@ -1,4 +1,5 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
+import { AppError, classifyError } from '../errors';
 import { ACCENT } from './theme';
 
 export function useVw(): number {
@@ -96,18 +97,70 @@ export function Spinner({ label, accent = ACCENT }: { label: string; accent?: st
   );
 }
 
-export function ErrorNote({ error, onDismiss }: { error: string; onDismiss?: () => void }) {
+export function ErrorNote({
+  error, onDismiss, tone = 'error'
+}: {
+  error: string | AppError;
+  onDismiss?: () => void;
+  tone?: 'error' | 'warn';
+}) {
+  const [openDetail, setOpenDetail] = useState(false);
+  const message = typeof error === 'string' ? error : error.userMessage;
+  const detail = typeof error === 'string'
+    ? null
+    : (error.detail && error.detail !== error.userMessage ? error.detail : null);
+  const warn = tone === 'warn';
   return (
     <div style={{
-      border: '1px solid rgba(220,110,90,0.4)', borderRadius: 12, padding: '11px 14px',
-      background: 'rgba(220,110,90,0.09)', display: 'flex', gap: 12, alignItems: 'flex-start'
+      border: warn ? '1px solid rgba(224,165,95,0.45)' : '1px solid rgba(220,110,90,0.4)',
+      borderRadius: 12, padding: '11px 14px',
+      background: warn ? 'rgba(224,165,95,0.1)' : 'rgba(220,110,90,0.09)',
+      display: 'flex', gap: 12, alignItems: 'flex-start'
     }}>
-      <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(240,200,190,0.95)', flex: 1, wordBreak: 'break-word' }}>{error}</div>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: 12.5, lineHeight: 1.55, wordBreak: 'break-word',
+          color: warn ? 'rgba(240,210,170,0.95)' : 'rgba(240,200,190,0.95)'
+        }}>
+          {message}
+        </div>
+        {detail && (
+          <div style={{ marginTop: 6 }}>
+            <button
+              type="button"
+              className="btn-quiet"
+              style={{ padding: 0, fontSize: 11, opacity: 0.75 }}
+              onClick={() => setOpenDetail((v) => !v)}
+            >
+              {openDetail ? 'Hide details' : 'Details'}
+            </button>
+            {openDetail && (
+              <div style={{
+                marginTop: 6, fontSize: 11, lineHeight: 1.45, opacity: 0.7,
+                wordBreak: 'break-word', fontFamily: "'IBM Plex Mono', monospace"
+              }}>
+                {detail}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
       {onDismiss && (
         <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 14 }} onClick={onDismiss}>×</button>
       )}
     </div>
   );
+}
+
+/** Convenience: classify then render. */
+export function ClassifiedErrorNote({
+  error, onDismiss, tone
+}: {
+  error: unknown;
+  onDismiss?: () => void;
+  tone?: 'error' | 'warn';
+}) {
+  return <ErrorNote error={classifyError(error)} onDismiss={onDismiss} tone={tone} />;
 }
 
 /**

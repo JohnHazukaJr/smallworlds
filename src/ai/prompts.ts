@@ -181,8 +181,8 @@ const CONTINUITY_FACT_CAP = 24;
 /** Cap open threads so the system frame does not drown the transcript. */
 const THREAD_CAP = 12;
 /** Tighter caps for the director utility prompt. */
-const DIRECTOR_FACT_CAP = 12;
-const DIRECTOR_THREAD_CAP = 8;
+export const DIRECTOR_FACT_CAP = 12;
+export const DIRECTOR_THREAD_CAP = 8;
 /** How many prior wrapped episodes to surface in prompts. */
 const PRIOR_EPISODE_DIGEST_COUNT = 3;
 
@@ -249,12 +249,38 @@ function preferEpisodeBuckets(ctx: PromptContext): string[] {
   ];
 }
 
+/** Prefer buckets for Context UI (same order as director). */
+export function preferBucketsForEpisodes(priorEpisodes: Episode[], current?: Episode): string[] {
+  const priors = priorEpisodes.filter((e) => !current || e.number < current.number);
+  return [
+    ...[...priors].reverse().map((e) => e.id),
+    ...[...priors].reverse().map((e) => `E${e.number}`),
+    'legacy'
+  ];
+}
+
 function factBucket(f: ContinuityFact): string {
   return f.episodeId || 'legacy';
 }
 
 function threadBucket(t: OpenThread): string {
   return episodeNumFromOpenedLabel(t.openedLabel) || t.seasonId || 'legacy';
+}
+
+/** Same fact selection the director prompt uses. */
+export function selectDirectorFacts(
+  continuity: ContinuityFact[],
+  preferBuckets: string[] = []
+): ContinuityFact[] {
+  return pickAcrossBuckets(continuity, factBucket, DIRECTOR_FACT_CAP, preferBuckets);
+}
+
+/** Same thread selection the director prompt uses. */
+export function selectDirectorThreads(
+  threads: OpenThread[],
+  preferBuckets: string[] = []
+): OpenThread[] {
+  return pickAcrossBuckets(threads, threadBucket, DIRECTOR_THREAD_CAP, preferBuckets);
 }
 
 function cappedThreadLines(threads: OpenThread[], preferBuckets: string[] = []): string[] {
@@ -288,31 +314,36 @@ function clipText(text: string, max: number): string {
   return `${t.slice(0, max - 1).trimEnd()}…`;
 }
 
-/** Immediate prior: full wrap. Older priors: short digests so mid-season still remembers them. */
+/** Immediate prior: capped wrap. Older priors: shorter digests. */
 function formatPriorEpisodesSection(
   ctx: PromptContext,
-  opts: { beatCapImmediate: number; beatCapDigest: number; recapDigestChars: number }
+  opts: {
+    beatCapImmediate: number;
+    beatCapDigest: number;
+    recapDigestChars: number;
+    recapImmediateChars?: number;
+  }
 ): string | null {
   const priors = resolvedPriorEpisodes(ctx);
   if (priors.length === 0) return null;
+  const immediateCap = opts.recapImmediateChars ?? PRIOR_RECAP_IMMEDIATE_CAP;
   const blocks = [...priors].reverse().map((ep, idx) => {
     const immediate = idx === 0;
     const recap = (ep.wrap?.recap ?? '').trim();
     const beats = (ep.wrap?.beats ?? [])
       .slice(0, immediate ? opts.beatCapImmediate : opts.beatCapDigest)
-      .map((b) => `- ${b.text}${b.consequence ? ` → ${b.consequence}` : ''}`)
+      .map((b) => `- ${clipText(b.text, 220)}${b.consequence ? ` → ${clipText(b.consequence, 160)}` : ''}`)
       .join('\n');
     const guestFx = immediate
       ? (ep.wrap?.guestEffects ?? [])
         .map((g) => g.trim())
         .filter(Boolean)
-        .map((g) => `- ${g}`)
+        .slice(0, 4)
+        .map((g) => `- ${clipText(g, 180)}`)
         .join('\n')
       : '';
     const title = ep.title ? ` — ${ep.title}` : '';
-    const body = immediate
-      ? recap
-      : clipText(recap, opts.recapDigestChars);
+    const body = clipText(recap, immediate ? immediateCap : opts.recapDigestChars);
     const heading = immediate
       ? `### Episode ${ep.number}${title} (immediate prior)`
       : `### Episode ${ep.number}${title}`;
@@ -329,12 +360,15 @@ function seasonBibleSection(season: Season): string | null {
   if (!season.bible) return null;
   const beats = season.bible.carriedBeats
     .filter((b) => b.disposition !== 'drop')
-    .map((b) => `- [${b.disposition.toUpperCase()}] ${b.text} → ${b.consequence}`)
+    .slice(0, 8)
+    .map((b) => `- [${b.disposition.toUpperCase()}] ${clipText(b.text, 200)} → ${clipText(b.consequence, 160)}`)
     .join('\n');
   return (
-    `## Previously (season ${season.number - 1} recap)\n${season.bible.recap}` +
+    `## Previously (season ${season.number - 1} recap)\n${clipText(season.bible.recap, SEASON_BIBLE_RECAP_CAP)}` +
     (beats ? `\n\nCarried beats:\n${beats}` : '') +
-    (season.bible.offscreenChanges ? `\n\nWhat changed during the gap:\n${season.bible.offscreenChanges}` : '')
+    (season.bible.offscreenChanges
+      ? `\n\nWhat changed during the gap:\n${clipText(season.bible.offscreenChanges, 800)}`
+      : '')
   );
 }
 
@@ -357,7 +391,7 @@ function worldFrameSections(ctx: PromptContext): string[] {
   const offScene = characters.filter((c) => !episode.castIds.includes(c.id) && !c.isPlayer);
   const sections: string[] = [];
 
-  sections.push(`## The world\n${world.bible || world.line}`);
+  sections.push(`## The world\n${clipText(world.bible || world.line, WORLD_BIBLE_CAP)}`);
 
   const bible = seasonBibleSection(season);
   if (bible) {
@@ -376,15 +410,16 @@ function worldFrameSections(ctx: PromptContext): string[] {
   );
 
   const priorEps = formatPriorEpisodesSection(ctx, {
-    beatCapImmediate: 12,
-    beatCapDigest: 3,
-    recapDigestChars: 360
+    beatCapImmediate: 6,
+    beatCapDigest: 2,
+    recapDigestChars: 280,
+    recapImmediateChars: PRIOR_RECAP_IMMEDIATE_CAP
   });
   if (priorEps) sections.push(priorEps);
 
   const running = episode.runningSummary?.trim();
   if (running) {
-    sections.push(`## Earlier this episode (running summary)\n${running}`);
+    sections.push(`## Earlier this episode (running summary)\n${clipText(running, 1400)}`);
   }
 
   const cal = worldCalendar(world);
@@ -395,6 +430,7 @@ function worldFrameSections(ctx: PromptContext): string[] {
     `## Calendar\n` +
     (cal.system ? `${cal.system}\n` : '') +
     `Week cycle: ${cal.weekdays.join(', ')} (day 1 of the story was a ${cal.weekdays[cal.dayOneWeekday]}).\n` +
+    `Months: ${cal.months.join(', ')}.\n` +
     `Today is ${formatStoryDate(cal, cal.currentDay)}.\n` +
     `This episode's date: ${dateLine}.` +
     (episode.dateNote?.trim() ? `\nDate note: ${episode.dateNote.trim()}` : '')
@@ -536,20 +572,21 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
     `Reply in your own voice — looks/mannerisms plus what you say aloud.`
   );
 
-  sections.push(`## The world\n${world.bible || world.line}`);
+  sections.push(`## The world\n${clipText(world.bible || world.line, WORLD_BIBLE_CAP)}`);
   const charBible = seasonBibleSection(season);
   if (charBible) sections.push(charBible);
   sections.push(
     `## This season\nPremise (current pressure): ${season.premise || 'unwritten; discover it in play.'}`
   );
   const prior = formatPriorEpisodesSection(ctx, {
-    beatCapImmediate: 5,
+    beatCapImmediate: 4,
     beatCapDigest: 2,
-    recapDigestChars: 280
+    recapDigestChars: 220,
+    recapImmediateChars: 1200
   });
   if (prior) sections.push(prior);
   const running = ctx.episode.runningSummary?.trim();
-  if (running) sections.push(`## Earlier this episode (running summary)\n${running}`);
+  if (running) sections.push(`## Earlier this episode (running summary)\n${clipText(running, 1200)}`);
   {
     const cal = worldCalendar(ctx.world);
     const dateLine = formatEpisodeDateRange(cal, ctx.episode.storyDay, ctx.episode.storyDayEnd);
@@ -628,20 +665,31 @@ export function buildGuestSystemPrompt(ctx: PromptContext, guest: EpisodeGuest):
     `You ARE ${guest.name}, a temporary walk-on in "${world.title}" (not a permanent cast member). ` +
     `You speak and act only as yourself for this scene.`
   );
-  sections.push(`## The world\n${world.bible || world.line}`);
+  sections.push(`## The world\n${clipText(world.bible || world.line, WORLD_BIBLE_CAP)}`);
   const guestBible = seasonBibleSection(season);
   if (guestBible) sections.push(guestBible);
   sections.push(
     `## This season\nPremise (current pressure): ${season.premise || 'unwritten; discover it in play.'}`
   );
   const prior = formatPriorEpisodesSection(ctx, {
-    beatCapImmediate: 5,
-    beatCapDigest: 2,
-    recapDigestChars: 240
+    beatCapImmediate: 3,
+    beatCapDigest: 1,
+    recapDigestChars: 200,
+    recapImmediateChars: 900
   });
   if (prior) sections.push(prior);
   const running = ctx.episode.runningSummary?.trim();
-  if (running) sections.push(`## Earlier this episode (running summary)\n${running}`);
+  if (running) sections.push(`## Earlier this episode (running summary)\n${clipText(running, 900)}`);
+  {
+    const cal = worldCalendar(ctx.world);
+    const dateLine = formatEpisodeDateRange(cal, ctx.episode.storyDay, ctx.episode.storyDayEnd);
+    sections.push(
+      `## Current episode\nEpisode ${ctx.episode.number}${ctx.episode.title ? ` — ${ctx.episode.title}` : ''}.` +
+      `${ctx.episode.location ? ` Location: ${ctx.episode.location}.` : ''} ` +
+      `Date: ${dateLine}. Today: ${formatStoryDate(cal, cal.currentDay)}.` +
+      (ctx.episode.dateNote?.trim() ? ` Note: ${ctx.episode.dateNote.trim()}.` : '')
+    );
+  }
   const guestHere = resolveCurrentLocations(ctx.episode, ctx.locations);
   if (guestHere.length > 0) {
     sections.push(`## Current location\n${guestHere.map(locationSheet).join('\n\n')}`);
@@ -682,11 +730,24 @@ export const MODE_PREFIX: Record<ComposeMode, (input: string) => string> = {
   act: (input) => `(The player does the following, without speaking — do not invent dialogue for them): ${input}`
 };
 
-/** Rough char budget for history packing (≈4 chars per token). */
-export const HISTORY_CHAR_BUDGET = 96000;
+/**
+ * Rough char budget for packed episode transcript (≈4 chars per token).
+ * Kept below the old 96k so system frame (bible + prior wraps + cast) still fits
+ * typical 128k-context models mid-season.
+ */
+export const HISTORY_CHAR_BUDGET = 56000;
+
+/** Soft ceiling for system + history chars before we shrink history further. */
+const TOTAL_PROMPT_CHAR_SOFT_CAP = 110_000;
 
 /** Minimum turns kept even when over budget. */
 const PACK_MIN_TURNS = 4;
+
+/** Cap world bible / season bible slices in agent frames. */
+const WORLD_BIBLE_CAP = 6000;
+const SEASON_BIBLE_RECAP_CAP = 1600;
+/** Immediate prior episode wrap — was uncapped and blew up by E5–E6. */
+const PRIOR_RECAP_IMMEDIATE_CAP = 1800;
 
 /** Target size for deterministic omitted-turn digests. */
 const OMITTED_DIGEST_CHARS = 1100;
@@ -742,14 +803,20 @@ export interface PackedTurns {
   omitted: Turn[];
 }
 
-/** Pack newest turns into the char budget; expose what fell off the front. */
-export function packTurnsDetailed(turns: Turn[]): PackedTurns {
+/**
+ * Pack newest turns into the char budget; expose what fell off the front.
+ * Pass `systemChars` so large mid-season system frames shrink history instead of
+ * overflowing the model context (common cause of empty provider replies).
+ */
+export function packTurnsDetailed(turns: Turn[], systemChars = 0): PackedTurns {
+  const room = TOTAL_PROMPT_CHAR_SOFT_CAP - Math.max(0, systemChars);
+  const budget = Math.min(HISTORY_CHAR_BUDGET, Math.max(20_000, room));
   let used = 0;
   const reversed = [...turns].reverse();
   const kept: Turn[] = [];
   for (const t of reversed) {
     used += t.text.length;
-    if (used > HISTORY_CHAR_BUDGET && kept.length > PACK_MIN_TURNS) break;
+    if (used > budget && kept.length > PACK_MIN_TURNS) break;
     kept.push(t);
   }
   kept.reverse();
@@ -782,22 +849,22 @@ export function compressOmittedTurns(
   );
 }
 
-/** History prefix when older turns were packed out (running summary + omitted digest). */
+/**
+ * History prefix when older turns were packed out.
+ * Running summary already lives in the system frame — only add the omitted digest here.
+ */
 function earlierEpisodePrefix(
   episode: Episode | undefined,
   omitted: Turn[],
   characters: Character[],
   guests: EpisodeGuest[]
 ): ChatMessage | null {
-  const parts: string[] = [];
-  const running = episode?.runningSummary?.trim();
-  if (running) parts.push(`Running summary:\n${running}`);
+  void episode;
   const digest = compressOmittedTurns(omitted, characters, guests);
-  if (digest) parts.push(`Compressed earlier beats:\n${digest}`);
-  if (parts.length === 0) return null;
+  if (!digest) return null;
   return {
     role: 'user',
-    content: `(Earlier this episode — compressed; recent turns follow.)\n\n${parts.join('\n\n')}`
+    content: `(Earlier this episode — compressed; recent turns follow.)\n\nCompressed earlier beats:\n${digest}`
   };
 }
 
@@ -805,9 +872,10 @@ function historyMessages(
   turns: Turn[],
   characters: Character[],
   guests: EpisodeGuest[] = [],
-  episode?: Episode
+  episode?: Episode,
+  systemChars = 0
 ): ChatMessage[] {
-  const { kept, omitted } = packTurnsDetailed(turns);
+  const { kept, omitted } = packTurnsDetailed(turns, systemChars);
   const messages: ChatMessage[] = kept.map((t) => turnToChatContent(t, characters, guests));
   const prefix = earlierEpisodePrefix(episode, omitted, characters, guests);
   if (prefix) messages.unshift(prefix);
@@ -834,9 +902,10 @@ export function buildMessages(
   length: TurnLength,
   characters: Character[] = [],
   guests: EpisodeGuest[] = [],
-  episode?: Episode
+  episode?: Episode,
+  systemChars = 0
 ): ChatMessage[] {
-  const messages = historyMessages(turns, characters, guests, episode);
+  const messages = historyMessages(turns, characters, guests, episode, systemChars);
   const userContent = `${MODE_PREFIX[mode](input)}\n\n(${LENGTH_SPEC[length].instruction})`;
   return mergeMessages([...messages, { role: 'user', content: userContent }]);
 }
@@ -848,9 +917,10 @@ export function buildNarrationBeatMessages(
   brief: string,
   length: TurnLength,
   guests: EpisodeGuest[] = [],
-  episode?: Episode
+  episode?: Episode,
+  systemChars = 0
 ): ChatMessage[] {
-  const messages = historyMessages(turns, characters, guests, episode);
+  const messages = historyMessages(turns, characters, guests, episode, systemChars);
   const sizeHint =
     length === 'beat' ? 'Keep this narration slice short (about 40–100 words).'
     : length === 'scene' ? 'This narration slice: about 80–180 words.'
@@ -873,9 +943,9 @@ export function buildCharacterSpeakMessages(
   speaking: Character,
   brief: string,
   guests: EpisodeGuest[] = [],
-  opts?: { requireDialogue?: boolean; episode?: Episode }
+  opts?: { requireDialogue?: boolean; episode?: Episode; systemChars?: number }
 ): ChatMessage[] {
-  const messages = historyMessages(turns, characters, guests, opts?.episode);
+  const messages = historyMessages(turns, characters, guests, opts?.episode, opts?.systemChars ?? 0);
   const userContent =
     `(You are ${speaking.name}. Respond now in character.)\n` +
     `Intent for this line: ${brief}\n\n` +
@@ -892,9 +962,9 @@ export function buildGuestSpeakMessages(
   guest: EpisodeGuest,
   brief: string,
   guests: EpisodeGuest[] = [],
-  opts?: { requireDialogue?: boolean; episode?: Episode }
+  opts?: { requireDialogue?: boolean; episode?: Episode; systemChars?: number }
 ): ChatMessage[] {
-  const messages = historyMessages(turns, characters, guests, opts?.episode);
+  const messages = historyMessages(turns, characters, guests, opts?.episode, opts?.systemChars ?? 0);
   const userContent =
     `(You are ${guest.name}, a walk-on. Respond now.)\n` +
     `Intent for this line: ${brief}\n\n` +
@@ -1005,26 +1075,20 @@ export function directorUserPrompt(
         : '')
     : '';
 
-  const priorBlocks = resolvedPriorEpisodes(ctx);
-  const priorMemory = priorBlocks.length > 0
-    ? [...priorBlocks].reverse().map((ep, idx) => {
-      const immediate = idx === 0;
-      const recap = clipText((ep.wrap?.recap ?? '').trim(), immediate ? 520 : 220);
-      const beats = (ep.wrap?.beats ?? [])
-        .slice(0, immediate ? 6 : 2)
-        .map((b) => `  - ${b.text}${b.consequence ? ` → ${b.consequence}` : ''}`)
-        .join('\n');
-      return (
-        `Episode ${ep.number}${ep.title ? ` — ${ep.title}` : ''}${immediate ? ' (immediate prior)' : ''}:\n` +
-        `${recap}` +
-        (beats ? `\nBeats:\n${beats}` : '')
-      );
-    }).join('\n\n')
+  const priorSection = formatPriorEpisodesSection(ctx, {
+    beatCapImmediate: 6,
+    beatCapDigest: 2,
+    recapDigestChars: 220,
+    recapImmediateChars: 520
+  });
+  const priorMemory = priorSection
+    ? priorSection.replace(/^## Recent episodes this season\n/, '')
     : '';
 
   return (
     `World: ${ctx.world.title}\n` +
-    `Episode ${ctx.episode.number}${ctx.episode.location ? ` @ ${ctx.episode.location}` : ''} · ${dateLine}\n` +
+    `Episode ${ctx.episode.number}${ctx.episode.location ? ` @ ${ctx.episode.location}` : ''} · ${dateLine}` +
+    (ctx.episode.dateNote?.trim() ? ` · ${ctx.episode.dateNote.trim()}` : '') + `\n` +
     `Today: ${formatStoryDate(cal, cal.currentDay)}\n` +
     `Premise (current pressure): ${ctx.season.premise || '(unwritten)'}\n` +
     (seasonBibleClip ? `${seasonBibleClip}\n` : '') +

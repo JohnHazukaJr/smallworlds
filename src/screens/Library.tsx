@@ -5,6 +5,7 @@ import {
   db, deleteWorld, encryptExport, exportWorld, importAnyFile, isEncryptedExport,
   type EncryptedExport
 } from '../db';
+import { formatUserError } from '../errors';
 import { decryptDeviceExport } from '../sync/serialize';
 import { seedStarterWorld } from '../data/seed';
 import { useApp } from '../store/app';
@@ -56,7 +57,7 @@ export function Library() {
       const id = await seedStarterWorld();
       openWorld(id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatUserError(e));
     } finally {
       setSeeding(false);
     }
@@ -82,7 +83,7 @@ export function Library() {
       }
       await finishImport(data);
     } catch (e) {
-      setError(`Import failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(`Import failed: ${formatUserError(e)}`);
     }
   };
 
@@ -186,7 +187,9 @@ export function Library() {
                       className="btn-quiet" style={{ padding: '2px 4px', fontSize: 10 }}
                       onClick={(e) => {
                         e.stopPropagation();
-                        if (confirm(`Delete "${w.title}" and everything in it? This cannot be undone.`)) void deleteWorld(w.id);
+                        if (confirm(`Delete "${w.title}" and everything in it? This cannot be undone.`)) {
+                          void deleteWorld(w.id).catch((err) => setError(formatUserError(err)));
+                        }
                       }}
                     >delete</button>
                   </span>
@@ -211,7 +214,7 @@ export function Library() {
           if (!pendingExport) return;
           setDialogBusy(true);
           void runExport(pendingExport.worldId, pendingExport.title, pass)
-            .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+            .catch((e) => setError(formatUserError(e)))
             .finally(() => { setDialogBusy(false); setPendingExport(null); });
         }}
       />
@@ -233,7 +236,7 @@ export function Library() {
               setPendingImport(null);
               setDialogError('');
             })
-            .catch((e) => setDialogError(e instanceof Error ? e.message : String(e)))
+            .catch((e) => setDialogError(formatUserError(e)))
             .finally(() => setDialogBusy(false));
         }}
       />

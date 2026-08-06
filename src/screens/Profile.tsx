@@ -13,6 +13,7 @@ import {
   decryptDeviceExport, deviceHasSecrets, encryptDeviceExport, exportDevice
 } from '../sync/serialize';
 import { pullEncryptedSecrets, pushEncryptedSecrets, syncNow, useSyncMeta } from '../sync/engine';
+import { formatUserError } from '../errors';
 import { ErrorNote, Mono, useVw } from '../ui/bits';
 import { avatarStyle, plateStyle, VIS } from '../ui/theme';
 import type { Visibility } from '../types';
@@ -37,6 +38,7 @@ export function Profile() {
   const [restoreBusy, setRestoreBusy] = useState(false);
   const [pendingRestore, setPendingRestore] = useState<EncryptedExport | null>(null);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [storage, setStorage] = useState<StorageReport | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -71,7 +73,7 @@ export function Profile() {
       }
       clearStoragePressure();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatUserError(e));
     } finally {
       setExporting(false);
     }
@@ -80,12 +82,13 @@ export function Profile() {
   const finishRestore = async (data: unknown) => {
     const ids = await importAnyFile(data);
     clearStoragePressure();
-    setError(`Restored ${ids.length} world${ids.length === 1 ? '' : 's'}. Unlock if the vault was restored.`);
+    setNotice(`Restored ${ids.length} world${ids.length === 1 ? '' : 's'}. Unlock if the vault was restored.`);
   };
 
   const onRestoreFile = async (file: File) => {
     setRestoreBusy(true);
     setError('');
+    setNotice('');
     try {
       const data = JSON.parse(await file.text());
       if (isEncryptedExport(data)) {
@@ -94,7 +97,7 @@ export function Profile() {
       }
       await finishRestore(data);
     } catch (e) {
-      setError(`Restore failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(`Restore failed: ${formatUserError(e)}`);
     } finally {
       setRestoreBusy(false);
     }
@@ -116,6 +119,11 @@ export function Profile() {
       </div>
 
       {error && <div style={{ marginBottom: 18 }}><ErrorNote error={error} onDismiss={() => setError('')} /></div>}
+      {notice && (
+        <div style={{ marginBottom: 18 }}>
+          <ErrorNote error={notice} tone="warn" onDismiss={() => setNotice('')} />
+        </div>
+      )}
 
       {storageWarn && (
         <div className="glass" style={{
@@ -263,7 +271,7 @@ export function Profile() {
           setRestoreBusy(true);
           void decryptDeviceExport(pendingRestore, pass)
             .then((data) => finishRestore(data))
-            .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+            .catch((e) => setError(formatUserError(e)))
             .finally(() => {
               setRestoreBusy(false);
               setPendingRestore(null);
@@ -308,7 +316,7 @@ function AccountSection({ onError }: { onError: (msg: string) => void }) {
     try {
       await fn();
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
+      onError(formatUserError(e));
     } finally {
       setBusy(false);
     }

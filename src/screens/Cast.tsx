@@ -2,10 +2,11 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef, useState } from 'react';
 import { draftCharacter, fleshOutCharacter, fleshOutRelationships } from '../ai/engine';
 import { RelationshipMap, type RelationshipMapMode } from '../components/RelationshipMap';
-import { db, recordTombstones } from '../db';
+import { db, recordTombstones, safeWrite } from '../db';
+import { formatUserError } from '../errors';
 import {
   hasLink, inboundFor, KIND_PRESETS, normalizeRelationships, pruneRelationshipsToCast,
-  removeLink, suggestInverseKind, unlinkedOthers, upsertLink
+  removeLink, suggestInverseKind, trimRelationships, unlinkedOthers, upsertLink
 } from '../relationships';
 import { useApp } from '../store/app';
 import type { Character, Relationship } from '../types';
@@ -21,15 +22,20 @@ const TABS: Array<[Tab, string]> = [
 ];
 
 /** Debounced autosave of a character draft back to the DB. */
-function useAutosave(draft: Character | null) {
+function useAutosave(draft: Character | null, onError: (msg: string) => void) {
   const timer = useRef<number>(undefined);
   const first = useRef(true);
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
   useEffect(() => {
     if (!draft) return;
     if (first.current) { first.current = false; return; }
     window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => {
-      void db.characters.put({ ...draft, updatedAt: Date.now() });
+      void safeWrite(
+        () => db.characters.put({ ...draft, updatedAt: Date.now() }),
+        (msg) => onErrorRef.current(msg)
+      );
     }, 500);
     return () => window.clearTimeout(timer.current);
   }, [draft]);
@@ -87,7 +93,7 @@ export function Cast() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id]);
 
-  useAutosave(draft);
+  useAutosave(draft, setError);
 
   const patch = (p: Partial<Character>) => setDraft((d) => (d ? { ...d, ...p } : d));
 
@@ -106,7 +112,7 @@ export function Cast() {
       await db.characters.update(draft.id, { ...next, updatedAt: Date.now() });
       patch(next);
     } catch (e) {
-      setPortraitError(e instanceof Error ? e.message : String(e));
+      setPortraitError(formatUserError(e));
     } finally {
       setPortraitBusy(false);
     }
@@ -150,7 +156,7 @@ export function Cast() {
       setUndoSnapshot(draft);
       patch(result);
     } catch (e) {
-      setFleshError(e instanceof Error ? e.message : String(e));
+      setFleshError(formatUserError(e));
     } finally {
       setFleshBusy(false);
     }
@@ -178,7 +184,7 @@ export function Cast() {
       const result = await draftCharacter(world, aiDesc.trim());
       await addCharacter(result);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatUserError(e));
     } finally {
       setAiBusy(false);
     }
@@ -496,7 +502,10 @@ export function Cast() {
                     <textarea
                       rows={4}
                       value={d.exampleLines.join('\n')}
-                      onChange={(e) => patch({ exampleLines: e.target.value.split('\n').filter((l) => l.trim()) })}
+                      onChange={(e) => patch({ exampleLines: e.target.value.split('\n') })}
+                      onBlur={() => patch({
+                        exampleLines: d.exampleLines.map((l) => l.trim()).filter(Boolean)
+                      })}
                       placeholder={'Then write it again, and put your own name on it.\nThe ledger doesn\u2019t care what I believe.'}
                     />
                   </Field>
@@ -552,7 +561,7 @@ export function Cast() {
                       const ids = cast.map((c) => c.id);
                       patch({ relationships: normalizeRelationships(next, ids, d.id) });
                     } catch (e) {
-                      setFleshError(e instanceof Error ? e.message : String(e));
+                      setFleshError(formatUserError(e));
                     } finally {
                       setFleshBusy(false);
                     }
@@ -577,11 +586,14 @@ export function Cast() {
                   <textarea
                     rows={5}
                     value={d.anchors.join('\n')}
-                    onChange={(e) => patch({ anchors: e.target.value.split('\n').filter((l) => l.trim()) })}
+                    onChange={(e) => patch({ anchors: e.target.value.split('\n') })}
+                    onBlur={() => patch({
+                      anchors: d.anchors.map((l) => l.trim()).filter(Boolean)
+                    })}
                     placeholder={'Never lies in writing. Will omit, will refuse, will not falsify.\nDoes not warm to you quickly. Trust moves one notch per episode at most.'}
                   />
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    {d.anchors.map((a, i) => (
+                    {d.anchors.filter((a) => a.trim()).map((a, i) => (
                       <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, lineHeight: 1.5, color: 'rgba(236,234,230,0.9)' }}>
                         <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'oklch(0.85 0.1 62)', paddingTop: 3 }}>
                           {String(i + 1).padStart(2, '0')}
@@ -827,6 +839,7 @@ function RelationsEditor({
                   <input
                     value={r.kind}
                     onChange={(e) => updateByTarget(r.targetId, { kind: e.target.value })}
+                    onBlur={() => setRels(trimRelationships(character.relationships))}
                     placeholder="custom kind…"
                     style={{ width: '100%', maxWidth: narrow ? '100%' : 220, minHeight: 44 }}
                   />
@@ -834,6 +847,7 @@ function RelationsEditor({
                 <input
                   value={r.note}
                   onChange={(e) => updateByTarget(r.targetId, { note: e.target.value })}
+                  onBlur={() => setRels(trimRelationships(character.relationships))}
                   placeholder="the history between them, one line"
                   style={{ minHeight: 44 }}
                 />

@@ -4,7 +4,8 @@ import {
   fleshOutCharacter, fleshOutLocation, fleshOutNarratorRules, fleshOutPremise,
   fleshOutWorldEverything, fleshOutWorldLore
 } from '../ai/engine';
-import { db } from '../db';
+import { db, safeWrite } from '../db';
+import { formatUserError } from '../errors';
 import { useApp } from '../store/app';
 import { useSettings } from '../store/settings';
 import type { Character, Location, Season, World, WorldAISettings } from '../types';
@@ -118,14 +119,21 @@ export function Onboard() {
   const patchAI = (p: Partial<WorldAISettings>) => {
     setAi((prev) => {
       const next = { ...prev, ...p };
-      if (worldId) void db.worlds.update(worldId, { ai: next, updatedAt: Date.now() });
+      if (worldId) {
+        void safeWrite(
+          () => db.worlds.update(worldId, { ai: next, updatedAt: Date.now() }),
+          setError
+        );
+      }
       return next;
     });
   };
 
   const setPremiseAndSave = (v: string) => {
     setPremise(v);
-    if (seasonId) void db.seasons.update(seasonId, { premise: v });
+    if (seasonId) {
+      void safeWrite(() => db.seasons.update(seasonId, { premise: v }), setError);
+    }
   };
 
   /** Current world state (title/seed/ai + who's already in it) shaped for AI context, live or not. */
@@ -146,9 +154,14 @@ export function Onboard() {
       const result = await fleshOutWorldLore(worldContext());
       setTitle(result.title);
       setSeed(result.bible);
-      if (worldId) void db.worlds.update(worldId, { title: result.title, line: result.line, bible: result.bible, updatedAt: Date.now() });
+      if (worldId) {
+        void safeWrite(
+          () => db.worlds.update(worldId, { title: result.title, line: result.line, bible: result.bible, updatedAt: Date.now() }),
+          setError
+        );
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatUserError(e));
     } finally {
       setBusy(null);
     }
@@ -161,7 +174,7 @@ export function Onboard() {
       const rules = await fleshOutNarratorRules(worldContext());
       patchAI({ narratorRules: rules });
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatUserError(e));
     } finally {
       setBusy(null);
     }
@@ -174,7 +187,7 @@ export function Onboard() {
       const result = await fleshOutPremise(worldContext(), previewSeason(premise));
       setPremiseAndSave(result);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatUserError(e));
     } finally {
       setBusy(null);
     }
@@ -209,7 +222,7 @@ export function Onboard() {
       setCastName('');
       setCastNotes('');
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatUserError(e));
     } finally {
       setBusy(null);
     }
@@ -263,7 +276,7 @@ export function Onboard() {
       setPlaceName('');
       setPlaceNotes('');
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatUserError(e));
     } finally {
       setBusy(null);
     }
@@ -326,7 +339,7 @@ export function Onboard() {
       setPlaceKind(0);
       setStep(3); // cast step — review before Finish
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatUserError(e));
     } finally {
       setBusy(null);
     }
@@ -506,7 +519,10 @@ export function Onboard() {
                       key={c.id} c={c} expanded={expandedCastId === c.id}
                       onToggle={() => setExpandedCastId((id) => (id === c.id ? null : c.id))}
                       onRemove={() => void removeCastEntry(c.id)}
-                      onPatch={(p) => void db.characters.update(c.id, { ...p, updatedAt: Date.now() })}
+                      onPatch={(p) => void safeWrite(
+                        () => db.characters.update(c.id, { ...p, updatedAt: Date.now() }),
+                        setError
+                      )}
                       onToggleSelfTag={() => void toggleSelfTag(c.id)}
                     />
                   ))}
@@ -557,7 +573,10 @@ export function Onboard() {
                       key={l.id} l={l} expanded={expandedPlaceId === l.id}
                       onToggle={() => setExpandedPlaceId((id) => (id === l.id ? null : l.id))}
                       onRemove={() => void removePlaceEntry(l.id)}
-                      onPatch={(p) => void db.locations.update(l.id, { ...p, updatedAt: Date.now() })}
+                      onPatch={(p) => void safeWrite(
+                        () => db.locations.update(l.id, { ...p, updatedAt: Date.now() }),
+                        setError
+                      )}
                     />
                   ))}
                 </div>
@@ -608,13 +627,16 @@ export function Onboard() {
           setWorldId(world.id);
           setSeasonId(world.activeSeasonId);
         } catch (e) {
-          setError(e instanceof Error ? e.message : String(e));
+          setError(formatUserError(e));
           setBusy(null);
           return;
         }
         setBusy(null);
       } else {
-        void db.worlds.update(worldId, { title: t, line: s.slice(0, 140), bible: s, updatedAt: Date.now() });
+        void safeWrite(
+          () => db.worlds.update(worldId, { title: t, line: s.slice(0, 140), bible: s, updatedAt: Date.now() }),
+          setError
+        );
       }
     }
     if (step < lastStep) setStep((v) => v + 1);
@@ -734,7 +756,7 @@ function CastCard({ c, expanded, onToggle, onRemove, onPatch, onToggleSelfTag }:
       const url = await fileToPortraitImage(file);
       onPatch(portraitsPatch([...gallery, url]));
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatUserError(e));
     } finally {
       setBusy(false);
     }
@@ -839,7 +861,7 @@ function PlaceCard({ l, expanded, onToggle, onRemove, onPatch }: {
     try {
       onPatch({ portrait: await fileToPortraitImage(file) });
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatUserError(e));
     } finally {
       setBusy(false);
     }

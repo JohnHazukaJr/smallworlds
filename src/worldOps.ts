@@ -7,12 +7,36 @@ export const DEFAULT_WEEKDAYS = [
   'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'
 ];
 
+export const DEFAULT_MONTHS = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December'
+];
+
+/** Non-leap Earth month lengths. */
+export const DEFAULT_MONTH_LENGTHS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
 export interface ResolvedCalendar {
   currentDay: number;
   system: string;
   weekdays: string[];
   dayOneWeekday: number;
   episodeAdvanceDays: number;
+  months: string[];
+  monthLengths: number[];
+  yearOne: number;
+  dayOneMonth: number;
+  dayOneDate: number;
+}
+
+export interface StoryDateParts {
+  year: number;
+  /** 0-based month index */
+  monthIndex: number;
+  monthName: string;
+  dayOfMonth: number;
+  weekday: string;
+  /** Absolute story day */
+  day: number;
 }
 
 /** Worlds created before the calendar field existed won't have it — always read through this. */
@@ -20,14 +44,36 @@ export function worldCalendar(world: World | null | undefined): ResolvedCalendar
   const c = world?.calendar;
   const customDays = c?.weekdays?.map((w) => w.trim()).filter(Boolean) ?? [];
   const weekdays = customDays.length > 0 ? customDays : DEFAULT_WEEKDAYS;
+  const customMonths = c?.months?.map((m) => m.trim()).filter(Boolean) ?? [];
+  const months = customMonths.length > 0 ? customMonths : DEFAULT_MONTHS;
+  const rawLengths = c?.monthLengths ?? [];
+  const monthLengths = months.map((_, i) => {
+    const n = rawLengths[i];
+    if (typeof n === 'number' && Number.isFinite(n) && n >= 1) return Math.min(90, Math.floor(n));
+    return DEFAULT_MONTH_LENGTHS[i % DEFAULT_MONTH_LENGTHS.length] ?? 30;
+  });
   const dayOne = typeof c?.dayOneWeekday === 'number' ? c.dayOneWeekday : 0;
   const advance = typeof c?.episodeAdvanceDays === 'number' ? c.episodeAdvanceDays : 1;
+  const yearOne = typeof c?.yearOne === 'number' && Number.isFinite(c.yearOne) ? Math.floor(c.yearOne) : 1;
+  const dayOneMonth = typeof c?.dayOneMonth === 'number' ? c.dayOneMonth : 0;
+  const dayOneDate = typeof c?.dayOneDate === 'number' ? c.dayOneDate : 1;
   return {
     currentDay: Math.max(1, c?.currentDay || 1),
     system: c?.system ?? '',
     weekdays,
     dayOneWeekday: ((dayOne % weekdays.length) + weekdays.length) % weekdays.length,
-    episodeAdvanceDays: Math.max(0, Math.min(365, advance))
+    episodeAdvanceDays: Math.max(0, Math.min(365, advance)),
+    months,
+    monthLengths,
+    yearOne,
+    dayOneMonth: ((dayOneMonth % months.length) + months.length) % months.length,
+    dayOneDate: Math.max(
+      1,
+      Math.min(
+        monthLengths[((dayOneMonth % months.length) + months.length) % months.length] ?? 30,
+        Math.floor(dayOneDate)
+      )
+    )
   };
 }
 
@@ -38,9 +84,106 @@ export function weekdayForDay(cal: ResolvedCalendar, day: number): string {
   return cal.weekdays[idx] ?? cal.weekdays[0];
 }
 
-/** Human label: "Thursday, day 12". */
+function monthLen(cal: ResolvedCalendar, monthIndex: number): number {
+  const i = ((monthIndex % cal.months.length) + cal.months.length) % cal.months.length;
+  return cal.monthLengths[i] ?? 30;
+}
+
+/** Convert absolute story day → year / month / day-of-month. */
+export function partsForDay(cal: ResolvedCalendar, day: number): StoryDateParts {
+  const abs = Math.max(1, Math.floor(day));
+  let remaining = abs - 1;
+  let year = cal.yearOne;
+  let month = cal.dayOneMonth;
+  let dom = Math.min(cal.dayOneDate, monthLen(cal, month));
+
+  while (remaining > 0) {
+    const len = monthLen(cal, month);
+    const leftInMonth = len - dom + 1;
+    if (remaining < leftInMonth) {
+      dom += remaining;
+      remaining = 0;
+    } else {
+      remaining -= leftInMonth;
+      dom = 1;
+      month += 1;
+      if (month >= cal.months.length) {
+        month = 0;
+        year += 1;
+      }
+    }
+  }
+
+  return {
+    year,
+    monthIndex: month,
+    monthName: cal.months[month] ?? `Month ${month + 1}`,
+    dayOfMonth: dom,
+    weekday: weekdayForDay(cal, abs),
+    day: abs
+  };
+}
+
+/** Days in a full calendar year (sum of month lengths). */
+function yearLength(cal: ResolvedCalendar): number {
+  return cal.monthLengths.reduce((a, b) => a + b, 0);
+}
+
+/** 1-based ordinal day within a year (Jan 1 → 1). */
+function ordinalInYear(cal: ResolvedCalendar, monthIndex: number, dayOfMonth: number): number {
+  const m = ((monthIndex % cal.months.length) + cal.months.length) % cal.months.length;
+  const d = Math.max(1, Math.min(monthLen(cal, m), Math.floor(dayOfMonth)));
+  let o = d;
+  for (let i = 0; i < m; i++) o += monthLen(cal, i);
+  return o;
+}
+
+/** Convert year / month / day-of-month → absolute story day (clamped). */
+export function dayFromParts(
+  cal: ResolvedCalendar,
+  year: number,
+  monthIndex: number,
+  dayOfMonth: number
+): number {
+  const mCount = cal.months.length;
+  const y = Math.floor(year);
+  const m = ((Math.floor(monthIndex) % mCount) + mCount) % mCount;
+  const d = Math.max(1, Math.min(monthLen(cal, m), Math.floor(dayOfMonth)));
+  const yLen = yearLength(cal);
+  if (yLen < 1) return 1;
+
+  const anchorOrd = ordinalInYear(cal, cal.dayOneMonth, cal.dayOneDate);
+  const targetOrd = ordinalInYear(cal, m, d);
+  const abs = 1 + (y - cal.yearOne) * yLen + (targetOrd - anchorOrd);
+  return Math.max(1, Math.floor(abs));
+}
+
+/** Advance absolute day by N calendar months (clamps day-of-month). */
+export function advanceMonths(cal: ResolvedCalendar, day: number, months: number): number {
+  const p = partsForDay(cal, day);
+  let y = p.year;
+  let m = p.monthIndex + Math.floor(months);
+  while (m >= cal.months.length) {
+    m -= cal.months.length;
+    y += 1;
+  }
+  while (m < 0) {
+    m += cal.months.length;
+    y -= 1;
+  }
+  return dayFromParts(cal, y, m, p.dayOfMonth);
+}
+
+/** Human label: "Thursday, 12 March, Year 3 · day 72". */
 export function formatStoryDate(cal: ResolvedCalendar, day: number): string {
-  return `${weekdayForDay(cal, day)}, day ${Math.max(1, day)}`;
+  const p = partsForDay(cal, day);
+  return `${p.weekday}, ${p.dayOfMonth} ${p.monthName}, Year ${p.year} · day ${p.day}`;
+}
+
+/** Compact label without absolute day (UI headers). */
+export function formatStoryDateShort(cal: ResolvedCalendar, day: number): string {
+  const p = partsForDay(cal, day);
+  return `${p.weekday}, ${p.dayOfMonth} ${p.monthName} Y${p.year}`;
 }
 
 /** Range label for an episode: single day or "Mon day 3 → Wed day 5". */
@@ -52,7 +195,7 @@ export function formatEpisodeDateRange(
   const start = startDay && startDay > 0 ? startDay : cal.currentDay;
   const end = endDay && endDay > 0 ? endDay : null;
   if (!end || end === start) return formatStoryDate(cal, start);
-  return `${formatStoryDate(cal, start)} → ${formatStoryDate(cal, end)}`;
+  return `${formatStoryDateShort(cal, start)} → ${formatStoryDateShort(cal, end)}`;
 }
 
 /** Persistable calendar patch merged onto resolved defaults. */
@@ -66,7 +209,12 @@ export function calendarPatch(
     system: patch.system ?? base.system,
     weekdays: patch.weekdays ?? base.weekdays,
     dayOneWeekday: patch.dayOneWeekday ?? base.dayOneWeekday,
-    episodeAdvanceDays: patch.episodeAdvanceDays ?? base.episodeAdvanceDays
+    episodeAdvanceDays: patch.episodeAdvanceDays ?? base.episodeAdvanceDays,
+    months: patch.months ?? base.months,
+    monthLengths: patch.monthLengths ?? base.monthLengths,
+    yearOne: patch.yearOne ?? base.yearOne,
+    dayOneMonth: patch.dayOneMonth ?? base.dayOneMonth,
+    dayOneDate: patch.dayOneDate ?? base.dayOneDate
   };
 }
 
@@ -114,7 +262,12 @@ export async function createWorld(input: NewWorldInput): Promise<World> {
       system: '',
       weekdays: [...DEFAULT_WEEKDAYS],
       dayOneWeekday: 0,
-      episodeAdvanceDays: 1
+      episodeAdvanceDays: 1,
+      months: [...DEFAULT_MONTHS],
+      monthLengths: [...DEFAULT_MONTH_LENGTHS],
+      yearOne: 1,
+      dayOneMonth: 0,
+      dayOneDate: 1
     },
     createdAt: now,
     updatedAt: now
@@ -244,15 +397,9 @@ export async function nextEpisode(current: Episode, opts: NextEpisodeOpts = {}):
     });
     await db.episodes.add(next);
     if (world) {
+      const live = await db.worlds.get(world.id);
       await db.worlds.update(world.id, {
-        calendar: {
-          ...world.calendar,
-          currentDay: nextDay,
-          system: cal.system,
-          weekdays: cal.weekdays,
-          dayOneWeekday: cal.dayOneWeekday,
-          episodeAdvanceDays: cal.episodeAdvanceDays
-        },
+        calendar: calendarPatch(live ?? world, { currentDay: nextDay }),
         updatedAt: Date.now()
       });
     }

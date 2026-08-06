@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { formatUserError, logAppError } from '../errors';
 import type { AppSettings, ModelRef, ProviderConfig } from '../types';
 
 // Checked via localStorage directly to avoid a circular import with security/vault.ts.
@@ -11,7 +12,20 @@ async function syncVault() {
   await useVault.getState().persistKeys();
 }
 
+async function syncVaultSafe(set: (partial: Partial<SettingsStore>) => void) {
+  try {
+    await syncVault();
+    set({ vaultPersistError: '' });
+  } catch (e) {
+    logAppError(e, 'vault persist');
+    set({ vaultPersistError: formatUserError(e) });
+  }
+}
+
 interface SettingsStore extends AppSettings {
+  /** Surfaced when encrypting keys into the vault fails after a provider change. */
+  vaultPersistError: string;
+  clearVaultPersistError: () => void;
   addProvider: (p: ProviderConfig) => void;
   updateProvider: (id: string, patch: Partial<ProviderConfig>) => void;
   removeProvider: (id: string) => void;
@@ -31,13 +45,15 @@ export const useSettings = create<SettingsStore>()(
       utilityModel: null,
       matureDefault: true,
       defaultVisibility: 'private',
+      vaultPersistError: '',
+      clearVaultPersistError: () => set({ vaultPersistError: '' }),
       addProvider: (p) => {
         set((s) => ({ providers: [...s.providers, p] }));
-        void syncVault().catch((e) => console.error('vault persist failed', e));
+        void syncVaultSafe(set);
       },
       updateProvider: (id, patch) => {
         set((s) => ({ providers: s.providers.map((p) => (p.id === id ? { ...p, ...patch } : p)) }));
-        void syncVault().catch((e) => console.error('vault persist failed', e));
+        void syncVaultSafe(set);
       },
       removeProvider: (id) => {
         set((s) => ({
@@ -45,7 +61,7 @@ export const useSettings = create<SettingsStore>()(
           proseModel: s.proseModel?.providerId === id ? null : s.proseModel,
           utilityModel: s.utilityModel?.providerId === id ? null : s.utilityModel
         }));
-        void syncVault().catch((e) => console.error('vault persist failed', e));
+        void syncVaultSafe(set);
       },
       setProseModel: (proseModel) => set({ proseModel }),
       setUtilityModel: (utilityModel) => set({ utilityModel }),
@@ -69,6 +85,7 @@ export const useSettings = create<SettingsStore>()(
         utilityModel: s.utilityModel,
         matureDefault: s.matureDefault,
         defaultVisibility: s.defaultVisibility
+        // vaultPersistError is session-only — not persisted
       })
     }
   )

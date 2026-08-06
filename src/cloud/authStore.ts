@@ -1,5 +1,6 @@
 import type { Factor, Session, User } from '@supabase/supabase-js';
 import { create } from 'zustand';
+import { formatUserError } from '../errors';
 import { getSupabase, isCloudConfigured } from './supabase';
 
 export type AuthMethod = 'phone' | 'email' | 'google';
@@ -59,7 +60,7 @@ export const useAuth = create<AuthState>()((set, get) => ({
     set({ error: '' });
     const { error } = await sb.auth.signInWithPassword({ email, password });
     if (error) {
-      set({ error: error.message });
+      set({ error: formatUserError(error) });
       throw error;
     }
   },
@@ -70,7 +71,7 @@ export const useAuth = create<AuthState>()((set, get) => ({
     set({ error: '' });
     const { error } = await sb.auth.signUp({ email, password });
     if (error) {
-      set({ error: error.message });
+      set({ error: formatUserError(error) });
       throw error;
     }
   },
@@ -81,7 +82,7 @@ export const useAuth = create<AuthState>()((set, get) => ({
     set({ error: '' });
     const { error } = await sb.auth.signInWithOtp({ phone });
     if (error) {
-      set({ error: error.message });
+      set({ error: formatUserError(error) });
       throw error;
     }
   },
@@ -92,7 +93,7 @@ export const useAuth = create<AuthState>()((set, get) => ({
     set({ error: '' });
     const { error } = await sb.auth.verifyOtp({ phone, token, type: 'sms' });
     if (error) {
-      set({ error: error.message });
+      set({ error: formatUserError(error) });
       throw error;
     }
   },
@@ -106,7 +107,7 @@ export const useAuth = create<AuthState>()((set, get) => ({
       options: { redirectTo: window.location.origin }
     });
     if (error) {
-      set({ error: error.message });
+      set({ error: formatUserError(error) });
       throw error;
     }
   },

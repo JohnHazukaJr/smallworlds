@@ -3,12 +3,13 @@ import { useId, useState } from 'react';
 import { testConnection } from '../ai/client';
 import { listModels, PROVIDER_PRESETS, presetFor, type ProviderPreset } from '../ai/providers';
 import { PassphraseDialog } from '../components/PassphraseDialog';
-import { db, uid, wipeAllData } from '../db';
+import { db, safeWrite, uid, wipeAllData } from '../db';
+import { formatUserError } from '../errors';
 import { useVault } from '../security/vault';
 import { useApp } from '../store/app';
 import { useSettings } from '../store/settings';
 import type { ModelRef, ProviderConfig, World, WorldAISettings } from '../types';
-import { Bar, Chip, Field, Mono, Toggle, useVw } from '../ui/bits';
+import { Bar, Chip, ErrorNote, Field, Mono, Toggle, useVw } from '../ui/bits';
 
 export function Settings() {
   const vw = useVw();
@@ -106,15 +107,30 @@ export function Settings() {
 
 function SecuritySection() {
   const vault = useVault();
+  const vaultPersistError = useSettings((s) => s.vaultPersistError);
+  const clearVaultPersistError = useSettings((s) => s.clearVaultPersistError);
   const [dialog, setDialog] = useState<'none' | 'enable' | 'change-old' | 'change-new'>('none');
   const [oldPass, setOldPass] = useState('');
   const [busy, setBusy] = useState(false);
   const [dialogError, setDialogError] = useState('');
+  const [sectionError, setSectionError] = useState('');
 
   const close = () => { setDialog('none'); setDialogError(''); setOldPass(''); };
 
   return (
     <Section title="Security" note="everything stays on this device — this controls how it's protected here">
+      {(sectionError || vaultPersistError) && (
+        <ErrorNote
+          error={sectionError || vaultPersistError}
+          onDismiss={() => { setSectionError(''); clearVaultPersistError(); }}
+        />
+      )}
+      {vault.corrupt && (
+        <ErrorNote
+          error="Vault unreadable — restore a backup from Profile, or reset the vault (stories are kept; keys on this device are lost)."
+          onDismiss={() => undefined}
+        />
+      )}
       <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap' }}>
           <div style={{ flex: 1, minWidth: 240, display: 'flex', flexDirection: 'column', gap: 5 }}>
@@ -124,8 +140,8 @@ function SecuritySection() {
                 <span style={{
                   fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase',
                   marginLeft: 10, padding: '3px 8px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.16)',
-                  color: 'oklch(0.85 0.09 140)'
-                }}>on</span>
+                  color: vault.corrupt ? 'oklch(0.75 0.12 25)' : 'oklch(0.85 0.09 140)'
+                }}>{vault.corrupt ? 'corrupt' : 'on'}</span>
               )}
             </div>
             <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
@@ -140,13 +156,22 @@ function SecuritySection() {
             <button className="btn-primary" onClick={() => setDialog('enable')}>Set a passphrase</button>
           ) : (
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <button className="btn-ghost" onClick={() => { void vault.lock().catch((e) => alert(e instanceof Error ? e.message : String(e))); }}>Lock now</button>
-              <button className="btn-ghost" onClick={() => setDialog('change-old')}>Change passphrase</button>
+              {!vault.corrupt && (
+                <button className="btn-ghost" onClick={() => {
+                  void vault.lock().catch((e) => setSectionError(formatUserError(e)));
+                }}>Lock now</button>
+              )}
+              {!vault.corrupt && (
+                <button className="btn-ghost" onClick={() => setDialog('change-old')}>Change passphrase</button>
+              )}
               <button className="btn-quiet" onClick={() => {
-                if (confirm('Remove the passphrase? Your API keys will be stored unencrypted on this device again.')) {
-                  void vault.disable();
-                }
-              }}>Remove</button>
+                const msg = vault.corrupt
+                  ? 'Reset the corrupt vault? Encrypted keys on this device will be wiped. Stories stay.'
+                  : 'Remove the passphrase? Your API keys will be stored unencrypted on this device again.';
+                if (!confirm(msg)) return;
+                void (vault.corrupt ? Promise.resolve(vault.reset()) : vault.disable())
+                  .catch((e) => setSectionError(formatUserError(e)));
+              }}>{vault.corrupt ? 'Reset vault' : 'Remove'}</button>
             </div>
           )}
         </div>
@@ -162,7 +187,7 @@ function SecuritySection() {
           <button className="btn-quiet" style={{ color: 'oklch(0.75 0.12 25)', borderColor: 'oklch(0.4 0.1 25)' }} onClick={() => {
             if (!confirm('Delete ALL data on this device? This cannot be undone.')) return;
             if (!confirm('Last chance — every world, season and key will be erased. Continue?')) return;
-            void wipeAllData();
+            void wipeAllData().catch((e) => setSectionError(formatUserError(e)));
           }}>Erase all data</button>
         </div>
       </div>
@@ -178,7 +203,11 @@ function SecuritySection() {
         onCancel={close}
         onSubmit={(pass) => {
           setBusy(true);
-          void vault.enable(pass).then(close).finally(() => setBusy(false));
+          setDialogError('');
+          void vault.enable(pass)
+            .then(close)
+            .catch((e) => setDialogError(formatUserError(e)))
+            .finally(() => setBusy(false));
         }}
       />
       <PassphraseDialog
@@ -207,10 +236,12 @@ function SecuritySection() {
         onCancel={close}
         onSubmit={(pass) => {
           setBusy(true);
+          setDialogError('');
           void vault.changePassphrase(oldPass, pass).then((ok) => {
             if (ok) close();
             else { setDialogError('Current passphrase was wrong.'); setDialog('change-old'); }
-          }).finally(() => setBusy(false));
+          }).catch((e) => setDialogError(formatUserError(e)))
+            .finally(() => setBusy(false));
         }}
       />
     </Section>
@@ -293,7 +324,7 @@ function ProviderCard({ config }: { config: ProviderConfig }) {
       setTestMsg(`last check: ${r.ms}ms · streaming OK`);
     } catch (e) {
       setTestState('fail');
-      setTestMsg(e instanceof Error ? e.message : String(e));
+      setTestMsg(formatUserError(e));
     }
   };
 
@@ -347,10 +378,15 @@ function ProviderCard({ config }: { config: ProviderConfig }) {
         <button className="btn-quiet" onClick={() => {
           if (confirm(`Remove ${config.label}? Worlds pointing at it will need a new model.`)) s.removeProvider(config.id);
         }}>Remove</button>
-        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: testState === 'fail' ? 'oklch(0.75 0.12 25)' : 'rgba(236,234,230,0.4)', marginLeft: 'auto', maxWidth: '100%', wordBreak: 'break-word' }}>
-          {testMsg || 'run a test before writing a chapter'}
-        </div>
+        {testState !== 'fail' && (
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)', marginLeft: 'auto', maxWidth: '100%', wordBreak: 'break-word' }}>
+            {testMsg || 'run a test before writing a chapter'}
+          </div>
+        )}
       </div>
+      {testState === 'fail' && testMsg && (
+        <ErrorNote error={testMsg} onDismiss={() => { setTestState('idle'); setTestMsg(''); }} />
+      )}
     </div>
   );
 }
@@ -418,11 +454,15 @@ export function ModelPicker({ value, onChange }: { value: ModelRef | null; onCha
 // ---------- world-level AI settings ----------
 
 function WorldSettings({ world }: { world: World }) {
+  const [saveError, setSaveError] = useState('');
+  const patchWorld = (p: Partial<World>) =>
+    void safeWrite(() => db.worlds.update(world.id, { ...p, updatedAt: Date.now() }), setSaveError);
   const patchAI = (p: Partial<WorldAISettings>) =>
-    void db.worlds.update(world.id, { ai: { ...world.ai, ...p }, updatedAt: Date.now() });
+    patchWorld({ ai: { ...world.ai, ...p } });
 
   return (
     <Section title={`This world — ${world.title}`} note="instructions the narrator follows in this world only">
+      {saveError && <ErrorNote error={saveError} onDismiss={() => setSaveError('')} />}
       <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 20 }}>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 14 }}>
           <Field label="Point of view">
@@ -497,27 +537,27 @@ function WorldSettings({ world }: { world: World }) {
           <Field label="Prose model override" note="unset = global default">
             <ModelPicker
               value={world.proseModel}
-              onChange={(m) => void db.worlds.update(world.id, { proseModel: m })}
+              onChange={(m) => patchWorld({ proseModel: m })}
             />
             {world.proseModel && (
               <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
-                onClick={() => void db.worlds.update(world.id, { proseModel: null })}>use global default</button>
+                onClick={() => patchWorld({ proseModel: null })}>use global default</button>
             )}
           </Field>
           <Field label="Utility model override" note="unset = global default">
             <ModelPicker
               value={world.utilityModel}
-              onChange={(m) => void db.worlds.update(world.id, { utilityModel: m })}
+              onChange={(m) => patchWorld({ utilityModel: m })}
             />
             {world.utilityModel && (
               <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
-                onClick={() => void db.worlds.update(world.id, { utilityModel: null })}>use global default</button>
+                onClick={() => patchWorld({ utilityModel: null })}>use global default</button>
             )}
           </Field>
         </div>
       </div>
 
-      <WorldBibleEditor world={world} />
+      <WorldBibleEditor world={world} onError={setSaveError} />
     </Section>
   );
 }
@@ -542,7 +582,7 @@ function SliderCard({ label, value, onChange, note, valueLabel }: {
   );
 }
 
-function WorldBibleEditor({ world }: { world: World }) {
+function WorldBibleEditor({ world, onError }: { world: World; onError: (msg: string) => void }) {
   return (
     <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
       <Field label="World bible" note="the setting, rules and pressures — packed into every prompt">
@@ -551,7 +591,10 @@ function WorldBibleEditor({ world }: { world: World }) {
           className="serif"
           key={world.id + '-bible'}
           defaultValue={world.bible}
-          onBlur={(e) => void db.worlds.update(world.id, { bible: e.target.value, updatedAt: Date.now() })}
+          onBlur={(e) => void safeWrite(
+            () => db.worlds.update(world.id, { bible: e.target.value, updatedAt: Date.now() }),
+            onError
+          )}
           style={{ fontFamily: 'Spectral, serif', fontSize: 15, lineHeight: 1.7 }}
         />
       </Field>
@@ -559,7 +602,10 @@ function WorldBibleEditor({ world }: { world: World }) {
         <input
           key={world.id + '-line'}
           defaultValue={world.line}
-          onBlur={(e) => void db.worlds.update(world.id, { line: e.target.value, updatedAt: Date.now() })}
+          onBlur={(e) => void safeWrite(
+            () => db.worlds.update(world.id, { line: e.target.value, updatedAt: Date.now() }),
+            onError
+          )}
         />
       </Field>
     </div>

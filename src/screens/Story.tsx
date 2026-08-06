@@ -17,12 +17,13 @@ import type {
   Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, EpisodeWrapBeat,
   Location, OpenThread, Season, Turn, TurnLength, World
 } from '../types';
+import { AppError, classifyError, formatUserError } from '../errors';
 import { Chip, ErrorNote, Mono, Sheet, Spinner, Toggle, useVw } from '../ui/bits';
 import { fileToSceneImage } from '../ui/image';
 import { avatarStyle, BACKDROPS, MOODS, STRIPE } from '../ui/theme';
 import {
-  calendarPatch, characterPortraits, emptyLocation, formatStoryDate,
-  nextEpisode, weekdayForDay, worldCalendar
+  calendarPatch, characterPortraits, dayFromParts, emptyLocation, formatStoryDate,
+  advanceMonths, formatStoryDateShort, nextEpisode, partsForDay, weekdayForDay, worldCalendar
 } from '../worldOps';
 
 /** Editable wrap draft with Keep/Drop flags for the review UI. */
@@ -323,8 +324,8 @@ export function Story() {
     [season?.id]
   ) ?? [];
   const threads = useLiveQuery(
-    async () => (world ? db.threads.where('worldId').equals(world.id).filter((t) => t.status === 'open').toArray() : []),
-    [world?.id]
+    async () => (season ? db.threads.where('seasonId').equals(season.id).filter((t) => t.status === 'open').toArray() : []),
+    [season?.id]
   ) ?? [];
 
   // writing state
@@ -335,8 +336,9 @@ export function Story() {
   const [partial, setPartial] = useState('');
   const [partialMeta, setPartialMeta] = useState<StreamMeta>({ role: 'narrator' });
   const [progressLabel, setProgressLabel] = useState('writing…');
-  const [error, setError] = useState('');
+  const [error, setError] = useState<string | AppError>('');
   const [notice, setNotice] = useState('');
+  const wrapAbortRef = useRef<AbortController | null>(null);
   /** How many turns from the end are mounted — keeps long episodes responsive. */
   const [turnWindow, setTurnWindow] = useState(60);
   useEffect(() => { setTurnWindow(60); }, [episode?.id]);
@@ -436,8 +438,11 @@ export function Story() {
   };
 
   /** Shared streaming runner behind write / rewrite / retry. */
-  const runNarration = async (mode: ComposeMode, text: string): Promise<'ok' | 'error' | 'aborted'> => {
-    if (!world || !season || !episode) return 'error';
+  const runNarration = async (
+    mode: ComposeMode,
+    text: string
+  ): Promise<{ status: 'ok' | 'error' | 'aborted'; beatsCompleted: number }> => {
+    if (!world || !season || !episode) return { status: 'error', beatsCompleted: 0 };
     setError('');
     setNotice('');
     setStreaming(true);
@@ -451,26 +456,27 @@ export function Story() {
         world, season, episode, mode, input: text, length,
         signal: controller.signal,
         onProgress: setProgressLabel,
+        onNotice: setNotice,
         onDelta: (p, meta) => {
           setPartialMeta(meta);
           setPartial(p);
         }
       });
       setPartial('');
-      return 'ok';
+      return { status: 'ok', beatsCompleted: 1 };
     } catch (e) {
       setPartial('');
       if (e instanceof WriteAbortedError || (e as Error).name === 'AbortError') {
         const n = e instanceof WriteAbortedError ? e.beatsCompleted : 0;
         setNotice(
           n === 0
-            ? 'Stopped before any beat finished.'
+            ? 'Stopped before any reply — your line was not applied.'
             : `Stopped after ${n} beat${n === 1 ? '' : 's'}; incomplete beat discarded.`
         );
-        return 'aborted';
+        return { status: 'aborted', beatsCompleted: n };
       }
-      setError(e instanceof Error ? e.message : String(e));
-      return 'error';
+      setError(classifyError(e));
+      return { status: 'error', beatsCompleted: 0 };
     } finally {
       setStreaming(false);
       setProgressLabel('');
@@ -484,9 +490,10 @@ export function Story() {
     const text = input;
     setInput('');
     const result = await runNarration(composeMode, text);
-    if (result === 'ok') {
+    if (result.status === 'ok') {
       if (composeMode !== 'continue') setComposeMode('continue');
-    } else if (result === 'error') {
+    } else if (result.status === 'error' || result.beatsCompleted === 0) {
+      // Restore composer when nothing was applied (orphan user turn removed).
       setInput(text);
     }
   };
@@ -516,7 +523,7 @@ export function Story() {
     if (replaceSelf) await deleteTurnsFrom(turn.id, episode.id);
     else await deleteTurnsAfter(turn.id, episode.id);
     const result = await runNarration('continue', '');
-    if (result === 'ok') {
+    if (result.status === 'ok') {
       if (snapshot.length > 0) {
         await recordTombstones(snapshot.map((t) => ({
           table: 'turns' as const,
@@ -528,7 +535,7 @@ export function Story() {
       }
     } else {
       await rollbackTurnSnapshot(episode.id, snapshot, retryStartedAt);
-      if (result === 'error') {
+      if (result.status === 'error') {
         setError((prev) => prev || 'Retry failed — previous turns were restored.');
       } else {
         setNotice('Retry cancelled — previous turns were restored.');
@@ -557,6 +564,8 @@ export function Story() {
   };
 
   const closeWrapSheet = () => {
+    wrapAbortRef.current?.abort();
+    wrapAbortRef.current = null;
     setWrapOpen(null);
     setWrapPhase('ready');
     setWrapDraft(null);
@@ -571,18 +580,31 @@ export function Story() {
   /** Analyze the episode transcript into a reviewable wrap draft. */
   const runEpisodeAnalyze = async () => {
     if (!world || !season || !episode) return;
+    wrapAbortRef.current?.abort();
+    const controller = new AbortController();
+    wrapAbortRef.current = controller;
     setWrapBusy(true);
     setWrapPhase('analyzing');
     setError('');
     try {
-      const draft = await analyzeEpisode(world, season, episode);
+      const draft = await analyzeEpisode(world, season, episode, controller.signal);
+      if (controller.signal.aborted) {
+        setWrapPhase('ready');
+        setNotice('Analyze cancelled.');
+        return;
+      }
       setWrapDraft(draftFromAnalysis(draft));
       setWrapPhase('review');
     } catch (e) {
       setWrapPhase('ready');
-      setError(e instanceof Error ? e.message : String(e));
+      if ((e as Error).name === 'AbortError' || controller.signal.aborted) {
+        setNotice('Analyze cancelled.');
+      } else {
+        setError(classifyError(e));
+      }
     } finally {
       setWrapBusy(false);
+      if (wrapAbortRef.current === controller) wrapAbortRef.current = null;
     }
   };
 
@@ -595,7 +617,7 @@ export function Story() {
       await nextEpisode(episode);
       resetAfterEpisodeEnd();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(classifyError(e));
     } finally {
       setWrapBusy(false);
     }
@@ -647,7 +669,7 @@ export function Story() {
       });
       resetAfterEpisodeEnd();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(classifyError(e));
     } finally {
       setWrapBusy(false);
     }
@@ -766,17 +788,26 @@ export function Story() {
               {world.title.toLowerCase()} · ep {episode.number}{locLabel ? ` · ${locLabel}` : ''}
             </div>
           </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-            {showWrapNudge && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+            {!narrow && showWrapNudge && (
               <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11 }}
                 onClick={() => setWrapOpen('episode')}>File episode?</button>
             )}
             <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 12 }}
               onClick={() => setComposerOpen((o) => !o)}>
-              {composerOpen ? 'Hide write' : 'Write'}
+              {composerOpen ? 'Hide' : 'Write'}
             </button>
-            <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 12 }}
-              onClick={() => setLayout('write')}>Exit read</button>
+            {narrow ? (
+              <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 12 }}
+                onClick={() => setMoreSheet(true)}>More</button>
+            ) : (
+              <>
+                <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 12 }}
+                  onClick={() => setDirectorSheet(true)}>Direct</button>
+                <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 12 }}
+                  onClick={() => setLayout('write')}>Exit read</button>
+              </>
+            )}
           </div>
         </div>
       ) : (
@@ -1129,6 +1160,19 @@ export function Story() {
                 Skip summary · end anyway
               </button>
             </>
+          ) : wrapPhase === 'analyzing' ? (
+            <button
+              className="btn-ghost"
+              style={{ width: '100%', minHeight: 44 }}
+              onClick={() => {
+                wrapAbortRef.current?.abort();
+                setNotice('Analyze cancelled.');
+                setWrapPhase('ready');
+                setWrapBusy(false);
+              }}
+            >
+              Cancel analyze
+            </button>
           ) : (
             <>
               <button
@@ -1137,7 +1181,7 @@ export function Story() {
                 disabled={wrapBusy}
                 onClick={() => void runEpisodeAnalyze()}
               >
-                {wrapPhase === 'analyzing' || wrapBusy ? 'Reading the episode back…' : 'Analyze episode'}
+                Analyze episode
               </button>
               <button
                 className="btn-quiet"
@@ -1176,6 +1220,16 @@ export function Story() {
         </div>
 
         {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
+        {notice && (
+          <div style={{
+            fontSize: 12.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.85)',
+            border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '10px 12px',
+            background: 'rgba(255,255,255,0.05)', display: 'flex', gap: 10, alignItems: 'flex-start'
+          }}>
+            <span style={{ flex: 1 }}>{notice}</span>
+            <button className="btn-quiet" style={{ fontSize: 11, minHeight: 28 }} onClick={() => setNotice('')}>dismiss</button>
+          </div>
+        )}
 
         {wrapOpen === 'season' ? (
           <div style={{
@@ -1244,6 +1298,21 @@ export function Story() {
       >
         <div className="serif" style={{ fontWeight: 300, fontSize: 24, color: '#f6f4f0' }}>More</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {readMode && (
+            <>
+              {showWrapNudge && (
+                <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setWrapOpen('episode'); }}>
+                  File episode?
+                </button>
+              )}
+              <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setDirectorSheet(true); }}>
+                Direct
+              </button>
+              <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setLayout('write'); }}>
+                Exit read
+              </button>
+            </>
+          )}
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setDisplayOpen(true); }}>
             Display
           </button>
@@ -1331,7 +1400,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
       const image = await fileToSceneImage(file);
       await guardStorage(() => db.episodes.update(episode.id, { image, updatedAt: Date.now() }));
     } catch (e) {
-      setImgError(e instanceof Error ? e.message : String(e));
+      setImgError(formatUserError(e));
     } finally {
       setImgBusy(false);
     }
@@ -1352,7 +1421,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
       });
       await guardStorage(() => db.episodes.update(episode.id, { image, updatedAt: Date.now() }));
     } catch (e) {
-      setImgError(e instanceof Error ? e.message : String(e));
+      setImgError(formatUserError(e));
     } finally {
       setGenBusy(false);
     }
@@ -1700,7 +1769,7 @@ function SceneLocationsPanel({ episode, locations, accent, world, onGoLocations 
       });
       await guardStorage(() => db.episodes.update(episode.id, { image, updatedAt: Date.now() }));
     } catch (e) {
-      setGenError(e instanceof Error ? e.message : String(e));
+      setGenError(formatUserError(e));
     } finally {
       setGenBusy(false);
     }
@@ -1941,7 +2010,7 @@ function DirectorContent(props: {
   );
 }
 
-/** Controllable in-fiction calendar: day, weekday, episode stamp, advance rules. */
+/** Controllable in-fiction calendar: day / month / year, weekday, episode stamp. */
 function CalendarTrackerPanel({
   world, season, episode
 }: {
@@ -1950,15 +2019,22 @@ function CalendarTrackerPanel({
   episode: Episode;
 }) {
   const cal = worldCalendar(world);
+  const today = partsForDay(cal, cal.currentDay);
   const epDay = episode.storyDay && episode.storyDay > 0 ? episode.storyDay : cal.currentDay;
   const loc = episode.location.trim() || 'no location set';
+  const inputStyle: CSSProperties = {
+    fontFamily: "'IBM Plex Mono', monospace", fontSize: 12,
+    background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.12)',
+    borderRadius: 8, padding: '6px 8px', color: '#f0eee9'
+  };
 
-  // Backfill storyDay on older episodes the first time the tracker is shown.
+  // Stamp open day once for legacy episodes — do not re-stamp when "today" moves.
   useEffect(() => {
     if (episode.storyDay == null || episode.storyDay < 1) {
       void db.episodes.update(episode.id, { storyDay: cal.currentDay, updatedAt: Date.now() });
     }
-  }, [episode.id, episode.storyDay, cal.currentDay]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only when episode id / missing storyDay
+  }, [episode.id, episode.storyDay]);
 
   const setDay = (day: number) => {
     const next = Math.max(1, Math.floor(day));
@@ -1968,9 +2044,13 @@ function CalendarTrackerPanel({
     });
   };
 
+  const setParts = (year: number, monthIndex: number, dayOfMonth: number) => {
+    setDay(dayFromParts(cal, year, monthIndex, dayOfMonth));
+  };
+
   const setAdvance = (n: number) => {
     void db.worlds.update(world.id, {
-      calendar: calendarPatch(world, { episodeAdvanceDays: Math.max(0, Math.min(30, Math.floor(n))) }),
+      calendar: calendarPatch(world, { episodeAdvanceDays: Math.max(0, Math.min(365, Math.floor(n))) }),
       updatedAt: Date.now()
     });
   };
@@ -1986,6 +2066,8 @@ function CalendarTrackerPanel({
     void db.episodes.update(episode.id, { storyDay: cal.currentDay, updatedAt: Date.now() });
   };
 
+  const monthLen = cal.monthLengths[today.monthIndex] ?? 30;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <Mono style={{ fontSize: 9 }}>calendar tracker</Mono>
@@ -1994,44 +2076,74 @@ function CalendarTrackerPanel({
         background: 'rgba(255,255,255,0.04)', display: 'flex', flexDirection: 'column', gap: 12
       }}>
         <div className="serif" style={{ fontSize: 20, lineHeight: 1.3, color: '#f0eee9' }}>
-          {formatStoryDate(cal, cal.currentDay)}
+          {formatStoryDateShort(cal, cal.currentDay)}
         </div>
         <div style={{ fontSize: 12.5, lineHeight: 1.45, opacity: 0.65, color: '#eceae6' }}>
-          S{season.number} · E{episode.number} · {loc}
+          Absolute day {cal.currentDay} · S{season.number} · E{episode.number} · {loc}
           <br />
-          Episode opened {formatStoryDate(cal, epDay)}
-          {episode.storyDayEnd ? ` → ended ${formatStoryDate(cal, episode.storyDayEnd)}` : ''}
+          Episode opened {formatStoryDateShort(cal, epDay)}
+          {episode.storyDayEnd ? ` → ended ${formatStoryDateShort(cal, episode.storyDayEnd)}` : ''}
         </div>
 
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
           <Chip onClick={() => setDay(cal.currentDay - 1)}>−1</Chip>
           <Chip onClick={() => setDay(cal.currentDay + 1)}>+1 day</Chip>
           <Chip onClick={() => setDay(cal.currentDay + 7)}>+7</Chip>
-          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, opacity: 0.8 }}>
-            day
+          <Chip onClick={() => setDay(advanceMonths(cal, cal.currentDay, 1))}>+1 month</Chip>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr 0.9fr', gap: 8 }}>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <Mono style={{ fontSize: 8, opacity: 0.5 }}>day</Mono>
             <input
               type="number"
               min={1}
-              value={cal.currentDay}
-              onChange={(e) => setDay(Number(e.target.value) || 1)}
-              style={{
-                width: 64, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12,
-                background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.12)',
-                borderRadius: 8, padding: '6px 8px', color: '#f0eee9'
-              }}
+              max={monthLen}
+              value={today.dayOfMonth}
+              onChange={(e) => setParts(today.year, today.monthIndex, Number(e.target.value) || 1)}
+              style={inputStyle}
+            />
+          </label>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <Mono style={{ fontSize: 8, opacity: 0.5 }}>month</Mono>
+            <select
+              value={today.monthIndex}
+              onChange={(e) => setParts(today.year, Number(e.target.value), today.dayOfMonth)}
+              style={{ ...inputStyle, width: '100%' }}
+            >
+              {cal.months.map((name, i) => (
+                <option key={name + i} value={i}>{name}</option>
+              ))}
+            </select>
+          </label>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <Mono style={{ fontSize: 8, opacity: 0.5 }}>year</Mono>
+            <input
+              type="number"
+              value={today.year}
+              onChange={(e) => setParts(Number(e.target.value) || cal.yearOne, today.monthIndex, today.dayOfMonth)}
+              style={inputStyle}
             />
           </label>
         </div>
+
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, opacity: 0.75 }}>
+          absolute day
+          <input
+            type="number"
+            min={1}
+            value={cal.currentDay}
+            onChange={(e) => setDay(Number(e.target.value) || 1)}
+            style={{ ...inputStyle, width: 72 }}
+          />
+        </label>
 
         <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           <Mono style={{ fontSize: 8, opacity: 0.5 }}>weekday of day 1</Mono>
           <select
             value={cal.dayOneWeekday}
             onChange={(e) => setDayOneWeekday(Number(e.target.value))}
-            style={{
-              fontSize: 13, background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.12)',
-              borderRadius: 8, padding: '8px 10px', color: '#f0eee9'
-            }}
+            style={{ ...inputStyle, width: '100%', fontSize: 13, padding: '8px 10px' }}
           >
             {cal.weekdays.map((name, i) => (
               <option key={name + i} value={i}>
@@ -2041,23 +2153,64 @@ function CalendarTrackerPanel({
           </select>
         </label>
 
+        <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 0.9fr', gap: 8 }}>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <Mono style={{ fontSize: 8, opacity: 0.5 }}>month of day 1</Mono>
+            <select
+              value={cal.dayOneMonth}
+              onChange={(e) => {
+                void db.worlds.update(world.id, {
+                  calendar: calendarPatch(world, { dayOneMonth: Number(e.target.value) }),
+                  updatedAt: Date.now()
+                });
+              }}
+              style={{ ...inputStyle, width: '100%' }}
+            >
+              {cal.months.map((name, i) => (
+                <option key={name + i} value={i}>{name}</option>
+              ))}
+            </select>
+          </label>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <Mono style={{ fontSize: 8, opacity: 0.5 }}>date of day 1</Mono>
+            <input
+              type="number"
+              min={1}
+              max={cal.monthLengths[cal.dayOneMonth] ?? 30}
+              value={cal.dayOneDate}
+              onChange={(e) => {
+                void db.worlds.update(world.id, {
+                  calendar: calendarPatch(world, { dayOneDate: Math.max(1, Number(e.target.value) || 1) }),
+                  updatedAt: Date.now()
+                });
+              }}
+              style={inputStyle}
+            />
+          </label>
+        </div>
+
         <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           <Mono style={{ fontSize: 8, opacity: 0.5 }}>days to advance when episode ends</Mono>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-            {[0, 1, 2, 7].map((n) => (
-              <Chip
-                key={n}
-                active={cal.episodeAdvanceDays === n}
-                onClick={() => setAdvance(n)}
-              >
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+            {[0, 1, 2, 7, 14].map((n) => (
+              <Chip key={n} active={cal.episodeAdvanceDays === n} onClick={() => setAdvance(n)}>
                 {n === 0 ? 'same day' : n === 1 ? '+1 day' : `+${n}`}
               </Chip>
             ))}
+            <input
+              type="number"
+              min={0}
+              max={365}
+              value={cal.episodeAdvanceDays}
+              onChange={(e) => setAdvance(Math.max(0, Math.min(365, Number(e.target.value) || 0)))}
+              style={{ ...inputStyle, width: 64 }}
+              title="Custom advance days"
+            />
           </div>
         </label>
 
         <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <Mono style={{ fontSize: 8, opacity: 0.5 }}>calendar system (optional)</Mono>
+          <Mono style={{ fontSize: 8, opacity: 0.5 }}>calendar system (optional notes)</Mono>
           <textarea
             key={world.id + '-dir-cal-system'}
             rows={2}
@@ -2068,8 +2221,51 @@ function CalendarTrackerPanel({
                 updatedAt: Date.now()
               });
             }}
-            placeholder="Month names, seasons, feast days — narrator follows this verbatim"
+            placeholder="Feast days, era name — narrator follows this verbatim. Month lengths are fixed (no leap days)."
             style={{ fontSize: 12.5, lineHeight: 1.45, color: '#eceae6' }}
+          />
+        </label>
+        <div style={{ fontSize: 11.5, opacity: 0.45, lineHeight: 1.4 }}>
+          Story day 1 is the earliest date ({cal.dayOneDate} {cal.months[cal.dayOneMonth]} Y{cal.yearOne}). Dates before that clamp to day 1.
+        </div>
+
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <Mono style={{ fontSize: 8, opacity: 0.5 }}>months (comma-separated)</Mono>
+          <input
+            key={world.id + '-months'}
+            defaultValue={cal.months.join(', ')}
+            onBlur={(e) => {
+              const months = e.target.value.split(',').map((s) => s.trim()).filter(Boolean);
+              if (months.length === 0) return;
+              const monthLengths = months.map((_, i) => cal.monthLengths[i] ?? 30);
+              void db.worlds.update(world.id, {
+                calendar: calendarPatch(world, {
+                  months,
+                  monthLengths,
+                  dayOneMonth: Math.min(cal.dayOneMonth, months.length - 1)
+                }),
+                updatedAt: Date.now()
+              });
+            }}
+            style={{ fontSize: 12.5, color: '#eceae6' }}
+          />
+        </label>
+
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <Mono style={{ fontSize: 8, opacity: 0.5 }}>days per month (comma-separated, same order)</Mono>
+          <input
+            key={world.id + '-month-lengths'}
+            defaultValue={cal.monthLengths.join(', ')}
+            onBlur={(e) => {
+              const monthLengths = e.target.value.split(',').map((s) => Math.max(1, Math.min(90, Number(s.trim()) || 30)));
+              if (monthLengths.length === 0) return;
+              while (monthLengths.length < cal.months.length) monthLengths.push(30);
+              void db.worlds.update(world.id, {
+                calendar: calendarPatch(world, { monthLengths: monthLengths.slice(0, cal.months.length) }),
+                updatedAt: Date.now()
+              });
+            }}
+            style={{ fontSize: 12.5, color: '#eceae6' }}
           />
         </label>
 
@@ -2092,7 +2288,7 @@ function CalendarTrackerPanel({
 
         {epDay !== cal.currentDay && (
           <button className="btn-ghost" style={{ fontSize: 11, alignSelf: 'flex-start' }} onClick={stampEpisodeDay}>
-            Stamp episode open day → {formatStoryDate(cal, cal.currentDay)}
+            Stamp episode open day → {formatStoryDateShort(cal, cal.currentDay)}
           </button>
         )}
       </div>

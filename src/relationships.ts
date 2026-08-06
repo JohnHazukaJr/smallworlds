@@ -24,8 +24,11 @@ export function normalizeRelationships(
     const targetId = (r.targetId ?? '').trim();
     if (!targetId || !allowed.has(targetId)) continue;
     if (selfId && targetId === selfId) continue;
-    const kind = (r.kind ?? '').trim() || 'linked';
-    const note = (r.note ?? '').trim();
+    // Do not .trim() kind/note here — Cast edits are controlled inputs; trimming on
+    // every keystroke eats spaces while typing ("old " → "old" before "friend").
+    const kindRaw = r.kind ?? '';
+    const kind = kindRaw.trim().length > 0 ? kindRaw : 'linked';
+    const note = r.note ?? '';
     const prev = byTarget.get(targetId);
     if (!prev) {
       byTarget.set(targetId, { targetId, kind, note });
@@ -36,11 +39,20 @@ export function normalizeRelationships(
       targetId,
       kind: prev.kind.trim() ? prev.kind : kind,
       note: prev.note.trim()
-        ? (note && note.length > prev.note.length ? note : prev.note)
+        ? (note.trim() && note.length > prev.note.length ? note : prev.note)
         : note
     });
   }
   return [...byTarget.values()];
+}
+
+/** Trim relationship text fields once (blur / AI flesh-out), not on every keystroke. */
+export function trimRelationships(rels: Relationship[]): Relationship[] {
+  return rels.map((r) => ({
+    ...r,
+    kind: (r.kind ?? '').trim() || 'linked',
+    note: (r.note ?? '').trim()
+  }));
 }
 
 /** Strip dead targetIds from every character after a cast member is removed. */
@@ -86,14 +98,15 @@ export function hasLink(rels: Relationship[], toId: string): boolean {
   return rels.some((r) => r.targetId === toId);
 }
 
-/** Upsert a single outbound link keyed by targetId. */
+/** Upsert a single outbound link keyed by targetId. Does not trim kind/note (blur does). */
 export function upsertLink(rels: Relationship[], link: Relationship): Relationship[] {
   const next = [...rels];
   const i = next.findIndex((r) => r.targetId === link.targetId);
+  const kindRaw = link.kind ?? '';
   const row: Relationship = {
     targetId: link.targetId,
-    kind: (link.kind ?? '').trim() || 'linked',
-    note: (link.note ?? '').trim()
+    kind: kindRaw.trim().length > 0 ? kindRaw : 'linked',
+    note: link.note ?? ''
   };
   if (i >= 0) next[i] = row;
   else next.push(row);

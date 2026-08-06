@@ -23,13 +23,31 @@ export interface VaultData {
   keys: CipherPayload;
 }
 
+export class VaultCorruptError extends Error {
+  readonly name = 'VaultCorruptError';
+  constructor() {
+    super('Vault data is unreadable.');
+  }
+}
+
 function readVault(): VaultData | null {
   const raw = localStorage.getItem(VAULT_STORAGE_KEY);
   if (!raw) return null;
   try {
     return JSON.parse(raw) as VaultData;
   } catch {
-    return null;
+    throw new VaultCorruptError();
+  }
+}
+
+function probeVault(): { enabled: boolean; locked: boolean; corrupt: boolean } {
+  const raw = localStorage.getItem(VAULT_STORAGE_KEY);
+  if (!raw) return { enabled: false, locked: false, corrupt: false };
+  try {
+    JSON.parse(raw) as VaultData;
+    return { enabled: true, locked: true, corrupt: false };
+  } catch {
+    return { enabled: true, locked: true, corrupt: true };
   }
 }
 
@@ -61,6 +79,8 @@ function repersistSettings() {
 interface VaultStore {
   enabled: boolean;
   locked: boolean;
+  /** True when localStorage holds vault bytes that do not parse as JSON. */
+  corrupt: boolean;
   sessionKey: CryptoKey | null;
   enable: (passphrase: string) => Promise<void>;
   unlock: (passphrase: string) => Promise<boolean>;
@@ -79,9 +99,12 @@ interface VaultStore {
   importVaultBlob: (data: VaultData) => void;
 }
 
+const initialVault = probeVault();
+
 export const useVault = create<VaultStore>()((set, get) => ({
-  enabled: !!readVault(),
-  locked: !!readVault(),
+  enabled: initialVault.enabled,
+  locked: initialVault.locked,
+  corrupt: initialVault.corrupt,
   sessionKey: null,
 
   enable: async (passphrase) => {
@@ -94,14 +117,23 @@ export const useVault = create<VaultStore>()((set, get) => ({
       keys: await encryptString(key, JSON.stringify(currentKeyMap()))
     };
     writeVault(data);
-    set({ enabled: true, locked: false, sessionKey: key });
+    set({ enabled: true, locked: false, corrupt: false, sessionKey: key });
     repersistSettings(); // strips plaintext keys from localStorage
   },
 
   unlock: async (passphrase) => {
-    const data = readVault();
+    let data: VaultData | null;
+    try {
+      data = readVault();
+    } catch (e) {
+      if (e instanceof VaultCorruptError) {
+        set({ enabled: true, locked: true, corrupt: true, sessionKey: null });
+        throw e;
+      }
+      throw e;
+    }
     if (!data) {
-      set({ enabled: false, locked: false, sessionKey: null });
+      set({ enabled: false, locked: false, corrupt: false, sessionKey: null });
       return true;
     }
     const key = await deriveKey(passphrase, data.salt);
@@ -128,15 +160,15 @@ export const useVault = create<VaultStore>()((set, get) => ({
   },
 
   disable: async () => {
-    if (get().locked) throw new Error('Unlock first');
+    if (get().locked && !get().corrupt) throw new Error('Unlock first');
     localStorage.removeItem(VAULT_STORAGE_KEY);
-    set({ enabled: false, locked: false, sessionKey: null });
+    set({ enabled: false, locked: false, corrupt: false, sessionKey: null });
     repersistSettings(); // keys persist in plaintext again
   },
 
   persistKeys: async () => {
-    const { enabled, locked, sessionKey } = get();
-    if (!enabled || locked || !sessionKey) return;
+    const { enabled, locked, sessionKey, corrupt } = get();
+    if (!enabled || locked || !sessionKey || corrupt) return;
     const data = readVault();
     if (!data) return;
     data.keys = await encryptString(sessionKey, JSON.stringify(currentKeyMap()));
@@ -171,16 +203,22 @@ export const useVault = create<VaultStore>()((set, get) => ({
   reset: () => {
     localStorage.removeItem(VAULT_STORAGE_KEY);
     useSettings.setState((s) => ({ providers: s.providers.map((p) => ({ ...p, apiKey: '' })) }));
-    set({ enabled: false, locked: false, sessionKey: null });
+    set({ enabled: false, locked: false, corrupt: false, sessionKey: null });
     repersistSettings();
   },
 
-  exportVaultBlob: () => readVault(),
+  exportVaultBlob: () => {
+    try {
+      return readVault();
+    } catch {
+      return null;
+    }
+  },
 
   importVaultBlob: (data) => {
     writeVault(data);
     useSettings.setState((s) => ({ providers: s.providers.map((p) => ({ ...p, apiKey: '' })) }));
-    set({ enabled: true, locked: true, sessionKey: null });
+    set({ enabled: true, locked: true, corrupt: false, sessionKey: null });
     repersistSettings();
   }
 }));

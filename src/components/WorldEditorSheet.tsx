@@ -1,14 +1,24 @@
-import { useState } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { useState, type ReactNode } from 'react';
 import { fleshOutNarratorRules, fleshOutPremise, fleshOutWorldLore } from '../ai/engine';
-import { db } from '../db';
+import {
+  preferBucketsForEpisodes, selectDirectorFacts, selectDirectorThreads
+} from '../ai/prompts';
+import { db, safeWrite } from '../db';
+import { formatUserError } from '../errors';
 import { ModelPicker } from '../screens/Settings';
 import { useApp } from '../store/app';
-import type { Character, Episode, Location, Season, World, WorldAISettings } from '../types';
+import type {
+  Character, ContinuityFact, Episode, Location, OpenThread, Season, World, WorldAISettings
+} from '../types';
 import { Bar, Chip, ErrorNote, Field, Mono, Sheet, Spinner, Toggle } from '../ui/bits';
 import { avatarStyle } from '../ui/theme';
-import { calendarPatch, emptyCharacter, emptyLocation, formatStoryDate, worldCalendar } from '../worldOps';
+import {
+  advanceMonths, calendarPatch, dayFromParts, emptyCharacter, emptyLocation,
+  formatEpisodeDateRange, formatStoryDateShort, partsForDay, worldCalendar
+} from '../worldOps';
 
-type Tab = 'lore' | 'plot' | 'instructions' | 'settings' | 'cast' | 'locations';
+type Tab = 'context' | 'lore' | 'plot' | 'instructions' | 'settings' | 'cast' | 'locations';
 
 const MONO_INPUT = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 } as const;
 
@@ -30,7 +40,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
   const go = useApp((s) => s.go);
   const goCast = useApp((s) => s.goCast);
   const goLocations = useApp((s) => s.goLocations);
-  const [tab, setTab] = useState<Tab>('lore');
+  const [tab, setTab] = useState<Tab>('context');
   const [charId, setCharId] = useState<string | null>(null);
   const [locId, setLocId] = useState<string | null>(null);
   const selected = characters.find((c) => c.id === charId) ?? null;
@@ -43,20 +53,25 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
   const [undoLore, setUndoLore] = useState<{ title: string; line: string; bible: string } | null>(null);
   const [undoPlot, setUndoPlot] = useState<string | null>(null);
   const [undoRules, setUndoRules] = useState<string[] | null>(null);
+  const [saveError, setSaveError] = useState('');
 
-  const patchWorld = (p: Partial<World>) => void db.worlds.update(world.id, { ...p, updatedAt: Date.now() });
+  const onSaveFail = (msg: string) => setSaveError(msg);
+  const patchWorld = (p: Partial<World>) =>
+    void safeWrite(() => db.worlds.update(world.id, { ...p, updatedAt: Date.now() }), onSaveFail);
   const patchAI = (p: Partial<WorldAISettings>) => patchWorld({ ai: { ...world.ai, ...p } });
-  const patchSeason = (p: Partial<Season>) => void db.seasons.update(season.id, { ...p, updatedAt: Date.now() });
-  const patchEpisode = (p: Partial<Episode>) => void db.episodes.update(episode.id, { ...p, updatedAt: Date.now() });
+  const patchSeason = (p: Partial<Season>) =>
+    void safeWrite(() => db.seasons.update(season.id, { ...p, updatedAt: Date.now() }), onSaveFail);
+  const patchEpisode = (p: Partial<Episode>) =>
+    void safeWrite(() => db.episodes.update(episode.id, { ...p, updatedAt: Date.now() }), onSaveFail);
   const patchChar = (id: string, p: Partial<Character>) =>
-    void db.characters.update(id, { ...p, updatedAt: Date.now() });
+    void safeWrite(() => db.characters.update(id, { ...p, updatedAt: Date.now() }), onSaveFail);
   const patchLoc = (id: string, p: Partial<Location>) =>
-    void db.locations.update(id, { ...p, updatedAt: Date.now() }).then(() => {
-      // Keep episode location name in sync if this place is the active setting.
+    void safeWrite(async () => {
+      await db.locations.update(id, { ...p, updatedAt: Date.now() });
       if (episode.locationId === id && typeof p.name === 'string') {
-        void db.episodes.update(episode.id, { location: p.name });
+        await db.episodes.update(episode.id, { location: p.name });
       }
-    });
+    }, onSaveFail);
 
   const runFlesh = async (kind: 'lore' | 'plot' | 'rules', task: () => Promise<void>) => {
     setFlesh({ busy: kind, error: '', errorFor: null });
@@ -65,7 +80,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
       setAiVersion((v) => v + 1);
       setFlesh({ busy: null, error: '', errorFor: null });
     } catch (e) {
-      setFlesh({ busy: null, error: e instanceof Error ? e.message : String(e), errorFor: kind });
+      setFlesh({ busy: null, error: formatUserError(e), errorFor: kind });
     }
   };
 
@@ -101,12 +116,26 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
       </div>
 
       <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
-        {(['lore', 'plot', 'instructions', 'settings', 'cast', 'locations'] as const).map((t) => (
-          <Chip key={t} active={tab === t} onClick={() => setTab(t)}>{t[0].toUpperCase() + t.slice(1)}</Chip>
+        {(['context', 'lore', 'plot', 'instructions', 'settings', 'cast', 'locations'] as const).map((t) => (
+          <Chip key={t} active={tab === t} onClick={() => setTab(t)}>
+            {t === 'context' ? 'Context' : t[0].toUpperCase() + t.slice(1)}
+          </Chip>
         ))}
       </div>
 
+      {saveError && <ErrorNote error={saveError} onDismiss={() => setSaveError('')} />}
+
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 16, paddingRight: 2 }}>
+        {tab === 'context' && (
+          <ContextPreview
+            world={world} season={season} episode={episode}
+            characters={characters} locations={locations}
+            onEditLore={() => setTab('lore')}
+            onEditPlot={() => setTab('plot')}
+            monoPx={monoPx}
+          />
+        )}
+
         {tab === 'lore' && (
           <>
             <Field label="Title">
@@ -161,33 +190,86 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
             <Field label="Calendar" note="full tracker also lives in Story → Direct; advances on episode end by your rule">
               {(() => {
                 const cal = worldCalendar(world);
+                const today = partsForDay(cal, cal.currentDay);
+                const monthLen = cal.monthLengths[today.monthIndex] ?? 30;
                 const patchCal = (p: Parameters<typeof calendarPatch>[1]) =>
                   patchWorld({ calendar: calendarPatch(world, p) });
+                const setParts = (year: number, monthIndex: number, dayOfMonth: number) =>
+                  patchCal({ currentDay: dayFromParts(cal, year, monthIndex, dayOfMonth) });
                 return (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                     <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: '#f0eee9' }}>
-                      {formatStoryDate(cal, cal.currentDay)}
+                      {formatStoryDateShort(cal, cal.currentDay)}
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                       <Chip onClick={() => patchCal({ currentDay: Math.max(1, cal.currentDay - 1) })}>−1</Chip>
                       <Chip onClick={() => patchCal({ currentDay: cal.currentDay + 1 })}>+1 day</Chip>
                       <Chip onClick={() => patchCal({ currentDay: cal.currentDay + 7 })}>+7 days</Chip>
+                      <Chip onClick={() => patchCal({ currentDay: advanceMonths(cal, cal.currentDay, 1) })}>+1 month</Chip>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr 0.9fr', gap: 8 }}>
+                      <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, opacity: 0.75 }}>
+                        Day
+                        <input
+                          type="number"
+                          min={1}
+                          max={monthLen}
+                          value={today.dayOfMonth}
+                          onChange={(e) => setParts(today.year, today.monthIndex, Number(e.target.value) || 1)}
+                          style={{ ...MONO_INPUT, width: '100%' }}
+                        />
+                      </label>
+                      <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, opacity: 0.75 }}>
+                        Month
+                        <select
+                          value={today.monthIndex}
+                          onChange={(e) => setParts(today.year, Number(e.target.value), today.dayOfMonth)}
+                          style={{ fontSize: 13, padding: '8px 10px' }}
+                        >
+                          {cal.months.map((name, i) => (
+                            <option key={name + i} value={i}>{name}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, opacity: 0.75 }}>
+                        Year
+                        <input
+                          type="number"
+                          value={today.year}
+                          onChange={(e) => setParts(Number(e.target.value) || cal.yearOne, today.monthIndex, today.dayOfMonth)}
+                          style={{ ...MONO_INPUT, width: '100%' }}
+                        />
+                      </label>
+                    </div>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, opacity: 0.75 }}>
+                      Absolute day
                       <input
                         type="number"
                         min={1}
                         value={cal.currentDay}
                         onChange={(e) => patchCal({ currentDay: Math.max(1, Number(e.target.value) || 1) })}
-                        style={{ width: 72, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}
+                        style={{ width: 72, ...MONO_INPUT }}
                       />
-                    </div>
+                    </label>
                     <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, opacity: 0.75 }}>
                       Days to advance when an episode ends
-                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                        {[0, 1, 2, 7].map((n) => (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                        {[0, 1, 2, 7, 14].map((n) => (
                           <Chip key={n} active={cal.episodeAdvanceDays === n} onClick={() => patchCal({ episodeAdvanceDays: n })}>
                             {n === 0 ? 'same day' : `+${n}`}
                           </Chip>
                         ))}
+                        <input
+                          type="number"
+                          min={0}
+                          max={365}
+                          value={cal.episodeAdvanceDays}
+                          onChange={(e) => patchCal({
+                            episodeAdvanceDays: Math.max(0, Math.min(365, Number(e.target.value) || 0))
+                          })}
+                          style={{ width: 64, ...MONO_INPUT }}
+                          title="Custom advance days"
+                        />
                       </div>
                     </label>
                     <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, opacity: 0.75 }}>
@@ -202,18 +284,76 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                         ))}
                       </select>
                     </label>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 0.9fr', gap: 8 }}>
+                      <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, opacity: 0.75 }}>
+                        Month of day 1
+                        <select
+                          value={cal.dayOneMonth}
+                          onChange={(e) => patchCal({ dayOneMonth: Number(e.target.value) })}
+                          style={{ fontSize: 13, padding: '8px 10px' }}
+                        >
+                          {cal.months.map((name, i) => (
+                            <option key={name + i} value={i}>{name}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, opacity: 0.75 }}>
+                        Date of day 1
+                        <input
+                          type="number"
+                          min={1}
+                          max={cal.monthLengths[cal.dayOneMonth] ?? 30}
+                          value={cal.dayOneDate}
+                          onChange={(e) => patchCal({ dayOneDate: Math.max(1, Number(e.target.value) || 1) })}
+                          style={{ ...MONO_INPUT, width: '100%' }}
+                        />
+                      </label>
+                    </div>
                     <input
                       key={world.id + '-weekdays'}
                       defaultValue={cal.weekdays.join(', ')}
                       onBlur={(e) => {
                         const weekdays = e.target.value.split(',').map((s) => s.trim()).filter(Boolean);
-                        if (weekdays.length) patchCal({ weekdays });
+                        if (weekdays.length) {
+                          patchCal({
+                            weekdays,
+                            dayOneWeekday: Math.min(cal.dayOneWeekday, weekdays.length - 1)
+                          });
+                        }
                       }}
                       placeholder="Weekday names, comma-separated"
                     />
+                    <input
+                      key={world.id + '-months'}
+                      defaultValue={cal.months.join(', ')}
+                      onBlur={(e) => {
+                        const months = e.target.value.split(',').map((s) => s.trim()).filter(Boolean);
+                        if (!months.length) return;
+                        const monthLengths = months.map((_, i) => cal.monthLengths[i] ?? 30);
+                        patchCal({
+                          months,
+                          monthLengths,
+                          dayOneMonth: Math.min(cal.dayOneMonth, months.length - 1)
+                        });
+                      }}
+                      placeholder="Month names, comma-separated"
+                    />
+                    <input
+                      key={world.id + '-month-lengths'}
+                      defaultValue={cal.monthLengths.join(', ')}
+                      onBlur={(e) => {
+                        const monthLengths = e.target.value
+                          .split(',')
+                          .map((s) => Math.max(1, Math.min(90, Number(s.trim()) || 30)));
+                        if (!monthLengths.length) return;
+                        while (monthLengths.length < cal.months.length) monthLengths.push(30);
+                        patchCal({ monthLengths: monthLengths.slice(0, cal.months.length) });
+                      }}
+                      placeholder="Days per month, comma-separated"
+                    />
                     <textarea key={world.id + '-cal-system'} rows={2} defaultValue={cal.system}
                       onBlur={(e) => patchCal({ system: e.target.value })}
-                      placeholder="Optional — month names, seasons, feast days. Narrator follows this verbatim." />
+                      placeholder="Optional — era name, feast days. Narrator follows this verbatim." />
                   </div>
                 );
               })()}
@@ -228,7 +368,19 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
             </Field>
             <Field label="Episode location note" note="free text · pick a saved location from the Locations tab or Story Direct">
               <textarea key={episode.id + '-loc'} rows={2} defaultValue={episode.location}
-                onBlur={(e) => patchEpisode({ location: e.target.value, locationId: null })} />
+                onBlur={(e) => {
+                  const text = e.target.value;
+                  const linked = episode.locationId
+                    ? locations.find((l) => l.id === episode.locationId)
+                    : null;
+                  const byName = locations.find(
+                    (l) => l.name.trim() && l.name.trim().toLowerCase() === text.trim().toLowerCase()
+                  );
+                  const keepId = linked && linked.name.trim().toLowerCase() === text.trim().toLowerCase()
+                    ? linked.id
+                    : byName?.id ?? null;
+                  patchEpisode({ location: text, locationId: keepId });
+                }} />
             </Field>
             {season.bible && (
               <Field label="Season recap — previously on" note="carried from the last season">
@@ -536,6 +688,240 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
         )}
       </div>
     </Sheet>
+  );
+}
+
+function clipPreview(text: string, max: number): string {
+  const t = text.trim();
+  if (t.length <= max) return t;
+  return `${t.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
+}
+
+function ContextSection({ title, children, note }: { title: string; children: ReactNode; note?: string }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+        <Mono style={{ fontSize: 9, opacity: 0.55 }}>{title}</Mono>
+        {note && <span style={{ fontSize: 11, opacity: 0.45 }}>{note}</span>}
+      </div>
+      <div style={{
+        border: '1px solid rgba(255,255,255,0.08)', borderRadius: 12,
+        padding: '12px 14px', background: 'rgba(0,0,0,0.18)',
+        display: 'flex', flexDirection: 'column', gap: 8,
+        fontSize: 13, lineHeight: 1.55, color: 'rgba(236,234,230,0.88)'
+      }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** Soft mirror of director-plan context (plus a clipped world bible the narrator also sees). */
+function ContextPreview({
+  world, season, episode, characters, locations, onEditLore, onEditPlot, monoPx
+}: {
+  world: World;
+  season: Season;
+  episode: Episode;
+  characters: Character[];
+  locations: Location[];
+  onEditLore: () => void;
+  onEditPlot: () => void;
+  monoPx: number;
+}) {
+  const continuity = useLiveQuery(
+    () => db.continuity.where('seasonId').equals(season.id).toArray(),
+    [season.id]
+  ) ?? [];
+  const threads = useLiveQuery(
+    () => db.threads.where('seasonId').equals(season.id).filter((t) => t.status === 'open').toArray(),
+    [season.id]
+  ) ?? [];
+  const priorEps = useLiveQuery(
+    async () => {
+      const all = await db.episodes.where('seasonId').equals(season.id).toArray();
+      return all
+        .filter((e) => e.number < episode.number && !!e.wrap?.recap?.trim())
+        .sort((a, b) => a.number - b.number)
+        .slice(-3);
+    },
+    [season.id, episode.number]
+  ) ?? [];
+
+  const cal = worldCalendar(world);
+  const dateLine = formatEpisodeDateRange(cal, episode.storyDay, episode.storyDayEnd);
+  const locName = episode.location.trim()
+    || locations.find((l) => l.id === episode.locationId)?.name
+    || '—';
+  const inScene = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
+  const player = characters.find((c) => c.isPlayer);
+  const offScene = characters.filter((c) => !episode.castIds.includes(c.id) && !c.isPlayer);
+  const guests = (episode.guests ?? []).filter((g) => {
+    const active = episode.activeGuestIds;
+    if (active === undefined) return true;
+    return active.includes(g.id);
+  });
+  const prefer = preferBucketsForEpisodes(priorEps, episode);
+  const facts = selectDirectorFacts(continuity, prefer);
+  const openThreads = selectDirectorThreads(threads, prefer);
+  const walls = [...inScene, ...(player ? [player] : [])].filter((c) => c.mustNotKnow?.trim());
+  const bible = season.bible;
+  const carried = (bible?.carriedBeats ?? [])
+    .filter((b) => b.disposition === 'raise' || b.disposition === 'keep')
+    .slice(0, 4);
+  const worldClip = clipPreview(world.bible || world.line || '', 320);
+  const running = episode.runningSummary?.trim();
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
+        What the director plans from on the next turn (soft preview, not a raw dump). Narration also gets the world bible below.
+      </div>
+
+      <ContextSection title="now" note="episode · date · place · cast">
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: monoPx }}>
+          S{season.number} · E{episode.number}
+          {episode.title ? ` — ${episode.title}` : ''}
+        </div>
+        <div>Today: {formatStoryDateShort(cal, cal.currentDay)}</div>
+        <div style={{ opacity: 0.7 }}>Episode date: {dateLine}</div>
+        {episode.dateNote?.trim() && (
+          <div style={{ opacity: 0.7 }}>Date note: {episode.dateNote.trim()}</div>
+        )}
+        <div style={{ opacity: 0.7 }}>Location: {locName}</div>
+        {player && (
+          <div style={{ opacity: 0.7 }}>Player: {player.name || 'unnamed'}</div>
+        )}
+        <div style={{ opacity: 0.7 }}>
+          In scene:{' '}
+          {inScene.length
+            ? inScene.map((c) => `${c.name || 'unnamed'}${c.role ? ` (${c.role})` : ''}`).join(', ')
+            : '(no NPCs)'}
+        </div>
+        <div style={{ opacity: 0.7 }}>
+          Off scene:{' '}
+          {offScene.length
+            ? offScene.map((c) => c.name || 'unnamed').join(', ')
+            : '(none)'}
+        </div>
+        {guests.length > 0 && (
+          <div style={{ opacity: 0.7 }}>
+            Walk-ons:{' '}
+            {guests.map((g) => `${g.name}${g.brief ? ` — ${clipPreview(g.brief, 80)}` : ''}`).join('; ')}
+          </div>
+        )}
+      </ContextSection>
+
+      <ContextSection title="pressure" note="season premise">
+        <div style={{ whiteSpace: 'pre-wrap' }}>
+          {season.premise?.trim() || '(unwritten)'}
+        </div>
+        <button type="button" className="btn-quiet" style={{ fontSize: 11, alignSelf: 'flex-start' }} onClick={onEditPlot}>
+          Edit in Plot
+        </button>
+      </ContextSection>
+
+      {priorEps.length > 0 && (
+        <ContextSection title="recent episode memory" note="last 2–3 wraps">
+          {[...priorEps].reverse().map((ep, idx) => (
+            <div key={ep.id} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: monoPx, opacity: 0.65 }}>
+                E{ep.number}{ep.title ? ` — ${ep.title}` : ''}{idx === 0 ? ' · immediate prior' : ''}
+              </div>
+              <div style={{ whiteSpace: 'pre-wrap' }}>
+                {clipPreview(ep.wrap?.recap ?? '', idx === 0 ? 520 : 220)}
+              </div>
+              {(ep.wrap?.beats?.length ?? 0) > 0 && (
+                <ul style={{ margin: 0, paddingLeft: 18, opacity: 0.75 }}>
+                  {(ep.wrap!.beats ?? []).slice(0, idx === 0 ? 6 : 2).map((b, i) => (
+                    <li key={i}>
+                      {clipPreview(b.text, 200)}
+                      {b.consequence ? ` → ${clipPreview(b.consequence, 120)}` : ''}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {idx === 0 && (ep.wrap?.guestEffects?.length ?? 0) > 0 && (
+                <ul style={{ margin: 0, paddingLeft: 18, opacity: 0.65 }}>
+                  {(ep.wrap!.guestEffects ?? []).slice(0, 4).map((g, i) => (
+                    <li key={`g${i}`}>{clipPreview(g, 180)}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ))}
+        </ContextSection>
+      )}
+
+      {running && (
+        <ContextSection title="earlier this episode" note="running summary · director clip">
+          <div style={{ whiteSpace: 'pre-wrap' }}>{clipPreview(running, 400)}</div>
+        </ContextSection>
+      )}
+
+      <ContextSection title="continuity" note={`director cap ${facts.length} / ${continuity.length}`}>
+        {facts.length === 0 ? (
+          <div style={{ opacity: 0.5 }}>(none yet)</div>
+        ) : (
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {facts.map((f: ContinuityFact) => (
+              <li key={f.id}>{f.text}</li>
+            ))}
+          </ul>
+        )}
+      </ContextSection>
+
+      <ContextSection title="open threads" note={`director cap ${openThreads.length} / ${threads.length}`}>
+        {openThreads.length === 0 ? (
+          <div style={{ opacity: 0.5 }}>(none)</div>
+        ) : (
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {openThreads.map((t: OpenThread) => (
+              <li key={t.id}>
+                {t.text}
+                <span style={{ opacity: 0.45 }}> · {t.openedLabel}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </ContextSection>
+
+      {walls.length > 0 && (
+        <ContextSection title="knowledge walls" note="must not know yet">
+          <ul style={{ margin: 0, paddingLeft: 18 }}>
+            {walls.map((c) => (
+              <li key={c.id}>
+                <strong style={{ fontWeight: 600 }}>{c.name || 'unnamed'}:</strong> {c.mustNotKnow}
+              </li>
+            ))}
+          </ul>
+        </ContextSection>
+      )}
+
+      {(bible?.recap?.trim() || carried.length > 0) && (
+        <ContextSection title="season bible" note="prior season handoff">
+          {bible?.recap?.trim() && (
+            <div style={{ whiteSpace: 'pre-wrap' }}>{clipPreview(bible.recap, 320)}</div>
+          )}
+          {carried.length > 0 && (
+            <ul style={{ margin: 0, paddingLeft: 18, opacity: 0.8 }}>
+              {carried.map((b, i) => (
+                <li key={i}>
+                  [{b.disposition.toUpperCase()}] {clipPreview(b.text, 160)}
+                </li>
+              ))}
+            </ul>
+          )}
+        </ContextSection>
+      )}
+
+      <ContextSection title="world bible" note="narrator system · clipped">
+        <div style={{ whiteSpace: 'pre-wrap' }}>{worldClip || '(empty)'}</div>
+        <button type="button" className="btn-quiet" style={{ fontSize: 11, alignSelf: 'flex-start' }} onClick={onEditLore}>
+          Edit in Lore
+        </button>
+      </ContextSection>
+    </div>
   );
 }
 

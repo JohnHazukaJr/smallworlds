@@ -1,7 +1,8 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef, useState } from 'react';
 import { draftLocation, fleshOutLocation } from '../ai/engine';
-import { db, recordTombstones } from '../db';
+import { db, recordTombstones, safeWrite } from '../db';
+import { formatUserError } from '../errors';
 import { useApp } from '../store/app';
 import type { Location } from '../types';
 import { ErrorNote, Field, Mono, Spinner, useVw } from '../ui/bits';
@@ -16,15 +17,20 @@ const TABS: Array<[Tab, string]> = [
 ];
 
 /** Debounced autosave of a location draft back to the DB. */
-function useAutosave(draft: Location | null) {
+function useAutosave(draft: Location | null, onError: (msg: string) => void) {
   const timer = useRef<number>(undefined);
   const first = useRef(true);
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
   useEffect(() => {
     if (!draft) return;
     if (first.current) { first.current = false; return; }
     window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => {
-      void db.locations.put({ ...draft, updatedAt: Date.now() });
+      void safeWrite(
+        () => db.locations.put({ ...draft, updatedAt: Date.now() }),
+        (msg) => onErrorRef.current(msg)
+      );
     }, 500);
     return () => window.clearTimeout(timer.current);
   }, [draft]);
@@ -81,7 +87,7 @@ export function Locations() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id]);
 
-  useAutosave(draft);
+  useAutosave(draft, setError);
 
   const patch = (p: Partial<Location>) => setDraft((d) => (d ? { ...d, ...p } : d));
 
@@ -94,7 +100,7 @@ export function Locations() {
       await db.locations.update(draft.id, { portrait, updatedAt: Date.now() });
       patch({ portrait });
     } catch (e) {
-      setPortraitError(e instanceof Error ? e.message : String(e));
+      setPortraitError(formatUserError(e));
     } finally {
       setPortraitBusy(false);
     }
@@ -115,7 +121,7 @@ export function Locations() {
       setUndoSnapshot(draft);
       patch(result);
     } catch (e) {
-      setFleshError(e instanceof Error ? e.message : String(e));
+      setFleshError(formatUserError(e));
     } finally {
       setFleshBusy(false);
     }
@@ -143,7 +149,7 @@ export function Locations() {
       const result = await draftLocation(world, aiDesc.trim());
       await addLocation(result);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatUserError(e));
     } finally {
       setAiBusy(false);
     }
@@ -383,11 +389,14 @@ export function Locations() {
                     <textarea
                       rows={4}
                       value={d.rules.join('\n')}
-                      onChange={(e) => patch({ rules: e.target.value.split('\n').filter((l) => l.trim()) })}
+                      onChange={(e) => patch({ rules: e.target.value.split('\n') })}
+                      onBlur={() => patch({
+                        rules: d.rules.map((l) => l.trim()).filter(Boolean)
+                      })}
                       placeholder={'The causeway floods at high tide — no crossing after the bell.\nNo weapons are drawn inside the registry, on pain of forfeiture.'}
                     />
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                      {d.rules.map((r, i) => (
+                      {d.rules.filter((r) => r.trim()).map((r, i) => (
                         <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, lineHeight: 1.5, color: 'rgba(236,234,230,0.9)' }}>
                           <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'oklch(0.85 0.1 62)', paddingTop: 3 }}>
                             {String(i + 1).padStart(2, '0')}

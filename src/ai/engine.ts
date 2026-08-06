@@ -1,4 +1,5 @@
 import { db, guardStorage, recordTombstones, uid } from '../db';
+import { logAppError } from '../errors';
 import { resolveModel, useSettings } from '../store/settings';
 import { GAP_DAYS, GAP_LABELS } from '../ui/theme';
 import type {
@@ -7,7 +8,7 @@ import type {
 } from '../types';
 import { normalizeRelationships } from '../relationships';
 import {
-  emptyCharacter, emptyLocation, formatEpisodeDateRange, formatStoryDate,
+  calendarPatch, emptyCharacter, emptyLocation, formatEpisodeDateRange, formatStoryDate,
   nextEpisode, worldCalendar
 } from '../worldOps';
 import { AIError, streamChat, type ChatMessage, type StreamRequest } from './client';
@@ -115,7 +116,7 @@ async function loadContext(world: World, season: Season, episode: Episode) {
     db.characters.where('worldId').equals(world.id).toArray(),
     db.locations.where('worldId').equals(world.id).toArray(),
     db.continuity.where('seasonId').equals(season.id).toArray(),
-    db.threads.where('worldId').equals(world.id).filter((t) => t.status === 'open').toArray(),
+    db.threads.where('seasonId').equals(season.id).filter((t) => t.status === 'open').toArray(),
     db.turns.where('episodeId').equals(episode.id).sortBy('createdAt'),
     db.episodes.where('seasonId').equals(season.id).sortBy('number')
   ]);
@@ -149,6 +150,8 @@ export interface WriteOptions {
   onDelta: (partial: string, meta: StreamMeta) => void;
   /** High-level stage labels for the UI spinner (planning / narrating / Name speaking). */
   onProgress?: (label: string) => void;
+  /** Soft recoverable notices (e.g. director fallback) — not hard errors. */
+  onNotice?: (message: string) => void;
 }
 
 const MAX_SPEAK_BEATS = 3;
@@ -391,8 +394,13 @@ function applyGuestDelta(
     introduced++;
   }
 
-  const leave = new Set((leaveIds ?? []).map((id) => id.trim()));
-  active = active.filter((id) => !leave.has(id));
+  // Resolve leave by guest id or name (director often emits names).
+  const leaveResolved = new Set<string>();
+  for (const raw of leaveIds ?? []) {
+    const id = resolveGuestSpeakerId(raw, guests, nameToId);
+    if (id) leaveResolved.add(id);
+  }
+  active = active.filter((id) => !leaveResolved.has(id));
 
   return { guests, activeGuestIds: active, nameToId };
 }
@@ -430,6 +438,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
     ? [...ctx.episode.activeGuestIds]
     : guests.map((g) => g.id);
   let beatsCompleted = 0;
+  let userTurnId: string | null = null;
 
   if (opts.mode !== 'continue' && opts.input.trim()) {
     const userText = opts.mode === 'speak'
@@ -440,6 +449,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       role: 'user', mode: opts.mode, text: userText, createdAt: Date.now()
     };
     await guardStorage(() => db.turns.add(userTurn));
+    userTurnId = userTurn.id;
     ctx.turns.push(userTurn);
   }
 
@@ -453,7 +463,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
   try {
     progress('planning…');
     const speakersPresent = inScene.length > 0 || activeGuests(ctx.episode).length > 0;
-    const plan = await utilityJson<{
+    const planDirector = () => utilityJson<{
       castDelta?: { enter?: string[]; leave?: string[]; introduce?: IntroduceSpec[] };
       beats: Array<{ type?: string; brief?: string; characterId?: string; guestId?: string }>;
     }>(
@@ -463,6 +473,14 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       1400,
       opts.signal
     );
+    let plan: Awaited<ReturnType<typeof planDirector>>;
+    try {
+      plan = await planDirector();
+    } catch (first) {
+      if ((first as Error).name === 'AbortError') asWriteAbort(first, beatsCompleted);
+      logAppError(first, 'director plan (retrying)');
+      plan = await planDirector();
+    }
     const nextCast = applyCastDelta(castIds, ctx.characters, plan.castDelta);
     const guestDelta = applyGuestDelta(
       { ...ctx.episode, castIds, guests, activeGuestIds },
@@ -498,7 +516,15 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       plan, inScene, activeGuests(ctx.episode), guestDelta.nameToId, opts.mode, playerText
     );
   } catch (e) {
-    if ((e as Error).name === 'AbortError') asWriteAbort(e, beatsCompleted);
+    if ((e as Error).name === 'AbortError') {
+      if (userTurnId) {
+        await db.turns.delete(userTurnId).catch(() => undefined);
+        ctx.turns = ctx.turns.filter((t) => t.id !== userTurnId);
+      }
+      asWriteAbort(e, 0);
+    }
+    logAppError(e, 'director plan (fallback)');
+    opts.onNotice?.('Planning failed — continuing with a simple beat.');
     const fallback: DirectorBeat[] = [{
       type: 'narration',
       brief: 'Continue the scene with atmosphere and physical action; leave space for the player.'
@@ -521,11 +547,12 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         progress('narrating…');
         opts.onDelta('', meta);
         let acc = '';
+        const narrSystem = buildNarratorSystemPrompt(ctx);
         const { text } = await streamChat({
           provider, model,
-          system: buildNarratorSystemPrompt(ctx),
+          system: narrSystem,
           messages: buildNarrationBeatMessages(
-            ctx.turns, ctx.characters, beat.brief, opts.length, sceneGuests(), ctx.episode
+            ctx.turns, ctx.characters, beat.brief, opts.length, sceneGuests(), ctx.episode, narrSystem.length
           ),
           maxTokens: narrationBeatTokens(opts.length),
           signal: opts.signal,
@@ -554,11 +581,13 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         const meta: StreamMeta = { role: 'character', guestId: guest.id };
         progress(`${guest.name} speaking…`);
         opts.onDelta('', meta);
+        const guestSystem = buildGuestSystemPrompt(ctx, guest);
         const cleaned = await streamSpeakComplete({
           provider, model,
-          system: buildGuestSystemPrompt(ctx, guest),
+          system: guestSystem,
           messages: buildGuestSpeakMessages(
-            ctx.turns, ctx.characters, guest, beat.brief, sceneGuests(), speakOpts
+            ctx.turns, ctx.characters, guest, beat.brief, sceneGuests(),
+            { ...speakOpts, systemChars: guestSystem.length }
           ),
           length: opts.length,
           signal: opts.signal,
@@ -588,11 +617,13 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       const meta: StreamMeta = { role: 'character', characterId: speaking.id };
       progress(`${speaking.name} speaking…`);
       opts.onDelta('', meta);
+      const charSystem = buildCharacterSystemPrompt(ctx, speaking);
       const cleaned = await streamSpeakComplete({
         provider, model,
-        system: buildCharacterSystemPrompt(ctx, speaking),
+        system: charSystem,
         messages: buildCharacterSpeakMessages(
-          ctx.turns, ctx.characters, speaking, beat.brief, sceneGuests(), speakOpts
+          ctx.turns, ctx.characters, speaking, beat.brief, sceneGuests(),
+          { ...speakOpts, systemChars: charSystem.length }
         ),
         length: opts.length,
         signal: opts.signal,
@@ -615,10 +646,41 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       opts.onDelta('', meta);
     }
   } catch (e) {
-    asWriteAbort(e, beatsCompleted);
+    try {
+      asWriteAbort(e, beatsCompleted);
+    } catch (abortErr) {
+      // Orphan player line with no reply — remove so the composer can restore cleanly.
+      if (beatsCompleted === 0 && userTurnId) {
+        await db.turns.delete(userTurnId).catch(() => undefined);
+        ctx.turns = ctx.turns.filter((t) => t.id !== userTurnId);
+      }
+      throw abortErr;
+    }
   }
 
-  await maybeRefreshRunningSummary(opts.world, ctx, opts.signal, progress);
+  if (beatsCompleted === 0) {
+    if (userTurnId) {
+      await db.turns.delete(userTurnId).catch(() => undefined);
+      ctx.turns = ctx.turns.filter((t) => t.id !== userTurnId);
+    }
+    throw new AIError(
+      'The model produced no usable narration or dialogue. Try again, or shorten Display length.'
+    );
+  }
+
+  // Summary is best-effort after beats are saved — abort here must not look like a zero-beat stop.
+  try {
+    await maybeRefreshRunningSummary(opts.world, ctx, opts.signal, progress, opts.onNotice);
+  } catch (e) {
+    if ((e as Error).name === 'AbortError' || e instanceof WriteAbortedError) {
+      if (beatsCompleted > 0) {
+        await db.worlds.update(opts.world.id, { updatedAt: Date.now() });
+        return lastId;
+      }
+      asWriteAbort(e, beatsCompleted);
+    }
+    throw e;
+  }
   await db.worlds.update(opts.world.id, { updatedAt: Date.now() });
   return lastId;
 }
@@ -631,7 +693,8 @@ async function maybeRefreshRunningSummary(
   world: World,
   ctx: Awaited<ReturnType<typeof loadContext>>,
   signal: AbortSignal | undefined,
-  progress: (label: string) => void
+  progress: (label: string) => void,
+  onNotice?: (message: string) => void
 ): Promise<void> {
   const chars = episodeHistoryChars(ctx.turns);
   const pressure = episodeContextPressure(chars);
@@ -688,6 +751,8 @@ async function maybeRefreshRunningSummary(
   } catch (e) {
     if ((e as Error).name === 'AbortError') throw e;
     // Non-fatal — prompts still have omitted digests and prior wrap.
+    logAppError(e, 'running summary');
+    onNotice?.('Couldn’t refresh mid-episode memory — older beats may thin out until the next successful turn.');
   }
 }
 
@@ -847,6 +912,11 @@ async function buildEpisodeWrapCorpus(
         signal: timed
       });
       summaries.push(`(Slice ${i + 1}/${chunks.length})\n${summary.trim()}`);
+    } catch (e) {
+      if ((e as Error).name === 'AbortError' && !signal?.aborted) {
+        throw new AIError(`Utility model timed out after ${UTILITY_TIMEOUT_MS / 1000}s.`);
+      }
+      throw e;
     } finally {
       cancel();
     }
@@ -949,8 +1019,8 @@ export async function analyzeEpisode(
   const characters = await db.characters.where('worldId').equals(world.id).toArray();
   const existing = await db.continuity.where('seasonId').equals(season.id).toArray();
   const openThreads = await db.threads
-    .where('worldId')
-    .equals(world.id)
+    .where('seasonId')
+    .equals(season.id)
     .filter((t) => t.status === 'open')
     .toArray();
   const guests = episode.guests ?? [];
@@ -1169,7 +1239,8 @@ export async function analyzeEpisode(
       threads: draftCore.threads,
       guestEffects: draftCore.guestEffects
     });
-  } catch {
+  } catch (e) {
+    logAppError(e, 'premise preview');
     draftCore.premisePreview = season.premise || '';
   }
 
@@ -1302,10 +1373,13 @@ export async function commitEpisodeWrap(
 
   // Sync world "today" to the episode end before nextEpisode advances.
   if (cal.currentDay !== dayEnd) {
-    await db.worlds.update(world.id, {
-      calendar: { ...world.calendar, currentDay: dayEnd, system: cal.system, weekdays: cal.weekdays, dayOneWeekday: cal.dayOneWeekday, episodeAdvanceDays: cal.episodeAdvanceDays },
-      updatedAt: Date.now()
-    });
+    const live = await db.worlds.get(world.id);
+    if (live) {
+      await db.worlds.update(world.id, {
+        calendar: calendarPatch(live, { currentDay: dayEnd }),
+        updatedAt: Date.now()
+      });
+    }
   }
 
   const now = Date.now();
@@ -1336,8 +1410,8 @@ export async function commitEpisodeWrap(
   const resolvedLines = (input.resolvedThreads ?? []).map((t) => t.trim()).filter(Boolean);
   if (resolvedLines.length > 0) {
     const open = await db.threads
-      .where('worldId')
-      .equals(world.id)
+      .where('seasonId')
+      .equals(season.id)
       .filter((t) => t.status === 'open')
       .toArray();
     const hits = matchOpenThreads(open, resolvedLines);
@@ -1432,8 +1506,9 @@ export async function commitEpisodeWrap(
       if (evolved.trim()) {
         await db.seasons.update(season.id, { premise: evolved.trim(), updatedAt: Date.now() });
       }
-    } catch {
+    } catch (e) {
       // Non-fatal — wrap and next episode still proceed with the prior premise.
+      logAppError(e, 'premise evolution');
     }
   }
 
@@ -1607,20 +1682,22 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
       await db.seasons.update(season.id, { status: 'wrapped' });
       await db.seasons.add(next);
       await db.episodes.add(firstEpisode);
-      const cal = worldCalendar(world);
-      const bumpedCalendar = {
-        currentDay: Math.max(1, seasonOpenDay),
-        system: cal.system,
-        weekdays: cal.weekdays,
-        dayOneWeekday: cal.dayOneWeekday,
-        episodeAdvanceDays: cal.episodeAdvanceDays
-      };
-      await db.worlds.update(world.id, { activeSeasonId: next.id, calendar: bumpedCalendar, updatedAt: Date.now() });
+      const liveWorld = await db.worlds.get(world.id);
+      await db.worlds.update(world.id, {
+        activeSeasonId: next.id,
+        calendar: calendarPatch(liveWorld ?? world, { currentDay: Math.max(1, seasonOpenDay) }),
+        updatedAt: Date.now()
+      });
       await db.wraps.update(wrap.id, { status: 'committed' });
       // Rewrite character current-state snapshots for the new season.
       for (const c of wrap.characters) {
         const patch = c.returning
-          ? { 'state.goal': '', 'state.condition': c.evolution || c.outcome, updatedAt: Date.now() }
+          ? {
+              'state.goal': '',
+              'state.condition': c.evolution || c.outcome,
+              'state.emotion': '',
+              updatedAt: Date.now()
+            }
           : { 'state.location': 'departed — not in this season', updatedAt: Date.now() };
         await db.characters.update(c.characterId, patch as never);
       }
@@ -1662,8 +1739,12 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
       }).slice(0, 32);
       if (toAdd.length > 0) await db.continuity.bulkAdd(toAdd);
 
-      // Dropped beats close matching threads; surviving open threads move to the new season.
-      const threads = await db.threads.where('worldId').equals(world.id).filter((t) => t.status === 'open').toArray();
+      // Dropped beats close matching threads; surviving open threads from this season move forward.
+      const threads = await db.threads
+        .where('seasonId')
+        .equals(season.id)
+        .filter((t) => t.status === 'open')
+        .toArray();
       const dropLines = wrap.beats
         .filter((b) => b.disposition === 'drop')
         .flatMap((b) => [b.text, b.consequence].map((s) => (s ?? '').trim()).filter(Boolean));

@@ -29,6 +29,22 @@ export class AIError extends Error {
   }
 }
 
+/** Empty stream — usually context overflow, refusal, or a reasoning model spending all tokens. */
+function throwEmptyResponse(finishReason: string, sawReasoning: boolean): never {
+  const reason = finishReason ? ` (stop: ${finishReason})` : '';
+  if (sawReasoning || isLengthStop(finishReason)) {
+    throw new AIError(
+      `The model returned an empty response${reason}. ` +
+      'The prompt may be too long for this model mid-season, or a reasoning model used its token budget on thinking. ' +
+      'Try again, wrap the episode, or pick a larger-context model in Settings.'
+    );
+  }
+  throw new AIError(
+    `The model returned an empty response${reason}. ` +
+    'If this keeps happening deep in a season, the context is likely too large — wrap the episode or shorten Display length.'
+  );
+}
+
 /**
  * Claude Sonnet 5 / Opus 4.7+ reject non-default sampling params with 400.
  * Match both direct Anthropic ids and OpenRouter-style `anthropic/...` slugs.
@@ -86,15 +102,66 @@ function isLengthStop(reason: string | undefined | null): boolean {
   return r === 'LENGTH' || r === 'MAX_TOKENS' || r === 'MAX_TOKEN' || r === 'MAXTOKENS';
 }
 
-/**
- * Stream a chat completion from any configured provider.
- * Resolves with full text and whether generation stopped for length.
- */
-export async function streamChat(req: StreamRequest): Promise<StreamResult> {
+function isRetryableStatus(status: number | undefined): boolean {
+  return status === 429 || status === 502 || status === 503 || status === 504;
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const t = window.setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      window.clearTimeout(t);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/** Delay before a single retry; honor Retry-After seconds when present (capped). */
+function retryDelayMs(res: Response | null): number {
+  const raw = res?.headers?.get('Retry-After');
+  if (raw) {
+    const sec = Number(raw);
+    if (Number.isFinite(sec) && sec >= 0) return Math.min(Math.max(sec * 1000, 200), 10_000);
+  }
+  return 800;
+}
+
+async function streamChatOnce(req: StreamRequest): Promise<StreamResult> {
   switch (req.provider.kind) {
     case 'openai': return streamOpenAI(req);
     case 'anthropic': return streamAnthropic(req);
     case 'gemini': return streamGemini(req);
+  }
+}
+
+/**
+ * Stream a chat completion from any configured provider.
+ * One automatic retry on 429 / transient 5xx / network failure.
+ */
+export async function streamChat(req: StreamRequest): Promise<StreamResult> {
+  try {
+    return await streamChatOnce(req);
+  } catch (e) {
+    if (req.signal?.aborted) throw e;
+    if ((e as Error)?.name === 'AbortError') throw e;
+
+    const status = e instanceof AIError ? e.status : undefined;
+    const network =
+      e instanceof TypeError ||
+      (e instanceof Error && /failed to fetch|network/i.test(e.message));
+    if (!isRetryableStatus(status) && !network) throw e;
+
+    const fromHeader = (e as AIError & { retryAfterMs?: number }).retryAfterMs;
+    await sleep(fromHeader ?? 800, req.signal);
+    return streamChatOnce(req);
   }
 }
 
@@ -129,7 +196,12 @@ async function throwHttpError(res: Response): Promise<never> {
   } catch {
     try { detail = await res.text(); } catch { /* ignore */ }
   }
-  throw new AIError(`${res.status} ${res.statusText}${detail ? ` — ${detail}` : ''}`, res.status);
+  const err = new AIError(`${res.status} ${res.statusText}${detail ? ` — ${detail}` : ''}`, res.status);
+  // Stash Retry-After for the streamChat retry helper via a non-enumerable field.
+  if (isRetryableStatus(res.status)) {
+    (err as AIError & { retryAfterMs?: number }).retryAfterMs = retryDelayMs(res);
+  }
+  throw err;
 }
 
 async function streamOpenAI(req: StreamRequest): Promise<StreamResult> {
@@ -157,19 +229,31 @@ async function streamOpenAI(req: StreamRequest): Promise<StreamResult> {
   if (!res.ok) await throwHttpError(res);
   let full = '';
   let truncated = false;
+  let finishReason = '';
+  let sawReasoning = false;
   await readSSE(res, (data) => {
     try {
       const json = JSON.parse(data);
-      const delta: string = json.choices?.[0]?.delta?.content ?? '';
-      if (delta) {
-        full += delta;
-        req.onDelta?.(delta);
+      const choice = json.choices?.[0];
+      const delta = choice?.delta;
+      // Standard content; some routers put text under `text` or array parts.
+      let piece = '';
+      const raw = delta?.content ?? choice?.message?.content ?? delta?.text;
+      if (typeof raw === 'string') piece = raw;
+      else if (Array.isArray(raw)) {
+        piece = raw.map((p: { text?: string }) => p?.text ?? '').join('');
       }
-      const reason: string | undefined = json.choices?.[0]?.finish_reason;
+      if (delta?.reasoning || delta?.reasoning_content) sawReasoning = true;
+      if (piece) {
+        full += piece;
+        req.onDelta?.(piece);
+      }
+      const reason: string | undefined = choice?.finish_reason;
+      if (reason) finishReason = reason;
       if (isLengthStop(reason)) truncated = true;
     } catch { /* keep-alive or malformed chunk */ }
   });
-  if (!full) throw new AIError('The model returned an empty response.');
+  if (!full.trim()) throwEmptyResponse(finishReason, sawReasoning);
   return { text: full, truncated };
 }
 
@@ -197,6 +281,7 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
   if (!res.ok) await throwHttpError(res);
   let full = '';
   let truncated = false;
+  let finishReason = '';
   await readSSE(res, (data) => {
     try {
       const json = JSON.parse(data);
@@ -207,6 +292,7 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
       // Final chunk: { type: 'message_delta', delta: { stop_reason: 'max_tokens' | 'end_turn' | ... } }
       if (json.type === 'message_delta') {
         const reason: string | undefined = json.delta?.stop_reason ?? json.stop_reason;
+        if (reason) finishReason = reason;
         if (isLengthStop(reason)) truncated = true;
       }
       if (json.type === 'error') throw new AIError(json.error?.message ?? 'Provider error');
@@ -214,7 +300,7 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
       if (e instanceof AIError) throw e;
     }
   });
-  if (!full) throw new AIError('The model returned an empty response.');
+  if (!full.trim()) throwEmptyResponse(finishReason, false);
   return { text: full, truncated };
 }
 
@@ -238,6 +324,7 @@ async function streamGemini(req: StreamRequest): Promise<StreamResult> {
   if (!res.ok) await throwHttpError(res);
   let full = '';
   let truncated = false;
+  let finishReason = '';
   await readSSE(res, (data) => {
     try {
       const json = JSON.parse(data);
@@ -248,10 +335,11 @@ async function streamGemini(req: StreamRequest): Promise<StreamResult> {
         req.onDelta?.(text);
       }
       const reason: string | undefined = json.candidates?.[0]?.finishReason;
+      if (reason) finishReason = reason;
       if (isLengthStop(reason)) truncated = true;
     } catch { /* ignore malformed chunk */ }
   });
-  if (!full) throw new AIError('The model returned an empty response.');
+  if (!full.trim()) throwEmptyResponse(finishReason, false);
   return { text: full, truncated };
 }
 

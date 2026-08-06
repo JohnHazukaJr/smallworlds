@@ -2,6 +2,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef, useState } from 'react';
 import { analyzeSeason, beginNextSeason, draftPremise, evolveCharacters } from '../ai/engine';
 import { db } from '../db';
+import { formatUserError } from '../errors';
 import { useApp } from '../store/app';
 import type { BeatDisposition, SeasonWrap } from '../types';
 import { Chip, ErrorNote, Mono, Spinner, useVw } from '../ui/bits';
@@ -71,7 +72,7 @@ export function Sequel() {
     try {
       await fn();
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(formatUserError(e));
     } finally {
       setBusy(null);
     }

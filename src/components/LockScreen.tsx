@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { useVault } from '../security/vault';
+import { formatUserError } from '../errors';
+import { useVault, VaultCorruptError } from '../security/vault';
 import { ErrorNote, Mono } from '../ui/bits';
 
 export function LockScreen() {
@@ -12,11 +13,20 @@ export function LockScreen() {
     if (!pass || busy) return;
     setBusy(true);
     setError('');
-    const ok = await vault.unlock(pass);
-    setBusy(false);
-    if (!ok) {
-      setError('Wrong passphrase.');
-      setPass('');
+    try {
+      const ok = await vault.unlock(pass);
+      if (!ok) {
+        setError('Wrong passphrase.');
+        setPass('');
+      }
+    } catch (e) {
+      setError(
+        e instanceof VaultCorruptError
+          ? 'Vault unreadable — restore a backup from Profile, or reset below (stories are kept).'
+          : formatUserError(e)
+      );
+    } finally {
+      setBusy(false);
     }
   };
 

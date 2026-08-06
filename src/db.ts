@@ -1,4 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie';
+import { formatUserError, logAppError } from './errors';
 import { decryptString, deriveKey, encryptString, randomSalt } from './security/crypto';
 import { isQuotaError, markStoragePressure } from './storage/quota';
 import type {
@@ -63,6 +64,23 @@ export async function guardStorage<T>(fn: () => Promise<T>): Promise<T> {
   } catch (e) {
     if (isQuotaError(e)) markStoragePressure();
     throw e;
+  }
+}
+
+/**
+ * Guarded write that surfaces a classified error instead of throwing.
+ * Returns undefined on failure.
+ */
+export async function safeWrite<T>(
+  fn: () => Promise<T>,
+  onError?: (message: string) => void
+): Promise<T | undefined> {
+  try {
+    return await guardStorage(fn);
+  } catch (e) {
+    logAppError(e, 'safeWrite');
+    onError?.(formatUserError(e));
+    return undefined;
   }
 }
 

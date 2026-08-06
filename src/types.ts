@@ -36,6 +36,16 @@ export interface WorldCalendar {
    * 0 = same day (overnight continuation), 1 = next morning (default), etc.
    */
   episodeAdvanceDays?: number;
+  /** Month names in order. Omitted → January–December. */
+  months?: string[];
+  /** Days in each month (same length as months). Omitted → Earth lengths (non-leap). */
+  monthLengths?: number[];
+  /** Year number on story day 1 (default 1). */
+  yearOne?: number;
+  /** 0-based month index for story day 1 (default 0 = first month). */
+  dayOneMonth?: number;
+  /** 1-based day-of-month for story day 1 (default 1). */
+  dayOneDate?: number;
 }
 
 export interface World {
