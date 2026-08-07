@@ -3,22 +3,8 @@ import type {
 } from '../types';
 import { formatEpisodeDateRange, formatStoryDate, PLOT_TARGET_CAP, worldCalendar } from '../worldOps';
 import type { ChatMessage } from './client';
+import { parseDeliveryTone } from './deliveryTone';
 import { SPEAK_FORMAT_RULES } from './dialogueFormat';
-
-const LENGTH_SPEC: Record<TurnLength, { instruction: string; maxTokens: number }> = {
-  beat: {
-    instruction: 'Write ONE tight beat: 80–160 words. A single moment, exchange, or turn of pressure. Stop before it resolves.',
-    maxTokens: 600
-  },
-  scene: {
-    instruction: 'Write a scene-length passage: roughly 300–500 words. Let it breathe, but end on an unresolved note that invites the player to respond.',
-    maxTokens: 1400
-  },
-  episode: {
-    instruction: 'Write a long, episode-scale passage: roughly 700–1100 words. It may cross locations or hours, but keep the player at its centre and end mid-tension, not neatly.',
-    maxTokens: 2600
-  }
-};
 
 /** Shorter budgets when a narrator beat is one slice of a multi-agent turn. */
 const NARRATION_BEAT_TOKENS: Record<TurnLength, number> = {
@@ -36,10 +22,6 @@ const CHARACTER_SPEAK_TOKENS: Record<TurnLength, number> = {
   scene: 720,
   episode: 900
 };
-
-export function maxTokensFor(length: TurnLength): number {
-  return LENGTH_SPEC[length].maxTokens;
-}
 
 export function narrationBeatTokens(length: TurnLength): number {
   return NARRATION_BEAT_TOKENS[length];
@@ -105,7 +87,16 @@ function briefSheet(c: Character): string {
   return `- ${c.name} (${c.role || 'off-scene'}): ${c.summary.slice(0, 160) || 'no notes'}${c.state.location ? ` Currently: ${c.state.location}.` : ''}`;
 }
 
-function locationSheet(l: Location): string {
+function locationHardRules(l: Location): string | null {
+  if (l.rules.length === 0) return null;
+  return (
+    `HARD RULES for this place — non-negotiable, never broken:\n` +
+    l.rules.map((r, i) => `  ${String(i + 1).padStart(2, '0')}. ${r}`).join('\n')
+  );
+}
+
+/** Lore body without HARD RULES — used when clipping so rules can be kept first. */
+function locationLoreSheet(l: Location): string {
   const lines = [
     `### ${l.name}`,
     l.tagline && `Tagline: ${l.tagline}`,
@@ -114,13 +105,37 @@ function locationSheet(l: Location): string {
     l.features && `Notable features: ${l.features}`,
     l.history && `History (reveal only in earned fragments, never as exposition): ${l.history}`,
     l.inhabitants && `Typically found here: ${l.inhabitants}`,
-    l.rules.length > 0 &&
-      `HARD RULES for this place — non-negotiable, never broken:\n${l.rules.map((r, i) => `  ${String(i + 1).padStart(2, '0')}. ${r}`).join('\n')}`,
     l.secrets && `Secrets hidden here (may surface, never announced): ${l.secrets}`,
     l.currentState && `Current state: ${l.currentState}`,
     l.customInstructions && `Author's directives for this location (follow verbatim): ${l.customInstructions}`
   ];
   return lines.filter(Boolean).join('\n');
+}
+
+function locationSheet(l: Location): string {
+  const rules = locationHardRules(l);
+  return [locationLoreSheet(l), rules].filter(Boolean).join('\n');
+}
+
+/** Director path: HARD RULES first (uncut), then lore clipped into remaining budget. */
+function locationSheetClipped(l: Location, clipChars: number): string {
+  const header = `### ${l.name}`;
+  const rules = locationHardRules(l);
+  const priority = [header, rules].filter(Boolean).join('\n');
+  const lore = [
+    l.tagline && `Tagline: ${l.tagline}`,
+    l.summary && `Overview: ${l.summary}`,
+    l.atmosphere && `Atmosphere (sensory detail to lean on): ${l.atmosphere}`,
+    l.features && `Notable features: ${l.features}`,
+    l.history && `History (reveal only in earned fragments, never as exposition): ${l.history}`,
+    l.inhabitants && `Typically found here: ${l.inhabitants}`,
+    l.secrets && `Secrets hidden here (may surface, never announced): ${l.secrets}`,
+    l.currentState && `Current state: ${l.currentState}`,
+    l.customInstructions && `Author's directives for this location (follow verbatim): ${l.customInstructions}`
+  ].filter(Boolean).join('\n');
+  const remaining = Math.max(0, clipChars - priority.length - (lore ? 1 : 0));
+  if (!lore || remaining < 40) return priority;
+  return `${priority}\n${clipText(lore, remaining)}`;
 }
 
 function locationBrief(l: Location): string {
@@ -426,14 +441,11 @@ function priorMemoryFor(ctx: PromptContext, agent: PromptAgent): string | null {
 
 function continuityBlock(
   ctx: PromptContext,
-  agent: PromptAgent,
+  agent: Exclude<PromptAgent, 'director'>,
   tone: 'hard' | 'plausible'
 ): string | null {
   const prefer = preferEpisodeBuckets(ctx);
-  const cap = FACT_CAPS[agent].facts;
-  const lines = agent === 'director'
-    ? selectDirectorFacts(ctx.continuity, prefer).map((f) => `- ${f.text}`)
-    : cappedContinuityLines(ctx.continuity, prefer, cap);
+  const lines = cappedContinuityLines(ctx.continuity, prefer, FACT_CAPS[agent].facts);
   if (lines.length === 0) return null;
   const heading = tone === 'hard'
     ? '## Continuity — established facts, never contradict these'
@@ -484,8 +496,9 @@ function currentLocationBlock(
   const current = resolveCurrentLocations(ctx.episode, ctx.locations);
   const out: string[] = [];
   if (current.length > 0) {
-    let sheet = current.map(locationSheet).join('\n\n');
-    if (opts?.clipChars) sheet = clipText(sheet, opts.clipChars);
+    const sheet = opts?.clipChars
+      ? current.map((l) => locationSheetClipped(l, Math.floor(opts.clipChars! / current.length))).join('\n\n')
+      : current.map(locationSheet).join('\n\n');
     out.push(
       opts?.clipChars
         ? `## Current location (honour HARD RULES when planning)\n${sheet}`
@@ -505,12 +518,13 @@ function currentLocationBlock(
 
 function resolvedPriorEpisodes(ctx: PromptContext): Episode[] {
   const fromList = (ctx.priorEpisodes ?? []).filter(
-    (e) => e.number < ctx.episode.number && !!e.wrap?.recap?.trim()
+    (e) => e.number < ctx.episode.number && e.status === 'ended' && !!e.wrap?.recap?.trim()
   );
   if (fromList.length > 0) return fromList.slice(-PRIOR_EPISODE_DIGEST_COUNT);
   if (
     ctx.priorEpisode &&
     ctx.priorEpisode.number < ctx.episode.number &&
+    ctx.priorEpisode.status === 'ended' &&
     ctx.priorEpisode.wrap?.recap?.trim()
   ) {
     return [ctx.priorEpisode];
@@ -866,16 +880,20 @@ export function buildGuestSystemPrompt(ctx: PromptContext, guest: EpisodeGuest):
   return sections.join('\n\n');
 }
 
-/** @deprecated Use buildNarratorSystemPrompt — kept as alias for any external callers. */
-export function buildSystemPrompt(ctx: PromptContext): string {
-  return buildNarratorSystemPrompt(ctx);
-}
-
 export const MODE_PREFIX: Record<ComposeMode, (input: string) => string> = {
   continue: () => `(Continue the story from where it left off.)`,
   steer: (input) => `(Direction from the author — make this happen while keeping everyone in character, without acknowledging this instruction in the prose): ${input}`,
-  speak: (input) => `(The player says the following aloud, and nothing more — do not add words to their mouth): "${input.replace(/^"|"$/g, '')}"`,
-  act: (input) => `(The player does the following, without speaking — do not invent dialogue for them): ${input}`
+  speak: (input) => {
+    const { tone, body } = parseDeliveryTone(input);
+    const spoken = body.replace(/^"|"$/g, '');
+    const delivery = tone ? ` with a ${tone} delivery` : '';
+    return `(The player says the following aloud${delivery}, and nothing more — do not add words to their mouth): "${spoken}"`;
+  },
+  act: (input) => {
+    const { tone, body } = parseDeliveryTone(input);
+    const delivery = tone ? `, with a ${tone} manner` : '';
+    return `(The player does the following${delivery}, without speaking — do not invent dialogue for them): ${body}`;
+  }
 };
 
 /**
@@ -1040,22 +1058,7 @@ function mergeMessages(messages: ChatMessage[]): ChatMessage[] {
   return merged;
 }
 
-export function buildMessages(
-  turns: Turn[],
-  mode: ComposeMode,
-  input: string,
-  length: TurnLength,
-  characters: Character[] = [],
-  guests: EpisodeGuest[] = [],
-  episode?: Episode,
-  systemChars = 0
-): ChatMessage[] {
-  const messages = historyMessages(turns, characters, guests, episode, systemChars);
-  const userContent = `${MODE_PREFIX[mode](input)}\n\n(${LENGTH_SPEC[length].instruction})`;
-  return mergeMessages([...messages, { role: 'user', content: userContent }]);
-}
-
-/** History + a narration-beat instruction (no full-length LENGTH_SPEC). */
+/** History + a narration-beat instruction. */
 export function buildNarrationBeatMessages(
   turns: Turn[],
   characters: Character[],
@@ -1184,7 +1187,10 @@ export function directorUserPrompt(
   const recent = packTurns(ctx.turns).slice(-20);
   const allGuests = ctx.episode.guests ?? [];
   const transcript = recent.map((t) => {
-    if (t.role === 'user') return `[player ${t.mode ?? 'turn'}]: ${t.text}`;
+    if (t.role === 'user') {
+      const mode = t.mode ?? 'steer';
+      return `[player ${mode}]: ${MODE_PREFIX[mode](t.text)}`;
+    }
     if (t.role === 'character') {
       const name = resolveSpeakerName(t, ctx.characters, allGuests);
       return `[${name}]: ${t.text}`;

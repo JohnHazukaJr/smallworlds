@@ -64,6 +64,30 @@ export function hasSpokenDialogue(raw: string): boolean {
 }
 
 /**
+ * Display-only cleanup for mid-stream speak text.
+ * Drops dangling open `*` / `"` so the preview does not flash raw delimiters,
+ * then normalizes when pairs are balanced.
+ */
+export function previewSpeakText(raw: string): string {
+  let text = normalizeQuotes(raw.trim());
+  if (!text) return '';
+
+  if (((text.match(/"/g) || []).length) % 2 === 1) {
+    const i = text.lastIndexOf('"');
+    if (i >= 0) text = text.slice(0, i) + text.slice(i + 1);
+  }
+  if (((text.match(/\*/g) || []).length) % 2 === 1) {
+    const i = text.lastIndexOf('*');
+    if (i >= 0) text = text.slice(0, i) + text.slice(i + 1);
+  }
+
+  text = text.replace(/[^\S\n]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  if (!text) return '';
+  if (!text.includes('*') && !text.includes('"')) return text;
+  return normalizeSpeakText(text);
+}
+
+/**
  * Split plain gap text into plain runs and paragraph breaks.
  * Leading/trailing whitespace around breaks is discarded; single newlines become spaces.
  */

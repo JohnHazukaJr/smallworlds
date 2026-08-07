@@ -6,9 +6,16 @@ import {
   WriteAbortedError, type EpisodeWrapDraft, type StreamMeta
 } from '../ai/engine';
 import {
+  DELIVERY_TONES,
+  applyDeliveryTone,
+  parseDeliveryTone,
+  type DeliveryTone
+} from '../ai/deliveryTone';
+import {
   groupSpeakParagraphs,
   parseInlineEmphasis,
   parseSpeakSegments,
+  previewSpeakText,
   type SpeakSegment
 } from '../ai/dialogueFormat';
 import { generateSceneImage } from '../ai/image';
@@ -119,6 +126,8 @@ interface ProseBlock {
   kind: 'narration' | 'dialogue' | 'direction' | 'action' | 'speak';
   /** For kind === 'speak': parsed *action* / "speech" segments */
   segments?: SpeakSegment[];
+  /** Player delivery tag from leading [tone] on the turn */
+  deliveryTone?: DeliveryTone | null;
 }
 
 const DIALOGUE_RE = /^([A-Z][^:\n]{0,48}?):\s*["“](.+?)["”]?\s*$/;
@@ -144,22 +153,26 @@ function parseTurn(turn: Turn, characters: Character[], guests: EpisodeGuest[] =
   if (turn.role === 'user') {
     const player = characters.find((c) => c.isPlayer);
     if (turn.mode === 'speak') {
+      const { tone, body } = parseDeliveryTone(turn.text);
       return [{
-        text: turn.text,
+        text: body,
         speaker: player?.name ?? 'you',
         hue: player?.hue ?? 60,
         portrait: player ? characterPortraits(player)[0] : null,
         kind: 'speak',
-        segments: parseSpeakSegments(turn.text)
+        segments: parseSpeakSegments(body),
+        deliveryTone: tone
       }];
     }
     if (turn.mode === 'act') {
+      const { tone, body } = parseDeliveryTone(turn.text);
       return [{
-        text: turn.text,
+        text: body,
         speaker: player?.name ?? 'you',
         hue: player?.hue ?? 60,
         portrait: player ? characterPortraits(player)[0] : null,
-        kind: 'action'
+        kind: 'action',
+        deliveryTone: tone
       }];
     }
     return [{ text: turn.text, kind: 'direction' }];
@@ -311,9 +324,20 @@ function ProseBlockView({ b, accent, prose, fontPx, avatarPx }: {
         {isDialog && b.speaker && (
           <div style={{
             fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: '0.14em',
-            textTransform: 'uppercase', color: accent, marginBottom: 6
+            textTransform: 'uppercase', color: accent, marginBottom: 6,
+            display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap'
           }}>
-            {b.speaker}{b.kind === 'action' ? ' · acts' : ''}
+            <span>{b.speaker}{b.kind === 'action' ? ' · acts' : ''}</span>
+            {b.deliveryTone && (
+              <span style={{
+                letterSpacing: '0.08em', fontSize: 9, fontWeight: 500,
+                color: 'rgba(236,234,230,0.55)',
+                border: '1px solid rgba(255,255,255,0.14)',
+                borderRadius: 6, padding: '2px 7px'
+              }}>
+                {b.deliveryTone}
+              </span>
+            )}
           </div>
         )}
         {b.kind === 'direction' ? (
@@ -388,6 +412,7 @@ export function Story() {
 
   // writing state
   const [composeMode, setComposeMode] = useState<ComposeMode>('continue');
+  const [deliveryTone, setDeliveryTone] = useState<DeliveryTone | null>(null);
   const [length, setLength] = useState<TurnLength>('scene');
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
@@ -561,15 +586,26 @@ export function Story() {
   const write = async () => {
     if (!world || !season || !episode || streaming) return;
     if (composeMode !== 'continue' && !input.trim()) return;
-    const text = input;
+    const tagged = (composeMode === 'speak' || composeMode === 'act')
+      ? applyDeliveryTone(input, deliveryTone)
+      : input;
+    const text = tagged;
+    const savedTone = deliveryTone;
     setInput('');
+    setDeliveryTone(null);
     const result = await runNarration(composeMode, text);
     if (result.status === 'ok') {
       if (composeMode !== 'continue') setComposeMode('continue');
     } else if (result.beatsCompleted === 0) {
       // Restore composer when nothing was applied (orphan user turn removed).
-      setInput(text);
+      setInput(parseDeliveryTone(text).body);
+      setDeliveryTone(savedTone);
     }
+  };
+
+  const setComposeModeSafe = (m: ComposeMode) => {
+    setComposeMode(m);
+    if (m !== 'speak' && m !== 'act') setDeliveryTone(null);
   };
 
   /**
@@ -796,7 +832,7 @@ export function Story() {
       world={world} season={season} episode={episode} characters={characters} locations={locations}
       continuity={continuity} threads={threads} accent={M.accent} narrow={narrow}
       onGoLocations={goLocations}
-      onNudge={(text) => { setComposeMode('steer'); setInput(text); setDirectorSheet(false); }}
+      onNudge={(text) => { setComposeModeSafe('steer'); setInput(text); setDirectorSheet(false); }}
     />
   );
 
@@ -1035,7 +1071,7 @@ export function Story() {
                 mode: null,
                 characterId: partialMeta.characterId,
                 guestId: partialMeta.guestId,
-                text: partial,
+                text: partialMeta.role === 'character' ? previewSpeakText(partial) : partial,
                 createdAt: 0
               }, characters, guests)
                 .map((b, i) => <ProseBlockView key={`p${i}`} b={b} accent={M.accent} prose={M.prose} fontPx={fontPx} avatarPx={avatarPx} />)
@@ -1123,7 +1159,7 @@ export function Story() {
               <button
                 key={m}
                 type="button"
-                onClick={() => setComposeMode(m)}
+                onClick={() => setComposeModeSafe(m)}
                 style={{
                   border: 0,
                   minHeight: 44,
@@ -1139,6 +1175,25 @@ export function Story() {
               </button>
             ))}
           </div>
+          {(composeMode === 'speak' || composeMode === 'act') && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.45 }}>
+                delivery
+              </span>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {DELIVERY_TONES.map((tone) => (
+                  <Chip
+                    key={tone}
+                    active={deliveryTone === tone}
+                    accent={M.accent}
+                    onClick={() => setDeliveryTone((cur) => (cur === tone ? null : tone))}
+                  >
+                    {tone}
+                  </Chip>
+                ))}
+              </div>
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.45 }}>length</span>
@@ -2503,7 +2558,7 @@ function DirectorContent(props: {
     async () => {
       const all = await db.episodes.where('seasonId').equals(props.season.id).toArray();
       return all
-        .filter((e) => e.number < props.episode.number && !!e.wrap?.recap?.trim())
+        .filter((e) => e.number < props.episode.number && e.status === 'ended' && !!e.wrap?.recap?.trim())
         .sort((a, b) => a.number - b.number)
         .slice(-3);
     },

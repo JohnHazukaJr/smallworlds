@@ -15,7 +15,8 @@ import { Bar, Chip, ErrorNote, Field, Mono, Sheet, Spinner, Toggle } from '../ui
 import { avatarStyle } from '../ui/theme';
 import {
   advanceMonths, calendarPatch, dayFromParts, emptyCharacter, emptyLocation,
-  formatEpisodeDateRange, formatStoryDate, formatStoryDateShort, partsForDay, worldCalendar
+  formatEpisodeDateRange, formatStoryDate, formatStoryDateShort, partsForDay, PLOT_TARGET_CAP,
+  worldCalendar
 } from '../worldOps';
 
 type Tab = 'context' | 'lore' | 'plot' | 'instructions' | 'settings' | 'cast' | 'locations';
@@ -754,7 +755,7 @@ function ContextPreview({
     async () => {
       const all = await db.episodes.where('seasonId').equals(season.id).toArray();
       return all
-        .filter((e) => e.number < episode.number && !!e.wrap?.recap?.trim())
+        .filter((e) => e.number < episode.number && e.status === 'ended' && !!e.wrap?.recap?.trim())
         .sort((a, b) => a.number - b.number)
         .slice(-3);
     },
@@ -764,9 +765,15 @@ function ContextPreview({
   const cal = worldCalendar(world);
   const sceneDay = episodeSceneDay(episode, cal);
   const dateLine = formatEpisodeDateRange(cal, episode.storyDay, episode.storyDayEnd);
-  const locName = episode.location.trim()
-    || locations.find((l) => l.id === episode.locationId)?.name
-    || '—';
+  const currentLoc = episode.locationId
+    ? locations.find((l) => l.id === episode.locationId)
+    : locations.find((l) => {
+      const epLoc = episode.location.trim().toLowerCase();
+      if (!epLoc || !l.name.trim()) return false;
+      const n = l.name.toLowerCase();
+      return epLoc.includes(n) || n.includes(epLoc);
+    });
+  const locName = episode.location.trim() || currentLoc?.name || '—';
   const inScene = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
   const player = characters.find((c) => c.isPlayer);
   const offScene = characters.filter((c) => !episode.castIds.includes(c.id) && !c.isPlayer);
@@ -807,6 +814,12 @@ function ContextPreview({
           <div style={{ opacity: 0.7 }}>Date note: {episode.dateNote.trim()}</div>
         )}
         <div style={{ opacity: 0.7 }}>Location: {locName}</div>
+        {currentLoc && currentLoc.rules.length > 0 && (
+          <div style={{ opacity: 0.7 }}>
+            HARD RULES ({currentLoc.rules.length}): {currentLoc.rules[0]}
+            {currentLoc.rules.length > 1 ? '…' : ''}
+          </div>
+        )}
         {player && (
           <div style={{ opacity: 0.7 }}>Player: {player.name || 'unnamed'}</div>
         )}
@@ -847,7 +860,7 @@ function ContextPreview({
           <ContextSection title="plot targets" note="work toward when natural">
             {epTargets.length > 0 && (
               <ul style={{ margin: 0, paddingLeft: 18 }}>
-                {epTargets.slice(0, 6).map((t) => (
+                {epTargets.slice(0, PLOT_TARGET_CAP).map((t) => (
                   <li key={t.id}>{t.text}</li>
                 ))}
               </ul>
@@ -856,7 +869,7 @@ function ContextPreview({
               <>
                 <div style={{ opacity: 0.55, fontSize: 12 }}>Season arc</div>
                 <ul style={{ margin: 0, paddingLeft: 18, opacity: 0.85 }}>
-                  {seaTargets.slice(0, 6).map((t) => (
+                  {seaTargets.slice(0, PLOT_TARGET_CAP).map((t) => (
                     <li key={t.id}>{t.text}</li>
                   ))}
                 </ul>

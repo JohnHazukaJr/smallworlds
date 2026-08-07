@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   groupSpeakParagraphs,
   parseInlineEmphasis,
-  parseSpeakSegments
+  parseSpeakSegments,
+  previewSpeakText
 } from './dialogueFormat';
 
 describe('parseSpeakSegments', () => {
@@ -52,5 +53,14 @@ describe('groupSpeakParagraphs', () => {
     expect(paras[0].map((s) => s.kind)).toEqual(['action']);
     expect(paras[1].map((s) => s.kind)).toEqual(['speech']);
     expect(paras[2].map((s) => s.kind)).toEqual(['speech']);
+  });
+});
+
+describe('previewSpeakText', () => {
+  it('hides dangling open quote while streaming', () => {
+    const preview = previewSpeakText('*she smiles* "Hel');
+    expect(preview).not.toContain('"Hel');
+    expect(preview).toContain('Hel');
+    expect(parseSpeakSegments(preview).some((s) => s.kind === 'action')).toBe(true);
   });
 });

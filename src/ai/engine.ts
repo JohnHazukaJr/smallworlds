@@ -12,6 +12,7 @@ import {
   formatEpisodeDateRange, formatStoryDate, nextEpisode, pendingPlotTargets, worldCalendar
 } from '../worldOps';
 import { AIError, streamChat, type ChatMessage, type StreamRequest } from './client';
+import { applyDeliveryTone, parseDeliveryTone } from './deliveryTone';
 import { hasSpokenDialogue, normalizeSpeakText } from './dialogueFormat';
 import {
   activeGuests,
@@ -544,8 +545,10 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
   };
 
   if (opts.mode !== 'continue' && opts.input.trim()) {
-    const userText = opts.mode === 'speak'
-      ? normalizeSpeakText(opts.input.trim())
+    const { tone, body } = parseDeliveryTone(opts.input.trim());
+    const normalized = opts.mode === 'speak' ? normalizeSpeakText(body) : body;
+    const userText = (opts.mode === 'speak' || opts.mode === 'act')
+      ? applyDeliveryTone(normalized, tone)
       : opts.input.trim();
     const userTurn: Turn = {
       id: uid(), episodeId: opts.episode.id, worldId: opts.world.id,
