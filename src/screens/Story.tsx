@@ -1,5 +1,5 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
 import {
   analyzeEpisode, commitEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, proseModelFor,
   rollbackTurnSnapshot, snapshotTurnsAfter, snapshotTurnsFrom, writeTurn,
@@ -343,7 +343,7 @@ export function Story() {
   /** How many turns from the end are mounted — keeps long episodes responsive. */
   const [turnWindow, setTurnWindow] = useState(60);
   useEffect(() => { setTurnWindow(60); }, [episode?.id]);
-  const [wrapOpen, setWrapOpen] = useState<null | 'episode' | 'season'>(null);
+  const [wrapOpen, setWrapOpen] = useState<null | 'episode'>(null);
   const [wrapBusy, setWrapBusy] = useState(false);
   const [wrapPhase, setWrapPhase] = useState<'ready' | 'analyzing' | 'review'>('ready');
   const [wrapDraft, setWrapDraft] = useState<WrapReviewDraft | null>(null);
@@ -411,7 +411,7 @@ export function Story() {
     setNudgeDismissedLocId(episode?.locationId ?? null);
   }, [episode?.id]);
 
-  // Fresh wrap draft only when opening from closed — Episode↔Season toggle must not wipe analysis.
+  // Fresh wrap draft only when opening from closed.
   const prevWrapOpen = useRef(wrapOpen);
   useEffect(() => {
     const wasClosed = prevWrapOpen.current === null;
@@ -600,6 +600,8 @@ export function Story() {
     setError('');
     try {
       const draft = await analyzeEpisode(world, season, episode, controller.signal);
+      // Stale run (superseded by a newer Analyze) — do not touch UI.
+      if (wrapAbortRef.current !== controller) return;
       if (controller.signal.aborted) {
         setWrapPhase('ready');
         setNotice('Analyze cancelled.');
@@ -608,6 +610,7 @@ export function Story() {
       setWrapDraft(draftFromAnalysis(draft));
       setWrapPhase('review');
     } catch (e) {
+      if (wrapAbortRef.current !== controller) return;
       setWrapPhase('ready');
       if ((e as Error).name === 'AbortError' || controller.signal.aborted) {
         setNotice('Analyze cancelled.');
@@ -615,8 +618,11 @@ export function Story() {
         setError(classifyError(e));
       }
     } finally {
-      setWrapBusy(false);
-      if (wrapAbortRef.current === controller) wrapAbortRef.current = null;
+      // Only the active controller clears busy — avoids cancel racing a second Analyze.
+      if (wrapAbortRef.current === controller) {
+        setWrapBusy(false);
+        wrapAbortRef.current = null;
+      }
     }
   };
 
@@ -1170,10 +1176,11 @@ export function Story() {
               className="btn-ghost"
               style={{ width: '100%', minHeight: 44 }}
               onClick={() => {
+                // Abort only — leave wrapBusy/ref for the run's finally so a
+                // follow-up Analyze cannot look idle while the old request settles.
                 wrapAbortRef.current?.abort();
                 setNotice('Analyze cancelled.');
                 setWrapPhase('ready');
-                setWrapBusy(false);
               }}
             >
               Cancel analyze
@@ -2095,6 +2102,18 @@ function CalendarTrackerPanel({
   const epDay = episode.storyDay && episode.storyDay > 0 ? episode.storyDay : cal.currentDay;
   const loc = episode.location.trim() || 'no location set';
   const [calError, setCalError] = useState('');
+  // Number fields draft locally; commit on blur/Enter (avoids intermediate DB writes).
+  const [dayDraft, setDayDraft] = useState(String(today.dayOfMonth));
+  const [yearDraft, setYearDraft] = useState(String(today.year));
+  const [absDraft, setAbsDraft] = useState(String(cal.currentDay));
+  const [dayOneDateDraft, setDayOneDateDraft] = useState(String(cal.dayOneDate));
+  const [advanceDraft, setAdvanceDraft] = useState(String(cal.episodeAdvanceDays));
+  useEffect(() => { setDayDraft(String(today.dayOfMonth)); }, [today.dayOfMonth, world.id]);
+  useEffect(() => { setYearDraft(String(today.year)); }, [today.year, world.id]);
+  useEffect(() => { setAbsDraft(String(cal.currentDay)); }, [cal.currentDay, world.id]);
+  useEffect(() => { setDayOneDateDraft(String(cal.dayOneDate)); }, [cal.dayOneDate, world.id]);
+  useEffect(() => { setAdvanceDraft(String(cal.episodeAdvanceDays)); }, [cal.episodeAdvanceDays, world.id]);
+
   const inputStyle: CSSProperties = {
     fontFamily: "'IBM Plex Mono', monospace", fontSize: 12,
     background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.12)',
@@ -2141,8 +2160,40 @@ function CalendarTrackerPanel({
     setDay(dayFromParts(cal, year, monthIndex, dayOfMonth));
   };
 
+  const monthLen = cal.monthLengths[today.monthIndex] ?? 30;
+
+  const commitDayDraft = () => {
+    const n = Math.max(1, Math.min(monthLen, Math.floor(Number(dayDraft) || 1)));
+    setDayDraft(String(n));
+    if (n !== today.dayOfMonth) setParts(today.year, today.monthIndex, n);
+  };
+  const commitYearDraft = () => {
+    const n = Math.floor(Number(yearDraft) || cal.yearOne);
+    setYearDraft(String(n));
+    if (n !== today.year) setParts(n, today.monthIndex, today.dayOfMonth);
+  };
+  const commitAbsDraft = () => {
+    const n = Math.max(1, Math.floor(Number(absDraft) || 1));
+    setAbsDraft(String(n));
+    if (n !== cal.currentDay) setDay(n);
+  };
+  const commitDayOneDateDraft = () => {
+    const max = cal.monthLengths[cal.dayOneMonth] ?? 30;
+    const n = Math.max(1, Math.min(max, Math.floor(Number(dayOneDateDraft) || 1)));
+    setDayOneDateDraft(String(n));
+    if (n !== cal.dayOneDate) patchCal({ dayOneDate: n });
+  };
   const setAdvance = (n: number) => {
     patchCal({ episodeAdvanceDays: Math.max(0, Math.min(365, Math.floor(n))) });
+  };
+  const commitAdvanceDraft = () => {
+    const n = Math.max(0, Math.min(365, Math.floor(Number(advanceDraft) || 0)));
+    setAdvanceDraft(String(n));
+    if (n !== cal.episodeAdvanceDays) setAdvance(n);
+  };
+
+  const onNumKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') e.currentTarget.blur();
   };
 
   const setDayOneWeekday = (idx: number) => {
@@ -2156,8 +2207,6 @@ function CalendarTrackerPanel({
       setCalError
     );
   };
-
-  const monthLen = cal.monthLengths[today.monthIndex] ?? 30;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -2191,8 +2240,10 @@ function CalendarTrackerPanel({
               type="number"
               min={1}
               max={monthLen}
-              value={today.dayOfMonth}
-              onChange={(e) => setParts(today.year, today.monthIndex, Number(e.target.value) || 1)}
+              value={dayDraft}
+              onChange={(e) => setDayDraft(e.target.value)}
+              onBlur={commitDayDraft}
+              onKeyDown={onNumKeyDown}
               style={inputStyle}
             />
           </label>
@@ -2212,8 +2263,10 @@ function CalendarTrackerPanel({
             <Mono style={{ fontSize: 8, opacity: 0.5 }}>year</Mono>
             <input
               type="number"
-              value={today.year}
-              onChange={(e) => setParts(Number(e.target.value) || cal.yearOne, today.monthIndex, today.dayOfMonth)}
+              value={yearDraft}
+              onChange={(e) => setYearDraft(e.target.value)}
+              onBlur={commitYearDraft}
+              onKeyDown={onNumKeyDown}
               style={inputStyle}
             />
           </label>
@@ -2224,8 +2277,10 @@ function CalendarTrackerPanel({
           <input
             type="number"
             min={1}
-            value={cal.currentDay}
-            onChange={(e) => setDay(Number(e.target.value) || 1)}
+            value={absDraft}
+            onChange={(e) => setAbsDraft(e.target.value)}
+            onBlur={commitAbsDraft}
+            onKeyDown={onNumKeyDown}
             style={{ ...inputStyle, width: 72 }}
           />
         </label>
@@ -2264,8 +2319,10 @@ function CalendarTrackerPanel({
               type="number"
               min={1}
               max={cal.monthLengths[cal.dayOneMonth] ?? 30}
-              value={cal.dayOneDate}
-              onChange={(e) => patchCal({ dayOneDate: Math.max(1, Number(e.target.value) || 1) })}
+              value={dayOneDateDraft}
+              onChange={(e) => setDayOneDateDraft(e.target.value)}
+              onBlur={commitDayOneDateDraft}
+              onKeyDown={onNumKeyDown}
               style={inputStyle}
             />
           </label>
@@ -2283,8 +2340,10 @@ function CalendarTrackerPanel({
               type="number"
               min={0}
               max={365}
-              value={cal.episodeAdvanceDays}
-              onChange={(e) => setAdvance(Math.max(0, Math.min(365, Number(e.target.value) || 0)))}
+              value={advanceDraft}
+              onChange={(e) => setAdvanceDraft(e.target.value)}
+              onBlur={commitAdvanceDraft}
+              onKeyDown={onNumKeyDown}
               style={{ ...inputStyle, width: 64 }}
               title="Custom advance days"
             />

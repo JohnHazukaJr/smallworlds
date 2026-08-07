@@ -53,11 +53,15 @@ export function Sequel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storedWrap?.id]);
   const timer = useRef<number>(undefined);
+  const clearDebounce = () => {
+    window.clearTimeout(timer.current);
+    timer.current = undefined;
+  };
   const patch = (p: Partial<SeasonWrap>) => {
     setDraft((d) => {
       if (!d) return d;
       const next = { ...d, ...p, updatedAt: Date.now() };
-      window.clearTimeout(timer.current);
+      clearDebounce();
       timer.current = window.setTimeout(
         () => void safeWrite(() => db.wraps.put(next), setError),
         400
@@ -70,6 +74,8 @@ export function Sequel() {
     kind: 'analyze' | 'evolve' | 'premise' | 'begin',
     fn: () => Promise<void>
   ) => {
+    // Flush pending local edits so AI writes cannot be overwritten by a stale put.
+    clearDebounce();
     setBusy(kind);
     setError('');
     try {
@@ -259,7 +265,9 @@ export function Sequel() {
             <button
               className="btn-ghost" disabled={busy !== null}
               onClick={() => void run('evolve', async () => {
+                clearDebounce();
                 const updated = await evolveCharacters(world, draft, gapLabel);
+                clearDebounce();
                 setDraft(updated);
               })}
             >

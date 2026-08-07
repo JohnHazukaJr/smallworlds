@@ -2,7 +2,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useState, type ReactNode } from 'react';
 import { fleshOutNarratorRules, fleshOutPremise, fleshOutWorldLore } from '../ai/engine';
 import {
-  preferBucketsForEpisodes, selectDirectorFacts, selectDirectorThreads
+  episodeSceneDay, preferBucketsForEpisodes, selectDirectorFacts, selectDirectorThreads
 } from '../ai/prompts';
 import { db, safeWrite } from '../db';
 import { formatUserError } from '../errors';
@@ -15,7 +15,7 @@ import { Bar, Chip, ErrorNote, Field, Mono, Sheet, Spinner, Toggle } from '../ui
 import { avatarStyle } from '../ui/theme';
 import {
   advanceMonths, calendarPatch, dayFromParts, emptyCharacter, emptyLocation,
-  formatEpisodeDateRange, formatStoryDateShort, partsForDay, worldCalendar
+  formatEpisodeDateRange, formatStoryDate, formatStoryDateShort, partsForDay, worldCalendar
 } from '../worldOps';
 
 type Tab = 'context' | 'lore' | 'plot' | 'instructions' | 'settings' | 'cast' | 'locations';
@@ -749,6 +749,7 @@ function ContextPreview({
   ) ?? [];
 
   const cal = worldCalendar(world);
+  const sceneDay = episodeSceneDay(episode, cal);
   const dateLine = formatEpisodeDateRange(cal, episode.storyDay, episode.storyDayEnd);
   const locName = episode.location.trim()
     || locations.find((l) => l.id === episode.locationId)?.name
@@ -764,7 +765,8 @@ function ContextPreview({
   const prefer = preferBucketsForEpisodes(priorEps, episode);
   const facts = selectDirectorFacts(continuity, prefer);
   const openThreads = selectDirectorThreads(threads, prefer);
-  const walls = [...inScene, ...(player ? [player] : [])].filter((c) => c.mustNotKnow?.trim());
+  // Match director: walls for all NPCs (enter-this-turn cast must be visible before castDelta).
+  const walls = characters.filter((c) => !c.isPlayer && c.mustNotKnow?.trim());
   const bible = season.bible;
   const carried = (bible?.carriedBeats ?? [])
     .filter((b) => b.disposition === 'raise' || b.disposition === 'keep')
@@ -783,7 +785,10 @@ function ContextPreview({
           S{season.number} · E{episode.number}
           {episode.title ? ` — ${episode.title}` : ''}
         </div>
-        <div>Today: {formatStoryDateShort(cal, cal.currentDay)}</div>
+        <div>Today (this scene): {formatStoryDateShort(cal, sceneDay)}</div>
+        {cal.currentDay !== sceneDay && (
+          <div style={{ opacity: 0.7 }}>World clock: {formatStoryDate(cal, cal.currentDay)}</div>
+        )}
         <div style={{ opacity: 0.7 }}>Episode date: {dateLine}</div>
         {episode.dateNote?.trim() && (
           <div style={{ opacity: 0.7 }}>Date note: {episode.dateNote.trim()}</div>

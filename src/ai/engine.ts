@@ -520,6 +520,28 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
     : guests.map((g) => g.id);
   let beatsCompleted = 0;
   let userTurnId: string | null = null;
+  // Pre-delta scene — restored if we abort/fail with zero beats after director mutated cast.
+  const sceneSnapshot = {
+    castIds: [...opts.episode.castIds],
+    guests: [...(opts.episode.guests ?? [])] as EpisodeGuest[],
+    /** undefined means field was omitted (all guests active) */
+    activeGuestIds: opts.episode.activeGuestIds
+      ? [...opts.episode.activeGuestIds]
+      : undefined as string[] | undefined
+  };
+  let sceneMutated = false;
+
+  const rollbackSceneIfNeeded = async () => {
+    if (!sceneMutated) return;
+    await db.episodes.where('id').equals(opts.episode.id).modify((ep) => {
+      ep.castIds = sceneSnapshot.castIds;
+      ep.guests = sceneSnapshot.guests;
+      if (sceneSnapshot.activeGuestIds === undefined) delete ep.activeGuestIds;
+      else ep.activeGuestIds = sceneSnapshot.activeGuestIds;
+      ep.updatedAt = Date.now();
+    }).catch(() => undefined);
+    sceneMutated = false;
+  };
 
   if (opts.mode !== 'continue' && opts.input.trim()) {
     const userText = opts.mode === 'speak'
@@ -590,6 +612,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
     }
     if (changed) {
       await db.episodes.update(opts.episode.id, episodePatch);
+      sceneMutated = true;
       ctx.episode = { ...ctx.episode, ...episodePatch, castIds, guests, activeGuestIds };
       inScene = ctx.characters.filter((c) => castIds.includes(c.id) && !c.isPlayer);
     }
@@ -598,6 +621,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
     );
   } catch (e) {
     if ((e as Error).name === 'AbortError') {
+      await rollbackSceneIfNeeded();
       if (userTurnId) {
         await db.turns.delete(userTurnId).catch(() => undefined);
         ctx.turns = ctx.turns.filter((t) => t.id !== userTurnId);
@@ -732,9 +756,12 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       asWriteAbort(e, beatsCompleted);
     } catch (abortErr) {
       // Orphan player line with no reply — remove so the composer can restore cleanly.
-      if (beatsCompleted === 0 && userTurnId) {
-        await db.turns.delete(userTurnId).catch(() => undefined);
-        ctx.turns = ctx.turns.filter((t) => t.id !== userTurnId);
+      if (beatsCompleted === 0) {
+        await rollbackSceneIfNeeded();
+        if (userTurnId) {
+          await db.turns.delete(userTurnId).catch(() => undefined);
+          ctx.turns = ctx.turns.filter((t) => t.id !== userTurnId);
+        }
       }
       if (abortErr instanceof WriteAbortedError) throw abortErr;
       // Non-abort: attach beatsCompleted so UI can keep partial replies.
@@ -746,6 +773,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
   }
 
   if (beatsCompleted === 0) {
+    await rollbackSceneIfNeeded();
     if (userTurnId) {
       await db.turns.delete(userTurnId).catch(() => undefined);
       ctx.turns = ctx.turns.filter((t) => t.id !== userTurnId);
@@ -1649,6 +1677,7 @@ export async function analyzeSeason(world: World, season: Season): Promise<Seaso
     4000
   );
 
+  const now = Date.now();
   const wrap: SeasonWrap = {
     id: uid(), seasonId: season.id, worldId: world.id,
     beats: result.beats.map((b) => ({ ...b, disposition: 'keep' as const })),
@@ -1659,7 +1688,7 @@ export async function analyzeSeason(world: World, season: Season): Promise<Seaso
       evolution: '',
       returning: true
     })),
-    gap: 1, premise: '', status: 'draft', createdAt: Date.now()
+    gap: 1, premise: '', status: 'draft', createdAt: now, updatedAt: now
   };
   // One draft wrap per season: replace any previous draft.
   const old = await db.wraps.where('seasonId').equals(season.id).filter((w) => w.status === 'draft').toArray();
@@ -1689,7 +1718,8 @@ export async function evolveCharacters(world: World, wrap: SeasonWrap, gapLabel:
       evolution: c.returning
         ? result.find((r) => r.name.toLowerCase() === c.name.toLowerCase())?.evolution ?? c.evolution
         : c.evolution
-    }))
+    })),
+    updatedAt: Date.now()
   };
   await db.wraps.put(updated);
   return updated;
@@ -1775,7 +1805,7 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
         calendar: calendarPatch(liveWorld ?? world, { currentDay: Math.max(1, seasonOpenDay) }),
         updatedAt: Date.now()
       });
-      await db.wraps.update(wrap.id, { status: 'committed' });
+      await db.wraps.update(wrap.id, { status: 'committed', updatedAt: Date.now() });
       // Rewrite character current-state snapshots for the new season.
       for (const c of wrap.characters) {
         const patch = c.returning

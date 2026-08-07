@@ -284,7 +284,7 @@ export function selectDirectorThreads(
 }
 
 /** Absolute day that counts as "now" in the active episode scene. */
-function episodeSceneDay(episode: Episode, cal: ReturnType<typeof worldCalendar>): number {
+export function episodeSceneDay(episode: Episode, cal: ReturnType<typeof worldCalendar>): number {
   if (episode.storyDayEnd && episode.storyDayEnd > 0) return episode.storyDayEnd;
   if (episode.storyDay && episode.storyDay > 0) return episode.storyDay;
   return cal.currentDay;
