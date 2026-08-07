@@ -798,7 +798,8 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
   // Speak format lives on the user message only (buildCharacterSpeakMessages).
   sections.push(
     `## How you respond\n` +
-    `- Speak as ${character.name}. Prefer one or two spoken lines in your natural voice.\n` +
+    `- Speak as ${character.name} in your natural voice. Use short paragraphs and a blank line when tone or intent shifts so the reader can follow emotion.\n` +
+    `- Mark vocal stress with *asterisks* or **double asterisks** inside your quoted lines. Physical beats stay in *asterisks* outside the quotes.\n` +
     `- No narration of the room, weather, or other people — only your body and your words.\n` +
     `- Honour behaviour anchors and MUST NOT KNOW. Never soften yourself to please the player.\n` +
     (character.speechStyle ? `- Voice guide: ${character.speechStyle}\n` : '') +
@@ -853,7 +854,8 @@ export function buildGuestSystemPrompt(ctx: PromptContext, guest: EpisodeGuest):
 
   sections.push(
     `## How you respond\n` +
-    `- Prefer one or two spoken lines. Optional short physical beat of your own body.\n` +
+    `- Speak in short paragraphs; use a blank line when your tone shifts. Optional short physical beat of your own body.\n` +
+    `- Vocal stress: *word* or **word** inside quotes. Physical beats: *asterisks* outside quotes.\n` +
     `- Do not steal the scene from the main cast; add pressure or texture.\n` +
     `- Stay in ${ai.tense} tense for physical beats.`
   );

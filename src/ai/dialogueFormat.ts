@@ -1,14 +1,20 @@
 /**
  * Canonical character/guest speak format:
  *   *she smiled, showing her dimples* "It's good to see you."
- * Actions in *asterisks*; spoken words in "double quotes".
+ * Actions in *asterisks* outside quotes; spoken words in "double quotes".
+ * Inside quotes, *stress* or **stress** = vocal emphasis (rendered bold).
  */
 
-export type SpeakSegmentKind = 'action' | 'speech' | 'plain';
+export type SpeakSegmentKind = 'action' | 'speech' | 'plain' | 'break';
 
 export interface SpeakSegment {
   kind: SpeakSegmentKind;
   text: string;
+}
+
+export interface InlineRun {
+  text: string;
+  strong?: boolean;
 }
 
 const NAME_PREFIX = /^[A-Z][^:\n]{0,48}:\s*/;
@@ -58,34 +64,52 @@ export function hasSpokenDialogue(raw: string): boolean {
 }
 
 /**
- * Split a speak turn into action / speech / plain segments for rendering.
+ * Split plain gap text into plain runs and paragraph breaks.
+ * Leading/trailing whitespace around breaks is discarded; single newlines become spaces.
+ */
+function pushPlainWithBreaks(segments: SpeakSegment[], gap: string): void {
+  if (!gap) return;
+  // Normalize 3+ newlines to paragraph breaks first.
+  const normalized = gap.replace(/\n{3,}/g, '\n\n');
+  const parts = normalized.split(/\n\n/);
+  for (let i = 0; i < parts.length; i++) {
+    if (i > 0) segments.push({ kind: 'break', text: '' });
+    // Single newlines → space so soft wraps don't become paragraphs.
+    const plain = parts[i].replace(/\n/g, ' ').replace(/[^\S\n]+/g, ' ').trim();
+    if (plain) segments.push({ kind: 'plain', text: plain });
+  }
+}
+
+/**
+ * Split a speak turn into action / speech / plain / break segments for rendering.
  * Asterisks and quote delimiters are not included in segment text.
+ * Blank lines between beats become `break` segments.
  */
 export function parseSpeakSegments(raw: string): SpeakSegment[] {
-  const text = normalizeQuotes(raw.trim());
+  const text = normalizeQuotes(raw.trim()).replace(/\n{3,}/g, '\n\n');
   if (!text) return [];
 
   const segments: SpeakSegment[] = [];
-  const re = /\*([^*]+)\*|"([^"]+)"/g;
+  // Speech first in the alternation so "I *said* leave." stays one speech segment
+  // (in-quote *stress* is not treated as action).
+  const re = /"([^"]+)"|\*([^*]+)\*/g;
   let last = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     if (m.index > last) {
-      const plain = text.slice(last, m.index).trim();
-      if (plain) segments.push({ kind: 'plain', text: plain });
+      pushPlainWithBreaks(segments, text.slice(last, m.index));
     }
     if (m[1] !== undefined) {
-      const action = m[1].trim();
-      if (action) segments.push({ kind: 'action', text: action });
-    } else if (m[2] !== undefined) {
-      const speech = m[2].trim();
+      const speech = m[1].trim();
       if (speech) segments.push({ kind: 'speech', text: speech });
+    } else if (m[2] !== undefined) {
+      const action = m[2].trim();
+      if (action) segments.push({ kind: 'action', text: action });
     }
     last = m.index + m[0].length;
   }
   if (last < text.length) {
-    const plain = text.slice(last).trim();
-    if (plain) segments.push({ kind: 'plain', text: plain });
+    pushPlainWithBreaks(segments, text.slice(last));
   }
 
   // Legacy: entire turn was plain dialogue with optional outer quotes.
@@ -94,14 +118,69 @@ export function parseSpeakSegments(raw: string): SpeakSegment[] {
     if (stripped) segments.push({ kind: 'speech', text: stripped });
   }
 
-  return segments;
+  // Drop leading/trailing breaks; collapse consecutive breaks.
+  const cleaned: SpeakSegment[] = [];
+  for (const seg of segments) {
+    if (seg.kind === 'break') {
+      if (cleaned.length === 0) continue;
+      if (cleaned[cleaned.length - 1].kind === 'break') continue;
+      cleaned.push(seg);
+      continue;
+    }
+    cleaned.push(seg);
+  }
+  while (cleaned.length > 0 && cleaned[cleaned.length - 1].kind === 'break') cleaned.pop();
+
+  return cleaned;
 }
 
-/** Instructions injected into character / guest speak system prompts. */
+/**
+ * Light inline emphasis: **strong** then *strong* (vocal stress).
+ * No nesting; unmatched markers stay literal.
+ */
+export function parseInlineEmphasis(text: string): InlineRun[] {
+  if (!text) return [];
+  const runs: InlineRun[] = [];
+  const re = /\*\*([^*]+)\*\*|\*([^*]+)\*/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) {
+      runs.push({ text: text.slice(last, m.index) });
+    }
+    const strong = (m[1] ?? m[2] ?? '').trim();
+    if (strong) runs.push({ text: strong, strong: true });
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) runs.push({ text: text.slice(last) });
+  return runs.length > 0 ? runs : [{ text }];
+}
+
+/** Group speak segments into paragraphs separated by break markers. */
+export function groupSpeakParagraphs(segments: SpeakSegment[]): SpeakSegment[][] {
+  const paras: SpeakSegment[][] = [];
+  let cur: SpeakSegment[] = [];
+  for (const seg of segments) {
+    if (seg.kind === 'break') {
+      if (cur.length > 0) paras.push(cur);
+      cur = [];
+      continue;
+    }
+    cur.push(seg);
+  }
+  if (cur.length > 0) paras.push(cur);
+  return paras.length > 0 ? paras : [[]];
+}
+
+/** Instructions injected into character / guest speak user messages. */
 export const SPEAK_FORMAT_RULES =
   'Output format (required):\n' +
-  '- Physical looks, gestures, mannerisms, and body language go inside *asterisks* — never inside the spoken quotes.\n' +
+  '- Physical looks, gestures, mannerisms, and body language go inside *asterisks* outside the spoken quotes.\n' +
   '- Words said aloud go inside "double quotes" only.\n' +
-  '- Example: *she smiled shyly, showing her dimples* "It\'s good to see you."\n' +
+  '- Vocal stress on a word: wrap it in *asterisks* or **double asterisks** inside the quotes (shown bold). Example: "I *said* leave."\n' +
+  '- Separate emotional beats or shifts with a blank line between actions/lines so the reader gets paragraphs.\n' +
+  '- Example:\n' +
+  '  *she smiled shyly, showing her dimples* "It\'s good to see you."\n\n' +
+  '  *her voice dropped* "I *meant* what I said earlier."\n' +
   '- You may use dialogue-only. Action-only (*gestures* with no quotes) is allowed only when the beat brief says so; otherwise prefer at least one spoken line. ' +
   'Do NOT prefix with your name. Do NOT wrap the whole reply in one outer quote.';

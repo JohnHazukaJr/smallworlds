@@ -5,7 +5,12 @@ import {
   rollbackTurnSnapshot, snapshotTurnsAfter, snapshotTurnsFrom, writeTurn,
   WriteAbortedError, type EpisodeWrapDraft, type StreamMeta
 } from '../ai/engine';
-import { parseSpeakSegments, type SpeakSegment } from '../ai/dialogueFormat';
+import {
+  groupSpeakParagraphs,
+  parseInlineEmphasis,
+  parseSpeakSegments,
+  type SpeakSegment
+} from '../ai/dialogueFormat';
 import { generateSceneImage } from '../ai/image';
 import {
   episodeContextPressure, episodeHistoryChars, HISTORY_CHAR_BUDGET,
@@ -197,16 +202,40 @@ function parseTurn(turn: Turn, characters: Character[], guests: EpisodeGuest[] =
     });
 }
 
-function SpeakBody({
-  segments, accent, prose, fontPx
+function EmphasizedText({ text }: { text: string }) {
+  return (
+    <>
+      {parseInlineEmphasis(text).map((run, i) =>
+        run.strong ? (
+          <strong key={i} style={{ fontWeight: 700 }}>{run.text}</strong>
+        ) : (
+          <span key={i}>{run.text}</span>
+        )
+      )}
+    </>
+  );
+}
+
+function SpeakParagraph({
+  segments, accent, prose, fontPx, last
 }: {
   segments: SpeakSegment[];
   accent: string;
   prose: string;
   fontPx: number;
+  last: boolean;
 }) {
   return (
-    <p className="serif" style={{ fontSize: fontPx, lineHeight: 1.78, margin: 0, textWrap: 'pretty' }}>
+    <p
+      className="serif"
+      style={{
+        fontSize: fontPx,
+        lineHeight: 1.78,
+        margin: 0,
+        marginBottom: last ? 0 : 12,
+        textWrap: 'pretty'
+      }}
+    >
       {segments.map((seg, i) => {
         if (seg.kind === 'action') {
           return (
@@ -226,7 +255,7 @@ function SpeakBody({
         if (seg.kind === 'speech') {
           return (
             <span key={i} style={{ fontStyle: 'italic', color: prose }}>
-              “{seg.text}”
+              “<EmphasizedText text={seg.text} />”
               {i < segments.length - 1 ? ' ' : ''}
             </span>
           );
@@ -238,6 +267,31 @@ function SpeakBody({
         );
       })}
     </p>
+  );
+}
+
+function SpeakBody({
+  segments, accent, prose, fontPx
+}: {
+  segments: SpeakSegment[];
+  accent: string;
+  prose: string;
+  fontPx: number;
+}) {
+  const paras = groupSpeakParagraphs(segments);
+  return (
+    <div>
+      {paras.map((para, pi) => (
+        <SpeakParagraph
+          key={pi}
+          segments={para}
+          accent={accent}
+          prose={prose}
+          fontPx={fontPx}
+          last={pi === paras.length - 1}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -276,7 +330,7 @@ function ProseBlockView({ b, accent, prose, fontPx, avatarPx }: {
             fontSize: fontPx, lineHeight: 1.78, margin: 0, color: prose,
             fontStyle: b.kind === 'dialogue' ? 'italic' : 'normal', textWrap: 'pretty'
           }}>
-            {b.text}
+            <EmphasizedText text={b.text} />
           </p>
         )}
       </div>
