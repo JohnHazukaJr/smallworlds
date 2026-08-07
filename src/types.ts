@@ -53,7 +53,7 @@ export interface World {
   title: string;
   /** one-line logline shown on the card */
   line: string;
-  /** the world bible: setting, rules, pressures — packed into every prompt */
+  /** the world bible: setting, rules, pressures — packed into narrator/character/guest prompts */
   bible: string;
   hue: number;
   visibility: Visibility;
@@ -84,6 +84,17 @@ export interface CarriedBeat {
   disposition: BeatDisposition;
 }
 
+export type PlotTargetStatus = 'pending' | 'hit' | 'dropped';
+
+/** Author-selected beat the director should work toward (not an open thread). */
+export interface PlotTarget {
+  id: string;
+  text: string;
+  status: PlotTargetStatus;
+  /** where it was seeded from */
+  source: 'wrap-beat' | 'season-raise' | 'manual' | 'carried';
+}
+
 export interface Season {
   id: string;
   worldId: string;
@@ -93,6 +104,8 @@ export interface Season {
   /** human label like "Two years" */
   timeGap: string | null;
   bible: SeasonBible | null;
+  /** Season-arc plot targets (typically seeded from Raise at season handoff). */
+  plotTargets?: PlotTarget[];
   status: 'active' | 'wrapped';
   createdAt: number;
   /** bumped on mutating writes — used for sync LWW */
@@ -158,6 +171,8 @@ export interface Episode {
   runningSummary?: string | null;
   /** Episode transcript char count when runningSummary was last refreshed */
   runningSummaryAtChars?: number;
+  /** Episode plot targets the director should work toward (Aim-from-wrap / manual). */
+  plotTargets?: PlotTarget[];
   status: 'active' | 'ended';
   createdAt: number;
   /** bumped on mutating writes — used for sync LWW */

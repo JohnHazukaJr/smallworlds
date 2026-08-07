@@ -199,6 +199,9 @@ export function Sequel() {
 
         {/* beats */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 11, marginBottom: 34 }}>
+          <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.5)', marginBottom: 4 }}>
+            Raised beats become season plot targets the director works toward. Keep/Soften stay as ambient pressure in the season bible.
+          </div>
           {draft.beats.map((b, i) => {
             const hot = b.disposition === 'raise';
             return (

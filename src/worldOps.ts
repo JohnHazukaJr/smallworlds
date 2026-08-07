@@ -1,6 +1,68 @@
 import { db, uid } from './db';
 import { useSettings } from './store/settings';
-import type { Character, Episode, Location, Season, World, WorldAISettings, WorldCalendar } from './types';
+import type {
+  Character, Episode, Location, PlotTarget, Season, World, WorldAISettings, WorldCalendar
+} from './types';
+
+/** Max pending plot targets stored on an episode or season. */
+export const PLOT_TARGET_CAP = 8;
+
+export function pendingPlotTargets(list?: PlotTarget[] | null): PlotTarget[] {
+  return (list ?? []).filter((t) => t.status === 'pending' && t.text.trim());
+}
+
+/** Prefer newly aimed texts, then carried pending; dedupe by normalized text. */
+export function buildEpisodePlotTargets(opts: {
+  aimedTexts: string[];
+  carried?: PlotTarget[] | null;
+  cap?: number;
+}): PlotTarget[] {
+  const cap = opts.cap ?? PLOT_TARGET_CAP;
+  const aimed: PlotTarget[] = opts.aimedTexts
+    .map((text) => text.trim())
+    .filter(Boolean)
+    .map((text) => ({
+      id: uid(),
+      text,
+      status: 'pending' as const,
+      source: 'wrap-beat' as const
+    }));
+  const carried: PlotTarget[] = pendingPlotTargets(opts.carried).map((t) => ({
+    id: uid(),
+    text: t.text.trim(),
+    status: 'pending' as const,
+    source: 'carried' as const
+  }));
+  const seen = new Set<string>();
+  const out: PlotTarget[] = [];
+  for (const t of [...aimed, ...carried]) {
+    const key = t.text.toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(t);
+    if (out.length >= cap) break;
+  }
+  return out;
+}
+
+export function buildSeasonPlotTargets(raiseBeats: Array<{ text: string; consequence?: string }>): PlotTarget[] {
+  const seen = new Set<string>();
+  const out: PlotTarget[] = [];
+  for (const b of raiseBeats) {
+    const text = `${b.text.trim()}${b.consequence?.trim() ? ` → ${b.consequence.trim()}` : ''}`.trim();
+    const key = text.toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      id: uid(),
+      text,
+      status: 'pending',
+      source: 'season-raise'
+    });
+    if (out.length >= PLOT_TARGET_CAP) break;
+  }
+  return out;
+}
 
 /** Default Earth-style week when the world hasn't defined its own. */
 export const DEFAULT_WEEKDAYS = [
@@ -354,6 +416,8 @@ export interface NextEpisodeOpts {
   nextStoryDay?: number;
   /** Free-text date note from wrap analysis */
   dateNote?: string | null;
+  /** Plot targets for the next episode (Aim + carried pending). */
+  plotTargets?: PlotTarget[];
 }
 
 /** End the current episode and open the next one, carrying the scene cast forward. */
@@ -383,6 +447,7 @@ export async function nextEpisode(current: Episode, opts: NextEpisodeOpts = {}):
     storyDay: nextDay,
     storyDayEnd: null,
     dateNote: null,
+    plotTargets: opts.plotTargets?.length ? opts.plotTargets : undefined,
     status: 'active',
     createdAt: Date.now(),
     updatedAt: Date.now()

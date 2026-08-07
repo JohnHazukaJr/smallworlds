@@ -69,7 +69,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
     void safeWrite(async () => {
       await db.locations.update(id, { ...p, updatedAt: Date.now() });
       if (episode.locationId === id && typeof p.name === 'string') {
-        await db.episodes.update(episode.id, { location: p.name });
+        await db.episodes.update(episode.id, { location: p.name, updatedAt: Date.now() });
       }
     }, onSaveFail);
 
@@ -146,7 +146,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <input key={world.id + '-line-' + aiVersion} defaultValue={world.line}
                 onBlur={(e) => patchWorld({ line: e.target.value })} />
             </Field>
-            <Field label="World bible — lore" note="setting, rules, pressures · in every prompt">
+            <Field label="World bible — lore" note="setting, rules, pressures · narrator / character / guest">
               <textarea key={world.id + '-bible-' + aiVersion} rows={14} defaultValue={world.bible}
                 onBlur={(e) => patchWorld({ bible: e.target.value })}
                 style={{ fontFamily: 'Spectral, serif', fontSize: 14.5, lineHeight: 1.65 }} />
@@ -194,18 +194,31 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 const monthLen = cal.monthLengths[today.monthIndex] ?? 30;
                 const patchCal = (p: Parameters<typeof calendarPatch>[1]) =>
                   patchWorld({ calendar: calendarPatch(world, p) });
+                /** Match Direct calendar: advancing today also stamps active episode scene day. */
+                const setDay = (day: number) => {
+                  const next = Math.max(1, Math.floor(day));
+                  void safeWrite(async () => {
+                    await db.worlds.update(world.id, {
+                      calendar: calendarPatch(world, { currentDay: next }),
+                      updatedAt: Date.now()
+                    });
+                    if (episode.status === 'active') {
+                      await db.episodes.update(episode.id, { storyDay: next, updatedAt: Date.now() });
+                    }
+                  }, onSaveFail);
+                };
                 const setParts = (year: number, monthIndex: number, dayOfMonth: number) =>
-                  patchCal({ currentDay: dayFromParts(cal, year, monthIndex, dayOfMonth) });
+                  setDay(dayFromParts(cal, year, monthIndex, dayOfMonth));
                 return (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                     <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: '#f0eee9' }}>
                       {formatStoryDateShort(cal, cal.currentDay)}
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                      <Chip onClick={() => patchCal({ currentDay: Math.max(1, cal.currentDay - 1) })}>−1</Chip>
-                      <Chip onClick={() => patchCal({ currentDay: cal.currentDay + 1 })}>+1 day</Chip>
-                      <Chip onClick={() => patchCal({ currentDay: cal.currentDay + 7 })}>+7 days</Chip>
-                      <Chip onClick={() => patchCal({ currentDay: advanceMonths(cal, cal.currentDay, 1) })}>+1 month</Chip>
+                      <Chip onClick={() => setDay(cal.currentDay - 1)}>−1</Chip>
+                      <Chip onClick={() => setDay(cal.currentDay + 1)}>+1 day</Chip>
+                      <Chip onClick={() => setDay(cal.currentDay + 7)}>+7 days</Chip>
+                      <Chip onClick={() => setDay(advanceMonths(cal, cal.currentDay, 1))}>+1 month</Chip>
                     </div>
                     <div style={{ display: 'grid', gridTemplateColumns: narrow ? '1fr' : '1fr 1.4fr 0.9fr', gap: 8 }}>
                       <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, opacity: 0.75 }}>
@@ -247,7 +260,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                         type="number"
                         min={1}
                         value={cal.currentDay}
-                        onChange={(e) => patchCal({ currentDay: Math.max(1, Number(e.target.value) || 1) })}
+                        onChange={(e) => setDay(Math.max(1, Number(e.target.value) || 1))}
                         style={{ width: 72, ...MONO_INPUT }}
                       />
                     </label>
@@ -394,7 +407,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
 
         {tab === 'instructions' && (
           <>
-            <Field label="World instructions" note="passed to the model verbatim, every request">
+            <Field label="World instructions" note="verbatim in narrator, character, and guest prompts">
               <textarea key={world.id + '-custom'} rows={6} defaultValue={world.ai.customInstructions}
                 onBlur={(e) => patchAI({ customInstructions: e.target.value })}
                 placeholder="Themes to circle, imagery to reuse, what the story is really about…" />
@@ -542,7 +555,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                   onBlur={(e) => patchChar(selected.id, { role: e.target.value })} />
               </Field>
             </div>
-            <Field label="Who they are" note="summary in every prompt when in scene">
+            <Field label="Who they are" note="summary when in scene (narrator / speak)">
               <textarea key={selected.id + '-summary'} rows={4} defaultValue={selected.summary}
                 onBlur={(e) => patchChar(selected.id, { summary: e.target.value })} />
             </Field>
@@ -580,11 +593,11 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <textarea key={selected.id + '-mnk'} rows={2} defaultValue={selected.mustNotKnow}
                 onBlur={(e) => patchChar(selected.id, { mustNotKnow: e.target.value })} />
             </Field>
-            <Field label="Behaviour anchors" note="one per line — never broken">
+            <Field label="Behaviour anchors" note="one per line — when in scene (narrator / speak)">
               <textarea key={selected.id + '-anchors'} rows={3} defaultValue={selected.anchors.join('\n')}
                 onBlur={(e) => patchChar(selected.id, { anchors: e.target.value.split('\n').filter((l) => l.trim()) })} />
             </Field>
-            <Field label="AI directives for this character" note="passed verbatim">
+            <Field label="AI directives for this character" note="verbatim when in scene (narrator / speak)">
               <textarea key={selected.id + '-ci'} rows={3} defaultValue={selected.customInstructions}
                 onBlur={(e) => patchChar(selected.id, { customInstructions: e.target.value })} />
             </Field>
@@ -642,7 +655,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 {selectedLoc.name || 'unnamed'}
               </div>
               <button className="btn-quiet" style={{ fontSize: 10 }} onClick={() => {
-                void db.episodes.update(episode.id, {
+                patchEpisode({
                   locationId: selectedLoc.id,
                   location: selectedLoc.name,
                   ...(selectedLoc.portrait ? { image: selectedLoc.portrait } : {})
@@ -680,7 +693,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <textarea key={selectedLoc.id + '-state'} rows={2} defaultValue={selectedLoc.currentState}
                 onBlur={(e) => patchLoc(selectedLoc.id, { currentState: e.target.value })} />
             </Field>
-            <Field label="AI directives for this location" note="passed verbatim">
+            <Field label="AI directives for this location" note="verbatim when this is the current scene">
               <textarea key={selectedLoc.id + '-ci'} rows={2} defaultValue={selectedLoc.customInstructions}
                 onBlur={(e) => patchLoc(selectedLoc.id, { customInstructions: e.target.value })} />
             </Field>
@@ -825,6 +838,33 @@ function ContextPreview({
           Edit in Plot
         </button>
       </ContextSection>
+
+      {(() => {
+        const epTargets = (episode.plotTargets ?? []).filter((t) => t.status === 'pending' && t.text.trim());
+        const seaTargets = (season.plotTargets ?? []).filter((t) => t.status === 'pending' && t.text.trim());
+        if (epTargets.length === 0 && seaTargets.length === 0) return null;
+        return (
+          <ContextSection title="plot targets" note="work toward when natural">
+            {epTargets.length > 0 && (
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                {epTargets.slice(0, 6).map((t) => (
+                  <li key={t.id}>{t.text}</li>
+                ))}
+              </ul>
+            )}
+            {seaTargets.length > 0 && (
+              <>
+                <div style={{ opacity: 0.55, fontSize: 12 }}>Season arc</div>
+                <ul style={{ margin: 0, paddingLeft: 18, opacity: 0.85 }}>
+                  {seaTargets.slice(0, 6).map((t) => (
+                    <li key={t.id}>{t.text}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </ContextSection>
+        );
+      })()}
 
       {priorEps.length > 0 && (
         <ContextSection title="recent episode memory" note="last 2–3 wraps">

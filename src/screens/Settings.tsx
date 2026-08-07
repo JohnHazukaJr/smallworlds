@@ -535,7 +535,7 @@ function WorldSettings({ world }: { world: World }) {
             onBlur={(e) => patchAI({ contentNotes: e.target.value })}
           />
         </Field>
-        <Field label="World instructions" note="passed to the model verbatim, every request in this world">
+        <Field label="World instructions" note="verbatim in narrator, character, and guest prompts (not the lean director plan)">
           <textarea
             rows={4}
             defaultValue={world.ai.customInstructions}
@@ -597,7 +597,7 @@ function SliderCard({ label, value, onChange, note, valueLabel }: {
 function WorldBibleEditor({ world, onError }: { world: World; onError: (msg: string) => void }) {
   return (
     <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <Field label="World bible" note="the setting, rules and pressures — packed into every prompt">
+      <Field label="World bible" note="setting, rules, pressures — packed into narrator, character, and guest prompts">
         <textarea
           rows={6}
           className="serif"

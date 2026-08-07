@@ -580,7 +580,7 @@ export function Cast() {
                     </div>
                   </div>
                   <div style={{ fontSize: 13, lineHeight: 1.65, color: 'rgba(236,234,230,0.6)' }}>
-                    Hard rules, rendered as a non-negotiable block in every prompt where this character appears.
+                    Hard rules, rendered as a non-negotiable block when this character is in scene (narrator / speak).
                     One per line.
                   </div>
                   <textarea
@@ -606,7 +606,7 @@ export function Cast() {
               )}
 
               {tab === 'ai' && (
-                <Field label="Custom AI instructions" note="passed to the model verbatim, every scene they appear in">
+                <Field label="Custom AI instructions" note="verbatim when this character is in scene (narrator / speak)">
                   <textarea
                     rows={5} value={d.customInstructions}
                     onChange={(e) => patch({ customInstructions: e.target.value })}

@@ -132,7 +132,7 @@ export function Onboard() {
   const setPremiseAndSave = (v: string) => {
     setPremise(v);
     if (seasonId) {
-      void safeWrite(() => db.seasons.update(seasonId, { premise: v }), setError);
+      void safeWrite(() => db.seasons.update(seasonId, { premise: v, updatedAt: Date.now() }), setError);
     }
   };
 
@@ -491,7 +491,7 @@ export function Onboard() {
               placeholder="e.g. No sexual content involving minors. Violence stays grounded, never cartoonish."
             />
           </Field>
-          <Field label="World instructions" note="passed to the model verbatim, every request">
+          <Field label="World instructions" note="verbatim in narrator, character, and guest prompts">
             <textarea
               rows={3}
               value={ai.customInstructions}

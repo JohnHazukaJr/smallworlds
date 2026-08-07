@@ -4,12 +4,12 @@ import { resolveModel, useSettings } from '../store/settings';
 import { GAP_DAYS, GAP_LABELS } from '../ui/theme';
 import type {
   Character, ComposeMode, Episode, EpisodeGuest, EpisodeWrap, EpisodeWrapBeat, Location, ModelRef,
-  OpenThread, Relationship, Season, SeasonWrap, Turn, TurnLength, TurnRole, World, WrapBeat
+  OpenThread, PlotTarget, Relationship, Season, SeasonWrap, Turn, TurnLength, TurnRole, World, WrapBeat
 } from '../types';
 import { normalizeRelationships } from '../relationships';
 import {
-  calendarPatch, emptyCharacter, emptyLocation, formatEpisodeDateRange, formatStoryDate,
-  nextEpisode, worldCalendar
+  buildEpisodePlotTargets, buildSeasonPlotTargets, calendarPatch, emptyCharacter, emptyLocation,
+  formatEpisodeDateRange, formatStoryDate, nextEpisode, pendingPlotTargets, worldCalendar
 } from '../worldOps';
 import { AIError, streamChat, type ChatMessage, type StreamRequest } from './client';
 import { hasSpokenDialogue, normalizeSpeakText } from './dialogueFormat';
@@ -1121,6 +1121,8 @@ export interface EpisodeWrapDraft {
   nextStoryDay: number;
   /** Free-text when/how time passed (night fell, two days later, etc.) */
   dateNote: string;
+  /** Pending plot targets this episode appears to have hit (near-exact to current list). */
+  hitTargets: string[];
 }
 
 /** Season-like episode analysis for the wrap review UI. */
@@ -1158,7 +1160,8 @@ export async function analyzeEpisode(
     storyDayStart: dayStart,
     storyDayEnd: Math.max(dayStart, dayNow),
     nextStoryDay: Math.max(dayStart, dayNow) + cal.episodeAdvanceDays,
-    dateNote: ''
+    dateNote: '',
+    hitTargets: []
   };
   if (!text.trim()) return empty;
 
@@ -1204,6 +1207,14 @@ export async function analyzeEpisode(
     ? openThreads.map((t) => `- ${t.text}`).join('\n')
     : '(none)';
 
+  const pendingTargets = [
+    ...pendingPlotTargets(episode.plotTargets).map((t) => ({ scope: 'episode' as const, text: t.text })),
+    ...pendingPlotTargets(season.plotTargets).map((t) => ({ scope: 'season' as const, text: t.text }))
+  ];
+  const pendingTargetBlock = pendingTargets.length > 0
+    ? pendingTargets.map((t) => `- [${t.scope}] ${t.text}`).join('\n')
+    : '(none)';
+
   const dateBlock =
     `Calendar system: ${cal.system || '(day count only)'}\n` +
     `Weekdays: ${cal.weekdays.join(', ')} (story day 1 = ${cal.weekdays[cal.dayOneWeekday]})\n` +
@@ -1239,6 +1250,7 @@ export async function analyzeEpisode(
     storyDayEnd?: number;
     nextStoryDay?: number;
     dateNote?: string;
+    hitTargets?: string[];
   }>(
     world,
     'You are a continuity editor closing an interactive fiction episode. ' +
@@ -1249,6 +1261,7 @@ export async function analyzeEpisode(
     '"facts":["<durable facts — include dated facts when time mattered, e.g. On Thursday (day 12) …>"],' +
     '"threads":["<NEW unresolved tensions raised this episode>"],' +
     '"resolvedThreads":["<exact or near-exact text of prior open threads this episode settled — omit if none>"],' +
+    '"hitTargets":["<exact or near-exact text of pending plot targets this episode meaningfully advanced or fulfilled — omit if none>"],' +
     '"guestEffects":["<how walk-ons changed the story, if any>"],' +
     '"characterUpdates":[{"name":"<exact cast name>","goal":"<current goal or empty>","emotion":"<emotional state>","location":"<where they are>","condition":"<injuries/status>"}],' +
     '"knowledgeUpdates":[{"name":"<exact cast name>","nowKnows":"<what they learned>","clearMustNotKnow":"<clause from MUST NOT KNOW that is no longer secret to them>"}],' +
@@ -1261,6 +1274,7 @@ export async function analyzeEpisode(
     '- Beats: 3–7 events that matter later; never vague ("things escalated").\n' +
     '- Facts: 4–12 new durable facts; do NOT repeat Known facts; each fact stands alone with names; date when relevant.\n' +
     '- Threads: only NEW open tensions (0–8). Put settled prior threads in resolvedThreads.\n' +
+    '- hitTargets: only from the Pending plot targets list; copy text near-exactly; omit if the target was not advanced.\n' +
     '- characterUpdates: every non-player cast member who appeared or was meaningfully affected; omit empties.\n' +
     '- knowledgeUpdates: only when someone learned something that was blocked or newly revealed; clearMustNotKnow should match their wall when possible.\n' +
     '- relationshipUpdates: only real shifts (trust, debt, romance, enmity); use exact cast names.\n' +
@@ -1280,6 +1294,7 @@ export async function analyzeEpisode(
     guestBlock +
     `Known facts (do not repeat):\n${knownFacts || '(none)'}\n\n` +
     `Open threads already on file (resolve via resolvedThreads if settled):\n${openThreadBlock}\n\n` +
+    `Pending plot targets (report hits via hitTargets):\n${pendingTargetBlock}\n\n` +
     `Episode material:\n${corpus.slice(0, 60000)}`,
     4000,
     signal,
@@ -1343,7 +1358,8 @@ export async function analyzeEpisode(
     storyDayStart: dayStart,
     storyDayEnd,
     nextStoryDay,
-    dateNote: (result.dateNote ?? '').trim()
+    dateNote: (result.dateNote ?? '').trim(),
+    hitTargets: (result.hitTargets ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 10)
   };
 
   try {
@@ -1378,6 +1394,10 @@ export interface CommitEpisodeWrapInput {
   /** Story day the next episode should open on */
   nextStoryDay?: number;
   dateNote?: string;
+  /** Kept beat texts aimed at the next episode as plot targets. */
+  aimedBeatTexts?: string[];
+  /** Pending plot target texts the author confirmed as hit this episode. */
+  hitTargets?: string[];
 }
 
 /**
@@ -1451,6 +1471,38 @@ function matchOpenThreads(
   return matched;
 }
 
+/** Match wrap hit-target lines to pending plot targets (exact, then loose contains). */
+function matchPlotTargets(
+  targets: PlotTarget[],
+  hitLines: string[]
+): PlotTarget[] {
+  const pending = targets.filter((t) => t.status === 'pending');
+  const matched: PlotTarget[] = [];
+  const used = new Set<string>();
+  for (const line of hitLines) {
+    const key = line.trim().toLowerCase();
+    if (!key) continue;
+    let hit = pending.find((t) => !used.has(t.id) && t.text.trim().toLowerCase() === key);
+    if (!hit) {
+      hit = pending.find((t) => {
+        if (used.has(t.id)) return false;
+        const tKey = t.text.trim().toLowerCase();
+        return tKey.includes(key) || key.includes(tKey);
+      });
+    }
+    if (hit) {
+      used.add(hit.id);
+      matched.push(hit);
+    }
+  }
+  return matched;
+}
+
+function markTargetsHit(list: PlotTarget[] | undefined, hitIds: Set<string>): PlotTarget[] | undefined {
+  if (!list?.length || hitIds.size === 0) return list;
+  return list.map((t) => (hitIds.has(t.id) ? { ...t, status: 'hit' as const } : t));
+}
+
 /**
  * Persist wrap onto the ended episode, file continuity/threads, evolve premise,
  * update cast state, open the next episode.
@@ -1478,13 +1530,25 @@ export async function commitEpisodeWrap(
     ` — ${formatEpisodeDateRange(cal, dayStart, dayEnd)}` +
     (dateNote ? `. ${dateNote}` : '.');
 
+  const hitLines = (input.hitTargets ?? []).map((t) => t.trim()).filter(Boolean);
+  const epHits = matchPlotTargets(episode.plotTargets ?? [], hitLines);
+  const seasonHits = matchPlotTargets(season.plotTargets ?? [], hitLines);
+  const epHitIds = new Set(epHits.map((t) => t.id));
+  const seasonHitIds = new Set(seasonHits.map((t) => t.id));
+  const episodeTargetsNext = markTargetsHit(episode.plotTargets, epHitIds);
+  const seasonTargetsNext = markTargetsHit(season.plotTargets, seasonHitIds);
+
   await db.episodes.update(episode.id, {
     wrap,
     storyDay: dayStart,
     storyDayEnd: dayEnd,
     dateNote: dateNote || null,
+    ...(episodeTargetsNext ? { plotTargets: episodeTargetsNext } : {}),
     updatedAt: Date.now()
   });
+  if (seasonTargetsNext) {
+    await db.seasons.update(season.id, { plotTargets: seasonTargetsNext, updatedAt: Date.now() });
+  }
 
   // Sync world "today" to the episode end before nextEpisode advances.
   if (cal.currentDay !== dayEnd) {
@@ -1498,10 +1562,10 @@ export async function commitEpisodeWrap(
   }
 
   const now = Date.now();
+  // Guest effects stay on episode.wrap for prior-episode prompts — do not also file into continuity.
   const factLines = [
     dateFact,
-    ...input.facts.map((f) => f.trim()).filter(Boolean),
-    ...wrap.guestEffects
+    ...input.facts.map((f) => f.trim()).filter(Boolean)
   ];
   if (factLines.length > 0) {
     await db.continuity.bulkAdd(
@@ -1633,9 +1697,28 @@ export async function commitEpisodeWrap(
       ? Math.floor(input.nextStoryDay)
       : dayEnd + cal.episodeAdvanceDays
   );
+  const aimedTexts = (input.aimedBeatTexts ?? []).map((t) => t.trim()).filter(Boolean);
+  // Carry unfinished pending from the ending episode (after hit marks applied).
+  const carriedPending = pendingPlotTargets(episodeTargetsNext ?? episode.plotTargets);
+  const nextPlotTargets = buildEpisodePlotTargets({
+    aimedTexts,
+    carried: carriedPending
+  });
   const next = await nextEpisode(
-    { ...episode, wrap, storyDay: dayStart, storyDayEnd: dayEnd, dateNote: dateNote || null },
-    { storyDayEnd: dayEnd, nextStoryDay: nextDay, dateNote: dateNote || null }
+    {
+      ...episode,
+      wrap,
+      storyDay: dayStart,
+      storyDayEnd: dayEnd,
+      dateNote: dateNote || null,
+      plotTargets: episodeTargetsNext ?? episode.plotTargets
+    },
+    {
+      storyDayEnd: dayEnd,
+      nextStoryDay: nextDay,
+      dateNote: dateNote || null,
+      plotTargets: nextPlotTargets
+    }
   );
   await db.worlds.update(world.id, { updatedAt: Date.now() });
   return next;
@@ -1760,6 +1843,7 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
     .map((c) => `- ${c.name}: ${c.evolution}`)
     .join('\n');
 
+  const raised = wrap.beats.filter((b) => b.disposition === 'raise');
   const next: Season = {
     id: uid(), worldId: world.id, number: season.number + 1,
     title: '', premise: wrap.premise, timeGap: gapLabel,
@@ -1768,7 +1852,8 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
       carriedBeats: kept.map(({ where: _where, ...b }): { text: string; consequence: string; disposition: WrapBeat['disposition'] } => b),
       offscreenChanges: offscreen
     },
-    status: 'active', createdAt: Date.now()
+    plotTargets: buildSeasonPlotTargets(raised),
+    status: 'active', createdAt: Date.now(), updatedAt: Date.now()
   };
 
   const calForSeason = worldCalendar(world);
@@ -1789,14 +1874,14 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
     storyDay: Math.max(1, seasonOpenDay),
     storyDayEnd: null,
     dateNote: null,
-    status: 'active', createdAt: Date.now()
+    status: 'active', createdAt: Date.now(), updatedAt: Date.now()
   };
 
   await db.transaction(
     'rw',
     [db.seasons, db.episodes, db.worlds, db.wraps, db.characters, db.threads, db.continuity],
     async () => {
-      await db.seasons.update(season.id, { status: 'wrapped' });
+      await db.seasons.update(season.id, { status: 'wrapped', updatedAt: Date.now() });
       await db.seasons.add(next);
       await db.episodes.add(firstEpisode);
       const liveWorld = await db.worlds.get(world.id);

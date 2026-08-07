@@ -1,7 +1,7 @@
 import type {
   Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, Location, OpenThread, Season, Turn, TurnLength, World
 } from '../types';
-import { formatEpisodeDateRange, formatStoryDate, worldCalendar } from '../worldOps';
+import { formatEpisodeDateRange, formatStoryDate, PLOT_TARGET_CAP, worldCalendar } from '../worldOps';
 import type { ChatMessage } from './client';
 import { SPEAK_FORMAT_RULES } from './dialogueFormat';
 
@@ -176,7 +176,7 @@ function pacingLine(ai: World['ai']): string {
     : 'Propulsive pacing: keep events moving, cut the connective tissue.';
 }
 
-/** Cap for continuity bullets in every agent frame. */
+/** Cap for continuity bullets in narrator / speak frames. */
 const CONTINUITY_FACT_CAP = 24;
 /** Cap open threads so the system frame does not drown the transcript. */
 const THREAD_CAP = 12;
@@ -185,6 +185,43 @@ export const DIRECTOR_FACT_CAP = 12;
 export const DIRECTOR_THREAD_CAP = 8;
 /** How many prior wrapped episodes to surface in prompts. */
 const PRIOR_EPISODE_DIGEST_COUNT = 3;
+
+type PromptAgent = 'narrator' | 'character' | 'guest' | 'director';
+
+type PriorCapPreset = {
+  beatCapImmediate: number;
+  beatCapDigest: number;
+  recapDigestChars: number;
+  recapImmediateChars: number;
+  runningCap: number;
+};
+
+/** Agent-specific prior-wrap + running-summary budgets (largest → leanest). */
+const PRIOR_CAPS: Record<PromptAgent, PriorCapPreset> = {
+  narrator: {
+    beatCapImmediate: 6, beatCapDigest: 2,
+    recapDigestChars: 280, recapImmediateChars: 1800, runningCap: 1400
+  },
+  character: {
+    beatCapImmediate: 4, beatCapDigest: 2,
+    recapDigestChars: 220, recapImmediateChars: 1200, runningCap: 1200
+  },
+  guest: {
+    beatCapImmediate: 3, beatCapDigest: 1,
+    recapDigestChars: 200, recapImmediateChars: 900, runningCap: 900
+  },
+  director: {
+    beatCapImmediate: 6, beatCapDigest: 2,
+    recapDigestChars: 220, recapImmediateChars: 520, runningCap: 400
+  }
+};
+
+const FACT_CAPS: Record<PromptAgent, { facts: number; threads: number }> = {
+  narrator: { facts: CONTINUITY_FACT_CAP, threads: THREAD_CAP },
+  character: { facts: CONTINUITY_FACT_CAP, threads: THREAD_CAP },
+  guest: { facts: CONTINUITY_FACT_CAP, threads: THREAD_CAP },
+  director: { facts: DIRECTOR_FACT_CAP, threads: DIRECTOR_THREAD_CAP }
+};
 
 /**
  * Pick up to `cap` items while keeping coverage across episode buckets
@@ -290,35 +327,45 @@ export function episodeSceneDay(episode: Episode, cal: ReturnType<typeof worldCa
   return cal.currentDay;
 }
 
-function episodeDateLine(world: World, episode: Episode): string {
-  const cal = worldCalendar(world);
-  return formatEpisodeDateRange(cal, episode.storyDay, episode.storyDayEnd);
-}
-
-/** Calendar block: scene "today" from episode day; world clock only when it differs. */
-function calendarSection(world: World, episode: Episode): string {
-  const cal = worldCalendar(world);
-  const scene = episodeSceneDay(episode, cal);
-  const dateLine = formatEpisodeDateRange(cal, episode.storyDay, episode.storyDayEnd);
-  const worldClock = cal.currentDay !== scene
-    ? `\nWorld clock (not this scene): ${formatStoryDate(cal, cal.currentDay)}.`
-    : '';
-  return (
-    `## Calendar\n` +
-    (cal.system ? `${cal.system}\n` : '') +
-    `Week cycle: ${cal.weekdays.join(', ')} (day 1 of the story was a ${cal.weekdays[cal.dayOneWeekday]}).\n` +
-    `Months: ${cal.months.join(', ')}.\n` +
-    `Today (this scene) is ${formatStoryDate(cal, scene)}.\n` +
-    `This episode's date: ${dateLine}.` +
-    worldClock +
-    (episode.dateNote?.trim() ? `\nDate note: ${episode.dateNote.trim()}` : '')
-  );
-}
-
-function episodeNowLine(world: World, episode: Episode): string {
+/**
+ * Unified calendar / "now" lines.
+ * - full: narrator calendar section (owns all dates)
+ * - compact: speak-agent current episode + today
+ * - directorLine: one-line header dates for the planner
+ */
+function calendarBlock(
+  world: World,
+  episode: Episode,
+  mode: 'full' | 'compact' | 'directorLine'
+): string {
   const cal = worldCalendar(world);
   const scene = episodeSceneDay(episode, cal);
   const dateLine = formatEpisodeDateRange(cal, episode.storyDay, episode.storyDayEnd);
+  const note = episode.dateNote?.trim();
+  if (mode === 'full') {
+    const worldClock = cal.currentDay !== scene
+      ? `\nWorld clock (not this scene): ${formatStoryDate(cal, cal.currentDay)}.`
+      : '';
+    return (
+      `## Calendar\n` +
+      (cal.system ? `${cal.system}\n` : '') +
+      `Week cycle: ${cal.weekdays.join(', ')} (day 1 of the story was a ${cal.weekdays[cal.dayOneWeekday]}).\n` +
+      `Months: ${cal.months.join(', ')}.\n` +
+      `Today (this scene) is ${formatStoryDate(cal, scene)}.\n` +
+      `This episode's date: ${dateLine}.` +
+      worldClock +
+      (note ? `\nDate note: ${note}` : '')
+    );
+  }
+  if (mode === 'directorLine') {
+    return (
+      `Episode ${episode.number}${episode.location ? ` @ ${episode.location}` : ''} · ${dateLine}` +
+      (note ? ` · ${note}` : '') + `\n` +
+      `Today (this scene): ${formatStoryDate(cal, scene)}` +
+      (cal.currentDay !== scene ? ` · World clock: ${formatStoryDate(cal, cal.currentDay)}` : '')
+    );
+  }
+  // compact
   const worldClock = cal.currentDay !== scene
     ? ` World clock: ${formatStoryDate(cal, cal.currentDay)}.`
     : '';
@@ -327,18 +374,133 @@ function episodeNowLine(world: World, episode: Episode): string {
     `${episode.location ? ` Location: ${episode.location}.` : ''} Date: ${dateLine}.` +
     ` Today (this scene): ${formatStoryDate(cal, scene)}.` +
     worldClock +
-    (episode.dateNote?.trim() ? ` Note: ${episode.dateNote.trim()}.` : '')
+    (note ? ` Note: ${note}.` : '')
   );
 }
 
-function cappedThreadLines(threads: OpenThread[], preferBuckets: string[] = []): string[] {
-  return pickAcrossBuckets(threads, threadBucket, THREAD_CAP, preferBuckets)
+/** Episode title + location only (dates live in calendarBlock). */
+function episodeHeader(episode: Episode): string {
+  return (
+    `## Current episode\nEpisode ${episode.number}${episode.title ? ` — ${episode.title}` : ''}.` +
+    `${episode.location ? ` Location: ${episode.location}.` : ''}`
+  );
+}
+
+function cappedThreadLines(
+  threads: OpenThread[],
+  preferBuckets: string[] = [],
+  cap = THREAD_CAP
+): string[] {
+  return pickAcrossBuckets(threads, threadBucket, cap, preferBuckets)
     .map((t) => `- ${t.text} (${t.openedLabel})`);
 }
 
-function cappedContinuityLines(continuity: ContinuityFact[], preferBuckets: string[] = []): string[] {
-  return pickAcrossBuckets(continuity, factBucket, CONTINUITY_FACT_CAP, preferBuckets)
+function cappedContinuityLines(
+  continuity: ContinuityFact[],
+  preferBuckets: string[] = [],
+  cap = CONTINUITY_FACT_CAP
+): string[] {
+  return pickAcrossBuckets(continuity, factBucket, cap, preferBuckets)
     .map((f) => `- ${f.text}`);
+}
+
+function worldBibleSection(world: World): string {
+  return `## The world\n${clipText(world.bible || world.line, WORLD_BIBLE_CAP)}`;
+}
+
+function runningSummaryFor(episode: Episode, cap: number): string | null {
+  const running = episode.runningSummary?.trim();
+  if (!running) return null;
+  return `## Earlier this episode (running summary)\n${clipText(running, cap)}`;
+}
+
+function priorMemoryFor(ctx: PromptContext, agent: PromptAgent): string | null {
+  const caps = PRIOR_CAPS[agent];
+  return formatPriorEpisodesSection(ctx, {
+    beatCapImmediate: caps.beatCapImmediate,
+    beatCapDigest: caps.beatCapDigest,
+    recapDigestChars: caps.recapDigestChars,
+    recapImmediateChars: caps.recapImmediateChars
+  });
+}
+
+function continuityBlock(
+  ctx: PromptContext,
+  agent: PromptAgent,
+  tone: 'hard' | 'plausible'
+): string | null {
+  const prefer = preferEpisodeBuckets(ctx);
+  const cap = FACT_CAPS[agent].facts;
+  const lines = agent === 'director'
+    ? selectDirectorFacts(ctx.continuity, prefer).map((f) => `- ${f.text}`)
+    : cappedContinuityLines(ctx.continuity, prefer, cap);
+  if (lines.length === 0) return null;
+  const heading = tone === 'hard'
+    ? '## Continuity — established facts, never contradict these'
+    : '## Continuity — facts you may know if you could plausibly know them';
+  return `${heading}\n${lines.join('\n')}`;
+}
+
+function threadsBlock(
+  ctx: PromptContext,
+  agent: PromptAgent,
+  tone: 'narrator' | 'speak' | 'director'
+): string | null {
+  const prefer = preferEpisodeBuckets(ctx);
+  const cap = FACT_CAPS[agent].threads;
+  const lines = agent === 'director'
+    ? selectDirectorThreads(ctx.threads, prefer).map((t) => `- ${t.text}`)
+    : cappedThreadLines(ctx.threads, prefer, cap);
+  if (lines.length === 0) return null;
+  if (tone === 'director') {
+    return `Open threads (draw on sparingly; soft tensions, not the plot-target hit-list):\n${lines.join('\n')}`;
+  }
+  if (tone === 'speak') {
+    return `## Open threads — tensions you may lean on if you know them\n${lines.join('\n')}`;
+  }
+  return (
+    `## Open threads — unresolved tensions to draw on sparingly (do not resolve them all at once; soft backlog, not the plot-target hit-list)\n` +
+    lines.join('\n')
+  );
+}
+
+/** Premise (+ optional plot targets). Threads stay separate so order stays premise → targets → … → threads. */
+function pressurePremise(ctx: PromptContext, opts?: { includeSeasonMeta?: boolean }): string {
+  const { season } = ctx;
+  if (opts?.includeSeasonMeta) {
+    return (
+      `## This season\nSeason ${season.number}${season.title ? ` — ${season.title}` : ''}. ` +
+      `Premise (current pressure): ${season.premise || 'unwritten; discover it in play.'}` +
+      `${season.timeGap ? ` It opens ${season.timeGap.toLowerCase()} after the previous season.` : ''}`
+    );
+  }
+  return `## This season\nPremise (current pressure): ${season.premise || 'unwritten; discover it in play.'}`;
+}
+
+function currentLocationBlock(
+  ctx: PromptContext,
+  opts?: { clipChars?: number; includeOthers?: boolean }
+): string[] {
+  const current = resolveCurrentLocations(ctx.episode, ctx.locations);
+  const out: string[] = [];
+  if (current.length > 0) {
+    let sheet = current.map(locationSheet).join('\n\n');
+    if (opts?.clipChars) sheet = clipText(sheet, opts.clipChars);
+    out.push(
+      opts?.clipChars
+        ? `## Current location (honour HARD RULES when planning)\n${sheet}`
+        : `## Current location\n${sheet}`
+    );
+  }
+  if (opts?.includeOthers && ctx.locations.length > 0) {
+    const others = ctx.locations.filter((l) => !current.includes(l));
+    if (others.length > 0) {
+      out.push(
+        `## Other established locations (may be referenced or visited)\n${others.map(locationBrief).join('\n')}`
+      );
+    }
+  }
+  return out;
 }
 
 function resolvedPriorEpisodes(ctx: PromptContext): Episode[] {
@@ -374,7 +536,7 @@ function formatPriorEpisodesSection(
 ): string | null {
   const priors = resolvedPriorEpisodes(ctx);
   if (priors.length === 0) return null;
-  const immediateCap = opts.recapImmediateChars ?? PRIOR_RECAP_IMMEDIATE_CAP;
+  const immediateCap = opts.recapImmediateChars ?? PRIOR_CAPS.narrator.recapImmediateChars;
   const blocks = [...priors].reverse().map((ep, idx) => {
     const immediate = idx === 0;
     const recap = (ep.wrap?.recap ?? '').trim();
@@ -413,11 +575,31 @@ function seasonBibleSection(season: Season): string | null {
     .join('\n');
   return (
     `## Previously (season ${season.number - 1} recap)\n${clipText(season.bible.recap, SEASON_BIBLE_RECAP_CAP)}` +
-    (beats ? `\n\nCarried beats:\n${beats}` : '') +
+    (beats
+      ? `\n\nCarried beats — ambient pressure from the prior season (RAISE = hot background, KEEP = alive, SOFTEN = distant echo; not the author hit-list):\n${beats}`
+      : '') +
     (season.bible.offscreenChanges
       ? `\n\nWhat changed during the gap:\n${clipText(season.bible.offscreenChanges, 800)}`
       : '')
   );
+}
+
+function plotTargetsSection(episode: Episode, season: Season): string | null {
+  const ep = (episode.plotTargets ?? [])
+    .filter((t) => t.status === 'pending' && t.text.trim())
+    .slice(0, PLOT_TARGET_CAP)
+    .map((t) => `- ${clipText(t.text.trim(), 220)}`);
+  const sea = (season.plotTargets ?? [])
+    .filter((t) => t.status === 'pending' && t.text.trim())
+    .slice(0, PLOT_TARGET_CAP)
+    .map((t) => `- ${clipText(t.text.trim(), 220)}`);
+  if (ep.length === 0 && sea.length === 0) return null;
+  const parts: string[] = [
+    '## Plot targets — work toward these when natural; do not force every target in one turn; prefer story-driven progress over checklist completion'
+  ];
+  if (ep.length > 0) parts.push(`Episode:\n${ep.join('\n')}`);
+  if (sea.length > 0) parts.push(`Season arc:\n${sea.join('\n')}`);
+  return parts.join('\n');
 }
 
 function resolveCurrentLocations(episode: Episode, locations: Location[]): Location[] {
@@ -433,50 +615,30 @@ function resolveCurrentLocations(episode: Episode, locations: Location[]): Locat
 }
 
 function worldFrameSections(ctx: PromptContext): string[] {
-  const { world, season, episode, characters, locations, continuity, threads } = ctx;
+  const { world, season, episode, characters } = ctx;
   const inScene = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
   const player = characters.find((c) => c.isPlayer);
   const offScene = characters.filter((c) => !episode.castIds.includes(c.id) && !c.isPlayer);
   const sections: string[] = [];
 
-  sections.push(`## The world\n${clipText(world.bible || world.line, WORLD_BIBLE_CAP)}`);
+  sections.push(worldBibleSection(world));
 
   const bible = seasonBibleSection(season);
-  if (bible) {
-    sections.push(
-      bible.replace(
-        'Carried beats:',
-        'Carried beats — RAISE means active pressure now, KEEP means alive background, SOFTEN means distant echo:'
-      )
-    );
-  }
+  if (bible) sections.push(bible);
 
-  sections.push(
-    `## This season\nSeason ${season.number}${season.title ? ` — ${season.title}` : ''}. ` +
-    `Premise (current pressure): ${season.premise || 'unwritten; discover it in play.'}` +
-    `${season.timeGap ? ` It opens ${season.timeGap.toLowerCase()} after the previous season.` : ''}`
-  );
+  sections.push(pressurePremise(ctx, { includeSeasonMeta: true }));
 
-  const priorEps = formatPriorEpisodesSection(ctx, {
-    beatCapImmediate: 6,
-    beatCapDigest: 2,
-    recapDigestChars: 280,
-    recapImmediateChars: PRIOR_RECAP_IMMEDIATE_CAP
-  });
+  const targets = plotTargetsSection(episode, season);
+  if (targets) sections.push(targets);
+
+  const priorEps = priorMemoryFor(ctx, 'narrator');
   if (priorEps) sections.push(priorEps);
 
-  const running = episode.runningSummary?.trim();
-  if (running) {
-    sections.push(`## Earlier this episode (running summary)\n${clipText(running, 1400)}`);
-  }
+  const running = runningSummaryFor(episode, PRIOR_CAPS.narrator.runningCap);
+  if (running) sections.push(running);
 
-  sections.push(calendarSection(world, episode));
-
-  const dateLine = episodeDateLine(world, episode);
-  sections.push(
-    `## Current episode\nEpisode ${episode.number}${episode.title ? ` — ${episode.title}` : ''}.` +
-    `${episode.location ? ` Location: ${episode.location}.` : ''} Date: ${dateLine}.`
-  );
+  sections.push(calendarBlock(world, episode, 'full'));
+  sections.push(episodeHeader(episode));
 
   const guests = activeGuests(episode);
   if (guests.length > 0) {
@@ -486,20 +648,14 @@ function worldFrameSections(ctx: PromptContext): string[] {
     );
   }
 
-  const currentLocations = resolveCurrentLocations(episode, locations);
-  if (locations.length > 0) {
-    const others = locations.filter((l) => !currentLocations.includes(l));
-    if (currentLocations.length > 0) {
-      sections.push(`## Current location\n${currentLocations.map(locationSheet).join('\n\n')}`);
-    }
-    if (others.length > 0) {
-      sections.push(`## Other established locations (may be referenced or visited)\n${others.map(locationBrief).join('\n')}`);
-    }
-  }
+  sections.push(...currentLocationBlock(ctx, { includeOthers: true }));
 
+  // Prefer episode atmosphereNote; location atmosphere already lives on the location sheet.
   const sensoryBits = [
-    currentLocations[0]?.atmosphere,
-    episode.atmosphereNote
+    episode.atmosphereNote,
+    !episode.atmosphereNote?.trim()
+      ? resolveCurrentLocations(episode, ctx.locations)[0]?.atmosphere
+      : undefined
   ].filter((s) => s && s.trim());
   if (sensoryBits.length > 0) {
     sections.push(
@@ -520,22 +676,30 @@ function worldFrameSections(ctx: PromptContext): string[] {
     sections.push(`## Off-scene cast (may be referenced, may arrive if the story calls them)\n${offScene.map(briefSheet).join('\n')}`);
   }
 
-  const prefer = preferEpisodeBuckets(ctx);
-  const contLines = cappedContinuityLines(continuity, prefer);
-  if (contLines.length > 0) {
-    sections.push(
-      `## Continuity — established facts, never contradict these\n` +
-      contLines.join('\n')
-    );
-  }
-  const threadLines = cappedThreadLines(threads, prefer);
-  if (threadLines.length > 0) {
-    sections.push(
-      `## Open threads — unresolved tensions to draw on (do not resolve them all at once)\n` +
-      threadLines.join('\n')
-    );
-  }
+  const cont = continuityBlock(ctx, 'narrator', 'hard');
+  if (cont) sections.push(cont);
+  const threads = threadsBlock(ctx, 'narrator', 'narrator');
+  if (threads) sections.push(threads);
 
+  return sections;
+}
+
+/**
+ * Shared lean frame for character / guest speak agents (no plot-target checklist).
+ * Role sheets go between this and continuity/threads (callers append those next).
+ */
+function leanAgentFrame(ctx: PromptContext, agent: 'character' | 'guest'): string[] {
+  const sections: string[] = [];
+  sections.push(worldBibleSection(ctx.world));
+  const bible = seasonBibleSection(ctx.season);
+  if (bible) sections.push(bible);
+  sections.push(pressurePremise(ctx));
+  const prior = priorMemoryFor(ctx, agent);
+  if (prior) sections.push(prior);
+  const running = runningSummaryFor(ctx.episode, PRIOR_CAPS[agent].runningCap);
+  if (running) sections.push(running);
+  sections.push(calendarBlock(ctx.world, ctx.episode, 'compact'));
+  sections.push(...currentLocationBlock(ctx));
   return sections;
 }
 
@@ -597,7 +761,7 @@ export function buildNarratorSystemPrompt(ctx: PromptContext): string {
  * Character agent: first-person as this NPC. Speaks as themselves.
  */
 export function buildCharacterSystemPrompt(ctx: PromptContext, character: Character): string {
-  const { world, characters, season } = ctx;
+  const { world, characters } = ctx;
   const ai = world.ai;
   const others = characters.filter((c) => c.id !== character.id);
   const guests = activeGuests(ctx.episode);
@@ -609,26 +773,7 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
     `Reply in your own voice — looks/mannerisms plus what you say aloud.`
   );
 
-  sections.push(`## The world\n${clipText(world.bible || world.line, WORLD_BIBLE_CAP)}`);
-  const charBible = seasonBibleSection(season);
-  if (charBible) sections.push(charBible);
-  sections.push(
-    `## This season\nPremise (current pressure): ${season.premise || 'unwritten; discover it in play.'}`
-  );
-  const prior = formatPriorEpisodesSection(ctx, {
-    beatCapImmediate: 4,
-    beatCapDigest: 2,
-    recapDigestChars: 220,
-    recapImmediateChars: 1200
-  });
-  if (prior) sections.push(prior);
-  const running = ctx.episode.runningSummary?.trim();
-  if (running) sections.push(`## Earlier this episode (running summary)\n${clipText(running, 1200)}`);
-  sections.push(episodeNowLine(ctx.world, ctx.episode));
-  const here = resolveCurrentLocations(ctx.episode, ctx.locations);
-  if (here.length > 0) {
-    sections.push(`## Current location\n${here.map(locationSheet).join('\n\n')}`);
-  }
+  sections.push(...leanAgentFrame(ctx, 'character'));
 
   sections.push(`## You\n${characterSheet(character, characters)}`);
 
@@ -645,22 +790,12 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
     );
   }
 
-  const prefer = preferEpisodeBuckets(ctx);
-  const contLines = cappedContinuityLines(ctx.continuity, prefer);
-  if (contLines.length > 0) {
-    sections.push(
-      `## Continuity — facts you may know if you could plausibly know them\n` +
-      contLines.join('\n')
-    );
-  }
-  const charThreads = cappedThreadLines(ctx.threads, prefer);
-  if (charThreads.length > 0) {
-    sections.push(
-      `## Open threads — tensions you may lean on if you know them\n` +
-      charThreads.join('\n')
-    );
-  }
+  const cont = continuityBlock(ctx, 'character', 'plausible');
+  if (cont) sections.push(cont);
+  const charThreads = threadsBlock(ctx, 'character', 'speak');
+  if (charThreads) sections.push(charThreads);
 
+  // Speak format lives on the user message only (buildCharacterSpeakMessages).
   sections.push(
     `## How you respond\n` +
     `- Speak as ${character.name}. Prefer one or two spoken lines in your natural voice.\n` +
@@ -670,8 +805,7 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
     (character.exampleLines.length > 0
       ? `- Example spoken rhythm (wording only — still emit *actions* and "quotes" as required):\n${character.exampleLines.map((l) => `  ${l}`).join('\n')}\n`
       : '') +
-    `- Stay in ${ai.tense} tense for any physical beat.\n\n` +
-    SPEAK_FORMAT_RULES
+    `- Stay in ${ai.tense} tense for any physical beat.`
   );
 
   sections.push(contentSection(ai));
@@ -685,7 +819,7 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
 
 /** Guest walk-on agent — short sheet, same speak format. */
 export function buildGuestSystemPrompt(ctx: PromptContext, guest: EpisodeGuest): string {
-  const { world, characters, season } = ctx;
+  const { world, characters } = ctx;
   const ai = world.ai;
   const inScene = characters.filter((c) => ctx.episode.castIds.includes(c.id));
   const sections: string[] = [];
@@ -694,47 +828,39 @@ export function buildGuestSystemPrompt(ctx: PromptContext, guest: EpisodeGuest):
     `You ARE ${guest.name}, a temporary walk-on in "${world.title}" (not a permanent cast member). ` +
     `You speak and act only as yourself for this scene.`
   );
-  sections.push(`## The world\n${clipText(world.bible || world.line, WORLD_BIBLE_CAP)}`);
-  const guestBible = seasonBibleSection(season);
-  if (guestBible) sections.push(guestBible);
-  sections.push(
-    `## This season\nPremise (current pressure): ${season.premise || 'unwritten; discover it in play.'}`
-  );
-  const prior = formatPriorEpisodesSection(ctx, {
-    beatCapImmediate: 3,
-    beatCapDigest: 1,
-    recapDigestChars: 200,
-    recapImmediateChars: 900
-  });
-  if (prior) sections.push(prior);
-  const running = ctx.episode.runningSummary?.trim();
-  if (running) sections.push(`## Earlier this episode (running summary)\n${clipText(running, 900)}`);
-  sections.push(episodeNowLine(ctx.world, ctx.episode));
-  const guestHere = resolveCurrentLocations(ctx.episode, ctx.locations);
-  if (guestHere.length > 0) {
-    sections.push(`## Current location\n${guestHere.map(locationSheet).join('\n\n')}`);
-  }
+
+  sections.push(...leanAgentFrame(ctx, 'guest'));
+
   sections.push(`## Who you are this scene\n${guest.brief}${guest.voice ? `\nVoice: ${guest.voice}` : ''}`);
   if (inScene.length > 0) {
     sections.push(`## Others present\n${inScene.map((c) => briefSheet(c)).join('\n')}`);
   }
-  const prefer = preferEpisodeBuckets(ctx);
-  const contLines = cappedContinuityLines(ctx.continuity, prefer);
-  if (contLines.length > 0) {
-    sections.push(`## Continuity you may know if plausible\n${contLines.join('\n')}`);
+
+  const cont = continuityBlock(ctx, 'guest', 'plausible');
+  if (cont) {
+    sections.push(cont.replace(
+      '## Continuity — facts you may know if you could plausibly know them',
+      '## Continuity you may know if plausible'
+    ));
   }
-  const guestThreads = cappedThreadLines(ctx.threads, prefer);
-  if (guestThreads.length > 0) {
-    sections.push(`## Open threads\n${guestThreads.join('\n')}`);
+  const guestThreads = threadsBlock(ctx, 'guest', 'speak');
+  if (guestThreads) {
+    sections.push(guestThreads.replace(
+      '## Open threads — tensions you may lean on if you know them',
+      '## Open threads'
+    ));
   }
+
   sections.push(
     `## How you respond\n` +
     `- Prefer one or two spoken lines. Optional short physical beat of your own body.\n` +
     `- Do not steal the scene from the main cast; add pressure or texture.\n` +
-    `- Stay in ${ai.tense} tense for physical beats.\n\n` +
-    SPEAK_FORMAT_RULES
+    `- Stay in ${ai.tense} tense for physical beats.`
   );
   sections.push(contentSection(ai));
+  if (ai.customInstructions.trim()) {
+    sections.push(`## Author's world instructions\n${ai.customInstructions}`);
+  }
   return sections.join('\n\n');
 }
 
@@ -766,9 +892,6 @@ const PACK_MIN_TURNS = 4;
 /** Cap world bible / season bible slices in agent frames. */
 const WORLD_BIBLE_CAP = 6000;
 const SEASON_BIBLE_RECAP_CAP = 1600;
-/** Immediate prior episode wrap — was uncapped and blew up by E5–E6. */
-const PRIOR_RECAP_IMMEDIATE_CAP = 1800;
-
 /** Target size for deterministic omitted-turn digests. */
 const OMITTED_DIGEST_CHARS = 1100;
 
@@ -1067,18 +1190,11 @@ export function directorUserPrompt(
     return `[narrator]: ${t.text}`;
   }).join('\n\n');
 
-  const running = ctx.episode.runningSummary?.trim();
-  const cal = worldCalendar(ctx.world);
-  const scene = episodeSceneDay(ctx.episode, cal);
-  const dateLine = formatEpisodeDateRange(cal, ctx.episode.storyDay, ctx.episode.storyDayEnd);
   const prefer = preferEpisodeBuckets(ctx);
-
-  const factLines = pickAcrossBuckets(ctx.continuity, factBucket, DIRECTOR_FACT_CAP, prefer)
+  const factLines = selectDirectorFacts(ctx.continuity, prefer)
     .map((f) => `- ${f.text}`)
     .join('\n');
-  const threadLines = pickAcrossBuckets(ctx.threads, threadBucket, DIRECTOR_THREAD_CAP, prefer)
-    .map((t) => `- ${t.text}`)
-    .join('\n');
+  const threadSec = threadsBlock(ctx, 'director', 'director');
   // All NPCs — walls for enter-this-turn cast must be visible before castDelta applies.
   const knowledgeWalls = ctx.characters
     .filter((c) => !c.isPlayer && c.mustNotKnow.trim())
@@ -1089,7 +1205,7 @@ export function directorUserPrompt(
   const seasonBibleClip = bible
     ? `Season bible (prior season): ${clipText(bible.recap, 320)}` +
       (bible.carriedBeats.some((b) => b.disposition === 'raise' || b.disposition === 'keep')
-        ? `\nCarried season beats:\n${bible.carriedBeats
+        ? `\nCarried season beats (ambient; plot targets are listed separately):\n${bible.carriedBeats
           .filter((b) => b.disposition === 'raise' || b.disposition === 'keep')
           .slice(0, 4)
           .map((b) => `- [${b.disposition.toUpperCase()}] ${b.text}`)
@@ -1097,32 +1213,45 @@ export function directorUserPrompt(
         : '')
     : '';
 
-  const priorSection = formatPriorEpisodesSection(ctx, {
-    beatCapImmediate: 6,
-    beatCapDigest: 2,
-    recapDigestChars: 220,
-    recapImmediateChars: 520
-  });
+  const priorSection = priorMemoryFor(ctx, 'director');
   const priorMemory = priorSection
     ? priorSection.replace(/^## Recent episodes this season\n/, '')
+    : '';
+  const running = runningSummaryFor(ctx.episode, PRIOR_CAPS.director.runningCap);
+  const runningLine = running
+    ? running.replace(
+      '## Earlier this episode (running summary)\n',
+      'Earlier this episode (summary): '
+    )
+    : '';
+  const targets = plotTargetsSection(ctx.episode, ctx.season);
+  const targetsCompact = targets
+    ? targets
+      .replace(
+        '## Plot targets — work toward these when natural; do not force every target in one turn; prefer story-driven progress over checklist completion\n',
+        'Plot targets (work toward when natural; do not force all at once):\n'
+      ) + '\n'
+    : '';
+  const locBlocks = currentLocationBlock(ctx, { clipChars: 1200 });
+  const locLine = locBlocks.length > 0
+    ? locBlocks[0].replace(/^## /, '') + '\n'
     : '';
 
   return (
     `World: ${ctx.world.title}\n` +
-    `Episode ${ctx.episode.number}${ctx.episode.location ? ` @ ${ctx.episode.location}` : ''} · ${dateLine}` +
-    (ctx.episode.dateNote?.trim() ? ` · ${ctx.episode.dateNote.trim()}` : '') + `\n` +
-    `Today (this scene): ${formatStoryDate(cal, scene)}` +
-    (cal.currentDay !== scene ? ` · World clock: ${formatStoryDate(cal, cal.currentDay)}` : '') + `\n` +
+    `${calendarBlock(ctx.world, ctx.episode, 'directorLine')}\n` +
     `Premise (current pressure): ${ctx.season.premise || '(unwritten)'}\n` +
+    targetsCompact +
     (seasonBibleClip ? `${seasonBibleClip}\n` : '') +
     (priorMemory ? `\nRecent episode memory:\n${priorMemory}\n` : '') +
-    (running ? `Earlier this episode (summary): ${running.slice(0, 400)}\n` : '') +
+    (runningLine ? `${runningLine}\n` : '') +
+    (locLine ? `\n${locLine}` : '') +
     `\n` +
     `In-scene cast:\n${castList}\n\n` +
     `Off-scene cast (may enter via castDelta.enter):\n${offList}\n\n` +
     `Active walk-ons (guest ids):\n${guestList}\n\n` +
     `Continuity (do not contradict):\n${factLines || '(none)'}\n\n` +
-    `Open threads (draw on sparingly):\n${threadLines || '(none)'}\n\n` +
+    `${threadSec ?? 'Open threads (draw on sparingly; soft tensions, not the plot-target hit-list):\n(none)'}\n\n` +
     `Knowledge walls:\n${knowledgeWalls || '(none)'}\n\n` +
     `Latest player move: ${MODE_PREFIX[mode](input)}\n\n` +
     `Recent transcript:\n${transcript || '(episode just opened)'}\n\n` +

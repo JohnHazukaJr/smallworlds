@@ -15,8 +15,8 @@ import { WorldEditorSheet } from '../components/WorldEditorSheet';
 import { db, guardStorage, recordTombstones, safeWrite, uid } from '../db';
 import { AVATAR_PX, DEFAULT_DISPLAY, moodFromHue, useApp, type AvatarSize, type StoryLayout } from '../store/app';
 import type {
-  Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, EpisodeWrapBeat,
-  Location, OpenThread, Season, Turn, TurnLength, World
+  Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, EpisodeWrap, EpisodeWrapBeat,
+  Location, OpenThread, PlotTarget, PlotTargetStatus, Season, Turn, TurnLength, World
 } from '../types';
 import { AppError, classifyError, formatUserError } from '../errors';
 import { Chip, ErrorNote, Mono, Sheet, Spinner, Toggle, useVw } from '../ui/bits';
@@ -24,17 +24,19 @@ import { fileToSceneImage } from '../ui/image';
 import { avatarStyle, BACKDROPS, MOODS, STRIPE } from '../ui/theme';
 import {
   calendarPatch, characterPortraits, dayFromParts, emptyLocation, formatStoryDate,
-  advanceMonths, formatStoryDateShort, nextEpisode, partsForDay, weekdayForDay, worldCalendar
+  advanceMonths, formatStoryDateShort, nextEpisode, partsForDay, PLOT_TARGET_CAP,
+  weekdayForDay, worldCalendar
 } from '../worldOps';
 
 /** Editable wrap draft with Keep/Drop flags for the review UI. */
 interface WrapReviewDraft {
   recap: string;
-  beats: Array<EpisodeWrapBeat & { keep: boolean }>;
+  beats: Array<EpisodeWrapBeat & { keep: boolean; aim: boolean }>;
   facts: Array<{ text: string; keep: boolean }>;
   threads: Array<{ text: string; keep: boolean }>;
   guestEffects: Array<{ text: string; keep: boolean }>;
   resolvedThreads: Array<{ text: string; keep: boolean }>;
+  hitTargets: Array<{ text: string; keep: boolean }>;
   characterUpdates: Array<{
     name: string;
     goal: string;
@@ -67,11 +69,12 @@ interface WrapReviewDraft {
 function draftFromAnalysis(d: EpisodeWrapDraft): WrapReviewDraft {
   return {
     recap: d.recap,
-    beats: d.beats.map((b) => ({ ...b, keep: true })),
+    beats: d.beats.map((b) => ({ ...b, keep: true, aim: false })),
     facts: d.facts.map((text) => ({ text, keep: true })),
     threads: d.threads.map((text) => ({ text, keep: true })),
     guestEffects: d.guestEffects.map((text) => ({ text, keep: true })),
     resolvedThreads: d.resolvedThreads.map((text) => ({ text, keep: true })),
+    hitTargets: (d.hitTargets ?? []).map((text) => ({ text, keep: true })),
     characterUpdates: d.characterUpdates.map((u) => ({
       name: u.name,
       goal: u.goal ?? '',
@@ -435,7 +438,12 @@ export function Story() {
 
   const pinMood = (id: typeof mood) => {
     setMood(id);
-    if (episode) void db.episodes.update(episode.id, { moodPinned: true });
+    if (episode) {
+      void safeWrite(
+        () => db.episodes.update(episode.id, { moodPinned: true, updatedAt: Date.now() }),
+        () => undefined
+      );
+    }
   };
 
   const dismissWrapNudge = () => {
@@ -652,6 +660,10 @@ export function Story() {
         beats: wrapDraft.beats
           .filter((b) => b.keep && b.text.trim())
           .map(({ text, consequence }) => ({ text, consequence })),
+        aimedBeatTexts: wrapDraft.beats
+          .filter((b) => b.keep && b.aim && b.text.trim())
+          .map((b) => `${b.text.trim()}${b.consequence.trim() ? ` → ${b.consequence.trim()}` : ''}`),
+        hitTargets: wrapDraft.hitTargets.filter((t) => t.keep).map((t) => t.text),
         facts: wrapDraft.facts.filter((f) => f.keep).map((f) => f.text),
         threads: wrapDraft.threads.filter((t) => t.keep).map((t) => t.text),
         guestEffects: wrapDraft.guestEffects.filter((g) => g.keep).map((g) => g.text),
@@ -1460,7 +1472,12 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
             onBlur={() => {
               const next = note.trim();
               if (next !== (episode.atmosphereNote ?? '')) {
-                void db.episodes.update(episode.id, { atmosphereNote: next || undefined });
+                void safeWrite(
+                  () => db.episodes.update(episode.id, {
+                    atmosphereNote: next || undefined, updatedAt: Date.now()
+                  }),
+                  setImgError
+                );
               }
             }}
             placeholder="rain on the glass · late afternoon · cold iron smell…"
@@ -1474,14 +1491,20 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
               on={!!episode.moodPinned}
               onClick={() => {
                 const next = !episode.moodPinned;
-                void db.episodes.update(episode.id, { moodPinned: next });
+                void safeWrite(
+                  () => db.episodes.update(episode.id, { moodPinned: next, updatedAt: Date.now() }),
+                  setImgError
+                );
                 if (!next && sceneLoc) setMood(moodFromHue(sceneLoc.hue));
               }}
             />
             {(Object.entries(MOODS) as Array<[typeof mood, (typeof MOODS)[typeof mood]]>).map(([id, m]) => (
               <button key={id} title={m.label} onClick={() => {
                 setMood(id);
-                void db.episodes.update(episode.id, { moodPinned: true });
+                void safeWrite(
+                  () => db.episodes.update(episode.id, { moodPinned: true, updatedAt: Date.now() }),
+                  setImgError
+                );
               }} style={{
                 width: 13, height: 13, borderRadius: '50%', cursor: 'pointer', background: m.accent,
                 border: `1px solid ${mood === id ? 'rgba(255,255,255,0.85)' : 'transparent'}`,
@@ -1652,12 +1675,16 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, st
 function SceneCastPanel({ episode, characters, accent }: { episode: Episode; characters: Character[]; accent: string }) {
   const guests = episode.guests ?? [];
   const activeGuestIds = episode.activeGuestIds;
+  const [castError, setCastError] = useState('');
   const toggleCast = async (id: string, isPlayer: boolean) => {
     if (isPlayer) return;
     const castIds = episode.castIds.includes(id)
       ? episode.castIds.filter((x) => x !== id)
       : [...episode.castIds, id];
-    await db.episodes.update(episode.id, { castIds, updatedAt: Date.now() });
+    await safeWrite(
+      () => db.episodes.update(episode.id, { castIds, updatedAt: Date.now() }),
+      setCastError
+    );
   };
   const toggleGuest = async (guestId: string) => {
     const allIds = guests.map((g) => g.id);
@@ -1666,11 +1693,15 @@ function SceneCastPanel({ episode, characters, accent }: { episode: Episode; cha
     const next = current.includes(guestId)
       ? current.filter((x) => x !== guestId)
       : [...current, guestId];
-    await db.episodes.update(episode.id, { activeGuestIds: next, updatedAt: Date.now() });
+    await safeWrite(
+      () => db.episodes.update(episode.id, { activeGuestIds: next, updatedAt: Date.now() }),
+      setCastError
+    );
   };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
       <Mono style={{ fontSize: 9 }}>in the scene</Mono>
+      {castError && <ErrorNote error={castError} onDismiss={() => setCastError('')} />}
       {characters.map((c) => {
         const active = c.isPlayer || episode.castIds.includes(c.id);
         return (
@@ -1768,22 +1799,31 @@ function SceneLocationsPanel({ episode, locations, accent, world, onGoLocations 
   const select = async (l: Location) => {
     const active = episode.locationId === l.id;
     if (active) {
-      await db.episodes.update(episode.id, { locationId: null, location: '' });
+      await safeWrite(
+        () => db.episodes.update(episode.id, {
+          locationId: null, location: '', updatedAt: Date.now()
+        }),
+        setGenError
+      );
       return;
     }
-    const patch: Partial<Episode> = { locationId: l.id, location: l.name };
+    const patch: Partial<Episode> = {
+      locationId: l.id, location: l.name, updatedAt: Date.now()
+    };
     if (l.portrait) patch.image = l.portrait;
-    await db.episodes.update(episode.id, patch);
+    await safeWrite(() => db.episodes.update(episode.id, patch), setGenError);
     if (!episode.moodPinned) setMood(moodFromHue(l.hue));
   };
 
   const addQuick = async () => {
     const l = emptyLocation(episode.worldId, { name: 'New location' });
-    await db.locations.add(l);
-    await db.episodes.update(episode.id, {
-      locationId: l.id, location: l.name,
-      ...(l.portrait ? { image: l.portrait } : {})
-    });
+    await safeWrite(async () => {
+      await db.locations.add(l);
+      await db.episodes.update(episode.id, {
+        locationId: l.id, location: l.name, updatedAt: Date.now(),
+        ...(l.portrait ? { image: l.portrait } : {})
+      });
+    }, setGenError);
     if (!episode.moodPinned) setMood(moodFromHue(l.hue));
   };
 
@@ -1875,9 +1915,14 @@ function ScenePlatePanel({ episode, bd }: { episode: Episode; bd: { tag: string;
           <div style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
             <textarea rows={2} value={value} onChange={(e) => setValue(e.target.value)} style={{ fontSize: 12 }}
               placeholder="One-off spot not in the library…" />
-            <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 10px' }} onClick={async () => {
+            <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 10px' }} onClick={() => {
               // Free-text override clears the library link so the cards don't fight it.
-              await db.episodes.update(episode.id, { location: value, locationId: null });
+              void safeWrite(
+                () => db.episodes.update(episode.id, {
+                  location: value, locationId: null, updatedAt: Date.now()
+                }),
+                () => undefined
+              );
               setEditing(false);
             }}>Save</button>
           </div>
@@ -1891,11 +1936,327 @@ function ScenePlatePanel({ episode, bd }: { episode: Episode; bd: { tag: string;
   );
 }
 
+/** Mid-episode digest injected into prompts — edit or clear so junk does not keep resurfacing. */
+function RunningSummaryPanel({ episode }: { episode: Episode }) {
+  const [error, setError] = useState('');
+  const running = episode.runningSummary?.trim();
+  if (!running && !episode.runningSummary) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <Mono style={{ fontSize: 9 }}>this episode · running summary</Mono>
+        <div style={{ fontSize: 12, opacity: 0.45, color: '#eceae6' }}>
+          None yet — built automatically when the transcript grows long.
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+        <Mono style={{ fontSize: 9 }}>this episode · running summary</Mono>
+        <button
+          type="button"
+          className="btn-quiet"
+          style={{ padding: 0, fontSize: 10 }}
+          onClick={() => void safeWrite(
+            () => db.episodes.update(episode.id, {
+              runningSummary: null, runningSummaryAtChars: 0, updatedAt: Date.now()
+            }),
+            setError
+          )}
+        >
+          Clear
+        </button>
+      </div>
+      {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
+      <textarea
+        key={episode.id + '-running-' + (episode.runningSummaryAtChars ?? 0)}
+        rows={4}
+        defaultValue={episode.runningSummary ?? ''}
+        onBlur={(e) => {
+          const next = e.target.value;
+          if (next === (episode.runningSummary ?? '')) return;
+          void safeWrite(
+            () => db.episodes.update(episode.id, {
+              runningSummary: next.trim() ? next : null,
+              runningSummaryAtChars: next.trim() ? (episode.runningSummaryAtChars ?? 0) : 0,
+              updatedAt: Date.now()
+            }),
+            setError
+          );
+        }}
+        placeholder="Compressed earlier beats for this episode…"
+        style={{ fontSize: 12.5, lineHeight: 1.45, color: '#eceae6' }}
+      />
+    </div>
+  );
+}
+
+/** Filed wrap memory from recent priors — prune recap / beats / walk-on effects that keep returning. */
+function PriorWrapMemoryPanel({ priorEpisodes }: { priorEpisodes: Episode[] }) {
+  const [error, setError] = useState('');
+  const patchWrap = (ep: Episode, wrap: EpisodeWrap) => {
+    void safeWrite(
+      () => db.episodes.update(ep.id, { wrap, updatedAt: Date.now() }),
+      setError
+    );
+  };
+  if (priorEpisodes.length === 0) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <Mono style={{ fontSize: 9 }}>recent episode memory</Mono>
+        <div style={{ fontSize: 12, opacity: 0.45, color: '#eceae6' }}>
+          No filed episode wraps yet.
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <Mono style={{ fontSize: 9 }}>recent episode memory · last {priorEpisodes.length}</Mono>
+      {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
+      {[...priorEpisodes].reverse().map((ep, idx) => {
+        const wrap = ep.wrap ?? { recap: '', beats: [], guestEffects: [] };
+        return (
+          <div
+            key={ep.id}
+            style={{
+              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, padding: '12px 12px',
+              background: 'rgba(255,255,255,0.03)', display: 'flex', flexDirection: 'column', gap: 10
+            }}
+          >
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.65 }}>
+              E{ep.number}{ep.title ? ` — ${ep.title}` : ''}{idx === 0 ? ' · immediate prior' : ''}
+            </div>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <Mono style={{ fontSize: 8, opacity: 0.5 }}>recap</Mono>
+              <textarea
+                key={ep.id + '-recap-' + (ep.updatedAt ?? ep.id)}
+                rows={3}
+                defaultValue={wrap.recap}
+                onBlur={(e) => {
+                  if (e.target.value === wrap.recap) return;
+                  patchWrap(ep, { ...wrap, recap: e.target.value });
+                }}
+                style={{ fontSize: 12.5, lineHeight: 1.45, color: '#eceae6' }}
+              />
+            </label>
+            {(wrap.beats.length > 0 || wrap.guestEffects.length > 0) && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {wrap.beats.map((b, i) => (
+                  <div key={`b${i}`} style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                    <div style={{
+                      fontSize: 12, lineHeight: 1.4, flex: 1, color: '#eceae6', opacity: 0.88,
+                      paddingLeft: 10, borderLeft: '1px solid rgba(255,255,255,0.14)'
+                    }}>
+                      {b.text}
+                      {b.consequence ? (
+                        <span style={{ opacity: 0.55 }}> → {b.consequence}</span>
+                      ) : null}
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-quiet"
+                      style={{ padding: '0 2px', fontSize: 12 }}
+                      title="Remove beat from memory"
+                      onClick={() => patchWrap(ep, {
+                        ...wrap,
+                        beats: wrap.beats.filter((_, j) => j !== i)
+                      })}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+                {wrap.guestEffects.map((g, i) => (
+                  <div key={`g${i}`} style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                    <div style={{
+                      fontSize: 12, lineHeight: 1.4, flex: 1, color: '#eceae6', opacity: 0.75,
+                      paddingLeft: 10, borderLeft: '1px solid rgba(224,165,95,0.28)'
+                    }}>
+                      <span style={{
+                        fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, opacity: 0.6,
+                        display: 'block', marginBottom: 2
+                      }}>walk-on</span>
+                      {g}
+                    </div>
+                    <button
+                      type="button"
+                      className="btn-quiet"
+                      style={{ padding: '0 2px', fontSize: 12 }}
+                      title="Remove walk-on effect"
+                      onClick={() => patchWrap(ep, {
+                        ...wrap,
+                        guestEffects: wrap.guestEffects.filter((_, j) => j !== i)
+                      })}
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function PlotTargetsPanel({ episode, season }: { episode: Episode; season: Season }) {
+  const [error, setError] = useState('');
+  const [adding, setAdding] = useState('');
+  const [addScope, setAddScope] = useState<'episode' | 'season'>('episode');
+
+  const writeEpisode = (plotTargets: PlotTarget[]) => {
+    void safeWrite(
+      () => db.episodes.update(episode.id, { plotTargets, updatedAt: Date.now() }),
+      setError
+    );
+  };
+  const writeSeason = (plotTargets: PlotTarget[]) => {
+    void safeWrite(
+      () => db.seasons.update(season.id, { plotTargets, updatedAt: Date.now() }),
+      setError
+    );
+  };
+
+  const setStatus = (
+    scope: 'episode' | 'season',
+    id: string,
+    status: PlotTargetStatus
+  ) => {
+    if (scope === 'episode') {
+      writeEpisode((episode.plotTargets ?? []).map((t) => (t.id === id ? { ...t, status } : t)));
+    } else {
+      writeSeason((season.plotTargets ?? []).map((t) => (t.id === id ? { ...t, status } : t)));
+    }
+  };
+
+  const patchText = (scope: 'episode' | 'season', id: string, text: string) => {
+    if (scope === 'episode') {
+      writeEpisode((episode.plotTargets ?? []).map((t) => (t.id === id ? { ...t, text } : t)));
+    } else {
+      writeSeason((season.plotTargets ?? []).map((t) => (t.id === id ? { ...t, text } : t)));
+    }
+  };
+
+  const addManual = () => {
+    const text = adding.trim();
+    if (!text) return;
+    const row: PlotTarget = {
+      id: uid(), text, status: 'pending', source: 'manual'
+    };
+    if (addScope === 'episode') {
+      const cur = episode.plotTargets ?? [];
+      if (cur.filter((t) => t.status === 'pending').length >= PLOT_TARGET_CAP) return;
+      writeEpisode([...cur, row]);
+    } else {
+      const cur = season.plotTargets ?? [];
+      if (cur.filter((t) => t.status === 'pending').length >= PLOT_TARGET_CAP) return;
+      writeSeason([...cur, row]);
+    }
+    setAdding('');
+  };
+
+  const renderRow = (t: PlotTarget, scope: 'episode' | 'season') => (
+    <div
+      key={`${scope}-${t.id}`}
+      style={{
+        display: 'flex', flexDirection: 'column', gap: 6,
+        border: '1px solid rgba(255,255,255,0.1)', borderRadius: 11, padding: '10px 12px',
+        background: 'rgba(255,255,255,0.04)',
+        opacity: t.status === 'pending' ? 1 : 0.5
+      }}
+    >
+      <textarea
+        key={t.id + t.status}
+        rows={2}
+        defaultValue={t.text}
+        onBlur={(e) => {
+          if (e.target.value !== t.text) patchText(scope, t.id, e.target.value);
+        }}
+        style={{
+          fontSize: 12.5, lineHeight: 1.4, color: '#eceae6',
+          background: 'transparent', border: 0, padding: 0
+        }}
+      />
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+        <span style={{
+          fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, opacity: 0.45, flex: 1
+        }}>
+          {scope === 'season' ? 'season arc' : 'episode'} · {t.source} · {t.status}
+        </span>
+        {t.status !== 'pending' && (
+          <button type="button" className="btn-quiet" style={{ padding: 0, fontSize: 10 }}
+            onClick={() => setStatus(scope, t.id, 'pending')}>pending</button>
+        )}
+        {t.status !== 'hit' && (
+          <button type="button" className="btn-quiet" style={{ padding: 0, fontSize: 10 }}
+            onClick={() => setStatus(scope, t.id, 'hit')}>hit</button>
+        )}
+        {t.status !== 'dropped' && (
+          <button type="button" className="btn-quiet" style={{ padding: 0, fontSize: 10 }}
+            onClick={() => setStatus(scope, t.id, 'dropped')}>drop</button>
+        )}
+      </div>
+    </div>
+  );
+
+  const epList = episode.plotTargets ?? [];
+  const seaList = season.plotTargets ?? [];
+  const epPending = epList.filter((t) => t.status === 'pending');
+  const seaPending = seaList.filter((t) => t.status === 'pending');
+  const settled = [
+    ...epList.filter((t) => t.status !== 'pending').map((t) => ({ t, scope: 'episode' as const })),
+    ...seaList.filter((t) => t.status !== 'pending').map((t) => ({ t, scope: 'season' as const }))
+  ];
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <Mono style={{ fontSize: 9 }}>
+        plot targets · {epPending.length} episode · {seaPending.length} season pending
+      </Mono>
+      <div style={{ fontSize: 11.5, lineHeight: 1.45, opacity: 0.45, color: '#eceae6' }}>
+        Author-selected beats the director works toward. Stronger than open threads; weaker than a one-shot steer.
+      </div>
+      {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
+      {epList.length === 0 && seaPending.length === 0 && (
+        <div style={{ fontSize: 12, opacity: 0.5, color: '#eceae6' }}>
+          None yet — Aim beats at episode wrap, or Raise at season review.
+        </div>
+      )}
+      {epList.filter((t) => t.status === 'pending').map((t) => renderRow(t, 'episode'))}
+      {seaPending.map((t) => renderRow(t, 'season'))}
+      {settled.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <Mono style={{ fontSize: 8, opacity: 0.5 }}>hit / dropped</Mono>
+          {settled.map(({ t, scope }) => renderRow(t, scope))}
+        </div>
+      )}
+      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+        <Chip active={addScope === 'episode'} onClick={() => setAddScope('episode')}>episode</Chip>
+        <Chip active={addScope === 'season'} onClick={() => setAddScope('season')}>season</Chip>
+        <input
+          value={adding}
+          onChange={(e) => setAdding(e.target.value)}
+          placeholder="add a target…"
+          style={{ fontSize: 11.5, padding: '7px 9px', flex: 1, minWidth: 140 }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') addManual();
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
 function ContinuityPanel({ continuity, world, season, episode, priorEpisodes }: {
   continuity: ContinuityFact[]; world: World; season: Season; episode: Episode;
   priorEpisodes?: Episode[];
 }) {
   const [adding, setAdding] = useState('');
+  const [error, setError] = useState('');
   const prefer = preferBucketsForEpisodes(priorEpisodes ?? [], episode);
   const inPlanIds = new Set(selectDirectorFacts(continuity, prefer).map((f) => f.id));
   return (
@@ -1903,6 +2264,10 @@ function ContinuityPanel({ continuity, world, season, episode, priorEpisodes }: 
       <Mono style={{ fontSize: 9 }}>
         continuity held · {inPlanIds.size}/{continuity.length} in director plan
       </Mono>
+      <div style={{ fontSize: 11, lineHeight: 1.4, opacity: 0.45, color: '#eceae6' }}>
+        Held facts outside the director cap may still reach narration (up to 24).
+      </div>
+      {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
       {continuity.map((f) => {
         const inPlan = inPlanIds.has(f.id);
         return (
@@ -1920,12 +2285,12 @@ function ContinuityPanel({ continuity, world, season, episode, priorEpisodes }: 
                 }}>held · not in director cap</span>
               )}
             </div>
-            <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 12 }} onClick={() => void (async () => {
+            <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 12 }} onClick={() => void safeWrite(async () => {
               await recordTombstones([{
                 table: 'continuity', id: f.id, worldId: f.worldId, seasonId: f.seasonId, payload: f
               }]);
               await db.continuity.delete(f.id);
-            })()}>×</button>
+            }, setError)}>×</button>
           </div>
         );
       })}
@@ -1933,12 +2298,15 @@ function ContinuityPanel({ continuity, world, season, episode, priorEpisodes }: 
         <input
           value={adding} onChange={(e) => setAdding(e.target.value)} placeholder="add a fact…"
           style={{ fontSize: 11.5, padding: '7px 9px' }}
-          onKeyDown={async (e) => {
+          onKeyDown={(e) => {
             if (e.key === 'Enter' && adding.trim()) {
-              await db.continuity.add({
-                id: uid(), worldId: world.id, seasonId: season.id, episodeId: episode.id,
-                text: adding.trim(), source: 'manual', createdAt: Date.now()
-              });
+              const text = adding.trim();
+              void safeWrite(async () => {
+                await db.continuity.add({
+                  id: uid(), worldId: world.id, seasonId: season.id, episodeId: episode.id,
+                  text, source: 'manual', createdAt: Date.now(), updatedAt: Date.now()
+                });
+              }, setError);
               setAdding('');
             }
           }}
@@ -1951,6 +2319,7 @@ function ContinuityPanel({ continuity, world, season, episode, priorEpisodes }: 
 function ThreadsPanel({ threads, episode, priorEpisodes }: {
   threads: OpenThread[]; episode: Episode; priorEpisodes?: Episode[];
 }) {
+  const [error, setError] = useState('');
   const prefer = preferBucketsForEpisodes(priorEpisodes ?? [], episode);
   const inPlanIds = new Set(selectDirectorThreads(threads, prefer).map((t) => t.id));
   return (
@@ -1958,6 +2327,7 @@ function ThreadsPanel({ threads, episode, priorEpisodes }: {
       <Mono style={{ fontSize: 9 }}>
         open threads · {inPlanIds.size}/{threads.length} in director plan
       </Mono>
+      {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
       {threads.map((t) => {
         const inPlan = inPlanIds.has(t.id);
         return (
@@ -1972,7 +2342,16 @@ function ThreadsPanel({ threads, episode, priorEpisodes }: {
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.45 }}>
                 {t.openedLabel}{!inPlan ? ' · held' : ''}
               </div>
-              <button className="btn-quiet" style={{ padding: 0, fontSize: 10 }} onClick={() => void db.threads.update(t.id, { status: 'resolved' })}>resolve</button>
+              <button
+                className="btn-quiet"
+                style={{ padding: 0, fontSize: 10 }}
+                onClick={() => void safeWrite(
+                  () => db.threads.update(t.id, { status: 'resolved', updatedAt: Date.now() }),
+                  setError
+                )}
+              >
+                resolve
+              </button>
             </div>
           </div>
         );
@@ -1982,10 +2361,22 @@ function ThreadsPanel({ threads, episode, priorEpisodes }: {
   );
 }
 
-function NudgesPanel({ threads, inScene, onNudge }: { threads: OpenThread[]; inScene: Character[]; onNudge: (t: string) => void }) {
+function NudgesPanel({
+  threads, inScene, episodeTargets, seasonTargets, onNudge
+}: {
+  threads: OpenThread[];
+  inScene: Character[];
+  episodeTargets?: PlotTarget[];
+  seasonTargets?: PlotTarget[];
+  onNudge: (t: string) => void;
+}) {
+  const topTarget =
+    (episodeTargets ?? []).find((t) => t.status === 'pending' && t.text.trim())
+    ?? (seasonTargets ?? []).find((t) => t.status === 'pending' && t.text.trim());
   const nudges = [
     'Let the silence run — do not fill it for me.',
     ...inScene.filter((c) => !c.isPlayer).slice(0, 2).map((c) => `${c.name} presses toward what they want.`),
+    ...(topTarget ? [`Advance toward: ${topTarget.text}`] : []),
     ...threads.slice(0, 2).map((t) => `Bring this to the surface: ${t.text}`),
     'Cut away — a different place, right after.'
   ];
@@ -2043,7 +2434,18 @@ function DirectorContent(props: {
   const labelSize = props.narrow ? 11 : 9;
   const [open, setOpen] = useState({ calendar: true, scene: true, memory: false, nudges: false });
   const toggle = (key: keyof typeof open) => setOpen((o) => ({ ...o, [key]: !o[key] }));
-  const priorEpisodes = useLiveQuery(
+  // Wrap presence for prune UI; recap-bearing for director-cap badges (matches prompts).
+  const priorForPrune = useLiveQuery(
+    async () => {
+      const all = await db.episodes.where('seasonId').equals(props.season.id).toArray();
+      return all
+        .filter((e) => e.number < props.episode.number && !!e.wrap)
+        .sort((a, b) => a.number - b.number)
+        .slice(-3);
+    },
+    [props.season.id, props.episode.number]
+  ) ?? [];
+  const priorForCaps = useLiveQuery(
     async () => {
       const all = await db.episodes.where('seasonId').equals(props.season.id).toArray();
       return all
@@ -2074,15 +2476,27 @@ function DirectorContent(props: {
       </DirectorAccordion>
       <DirectorAccordion title="memory" open={open.memory} onToggle={() => toggle('memory')} labelSize={labelSize}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+          <RunningSummaryPanel episode={props.episode} />
+          <PriorWrapMemoryPanel priorEpisodes={priorForPrune} />
+          <PlotTargetsPanel episode={props.episode} season={props.season} />
+          <div style={{ fontSize: 11.5, lineHeight: 1.45, opacity: 0.45, color: '#eceae6' }}>
+            Older worlds may still have walk-on effects filed as continuity facts — delete those separately if they linger.
+          </div>
           <ContinuityPanel
             continuity={props.continuity} world={props.world} season={props.season} episode={props.episode}
-            priorEpisodes={priorEpisodes}
+            priorEpisodes={priorForCaps}
           />
-          <ThreadsPanel threads={props.threads} episode={props.episode} priorEpisodes={priorEpisodes} />
+          <ThreadsPanel threads={props.threads} episode={props.episode} priorEpisodes={priorForCaps} />
         </div>
       </DirectorAccordion>
       <DirectorAccordion title="nudges" open={open.nudges} onToggle={() => toggle('nudges')} labelSize={labelSize}>
-        <NudgesPanel threads={props.threads} inScene={inScene} onNudge={props.onNudge} />
+        <NudgesPanel
+          threads={props.threads}
+          inScene={inScene}
+          episodeTargets={props.episode.plotTargets}
+          seasonTargets={props.season.plotTargets}
+          onNudge={props.onNudge}
+        />
       </DirectorAccordion>
     </div>
   );
@@ -2635,6 +3049,9 @@ function WrapReviewBody({
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <Mono style={{ fontSize: 9 }}>beats</Mono>
+        <div style={{ fontSize: 12, lineHeight: 1.45, opacity: 0.5 }}>
+          Aimed beats become the next episode’s plot targets.
+        </div>
         {draft.beats.length === 0 && (
           <div style={{ fontSize: 12.5, opacity: 0.5 }}>No standout beats proposed — you can still confirm.</div>
         )}
@@ -2662,11 +3079,63 @@ function WrapReviewBody({
             <KeepDropChips
               keep={b.keep}
               onKeep={() => patchBeat(i, { keep: true })}
-              onDrop={() => patchBeat(i, { keep: false })}
+              onDrop={() => patchBeat(i, { keep: false, aim: false })}
             />
+            {b.keep && (
+              <Chip
+                active={b.aim}
+                onClick={() => patchBeat(i, { aim: !b.aim })}
+              >
+                {b.aim ? 'Aim next · on' : 'Aim next'}
+              </Chip>
+            )}
           </div>
         ))}
       </div>
+
+      {draft.hitTargets.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <Mono style={{ fontSize: 9 }}>plot targets hit this episode</Mono>
+          <div style={{ fontSize: 12, lineHeight: 1.45, opacity: 0.5 }}>
+            Keep to mark these pending targets as hit. Drop to leave them pending for the next episode.
+          </div>
+          {draft.hitTargets.map((row, i) => (
+            <div key={i} style={{
+              display: 'flex', flexDirection: 'column', gap: 10,
+              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '12px 14px',
+              background: 'rgba(255,255,255,0.04)',
+              opacity: row.keep ? 1 : 0.42
+            }}>
+              <textarea
+                rows={2}
+                value={row.text}
+                onChange={(e) => {
+                  const hitTargets = draft.hitTargets.map((r, j) =>
+                    j === i ? { ...r, text: e.target.value } : r
+                  );
+                  onChange({ ...draft, hitTargets });
+                }}
+                style={{ fontSize: 13.5, lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, color: '#eceae6' }}
+              />
+              <KeepDropChips
+                keep={row.keep}
+                onKeep={() => {
+                  const hitTargets = draft.hitTargets.map((r, j) =>
+                    j === i ? { ...r, keep: true } : r
+                  );
+                  onChange({ ...draft, hitTargets });
+                }}
+                onDrop={() => {
+                  const hitTargets = draft.hitTargets.map((r, j) =>
+                    j === i ? { ...r, keep: false } : r
+                  );
+                  onChange({ ...draft, hitTargets });
+                }}
+              />
+            </div>
+          ))}
+        </div>
+      )}
 
       {([
         ['facts', 'continuity facts'] as const,

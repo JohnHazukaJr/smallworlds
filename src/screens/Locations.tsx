@@ -413,7 +413,7 @@ export function Locations() {
               )}
 
               {tab === 'ai' && (
-                <Field label="Custom AI instructions" note="passed to the model verbatim, every scene set here">
+                <Field label="Custom AI instructions" note="verbatim when this location is the current scene">
                   <textarea
                     rows={5} value={d.customInstructions}
                     onChange={(e) => patch({ customInstructions: e.target.value })}
