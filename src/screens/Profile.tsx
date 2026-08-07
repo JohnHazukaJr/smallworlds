@@ -109,7 +109,7 @@ export function Profile() {
     <div className="fade-in" style={{ padding: narrow ? '26px 18px 70px' : '42px 46px 70px', maxWidth: 1020 }}>
       <div style={{ display: 'flex', gap: 22, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 34 }}>
         <div style={avatarStyle(60, 84, 'rgba(255,255,255,0.2)')} />
-        <div style={{ flex: 1, minWidth: 260, display: 'flex', flexDirection: 'column', gap: 9 }}>
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 9 }}>
           <div className="serif" style={{ fontWeight: 300, fontSize: narrow ? 28 : 36, lineHeight: 1.1, color: '#f8f6f2' }}>Your shelf</div>
           <div style={{ fontSize: 13.5, lineHeight: 1.65, color: 'rgba(236,234,230,0.58)', maxWidth: '58ch' }}>
             Worlds live in this browser first. Back up the whole device (stories + settings + encrypted keys), or sign in
@@ -192,7 +192,7 @@ export function Profile() {
         {worlds.length === 0 && <div style={{ fontSize: 13, opacity: 0.5 }}>No worlds yet.</div>}
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 15 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 300px), 1fr))', gap: 15 }}>
         <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 13 }}>
           <Mono style={{ fontSize: 9 }}>default for new worlds</Mono>
           {(Object.entries(VIS) as Array<[Visibility, typeof VIS[Visibility]]>).map(([id, v]) => {

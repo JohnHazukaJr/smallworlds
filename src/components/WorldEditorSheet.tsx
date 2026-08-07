@@ -439,7 +439,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
 
         {tab === 'settings' && (
           <>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 150px), 1fr))', gap: 12 }}>
               <Field label="Point of view">
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   {(['second', 'first', 'third'] as const).map((pov) => (
@@ -545,7 +545,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               </div>
               <button className="btn-quiet" style={{ fontSize: 10 }} onClick={() => { onClose(); goCast(selected.id); }}>full editor</button>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 12 }}>
               <Field label="Name">
                 <input key={selected.id + '-name'} defaultValue={selected.name}
                   onBlur={(e) => patchChar(selected.id, { name: e.target.value })} />
@@ -575,7 +575,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <textarea key={selected.id + '-voice'} rows={2} defaultValue={selected.speechStyle}
                 onBlur={(e) => patchChar(selected.id, { speechStyle: e.target.value })} />
             </Field>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 12 }}>
               <Field label="Desires">
                 <textarea key={selected.id + '-desires'} rows={2} defaultValue={selected.desires}
                   onBlur={(e) => patchChar(selected.id, { desires: e.target.value })} />
@@ -602,7 +602,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 onBlur={(e) => patchChar(selected.id, { customInstructions: e.target.value })} />
             </Field>
             <Mono style={{ fontSize: monoPx }}>current state — right now in the story</Mono>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 12 }}>
               {([['goal', 'Goal'], ['emotion', 'Emotion'], ['location', 'Location'], ['condition', 'Condition']] as const).map(([k, label]) => (
                 <Field key={k} label={label}>
                   <input key={selected.id + '-st-' + k} defaultValue={selected.state[k]} style={MONO_INPUT}
@@ -663,7 +663,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               }}>use as scene</button>
               <button className="btn-quiet" style={{ fontSize: 10 }} onClick={() => { onClose(); goLocations(selectedLoc.id); }}>full editor</button>
             </div>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 12 }}>
               <Field label="Name">
                 <input key={selectedLoc.id + '-name'} defaultValue={selectedLoc.name}
                   onBlur={(e) => patchLoc(selectedLoc.id, { name: e.target.value })} />

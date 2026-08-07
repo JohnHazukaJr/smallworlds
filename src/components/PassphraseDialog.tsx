@@ -48,7 +48,7 @@ export function PassphraseDialog(p: PassphraseDialogProps) {
       <div onClick={p.onCancel} style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(6,7,10,0.6)', backdropFilter: 'blur(4px)' }} />
       <div className="glass fade-in" style={{
         position: 'fixed', zIndex: 51, top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
-        width: 420, maxWidth: 'calc(100vw - 32px)', padding: '24px 24px 20px',
+        width: 'min(420px, calc(100% - 32px))', maxWidth: 'calc(100% - 32px)', padding: '24px 24px 20px',
         display: 'flex', flexDirection: 'column', gap: 14, background: 'rgba(14,16,20,0.92)'
       }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>

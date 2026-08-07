@@ -39,7 +39,7 @@ function useAutosave(draft: Location | null, onError: (msg: string) => void) {
 
 export function Locations() {
   const vw = useVw();
-  const narrow = vw < 900;
+  const narrow = vw < 1000;
   const { currentWorldId, go, pendingLocationId, clearPendingLocation } = useApp();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('overview');
@@ -307,7 +307,7 @@ export function Locations() {
                 >remove from world</button>
               </div>
 
-              <div style={{ flex: 1, minWidth: 280, display: 'flex', flexDirection: 'column', gap: 20 }}>
+              <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 20 }}>
                 <div>
                   <Mono style={{ letterSpacing: '0.16em', marginBottom: 8 }}>location</Mono>
                   <input
@@ -321,7 +321,7 @@ export function Locations() {
                     style={{ fontSize: 13.5, color: 'rgba(236,234,230,0.7)', marginTop: 8, background: 'transparent', border: 0, padding: 0, borderRadius: 0 }}
                   />
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 11 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 11 }}>
                   {([
                     ['current state', d.currentState, (v: string) => patch({ currentState: v })],
                     ['typically found here', d.inhabitants, (v: string) => patch({ inhabitants: v })]

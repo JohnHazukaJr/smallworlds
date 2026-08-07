@@ -86,7 +86,7 @@ export function Settings() {
       <Section title="Content defaults">
         <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap' }}>
-            <div style={{ flex: 1, minWidth: 240, display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 5 }}>
               <div style={{ fontSize: 13.5, fontWeight: 600, color: 'rgba(236,234,230,0.92)' }}>Mature content on new worlds</div>
               <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
                 Unlocks graphic violence, sex, and darker themes for new worlds. Whether the model complies also
@@ -134,7 +134,7 @@ function SecuritySection() {
       )}
       <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap' }}>
-          <div style={{ flex: 1, minWidth: 240, display: 'flex', flexDirection: 'column', gap: 5 }}>
+          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 5 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: 'rgba(236,234,230,0.92)' }}>
               App lock &amp; key encryption
               {vault.enabled && (
@@ -178,7 +178,7 @@ function SecuritySection() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
-          <div style={{ flex: 1, minWidth: 240, display: 'flex', flexDirection: 'column', gap: 5 }}>
+          <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 5 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: 'oklch(0.75 0.12 25)' }}>Erase everything</div>
             <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
               Deletes all worlds, characters, settings and keys from this device. Export a backup first — this cannot
@@ -292,7 +292,7 @@ function AddProvider({ onDone }: { onDone: () => void }) {
           <> Get a key at <a href={preset.keyUrl} target="_blank" rel="noreferrer">{preset.keyUrl.replace('https://', '')}</a>.</>
         )}
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: 12 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 230px), 1fr))', gap: 12 }}>
         <Field label="Base URL">
           <input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }} />
         </Field>
@@ -344,7 +344,7 @@ function ProviderCard({ config }: { config: ProviderConfig }) {
           {config.baseUrl}
         </div>
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))', gap: 12 }}>
         <Field label="API key">
           {editKey ? (
             <input
@@ -476,7 +476,7 @@ function WorldSettings({ world }: { world: World }) {
     <Section title={`This world — ${world.title}`} note="instructions the narrator follows in this world only">
       {saveError && <ErrorNote error={saveError} onDismiss={() => setSaveError('')} />}
       <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 20 }}>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 14 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 200px), 1fr))', gap: 14 }}>
           <Field label="Point of view">
             <div style={{ display: 'flex', gap: 6 }}>
               {(['second', 'first', 'third'] as const).map((pov) => (
@@ -501,7 +501,7 @@ function WorldSettings({ world }: { world: World }) {
           </Field>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 13 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: 13 }}>
           <SliderCard
             label="Purple-ness"
             value={world.ai.proseDensity}
@@ -545,7 +545,7 @@ function WorldSettings({ world }: { world: World }) {
           />
         </Field>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 14, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: 14, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
           <Field label="Prose model override" note="unset = global default">
             <ModelPicker
               value={world.proseModel}

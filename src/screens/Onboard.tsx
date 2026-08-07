@@ -406,7 +406,7 @@ export function Onboard() {
       cta: 'Next — the first character',
       content: (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 14 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 14 }}>
             <Field label="Point of view">
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 {(['second', 'first', 'third'] as const).map((pov) => (
@@ -423,7 +423,7 @@ export function Onboard() {
             </Field>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))', gap: 12 }}>
             <SliderCard
               label="Purple-ness"
               value={ai.proseDensity}
@@ -442,7 +442,7 @@ export function Onboard() {
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
             <Toggle on={ai.mature} onClick={() => patchAI({ mature: !ai.mature })} />
-            <div style={{ flex: 1, minWidth: 200, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.6)' }}>
+            <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.6)' }}>
               {ai.mature
                 ? 'Adult world — graphic violence, sex, and darker themes permitted where the story calls for them.'
                 : 'General audience — imply rather than depict.'}
@@ -837,7 +837,7 @@ function CastCard({ c, expanded, onToggle, onRemove, onPatch, onToggleSelfTag }:
           {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
           <Field label="Who they are"><textarea rows={3} defaultValue={c.summary} onBlur={(e) => onPatch({ summary: e.target.value })} /></Field>
           <Field label="Backstory"><textarea rows={2} defaultValue={c.backstory} onBlur={(e) => onPatch({ backstory: e.target.value })} /></Field>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 10 }}>
             <Field label="Desires"><textarea rows={2} defaultValue={c.desires} onBlur={(e) => onPatch({ desires: e.target.value })} /></Field>
             <Field label="Fears"><textarea rows={2} defaultValue={c.fears} onBlur={(e) => onPatch({ fears: e.target.value })} /></Field>
           </div>

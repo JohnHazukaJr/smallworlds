@@ -44,7 +44,7 @@ function useAutosave(draft: Character | null, onError: (msg: string) => void) {
 
 export function Cast() {
   const vw = useVw();
-  const narrow = vw < 900;
+  const narrow = vw < 1000;
   const { currentWorldId, go, pendingCharacterId, clearPendingCharacter } = useApp();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('persona');
@@ -426,7 +426,7 @@ export function Cast() {
                 )}
               </div>
 
-              <div style={{ flex: 1, minWidth: 280, display: 'flex', flexDirection: 'column', gap: 20 }}>
+              <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 20 }}>
                 <div>
                   <Mono style={{ letterSpacing: '0.16em', marginBottom: 8 }}>{d.isPlayer ? 'the player' : 'character'}</Mono>
                   <input
@@ -440,7 +440,7 @@ export function Cast() {
                     style={{ fontSize: 13.5, color: 'rgba(236,234,230,0.7)', marginTop: 8, background: 'transparent', border: 0, padding: 0, borderRadius: 0 }}
                   />
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 11 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 11 }}>
                   {([
                     ['current goal', d.state.goal, (v: string) => patch({ state: { ...d.state, goal: v } })],
                     ['emotional state', d.state.emotion, (v: string) => patch({ state: { ...d.state, emotion: v } })],
@@ -816,13 +816,7 @@ function RelationsEditor({
                     onClick={() => setRels(removeLink(character.relationships, r.targetId))}
                   >remove</button>
                 </div>
-                <div style={{
-                  display: 'flex', gap: 6, flexWrap: narrow ? 'nowrap' : 'wrap',
-                  overflowX: narrow ? 'auto' : undefined,
-                  WebkitOverflowScrolling: 'touch',
-                  paddingBottom: narrow ? 4 : 0,
-                  marginRight: narrow ? -4 : 0
-                }}>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   {KIND_PRESETS.map((k) => (
                     <Chip key={k} active={r.kind === k} onClick={() => updateByTarget(r.targetId, { kind: k })}>
                       {k}

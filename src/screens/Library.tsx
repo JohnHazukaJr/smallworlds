@@ -135,7 +135,7 @@ export function Library() {
         </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(272px, 1fr))', gap: 18 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 272px), 1fr))', gap: 18 }}>
         {(worlds ?? []).map((w) => {
           const st = stats?.[w.id];
           return (

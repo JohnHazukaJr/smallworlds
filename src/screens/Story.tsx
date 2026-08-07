@@ -1032,7 +1032,7 @@ export function Story() {
               border: '1px solid rgba(255,255,255,0.14)', borderRadius: 14, padding: '12px 14px',
               background: pressure === 'escalate' ? 'rgba(224,165,95,0.12)' : 'rgba(255,255,255,0.05)'
             }}>
-              <div style={{ flex: 1, minWidth: 200, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.78)' }}>
+              <div style={{ flex: 1, minWidth: narrow ? 0 : 200, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.78)' }}>
                 {pressure === 'escalate'
                   ? 'Earlier beats may already be dropping from context. File this episode so continuity keeps them.'
                   : locationShiftNudge && pressure === 'ok'
@@ -1058,7 +1058,7 @@ export function Story() {
           )}
           <div style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+            gridTemplateColumns: narrow ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))',
             gap: 4,
             border: '1px solid rgba(255,255,255,0.12)',
             borderRadius: 12,

@@ -1,6 +1,7 @@
 import type { CSSProperties } from 'react';
 import type { Character } from '../types';
 import { hasLink } from '../relationships';
+import { useVw } from '../ui/bits';
 import { avatarStyle } from '../ui/theme';
 import { characterPortraits } from '../worldOps';
 
@@ -167,9 +168,10 @@ function HtmlNode({
 export function RelationshipMap({
   mode, subject, cast, narrow, onSelectCharacter, onFocusEdge
 }: Props) {
+  const vw = useVw();
   const others = cast.filter((c) => c.id !== subject.id);
-  // Phone: fill width, larger faces for fat-finger taps; desktop stays compact.
-  const size = narrow ? 340 : 380;
+  // Phone: fill width, larger faces for fat-finger taps; never exceed the viewport.
+  const size = Math.min(narrow ? 340 : 380, Math.max(240, vw - 48));
   const cx = size / 2;
   const cy = size / 2;
   const nodeSize = narrow ? 44 : 40;
