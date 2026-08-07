@@ -1,7 +1,7 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef, useState } from 'react';
 import { analyzeSeason, beginNextSeason, draftPremise, evolveCharacters } from '../ai/engine';
-import { db } from '../db';
+import { db, safeWrite } from '../db';
 import { formatUserError } from '../errors';
 import { useApp } from '../store/app';
 import type { BeatDisposition, SeasonWrap } from '../types';
@@ -56,9 +56,12 @@ export function Sequel() {
   const patch = (p: Partial<SeasonWrap>) => {
     setDraft((d) => {
       if (!d) return d;
-      const next = { ...d, ...p };
+      const next = { ...d, ...p, updatedAt: Date.now() };
       window.clearTimeout(timer.current);
-      timer.current = window.setTimeout(() => void db.wraps.put(next), 400);
+      timer.current = window.setTimeout(
+        () => void safeWrite(() => db.wraps.put(next), setError),
+        400
+      );
       return next;
     });
   };
@@ -176,9 +179,13 @@ export function Sequel() {
           ))}
           <button
             className="btn-quiet" style={{ marginLeft: 'auto' }}
+            disabled={!!busy}
             onClick={() => {
               if (confirm('Discard this review and re-read the season?')) {
-                void db.wraps.delete(draft.id).then(() => setDraft(null));
+                void safeWrite(async () => {
+                  await db.wraps.delete(draft.id);
+                  setDraft(null);
+                }, setError);
               }
             }}
           >discard &amp; re-read</button>

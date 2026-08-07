@@ -469,7 +469,10 @@ export function Onboard() {
             <textarea
               rows={3}
               value={ai.narratorRules.join('\n')}
-              onChange={(e) => patchAI({ narratorRules: e.target.value.split('\n').filter((l) => l.trim()) })}
+              onChange={(e) => patchAI({ narratorRules: e.target.value.split('\n') })}
+              onBlur={() => patchAI({
+                narratorRules: ai.narratorRules.map((l) => l.trim()).filter(Boolean)
+              })}
               placeholder={'Never skip time without asking.\nNever kill a named character without the player in the scene.'}
             />
           </Field>

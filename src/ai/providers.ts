@@ -117,16 +117,24 @@ export function presetFor(config: ProviderConfig): ProviderPreset | undefined {
     PROVIDER_PRESETS.find((p) => p.kind === config.kind && p.id === 'custom');
 }
 
+export interface ListModelsResult {
+  models: string[];
+  error?: string;
+}
+
 /** Fetch the live model catalog from a provider, where supported. */
-export async function listModels(config: ProviderConfig): Promise<string[]> {
+export async function listModels(config: ProviderConfig): Promise<ListModelsResult> {
   try {
     if (config.kind === 'gemini') {
       const res = await fetch(`${config.baseUrl}/models?key=${encodeURIComponent(config.apiKey)}`);
-      if (!res.ok) return [];
+      if (!res.ok) {
+        return { models: [], error: `Could not list models (${res.status}). Check the API key.` };
+      }
       const data = await res.json();
-      return (data.models ?? [])
+      const models = (data.models ?? [])
         .map((m: { name: string }) => m.name.replace(/^models\//, ''))
         .filter((n: string) => n.includes('gemini'));
+      return { models };
     }
     const headers: Record<string, string> = {};
     if (config.kind === 'anthropic') {
@@ -137,11 +145,17 @@ export async function listModels(config: ProviderConfig): Promise<string[]> {
       headers['Authorization'] = `Bearer ${config.apiKey}`;
     }
     const res = await fetch(`${config.baseUrl}/models`, { headers });
-    if (!res.ok) return [];
+    if (!res.ok) {
+      return { models: [], error: `Could not list models (${res.status}). Check the API key.` };
+    }
     const data = await res.json();
     const arr = Array.isArray(data.data) ? data.data : Array.isArray(data.models) ? data.models : [];
-    return arr.map((m: { id?: string; name?: string }) => m.id ?? m.name ?? '').filter(Boolean).sort();
-  } catch {
-    return [];
+    const models = arr.map((m: { id?: string; name?: string }) => m.id ?? m.name ?? '').filter(Boolean).sort();
+    return { models };
+  } catch (e) {
+    return {
+      models: [],
+      error: e instanceof Error ? e.message : 'Could not reach the provider to list models.'
+    };
   }
 }

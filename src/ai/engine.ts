@@ -12,7 +12,7 @@ import {
   nextEpisode, worldCalendar
 } from '../worldOps';
 import { AIError, streamChat, type ChatMessage, type StreamRequest } from './client';
-import { normalizeSpeakText } from './dialogueFormat';
+import { hasSpokenDialogue, normalizeSpeakText } from './dialogueFormat';
 import {
   activeGuests,
   buildCharacterSpeakMessages,
@@ -61,9 +61,18 @@ const SPEAK_CONTINUE_NUDGE =
   'finish the unfinished *action* or "dialogue" only. Do not restart or repeat completed words. ' +
   'Keep the same *action* / "speech" format.';
 
+const NARRATION_CONTINUE_NUDGE =
+  'Your previous narration was cut off mid-sentence. Continue from exactly where you stopped — ' +
+  'do not restart or repeat completed words. Stay in narrator voice; no character dialogue.';
+
+const SPEAK_DIALOGUE_NUDGE =
+  'Your reply had no spoken dialogue. Answer the player aloud with at least one line in "double quotes". ' +
+  'You may keep a short *action*, but speech is required.';
+
 /**
  * Stream a character/guest speak beat; if the provider stops for length, make one
- * continuation call and stitch before normalizing.
+ * continuation call and stitch before normalizing. When requireDialogue, retry once
+ * if the cleaned text has no quoted speech.
  */
 async function streamSpeakComplete(opts: {
   provider: StreamRequest['provider'];
@@ -72,6 +81,7 @@ async function streamSpeakComplete(opts: {
   messages: ChatMessage[];
   length: TurnLength;
   signal?: AbortSignal;
+  requireDialogue?: boolean;
   onProgress: (label: string) => void;
   onAccumulated: (text: string) => void;
 }): Promise<string> {
@@ -108,7 +118,78 @@ async function streamSpeakComplete(opts: {
       }
     });
   }
-  return normalizeSpeakText(acc);
+  let cleaned = normalizeSpeakText(acc);
+  if (opts.requireDialogue && cleaned && !hasSpokenDialogue(cleaned)) {
+    opts.onProgress('adding dialogue…');
+    acc = '';
+    await streamChat({
+      provider: opts.provider,
+      model: opts.model,
+      system: opts.system,
+      messages: [
+        ...opts.messages,
+        { role: 'assistant', content: cleaned },
+        { role: 'user', content: SPEAK_DIALOGUE_NUDGE }
+      ],
+      maxTokens,
+      signal: opts.signal,
+      onDelta: (d) => {
+        acc += d;
+        opts.onAccumulated(cleaned + (cleaned && acc ? ' ' : '') + acc);
+      }
+    });
+    const retried = normalizeSpeakText(acc);
+    if (retried && hasSpokenDialogue(retried)) cleaned = retried;
+    else if (!hasSpokenDialogue(cleaned)) cleaned = '';
+  }
+  return cleaned;
+}
+
+/** Stream a narration beat; one continuation if truncated mid-sentence. */
+async function streamNarrationComplete(opts: {
+  provider: StreamRequest['provider'];
+  model: string;
+  system: string;
+  messages: ChatMessage[];
+  length: TurnLength;
+  signal?: AbortSignal;
+  onProgress: (label: string) => void;
+  onAccumulated: (text: string) => void;
+}): Promise<string> {
+  const maxTokens = narrationBeatTokens(opts.length);
+  let acc = '';
+  const first = await streamChat({
+    provider: opts.provider,
+    model: opts.model,
+    system: opts.system,
+    messages: opts.messages,
+    maxTokens,
+    signal: opts.signal,
+    onDelta: (d) => {
+      acc += d;
+      opts.onAccumulated(acc);
+    }
+  });
+  if (first.truncated && acc.trim()) {
+    opts.onProgress('finishing narration…');
+    await streamChat({
+      provider: opts.provider,
+      model: opts.model,
+      system: opts.system,
+      messages: [
+        ...opts.messages,
+        { role: 'assistant', content: acc },
+        { role: 'user', content: NARRATION_CONTINUE_NUDGE }
+      ],
+      maxTokens,
+      signal: opts.signal,
+      onDelta: (d) => {
+        acc += d;
+        opts.onAccumulated(acc);
+      }
+    });
+  }
+  return acc.trim();
 }
 
 async function loadContext(world: World, season: Season, episode: Episode) {
@@ -546,19 +627,18 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         const meta: StreamMeta = { role: 'narrator' };
         progress('narrating…');
         opts.onDelta('', meta);
-        let acc = '';
         const narrSystem = buildNarratorSystemPrompt(ctx);
-        const { text } = await streamChat({
+        const narrText = await streamNarrationComplete({
           provider, model,
           system: narrSystem,
           messages: buildNarrationBeatMessages(
             ctx.turns, ctx.characters, beat.brief, opts.length, sceneGuests(), ctx.episode, narrSystem.length
           ),
-          maxTokens: narrationBeatTokens(opts.length),
+          length: opts.length,
           signal: opts.signal,
-          onDelta: (d) => { acc += d; opts.onDelta(acc, meta); }
+          onProgress: progress,
+          onAccumulated: (acc) => opts.onDelta(acc, meta)
         });
-        const narrText = text.trim();
         if (!narrText) {
           opts.onDelta('', meta);
           continue;
@@ -591,6 +671,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
           ),
           length: opts.length,
           signal: opts.signal,
+          requireDialogue,
           onProgress: progress,
           onAccumulated: (acc) => opts.onDelta(acc, meta)
         });
@@ -627,6 +708,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         ),
         length: opts.length,
         signal: opts.signal,
+        requireDialogue,
         onProgress: progress,
         onAccumulated: (acc) => opts.onDelta(acc, meta)
       });
@@ -653,6 +735,11 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       if (beatsCompleted === 0 && userTurnId) {
         await db.turns.delete(userTurnId).catch(() => undefined);
         ctx.turns = ctx.turns.filter((t) => t.id !== userTurnId);
+      }
+      if (abortErr instanceof WriteAbortedError) throw abortErr;
+      // Non-abort: attach beatsCompleted so UI can keep partial replies.
+      if (abortErr && typeof abortErr === 'object') {
+        (abortErr as { beatsCompleted?: number }).beatsCompleted = beatsCompleted;
       }
       throw abortErr;
     }

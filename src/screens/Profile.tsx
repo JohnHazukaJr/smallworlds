@@ -141,7 +141,7 @@ export function Profile() {
         </div>
       )}
 
-      <AccountSection onError={setError} />
+      <AccountSection onError={setError} onNotice={setNotice} />
 
       <div style={{ display: 'flex', gap: 26, flexWrap: 'wrap', borderTop: '1px solid rgba(255,255,255,0.08)', borderBottom: '1px solid rgba(255,255,255,0.08)', padding: '16px 0', marginBottom: 34 }}>
         {[
@@ -282,7 +282,12 @@ export function Profile() {
   );
 }
 
-function AccountSection({ onError }: { onError: (msg: string) => void }) {
+function AccountSection({
+  onError, onNotice
+}: {
+  onError: (msg: string) => void;
+  onNotice: (msg: string) => void;
+}) {
   const auth = useAuth();
   const sync = useSyncMeta();
   const [tab, setTab] = useState<'phone' | 'email' | 'google'>('email');
@@ -310,13 +315,15 @@ function AccountSection({ onError }: { onError: (msg: string) => void }) {
     );
   }
 
-  const run = async (fn: () => Promise<void>) => {
+  const run = async (fn: () => Promise<void>, opts?: { skipError?: boolean }) => {
     setBusy(true);
     onError('');
+    onNotice('');
     try {
       await fn();
     } catch (e) {
-      onError(formatUserError(e));
+      // syncNow already sets useSyncMeta.error — avoid a duplicate banner.
+      if (!opts?.skipError) onError(formatUserError(e));
     } finally {
       setBusy(false);
     }
@@ -411,7 +418,7 @@ function AccountSection({ onError }: { onError: (msg: string) => void }) {
         <button
           className="btn-primary"
           disabled={busy || sync.busy}
-          onClick={() => void run(async () => { await syncNow(); })}
+          onClick={() => void run(async () => { await syncNow(); }, { skipError: true })}
         >
           {sync.busy ? 'Syncing…' : 'Sync now'}
         </button>
@@ -434,7 +441,7 @@ function AccountSection({ onError }: { onError: (msg: string) => void }) {
           </button>
           <button className="btn-ghost" disabled={busy || !secretsPass} onClick={() => void run(async () => {
             const n = await pullEncryptedSecrets(secretsPass);
-            onError(`Restored ${n} key${n === 1 ? '' : 's'} into memory.`);
+            onNotice(`Restored ${n} key${n === 1 ? '' : 's'} into memory.`);
           })}>
             Download keys
           </button>

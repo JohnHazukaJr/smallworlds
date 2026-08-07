@@ -114,6 +114,7 @@ function SecuritySection() {
   const [busy, setBusy] = useState(false);
   const [dialogError, setDialogError] = useState('');
   const [sectionError, setSectionError] = useState('');
+  const [vaultCorruptDismissed, setVaultCorruptDismissed] = useState(false);
 
   const close = () => { setDialog('none'); setDialogError(''); setOldPass(''); };
 
@@ -125,10 +126,10 @@ function SecuritySection() {
           onDismiss={() => { setSectionError(''); clearVaultPersistError(); }}
         />
       )}
-      {vault.corrupt && (
+      {vault.corrupt && !vaultCorruptDismissed && (
         <ErrorNote
           error="Vault unreadable — restore a backup from Profile, or reset the vault (stories are kept; keys on this device are lost)."
-          onDismiss={() => undefined}
+          onDismiss={() => setVaultCorruptDismissed(true)}
         />
       )}
       <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -397,6 +398,7 @@ export function ModelPicker({ value, onChange }: { value: ModelRef | null; onCha
   const providers = useSettings((st) => st.providers);
   const [catalog, setCatalog] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
+  const [listError, setListError] = useState('');
   const listId = useId();
 
   const provider = providers.find((p) => p.id === value?.providerId) ?? providers[0];
@@ -417,6 +419,7 @@ export function ModelPicker({ value, onChange }: { value: ModelRef | null; onCha
             const ps = presetFor(p);
             onChange({ providerId: p.id, model: value?.providerId === p.id ? value.model : (ps?.suggestedModels[0] ?? '') });
             setCatalog([]);
+            setListError('');
           }
         }}
       >
@@ -436,14 +439,23 @@ export function ModelPicker({ value, onChange }: { value: ModelRef | null; onCha
           onClick={async () => {
             if (!provider) return;
             setLoading(true);
-            const models = await listModels(provider);
-            setCatalog(models);
-            setLoading(false);
+            setListError('');
+            try {
+              const { models, error } = await listModels(provider);
+              setCatalog(models);
+              if (error) setListError(error);
+              else if (models.length === 0) setListError('Provider returned no models.');
+            } finally {
+              setLoading(false);
+            }
           }}
         >
           {loading ? '…' : catalog.length > 0 ? `${catalog.length} live` : 'fetch list'}
         </button>
       </div>
+      {listError && (
+        <div style={{ fontSize: 11.5, lineHeight: 1.4, color: 'oklch(0.78 0.1 35)' }}>{listError}</div>
+      )}
       <datalist id={listId}>
         {suggestions.map((m) => <option key={m} value={m} />)}
       </datalist>

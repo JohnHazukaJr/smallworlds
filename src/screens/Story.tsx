@@ -8,10 +8,11 @@ import {
 import { parseSpeakSegments, type SpeakSegment } from '../ai/dialogueFormat';
 import { generateSceneImage } from '../ai/image';
 import {
-  episodeContextPressure, episodeHistoryChars, HISTORY_CHAR_BUDGET, resolveSpeakerName
+  episodeContextPressure, episodeHistoryChars, HISTORY_CHAR_BUDGET,
+  preferBucketsForEpisodes, resolveSpeakerName, selectDirectorFacts, selectDirectorThreads
 } from '../ai/prompts';
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
-import { db, guardStorage, recordTombstones, uid } from '../db';
+import { db, guardStorage, recordTombstones, safeWrite, uid } from '../db';
 import { AVATAR_PX, DEFAULT_DISPLAY, moodFromHue, useApp, type AvatarSize, type StoryLayout } from '../store/app';
 import type {
   Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, EpisodeWrapBeat,
@@ -410,11 +411,16 @@ export function Story() {
     setNudgeDismissedLocId(episode?.locationId ?? null);
   }, [episode?.id]);
 
-  // Fresh wrap sheet each time it opens or switches Episode/Season.
+  // Fresh wrap draft only when opening from closed — Episode↔Season toggle must not wipe analysis.
+  const prevWrapOpen = useRef(wrapOpen);
   useEffect(() => {
-    setWrapPhase('ready');
-    setWrapDraft(null);
-    setWrapBusy(false);
+    const wasClosed = prevWrapOpen.current === null;
+    prevWrapOpen.current = wrapOpen;
+    if (wrapOpen !== null && wasClosed) {
+      setWrapPhase('ready');
+      setWrapDraft(null);
+      setWrapBusy(false);
+    }
   }, [wrapOpen]);
 
   // Location hue → mood when the episode hasn't pinned a mood.
@@ -475,8 +481,14 @@ export function Story() {
         );
         return { status: 'aborted', beatsCompleted: n };
       }
+      const n = typeof e === 'object' && e && 'beatsCompleted' in e
+        ? Math.max(0, Number((e as { beatsCompleted: number }).beatsCompleted) || 0)
+        : 0;
       setError(classifyError(e));
-      return { status: 'error', beatsCompleted: 0 };
+      if (n > 0) {
+        setNotice(`${n} beat${n === 1 ? '' : 's'} saved — retry from the last reply if you want to continue.`);
+      }
+      return { status: 'error', beatsCompleted: n };
     } finally {
       setStreaming(false);
       setProgressLabel('');
@@ -492,7 +504,7 @@ export function Story() {
     const result = await runNarration(composeMode, text);
     if (result.status === 'ok') {
       if (composeMode !== 'continue') setComposeMode('continue');
-    } else if (result.status === 'error' || result.beatsCompleted === 0) {
+    } else if (result.beatsCompleted === 0) {
       // Restore composer when nothing was applied (orphan user turn removed).
       setInput(text);
     }
@@ -989,8 +1001,9 @@ export function Story() {
       ) : (
         <div style={{
           position: 'relative', zIndex: 2, borderTop: '1px solid rgba(255,255,255,0.08)',
+          // Tab bar already reserves safe-area — don't double-pad in write mode.
           padding: narrow
-            ? '11px 12px calc(12px + env(safe-area-inset-bottom))'
+            ? (readMode ? '11px 12px calc(12px + env(safe-area-inset-bottom))' : '11px 12px 12px')
             : '15px 24px 18px',
           display: 'flex', flexDirection: 'column', gap: 11,
           background: 'rgba(8,9,12,0.42)', backdropFilter: 'blur(24px) saturate(140%)'
@@ -1124,15 +1137,7 @@ export function Story() {
         onClose={closeWrapSheet}
         narrow={narrow}
         footer={
-          wrapOpen === 'season' ? (
-            <button
-              className="btn-primary"
-              style={{ width: '100%', minHeight: 44 }}
-              onClick={() => { closeWrapSheet(); go('sequel'); }}
-            >
-              Open the season review
-            </button>
-          ) : wrapPhase === 'review' ? (
+          wrapPhase === 'review' ? (
             <>
               <button
                 className="btn-primary"
@@ -1201,22 +1206,26 @@ export function Story() {
               season {season.number} · episode {episode.number}
             </div>
             <div className="serif" style={{ fontWeight: 300, fontSize: 27, lineHeight: 1.15, color: '#f6f4f0' }}>
-              {wrapOpen === 'season' ? 'End the season.' : 'End the episode.'}
+              End the episode.
             </div>
             <div style={{ fontSize: 13, lineHeight: 1.6, opacity: 0.62, maxWidth: '48ch', color: '#eceae6' }}>
-              {wrapOpen === 'season'
-                ? 'Opens the season review to choose what carries forward into the next season.'
-                : wrapPhase === 'review'
-                  ? 'Edit the recap, Keep or Drop beats/facts/threads/cast state, then confirm to file memory and open the next episode.'
-                  : 'The utility model reads the full episode (compressing long ones) and proposes a previously-on recap, beats, continuity, resolved threads, and cast state — you review before anything is filed.'}
+              {wrapPhase === 'review'
+                ? 'Edit the recap, Keep or Drop beats/facts/threads/cast state, then confirm to file memory and open the next episode.'
+                : 'The utility model reads the full episode (compressing long ones) and proposes a previously-on recap, beats, continuity, resolved threads, and cast state — you review before anything is filed.'}
             </div>
           </div>
           <button className="btn-ghost" style={{ width: 30, height: 30, padding: 0, flexShrink: 0 }} onClick={closeWrapSheet}>×</button>
         </div>
 
-        <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
-          <Chip active={wrapOpen === 'episode'} onClick={() => setWrapOpen('episode')}>Episode</Chip>
-          <Chip active={wrapOpen === 'season'} onClick={() => setWrapOpen('season')}>Season</Chip>
+        <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', alignItems: 'center' }}>
+          <Chip active>Episode wrap</Chip>
+          <button
+            className="btn-quiet"
+            style={{ fontSize: 12, minHeight: 36 }}
+            onClick={() => { closeWrapSheet(); go('sequel'); }}
+          >
+            Season review →
+          </button>
         </div>
 
         {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
@@ -1231,15 +1240,7 @@ export function Story() {
           </div>
         )}
 
-        {wrapOpen === 'season' ? (
-          <div style={{
-            fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.7)',
-            border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, padding: '12px 14px',
-            background: 'rgba(255,255,255,0.04)'
-          }}>
-            The season review reads every episode back, proposes beats, and asks what to Drop / Soften / Keep / Raise. It runs on your utility model.
-          </div>
-        ) : wrapPhase === 'analyzing' ? (
+        {wrapPhase === 'analyzing' ? (
           <div style={{ padding: '20px 0' }}>
             <Spinner label="extracting recap, beats, and continuity" />
           </div>
@@ -1644,35 +1645,53 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, st
 function SceneCastPanel({ episode, characters, accent }: { episode: Episode; characters: Character[]; accent: string }) {
   const guests = episode.guests ?? [];
   const activeGuestIds = episode.activeGuestIds;
-  const toggle = async (id: string) => {
+  const toggleCast = async (id: string, isPlayer: boolean) => {
+    if (isPlayer) return;
     const castIds = episode.castIds.includes(id)
       ? episode.castIds.filter((x) => x !== id)
       : [...episode.castIds, id];
     await db.episodes.update(episode.id, { castIds, updatedAt: Date.now() });
   };
+  const toggleGuest = async (guestId: string) => {
+    const allIds = guests.map((g) => g.id);
+    // Materialize omitted (= all active) into an explicit list before toggling.
+    const current = activeGuestIds == null ? [...allIds] : [...activeGuestIds];
+    const next = current.includes(guestId)
+      ? current.filter((x) => x !== guestId)
+      : [...current, guestId];
+    await db.episodes.update(episode.id, { activeGuestIds: next, updatedAt: Date.now() });
+  };
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
       <Mono style={{ fontSize: 9 }}>in the scene</Mono>
       {characters.map((c) => {
-        const active = episode.castIds.includes(c.id);
+        const active = c.isPlayer || episode.castIds.includes(c.id);
         return (
-          <div key={c.id} onClick={() => void toggle(c.id)} style={{
-            display: 'flex', gap: 10, alignItems: 'center', padding: 8, borderRadius: 12, cursor: 'pointer',
-            background: active ? 'rgba(255,255,255,0.05)' : 'transparent',
-            border: `1px solid ${active ? 'rgba(255,255,255,0.08)' : 'transparent'}`,
-            opacity: active ? 1 : 0.45
-          }}>
+          <div
+            key={c.id}
+            onClick={() => void toggleCast(c.id, !!c.isPlayer)}
+            style={{
+              display: 'flex', gap: 10, alignItems: 'center', padding: 8, borderRadius: 12,
+              cursor: c.isPlayer ? 'default' : 'pointer',
+              background: active ? 'rgba(255,255,255,0.05)' : 'transparent',
+              border: `1px solid ${active ? 'rgba(255,255,255,0.08)' : 'transparent'}`,
+              opacity: active ? 1 : 0.45
+            }}
+          >
             <div style={portraitPlate(c.hue, 30, characterPortraits(c)[0])} />
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
               <div style={{ fontSize: 13, fontWeight: 600, color: '#f0eee9' }}>{c.name}</div>
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {active ? (c.state.emotion || c.role || 'in scene') : 'off-page'}
+                {c.isPlayer
+                  ? 'player · always in scene'
+                  : active ? (c.state.emotion || c.role || 'in scene') : 'off-page'}
               </div>
             </div>
             <div style={{
               width: 14, height: 14, borderRadius: 5, flexShrink: 0,
               border: `1px solid ${active ? accent : 'rgba(255,255,255,0.18)'}`,
-              background: active ? accent : 'transparent'
+              background: active ? accent : 'transparent',
+              opacity: c.isPlayer ? 0.85 : 1
             }} />
           </div>
         );
@@ -1684,25 +1703,29 @@ function SceneCastPanel({ episode, characters, accent }: { episode: Episode; cha
             // Omitted activeGuestIds ⇒ all guests; explicit [] ⇒ none (matches prompts).
             const active = activeGuestIds == null || activeGuestIds.includes(g.id);
             return (
-              <div key={g.id} style={{
-                display: 'flex', gap: 10, alignItems: 'center', padding: 8, borderRadius: 12,
-                background: active ? 'rgba(255,255,255,0.04)' : 'transparent',
-                border: '1px solid rgba(255,255,255,0.06)',
-                opacity: active ? 1 : 0.4
-              }}>
+              <div
+                key={g.id}
+                onClick={() => void toggleGuest(g.id)}
+                style={{
+                  display: 'flex', gap: 10, alignItems: 'center', padding: 8, borderRadius: 12,
+                  cursor: 'pointer',
+                  background: active ? 'rgba(255,255,255,0.04)' : 'transparent',
+                  border: `1px solid ${active ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.06)'}`,
+                  opacity: active ? 1 : 0.4
+                }}
+              >
                 <div style={portraitPlate(guestHue(g.id), 30, null, 'rgba(255,255,255,0.14)')} />
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
                   <div style={{ fontSize: 13, fontWeight: 600, color: '#f0eee9' }}>{g.name}</div>
                   <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {g.brief || 'walk-on'}
+                    {active ? (g.brief || 'walk-on') : 'off-page'}
                   </div>
                 </div>
                 <div style={{
-                  fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.08em',
-                  textTransform: 'uppercase', opacity: 0.45, flexShrink: 0
-                }}>
-                  guest
-                </div>
+                  width: 14, height: 14, borderRadius: 5, flexShrink: 0,
+                  border: `1px solid ${active ? accent : 'rgba(255,255,255,0.18)'}`,
+                  background: active ? accent : 'transparent'
+                }} />
               </div>
             );
           })}
@@ -1861,26 +1884,44 @@ function ScenePlatePanel({ episode, bd }: { episode: Episode; bd: { tag: string;
   );
 }
 
-function ContinuityPanel({ continuity, world, season, episode }: {
+function ContinuityPanel({ continuity, world, season, episode, priorEpisodes }: {
   continuity: ContinuityFact[]; world: World; season: Season; episode: Episode;
+  priorEpisodes?: Episode[];
 }) {
   const [adding, setAdding] = useState('');
+  const prefer = preferBucketsForEpisodes(priorEpisodes ?? [], episode);
+  const inPlanIds = new Set(selectDirectorFacts(continuity, prefer).map((f) => f.id));
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <Mono style={{ fontSize: 9 }}>continuity held</Mono>
-      {continuity.map((f) => (
-        <div key={f.id} style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
-          <div style={{ fontSize: 12, lineHeight: 1.45, opacity: 0.68, paddingLeft: 12, borderLeft: '1px solid rgba(255,255,255,0.14)', flex: 1, color: '#eceae6' }}>
-            {f.text}
+      <Mono style={{ fontSize: 9 }}>
+        continuity held · {inPlanIds.size}/{continuity.length} in director plan
+      </Mono>
+      {continuity.map((f) => {
+        const inPlan = inPlanIds.has(f.id);
+        return (
+          <div key={f.id} style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+            <div style={{
+              fontSize: 12, lineHeight: 1.45, paddingLeft: 12,
+              borderLeft: `1px solid ${inPlan ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.08)'}`,
+              flex: 1, color: '#eceae6', opacity: inPlan ? 0.88 : 0.45
+            }}>
+              {f.text}
+              {!inPlan && (
+                <span style={{
+                  display: 'block', marginTop: 2,
+                  fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, opacity: 0.7
+                }}>held · not in director cap</span>
+              )}
+            </div>
+            <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 12 }} onClick={() => void (async () => {
+              await recordTombstones([{
+                table: 'continuity', id: f.id, worldId: f.worldId, seasonId: f.seasonId, payload: f
+              }]);
+              await db.continuity.delete(f.id);
+            })()}>×</button>
           </div>
-          <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 12 }} onClick={() => void (async () => {
-            await recordTombstones([{
-              table: 'continuity', id: f.id, worldId: f.worldId, seasonId: f.seasonId, payload: f
-            }]);
-            await db.continuity.delete(f.id);
-          })()}>×</button>
-        </div>
-      ))}
+        );
+      })}
       <div style={{ display: 'flex', gap: 6 }}>
         <input
           value={adding} onChange={(e) => setAdding(e.target.value)} placeholder="add a fact…"
@@ -1900,19 +1941,35 @@ function ContinuityPanel({ continuity, world, season, episode }: {
   );
 }
 
-function ThreadsPanel({ threads }: { threads: OpenThread[] }) {
+function ThreadsPanel({ threads, episode, priorEpisodes }: {
+  threads: OpenThread[]; episode: Episode; priorEpisodes?: Episode[];
+}) {
+  const prefer = preferBucketsForEpisodes(priorEpisodes ?? [], episode);
+  const inPlanIds = new Set(selectDirectorThreads(threads, prefer).map((t) => t.id));
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-      <Mono style={{ fontSize: 9 }}>open threads</Mono>
-      {threads.map((t) => (
-        <div key={t.id} style={{ border: '1px solid rgba(255,255,255,0.09)', borderRadius: 11, padding: '10px 12px', background: 'rgba(255,255,255,0.04)', display: 'flex', flexDirection: 'column', gap: 5 }}>
-          <div style={{ fontSize: 12.5, lineHeight: 1.4, color: '#eceae6' }}>{t.text}</div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.45 }}>{t.openedLabel}</div>
-            <button className="btn-quiet" style={{ padding: 0, fontSize: 10 }} onClick={() => void db.threads.update(t.id, { status: 'resolved' })}>resolve</button>
+      <Mono style={{ fontSize: 9 }}>
+        open threads · {inPlanIds.size}/{threads.length} in director plan
+      </Mono>
+      {threads.map((t) => {
+        const inPlan = inPlanIds.has(t.id);
+        return (
+          <div key={t.id} style={{
+            border: `1px solid ${inPlan ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.06)'}`,
+            borderRadius: 11, padding: '10px 12px',
+            background: 'rgba(255,255,255,0.04)', display: 'flex', flexDirection: 'column', gap: 5,
+            opacity: inPlan ? 1 : 0.55
+          }}>
+            <div style={{ fontSize: 12.5, lineHeight: 1.4, color: '#eceae6' }}>{t.text}</div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.45 }}>
+                {t.openedLabel}{!inPlan ? ' · held' : ''}
+              </div>
+              <button className="btn-quiet" style={{ padding: 0, fontSize: 10 }} onClick={() => void db.threads.update(t.id, { status: 'resolved' })}>resolve</button>
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
       {threads.length === 0 && <div style={{ fontSize: 12, opacity: 0.5, color: '#eceae6' }}>No open threads yet.</div>}
     </div>
   );
@@ -1979,11 +2036,24 @@ function DirectorContent(props: {
   const labelSize = props.narrow ? 11 : 9;
   const [open, setOpen] = useState({ calendar: true, scene: true, memory: false, nudges: false });
   const toggle = (key: keyof typeof open) => setOpen((o) => ({ ...o, [key]: !o[key] }));
+  const priorEpisodes = useLiveQuery(
+    async () => {
+      const all = await db.episodes.where('seasonId').equals(props.season.id).toArray();
+      return all
+        .filter((e) => e.number < props.episode.number && !!e.wrap?.recap?.trim())
+        .sort((a, b) => a.number - b.number)
+        .slice(-3);
+    },
+    [props.season.id, props.episode.number]
+  ) ?? [];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, overflow: 'auto' }}>
       <DirectorAccordion title="calendar" open={open.calendar} onToggle={() => toggle('calendar')} labelSize={labelSize}>
-        <CalendarTrackerPanel world={props.world} season={props.season} episode={props.episode} />
+        <CalendarTrackerPanel
+          world={props.world} season={props.season} episode={props.episode}
+          narrow={!!props.narrow}
+        />
       </DirectorAccordion>
       <DirectorAccordion title="scene" open={open.scene} onToggle={() => toggle('scene')} labelSize={labelSize}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -1999,8 +2069,9 @@ function DirectorContent(props: {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
           <ContinuityPanel
             continuity={props.continuity} world={props.world} season={props.season} episode={props.episode}
+            priorEpisodes={priorEpisodes}
           />
-          <ThreadsPanel threads={props.threads} />
+          <ThreadsPanel threads={props.threads} episode={props.episode} priorEpisodes={priorEpisodes} />
         </div>
       </DirectorAccordion>
       <DirectorAccordion title="nudges" open={open.nudges} onToggle={() => toggle('nudges')} labelSize={labelSize}>
@@ -2012,36 +2083,58 @@ function DirectorContent(props: {
 
 /** Controllable in-fiction calendar: day / month / year, weekday, episode stamp. */
 function CalendarTrackerPanel({
-  world, season, episode
+  world, season, episode, narrow
 }: {
   world: World;
   season: Season;
   episode: Episode;
+  narrow?: boolean;
 }) {
   const cal = worldCalendar(world);
   const today = partsForDay(cal, cal.currentDay);
   const epDay = episode.storyDay && episode.storyDay > 0 ? episode.storyDay : cal.currentDay;
   const loc = episode.location.trim() || 'no location set';
+  const [calError, setCalError] = useState('');
   const inputStyle: CSSProperties = {
     fontFamily: "'IBM Plex Mono', monospace", fontSize: 12,
     background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.12)',
     borderRadius: 8, padding: '6px 8px', color: '#f0eee9'
   };
+  const ymdGrid = narrow ? '1fr' : '1fr 1.4fr 0.9fr';
+  const day1Grid = narrow ? '1fr' : '1.4fr 0.9fr';
+
+  const patchCal = (p: Parameters<typeof calendarPatch>[1]) => {
+    setCalError('');
+    void safeWrite(
+      () => db.worlds.update(world.id, { calendar: calendarPatch(world, p), updatedAt: Date.now() }),
+      setCalError
+    );
+  };
 
   // Stamp open day once for legacy episodes — do not re-stamp when "today" moves.
   useEffect(() => {
     if (episode.storyDay == null || episode.storyDay < 1) {
-      void db.episodes.update(episode.id, { storyDay: cal.currentDay, updatedAt: Date.now() });
+      void safeWrite(
+        () => db.episodes.update(episode.id, { storyDay: cal.currentDay, updatedAt: Date.now() }),
+        setCalError
+      );
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only when episode id / missing storyDay
   }, [episode.id, episode.storyDay]);
 
   const setDay = (day: number) => {
     const next = Math.max(1, Math.floor(day));
-    void db.worlds.update(world.id, {
-      calendar: calendarPatch(world, { currentDay: next }),
-      updatedAt: Date.now()
-    });
+    setCalError('');
+    void safeWrite(async () => {
+      await db.worlds.update(world.id, {
+        calendar: calendarPatch(world, { currentDay: next }),
+        updatedAt: Date.now()
+      });
+      // Keep active episode scene day in sync when the author advances "today".
+      if (episode.status === 'active') {
+        await db.episodes.update(episode.id, { storyDay: next, updatedAt: Date.now() });
+      }
+    }, setCalError);
   };
 
   const setParts = (year: number, monthIndex: number, dayOfMonth: number) => {
@@ -2049,21 +2142,19 @@ function CalendarTrackerPanel({
   };
 
   const setAdvance = (n: number) => {
-    void db.worlds.update(world.id, {
-      calendar: calendarPatch(world, { episodeAdvanceDays: Math.max(0, Math.min(365, Math.floor(n))) }),
-      updatedAt: Date.now()
-    });
+    patchCal({ episodeAdvanceDays: Math.max(0, Math.min(365, Math.floor(n))) });
   };
 
   const setDayOneWeekday = (idx: number) => {
-    void db.worlds.update(world.id, {
-      calendar: calendarPatch(world, { dayOneWeekday: idx }),
-      updatedAt: Date.now()
-    });
+    patchCal({ dayOneWeekday: idx });
   };
 
   const stampEpisodeDay = () => {
-    void db.episodes.update(episode.id, { storyDay: cal.currentDay, updatedAt: Date.now() });
+    setCalError('');
+    void safeWrite(
+      () => db.episodes.update(episode.id, { storyDay: cal.currentDay, updatedAt: Date.now() }),
+      setCalError
+    );
   };
 
   const monthLen = cal.monthLengths[today.monthIndex] ?? 30;
@@ -2071,6 +2162,7 @@ function CalendarTrackerPanel({
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
       <Mono style={{ fontSize: 9 }}>calendar tracker</Mono>
+      {calError && <ErrorNote error={calError} onDismiss={() => setCalError('')} />}
       <div style={{
         border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '14px 14px',
         background: 'rgba(255,255,255,0.04)', display: 'flex', flexDirection: 'column', gap: 12
@@ -2092,7 +2184,7 @@ function CalendarTrackerPanel({
           <Chip onClick={() => setDay(advanceMonths(cal, cal.currentDay, 1))}>+1 month</Chip>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr 0.9fr', gap: 8 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: ymdGrid, gap: 8 }}>
           <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             <Mono style={{ fontSize: 8, opacity: 0.5 }}>day</Mono>
             <input
@@ -2153,17 +2245,12 @@ function CalendarTrackerPanel({
           </select>
         </label>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 0.9fr', gap: 8 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: day1Grid, gap: 8 }}>
           <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             <Mono style={{ fontSize: 8, opacity: 0.5 }}>month of day 1</Mono>
             <select
               value={cal.dayOneMonth}
-              onChange={(e) => {
-                void db.worlds.update(world.id, {
-                  calendar: calendarPatch(world, { dayOneMonth: Number(e.target.value) }),
-                  updatedAt: Date.now()
-                });
-              }}
+              onChange={(e) => patchCal({ dayOneMonth: Number(e.target.value) })}
               style={{ ...inputStyle, width: '100%' }}
             >
               {cal.months.map((name, i) => (
@@ -2178,12 +2265,7 @@ function CalendarTrackerPanel({
               min={1}
               max={cal.monthLengths[cal.dayOneMonth] ?? 30}
               value={cal.dayOneDate}
-              onChange={(e) => {
-                void db.worlds.update(world.id, {
-                  calendar: calendarPatch(world, { dayOneDate: Math.max(1, Number(e.target.value) || 1) }),
-                  updatedAt: Date.now()
-                });
-              }}
+              onChange={(e) => patchCal({ dayOneDate: Math.max(1, Number(e.target.value) || 1) })}
               style={inputStyle}
             />
           </label>
@@ -2215,18 +2297,14 @@ function CalendarTrackerPanel({
             key={world.id + '-dir-cal-system'}
             rows={2}
             defaultValue={cal.system}
-            onBlur={(e) => {
-              void db.worlds.update(world.id, {
-                calendar: calendarPatch(world, { system: e.target.value }),
-                updatedAt: Date.now()
-              });
-            }}
+            onBlur={(e) => patchCal({ system: e.target.value })}
             placeholder="Feast days, era name — narrator follows this verbatim. Month lengths are fixed (no leap days)."
             style={{ fontSize: 12.5, lineHeight: 1.45, color: '#eceae6' }}
           />
         </label>
         <div style={{ fontSize: 11.5, opacity: 0.45, lineHeight: 1.4 }}>
           Story day 1 is the earliest date ({cal.dayOneDate} {cal.months[cal.dayOneMonth]} Y{cal.yearOne}). Dates before that clamp to day 1.
+          Advancing today on an active episode also stamps the episode open day.
         </div>
 
         <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -2238,13 +2316,10 @@ function CalendarTrackerPanel({
               const months = e.target.value.split(',').map((s) => s.trim()).filter(Boolean);
               if (months.length === 0) return;
               const monthLengths = months.map((_, i) => cal.monthLengths[i] ?? 30);
-              void db.worlds.update(world.id, {
-                calendar: calendarPatch(world, {
-                  months,
-                  monthLengths,
-                  dayOneMonth: Math.min(cal.dayOneMonth, months.length - 1)
-                }),
-                updatedAt: Date.now()
+              patchCal({
+                months,
+                monthLengths,
+                dayOneMonth: Math.min(cal.dayOneMonth, months.length - 1)
               });
             }}
             style={{ fontSize: 12.5, color: '#eceae6' }}
@@ -2260,10 +2335,7 @@ function CalendarTrackerPanel({
               const monthLengths = e.target.value.split(',').map((s) => Math.max(1, Math.min(90, Number(s.trim()) || 30)));
               if (monthLengths.length === 0) return;
               while (monthLengths.length < cal.months.length) monthLengths.push(30);
-              void db.worlds.update(world.id, {
-                calendar: calendarPatch(world, { monthLengths: monthLengths.slice(0, cal.months.length) }),
-                updatedAt: Date.now()
-              });
+              patchCal({ monthLengths: monthLengths.slice(0, cal.months.length) });
             }}
             style={{ fontSize: 12.5, color: '#eceae6' }}
           />
@@ -2277,9 +2349,9 @@ function CalendarTrackerPanel({
             onBlur={(e) => {
               const weekdays = e.target.value.split(',').map((s) => s.trim()).filter(Boolean);
               if (weekdays.length === 0) return;
-              void db.worlds.update(world.id, {
-                calendar: calendarPatch(world, { weekdays, dayOneWeekday: Math.min(cal.dayOneWeekday, weekdays.length - 1) }),
-                updatedAt: Date.now()
+              patchCal({
+                weekdays,
+                dayOneWeekday: Math.min(cal.dayOneWeekday, weekdays.length - 1)
               });
             }}
             style={{ fontSize: 12.5, color: '#eceae6' }}

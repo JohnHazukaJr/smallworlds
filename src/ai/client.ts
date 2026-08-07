@@ -325,11 +325,23 @@ async function streamGemini(req: StreamRequest): Promise<StreamResult> {
   let full = '';
   let truncated = false;
   let finishReason = '';
+  let sawThought = false;
   await readSSE(res, (data) => {
     try {
       const json = JSON.parse(data);
-      const text: string =
-        json.candidates?.[0]?.content?.parts?.map((p: { text?: string }) => p.text ?? '').join('') ?? '';
+      const parts: Array<{ text?: string; thought?: boolean }> =
+        json.candidates?.[0]?.content?.parts ?? [];
+      // Skip Gemini thinking parts — they pad or empty the visible stream.
+      const text = parts
+        .filter((p) => {
+          if (p.thought) {
+            sawThought = true;
+            return false;
+          }
+          return true;
+        })
+        .map((p) => p.text ?? '')
+        .join('');
       if (text) {
         full += text;
         req.onDelta?.(text);
@@ -339,7 +351,7 @@ async function streamGemini(req: StreamRequest): Promise<StreamResult> {
       if (isLengthStop(reason)) truncated = true;
     } catch { /* ignore malformed chunk */ }
   });
-  if (!full.trim()) throwEmptyResponse(finishReason, false);
+  if (!full.trim()) throwEmptyResponse(finishReason, sawThought);
   return { text: full, truncated };
 }
 

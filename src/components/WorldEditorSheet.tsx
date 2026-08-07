@@ -207,7 +207,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                       <Chip onClick={() => patchCal({ currentDay: cal.currentDay + 7 })}>+7 days</Chip>
                       <Chip onClick={() => patchCal({ currentDay: advanceMonths(cal, cal.currentDay, 1) })}>+1 month</Chip>
                     </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr 0.9fr', gap: 8 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: narrow ? '1fr' : '1fr 1.4fr 0.9fr', gap: 8 }}>
                       <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, opacity: 0.75 }}>
                         Day
                         <input
@@ -284,7 +284,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                         ))}
                       </select>
                     </label>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1.4fr 0.9fr', gap: 8 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: narrow ? '1fr' : '1.4fr 0.9fr', gap: 8 }}>
                       <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, opacity: 0.75 }}>
                         Month of day 1
                         <select
@@ -467,21 +467,21 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <Field label="Prose model for this world" note="unset = global default">
                 <ModelPicker
                   value={world.proseModel}
-                  onChange={(m) => void db.worlds.update(world.id, { proseModel: m })}
+                  onChange={(m) => patchWorld({ proseModel: m })}
                 />
                 {world.proseModel && (
                   <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
-                    onClick={() => void db.worlds.update(world.id, { proseModel: null })}>use global default</button>
+                    onClick={() => patchWorld({ proseModel: null })}>use global default</button>
                 )}
               </Field>
               <Field label="Utility model for this world" note="unset = global default">
                 <ModelPicker
                   value={world.utilityModel}
-                  onChange={(m) => void db.worlds.update(world.id, { utilityModel: m })}
+                  onChange={(m) => patchWorld({ utilityModel: m })}
                 />
                 {world.utilityModel && (
                   <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
-                    onClick={() => void db.worlds.update(world.id, { utilityModel: null })}>use global default</button>
+                    onClick={() => patchWorld({ utilityModel: null })}>use global default</button>
                 )}
               </Field>
             </div>

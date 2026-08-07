@@ -283,6 +283,54 @@ export function selectDirectorThreads(
   return pickAcrossBuckets(threads, threadBucket, DIRECTOR_THREAD_CAP, preferBuckets);
 }
 
+/** Absolute day that counts as "now" in the active episode scene. */
+function episodeSceneDay(episode: Episode, cal: ReturnType<typeof worldCalendar>): number {
+  if (episode.storyDayEnd && episode.storyDayEnd > 0) return episode.storyDayEnd;
+  if (episode.storyDay && episode.storyDay > 0) return episode.storyDay;
+  return cal.currentDay;
+}
+
+function episodeDateLine(world: World, episode: Episode): string {
+  const cal = worldCalendar(world);
+  return formatEpisodeDateRange(cal, episode.storyDay, episode.storyDayEnd);
+}
+
+/** Calendar block: scene "today" from episode day; world clock only when it differs. */
+function calendarSection(world: World, episode: Episode): string {
+  const cal = worldCalendar(world);
+  const scene = episodeSceneDay(episode, cal);
+  const dateLine = formatEpisodeDateRange(cal, episode.storyDay, episode.storyDayEnd);
+  const worldClock = cal.currentDay !== scene
+    ? `\nWorld clock (not this scene): ${formatStoryDate(cal, cal.currentDay)}.`
+    : '';
+  return (
+    `## Calendar\n` +
+    (cal.system ? `${cal.system}\n` : '') +
+    `Week cycle: ${cal.weekdays.join(', ')} (day 1 of the story was a ${cal.weekdays[cal.dayOneWeekday]}).\n` +
+    `Months: ${cal.months.join(', ')}.\n` +
+    `Today (this scene) is ${formatStoryDate(cal, scene)}.\n` +
+    `This episode's date: ${dateLine}.` +
+    worldClock +
+    (episode.dateNote?.trim() ? `\nDate note: ${episode.dateNote.trim()}` : '')
+  );
+}
+
+function episodeNowLine(world: World, episode: Episode): string {
+  const cal = worldCalendar(world);
+  const scene = episodeSceneDay(episode, cal);
+  const dateLine = formatEpisodeDateRange(cal, episode.storyDay, episode.storyDayEnd);
+  const worldClock = cal.currentDay !== scene
+    ? ` World clock: ${formatStoryDate(cal, cal.currentDay)}.`
+    : '';
+  return (
+    `## Current episode\nEpisode ${episode.number}${episode.title ? ` — ${episode.title}` : ''}.` +
+    `${episode.location ? ` Location: ${episode.location}.` : ''} Date: ${dateLine}.` +
+    ` Today (this scene): ${formatStoryDate(cal, scene)}.` +
+    worldClock +
+    (episode.dateNote?.trim() ? ` Note: ${episode.dateNote.trim()}.` : '')
+  );
+}
+
 function cappedThreadLines(threads: OpenThread[], preferBuckets: string[] = []): string[] {
   return pickAcrossBuckets(threads, threadBucket, THREAD_CAP, preferBuckets)
     .map((t) => `- ${t.text} (${t.openedLabel})`);
@@ -422,20 +470,9 @@ function worldFrameSections(ctx: PromptContext): string[] {
     sections.push(`## Earlier this episode (running summary)\n${clipText(running, 1400)}`);
   }
 
-  const cal = worldCalendar(world);
-  const epStart = episode.storyDay ?? cal.currentDay;
-  const epEnd = episode.storyDayEnd ?? null;
-  const dateLine = formatEpisodeDateRange(cal, epStart, epEnd);
-  sections.push(
-    `## Calendar\n` +
-    (cal.system ? `${cal.system}\n` : '') +
-    `Week cycle: ${cal.weekdays.join(', ')} (day 1 of the story was a ${cal.weekdays[cal.dayOneWeekday]}).\n` +
-    `Months: ${cal.months.join(', ')}.\n` +
-    `Today is ${formatStoryDate(cal, cal.currentDay)}.\n` +
-    `This episode's date: ${dateLine}.` +
-    (episode.dateNote?.trim() ? `\nDate note: ${episode.dateNote.trim()}` : '')
-  );
+  sections.push(calendarSection(world, episode));
 
+  const dateLine = episodeDateLine(world, episode);
   sections.push(
     `## Current episode\nEpisode ${episode.number}${episode.title ? ` — ${episode.title}` : ''}.` +
     `${episode.location ? ` Location: ${episode.location}.` : ''} Date: ${dateLine}.`
@@ -587,15 +624,7 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
   if (prior) sections.push(prior);
   const running = ctx.episode.runningSummary?.trim();
   if (running) sections.push(`## Earlier this episode (running summary)\n${clipText(running, 1200)}`);
-  {
-    const cal = worldCalendar(ctx.world);
-    const dateLine = formatEpisodeDateRange(cal, ctx.episode.storyDay, ctx.episode.storyDayEnd);
-    sections.push(
-      `## Current episode\nEpisode ${ctx.episode.number}${ctx.episode.title ? ` — ${ctx.episode.title}` : ''}.` +
-      `${ctx.episode.location ? ` Location: ${ctx.episode.location}.` : ''} Date: ${dateLine}.` +
-      `\nToday is ${formatStoryDate(cal, cal.currentDay)}.`
-    );
-  }
+  sections.push(episodeNowLine(ctx.world, ctx.episode));
   const here = resolveCurrentLocations(ctx.episode, ctx.locations);
   if (here.length > 0) {
     sections.push(`## Current location\n${here.map(locationSheet).join('\n\n')}`);
@@ -680,16 +709,7 @@ export function buildGuestSystemPrompt(ctx: PromptContext, guest: EpisodeGuest):
   if (prior) sections.push(prior);
   const running = ctx.episode.runningSummary?.trim();
   if (running) sections.push(`## Earlier this episode (running summary)\n${clipText(running, 900)}`);
-  {
-    const cal = worldCalendar(ctx.world);
-    const dateLine = formatEpisodeDateRange(cal, ctx.episode.storyDay, ctx.episode.storyDayEnd);
-    sections.push(
-      `## Current episode\nEpisode ${ctx.episode.number}${ctx.episode.title ? ` — ${ctx.episode.title}` : ''}.` +
-      `${ctx.episode.location ? ` Location: ${ctx.episode.location}.` : ''} ` +
-      `Date: ${dateLine}. Today: ${formatStoryDate(cal, cal.currentDay)}.` +
-      (ctx.episode.dateNote?.trim() ? ` Note: ${ctx.episode.dateNote.trim()}.` : '')
-    );
-  }
+  sections.push(episodeNowLine(ctx.world, ctx.episode));
   const guestHere = resolveCurrentLocations(ctx.episode, ctx.locations);
   if (guestHere.length > 0) {
     sections.push(`## Current location\n${guestHere.map(locationSheet).join('\n\n')}`);
@@ -1049,6 +1069,7 @@ export function directorUserPrompt(
 
   const running = ctx.episode.runningSummary?.trim();
   const cal = worldCalendar(ctx.world);
+  const scene = episodeSceneDay(ctx.episode, cal);
   const dateLine = formatEpisodeDateRange(cal, ctx.episode.storyDay, ctx.episode.storyDayEnd);
   const prefer = preferEpisodeBuckets(ctx);
 
@@ -1058,8 +1079,9 @@ export function directorUserPrompt(
   const threadLines = pickAcrossBuckets(ctx.threads, threadBucket, DIRECTOR_THREAD_CAP, prefer)
     .map((t) => `- ${t.text}`)
     .join('\n');
-  const knowledgeWalls = inScene
-    .filter((c) => c.mustNotKnow.trim())
+  // All NPCs — walls for enter-this-turn cast must be visible before castDelta applies.
+  const knowledgeWalls = ctx.characters
+    .filter((c) => !c.isPlayer && c.mustNotKnow.trim())
     .map((c) => `- ${c.name}: must not know — ${c.mustNotKnow.trim()}`)
     .join('\n');
 
@@ -1089,7 +1111,8 @@ export function directorUserPrompt(
     `World: ${ctx.world.title}\n` +
     `Episode ${ctx.episode.number}${ctx.episode.location ? ` @ ${ctx.episode.location}` : ''} · ${dateLine}` +
     (ctx.episode.dateNote?.trim() ? ` · ${ctx.episode.dateNote.trim()}` : '') + `\n` +
-    `Today: ${formatStoryDate(cal, cal.currentDay)}\n` +
+    `Today (this scene): ${formatStoryDate(cal, scene)}` +
+    (cal.currentDay !== scene ? ` · World clock: ${formatStoryDate(cal, cal.currentDay)}` : '') + `\n` +
     `Premise (current pressure): ${ctx.season.premise || '(unwritten)'}\n` +
     (seasonBibleClip ? `${seasonBibleClip}\n` : '') +
     (priorMemory ? `\nRecent episode memory:\n${priorMemory}\n` : '') +

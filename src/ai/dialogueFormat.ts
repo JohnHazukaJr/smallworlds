@@ -48,8 +48,13 @@ export function normalizeSpeakText(raw: string): string {
     return `"${text.replace(/^"|"$/g, '')}"`;
   }
 
-  // If only actions (asterisks) and bare prose, leave as-is after cleanup.
-  return text.replace(/\s+/g, ' ').trim();
+  // Collapse horizontal whitespace only — keep intentional newlines in dialogue.
+  return text.replace(/[^\S\n]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** True when normalized speak text contains at least one "quoted" speech segment. */
+export function hasSpokenDialogue(raw: string): boolean {
+  return parseSpeakSegments(raw).some((s) => s.kind === 'speech' && s.text.trim().length > 0);
 }
 
 /**
