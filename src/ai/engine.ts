@@ -228,6 +228,8 @@ export interface WriteOptions {
   input: string;
   length: TurnLength;
   signal?: AbortSignal;
+  /** Skip director planning and run these leftover beats (Continue plan). */
+  resumeBeats?: DirectorBeat[];
   /** Partial text of the beat currently streaming. */
   onDelta: (partial: string, meta: StreamMeta) => void;
   /** High-level stage labels for the UI spinner (planning / narrating / Name speaking). */
@@ -334,7 +336,8 @@ function ensurePlayerReplySpeak(
   return next.slice(0, MAX_TOTAL_BEATS);
 }
 
-function normalizeBeats(
+/** Normalize raw director JSON into executable beats (exported for tests). */
+export function normalizeBeats(
   raw: { beats?: Array<{ type?: string; brief?: string; characterId?: string; guestId?: string }> },
   inScene: Character[],
   guests: EpisodeGuest[],
@@ -490,19 +493,51 @@ function applyGuestDelta(
 /** Thrown when the user aborts mid-write; completed beats are already persisted. */
 export class WriteAbortedError extends Error {
   readonly name = 'AbortError';
-  constructor(public beatsCompleted: number) {
+  constructor(
+    public beatsCompleted: number,
+    public remainingBeats: DirectorBeat[] = []
+  ) {
     super('Aborted');
   }
 }
 
-function throwIfAborted(signal: AbortSignal | undefined, beatsCompleted: number): void {
-  if (signal?.aborted) throw new WriteAbortedError(beatsCompleted);
+function throwIfAborted(
+  signal: AbortSignal | undefined,
+  beatsCompleted: number,
+  remainingBeats: DirectorBeat[] = []
+): void {
+  if (signal?.aborted) throw new WriteAbortedError(beatsCompleted, remainingBeats);
 }
 
-function asWriteAbort(e: unknown, beatsCompleted: number): never {
+function asWriteAbort(
+  e: unknown,
+  beatsCompleted: number,
+  remainingBeats: DirectorBeat[] = []
+): never {
   if (e instanceof WriteAbortedError) throw e;
-  if ((e as Error)?.name === 'AbortError') throw new WriteAbortedError(beatsCompleted);
+  if ((e as Error)?.name === 'AbortError') {
+    throw new WriteAbortedError(beatsCompleted, remainingBeats);
+  }
   throw e;
+}
+
+async function savePendingPlan(
+  episodeId: string,
+  remaining: DirectorBeat[],
+  length: TurnLength
+): Promise<void> {
+  if (remaining.length === 0) {
+    await db.episodes.update(episodeId, { pendingPlan: null, updatedAt: Date.now() }).catch(() => undefined);
+    return;
+  }
+  await db.episodes.update(episodeId, {
+    pendingPlan: { beats: remaining, length, createdAt: Date.now() },
+    updatedAt: Date.now()
+  }).catch(() => undefined);
+}
+
+async function clearPendingPlan(episodeId: string): Promise<void> {
+  await db.episodes.update(episodeId, { pendingPlan: null, updatedAt: Date.now() }).catch(() => undefined);
 }
 
 /**
@@ -565,90 +600,99 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
   const requireDialogue = opts.mode === 'speak' || opts.mode === 'act';
 
   // Director plans cast/guest changes + ordered narration / speak beats (utility model).
+  // Resume path skips planning and runs leftover beats from a prior Stop/error.
   let beats: DirectorBeat[];
-  try {
-    progress('planning…');
-    const speakersPresent = inScene.length > 0 || activeGuests(ctx.episode).length > 0;
-    const planDirector = () => utilityJson<{
-      castDelta?: { enter?: string[]; leave?: string[]; introduce?: IntroduceSpec[] };
-      beats: Array<{ type?: string; brief?: string; characterId?: string; guestId?: string }>;
-    }>(
-      opts.world,
-      directorSystemPrompt(opts.mode, speakersPresent),
-      directorUserPrompt(ctx, opts.mode, playerText),
-      1400,
-      opts.signal
-    );
-    let plan: Awaited<ReturnType<typeof planDirector>>;
+  if (opts.resumeBeats && opts.resumeBeats.length > 0) {
+    progress('continuing plan…');
+    beats = opts.resumeBeats;
+    await clearPendingPlan(opts.episode.id);
+  } else {
     try {
-      plan = await planDirector();
-    } catch (first) {
-      if ((first as Error).name === 'AbortError') asWriteAbort(first, beatsCompleted);
-      logAppError(first, 'director plan (retrying)');
-      plan = await planDirector();
-    }
-    const nextCast = applyCastDelta(castIds, ctx.characters, plan.castDelta);
-    const guestDelta = applyGuestDelta(
-      { ...ctx.episode, castIds, guests, activeGuestIds },
-      plan.castDelta?.introduce,
-      plan.castDelta?.leave
-    );
-    guests = guestDelta.guests;
-    activeGuestIds = guestDelta.activeGuestIds;
-
-    const episodePatch: Partial<Episode> = { updatedAt: Date.now() };
-    let changed = false;
-    if (nextCast.join('\0') !== castIds.join('\0')) {
-      castIds = nextCast;
-      episodePatch.castIds = nextCast;
-      changed = true;
-    }
-    const prevGuestKey = JSON.stringify({
-      g: ctx.episode.guests ?? [],
-      a: ctx.episode.activeGuestIds ?? (ctx.episode.guests ?? []).map((g) => g.id)
-    });
-    const nextGuestKey = JSON.stringify({ g: guests, a: activeGuestIds });
-    if (prevGuestKey !== nextGuestKey) {
-      episodePatch.guests = guests;
-      episodePatch.activeGuestIds = activeGuestIds;
-      changed = true;
-    }
-    if (changed) {
-      await db.episodes.update(opts.episode.id, episodePatch);
-      sceneMutated = true;
-      ctx.episode = { ...ctx.episode, ...episodePatch, castIds, guests, activeGuestIds };
-      inScene = ctx.characters.filter((c) => castIds.includes(c.id) && !c.isPlayer);
-    }
-    beats = normalizeBeats(
-      plan, inScene, activeGuests(ctx.episode), guestDelta.nameToId, opts.mode, playerText
-    );
-  } catch (e) {
-    if ((e as Error).name === 'AbortError') {
-      await rollbackSceneIfNeeded();
-      if (userTurnId) {
-        await db.turns.delete(userTurnId).catch(() => undefined);
-        ctx.turns = ctx.turns.filter((t) => t.id !== userTurnId);
+      progress('planning…');
+      const speakersPresent = inScene.length > 0 || activeGuests(ctx.episode).length > 0;
+      const planDirector = () => utilityJson<{
+        castDelta?: { enter?: string[]; leave?: string[]; introduce?: IntroduceSpec[] };
+        beats: Array<{ type?: string; brief?: string; characterId?: string; guestId?: string }>;
+      }>(
+        opts.world,
+        directorSystemPrompt(opts.mode, speakersPresent),
+        directorUserPrompt(ctx, opts.mode, playerText),
+        1400,
+        opts.signal
+      );
+      let plan: Awaited<ReturnType<typeof planDirector>>;
+      try {
+        plan = await planDirector();
+      } catch (first) {
+        if ((first as Error).name === 'AbortError') asWriteAbort(first, beatsCompleted);
+        logAppError(first, 'director plan (retrying)');
+        plan = await planDirector();
       }
-      asWriteAbort(e, 0);
+      const nextCast = applyCastDelta(castIds, ctx.characters, plan.castDelta);
+      const guestDelta = applyGuestDelta(
+        { ...ctx.episode, castIds, guests, activeGuestIds },
+        plan.castDelta?.introduce,
+        plan.castDelta?.leave
+      );
+      guests = guestDelta.guests;
+      activeGuestIds = guestDelta.activeGuestIds;
+
+      const episodePatch: Partial<Episode> = { updatedAt: Date.now() };
+      let changed = false;
+      if (nextCast.join('\0') !== castIds.join('\0')) {
+        castIds = nextCast;
+        episodePatch.castIds = nextCast;
+        changed = true;
+      }
+      const prevGuestKey = JSON.stringify({
+        g: ctx.episode.guests ?? [],
+        a: ctx.episode.activeGuestIds ?? (ctx.episode.guests ?? []).map((g) => g.id)
+      });
+      const nextGuestKey = JSON.stringify({ g: guests, a: activeGuestIds });
+      if (prevGuestKey !== nextGuestKey) {
+        episodePatch.guests = guests;
+        episodePatch.activeGuestIds = activeGuestIds;
+        changed = true;
+      }
+      if (changed) {
+        await db.episodes.update(opts.episode.id, episodePatch);
+        sceneMutated = true;
+        ctx.episode = { ...ctx.episode, ...episodePatch, castIds, guests, activeGuestIds };
+        inScene = ctx.characters.filter((c) => castIds.includes(c.id) && !c.isPlayer);
+      }
+      beats = normalizeBeats(
+        plan, inScene, activeGuests(ctx.episode), guestDelta.nameToId, opts.mode, playerText
+      );
+      await clearPendingPlan(opts.episode.id);
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') {
+        await rollbackSceneIfNeeded();
+        if (userTurnId) {
+          await db.turns.delete(userTurnId).catch(() => undefined);
+          ctx.turns = ctx.turns.filter((t) => t.id !== userTurnId);
+        }
+        asWriteAbort(e, 0);
+      }
+      logAppError(e, 'director plan (fallback)');
+      opts.onNotice?.('Planning failed — continuing with a simple beat.');
+      const fallback: DirectorBeat[] = [{
+        type: 'narration',
+        brief: 'Continue the scene with atmosphere and physical action; leave space for the player.'
+      }];
+      beats = ensurePlayerReplySpeak(
+        fallback, opts.mode, playerText, inScene, activeGuests(ctx.episode)
+      );
     }
-    logAppError(e, 'director plan (fallback)');
-    opts.onNotice?.('Planning failed — continuing with a simple beat.');
-    const fallback: DirectorBeat[] = [{
-      type: 'narration',
-      brief: 'Continue the scene with atmosphere and physical action; leave space for the player.'
-    }];
-    beats = ensurePlayerReplySpeak(
-      fallback, opts.mode, playerText, inScene, activeGuests(ctx.episode)
-    );
   }
 
   const sceneGuests = () => activeGuests(ctx.episode);
   const speakOpts = { requireDialogue, episode: ctx.episode };
+  const remainingFrom = (completed: number) => beats.slice(completed);
 
   let lastId = '';
   try {
     for (const beat of beats) {
-      throwIfAborted(opts.signal, beatsCompleted);
+      throwIfAborted(opts.signal, beatsCompleted, remainingFrom(beatsCompleted));
 
       if (beat.type === 'narration') {
         const meta: StreamMeta = { role: 'narrator' };
@@ -755,8 +799,9 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       opts.onDelta('', meta);
     }
   } catch (e) {
+    const remaining = remainingFrom(beatsCompleted);
     try {
-      asWriteAbort(e, beatsCompleted);
+      asWriteAbort(e, beatsCompleted, remaining);
     } catch (abortErr) {
       // Orphan player line with no reply — remove so the composer can restore cleanly.
       if (beatsCompleted === 0) {
@@ -765,11 +810,15 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
           await db.turns.delete(userTurnId).catch(() => undefined);
           ctx.turns = ctx.turns.filter((t) => t.id !== userTurnId);
         }
+        await clearPendingPlan(opts.episode.id);
+      } else if (remaining.length > 0) {
+        await savePendingPlan(opts.episode.id, remaining, opts.length);
       }
       if (abortErr instanceof WriteAbortedError) throw abortErr;
       // Non-abort: attach beatsCompleted so UI can keep partial replies.
       if (abortErr && typeof abortErr === 'object') {
         (abortErr as { beatsCompleted?: number }).beatsCompleted = beatsCompleted;
+        (abortErr as { remainingBeats?: DirectorBeat[] }).remainingBeats = remaining;
       }
       throw abortErr;
     }
@@ -781,10 +830,13 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       await db.turns.delete(userTurnId).catch(() => undefined);
       ctx.turns = ctx.turns.filter((t) => t.id !== userTurnId);
     }
+    await clearPendingPlan(opts.episode.id);
     throw new AIError(
       'The model produced no usable narration or dialogue. Try again, or shorten Display length.'
     );
   }
+
+  await clearPendingPlan(opts.episode.id);
 
   // Summary is best-effort after beats are saved — abort here must not look like a zero-beat stop.
   try {
@@ -801,6 +853,109 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
   }
   await db.worlds.update(opts.world.id, { updatedAt: Date.now() });
   return lastId;
+}
+
+/**
+ * Re-roll a single narrator or character beat in place — siblings stay.
+ */
+export async function regenerateBeat(opts: {
+  world: World;
+  season: Season;
+  episode: Episode;
+  turn: Turn;
+  length: TurnLength;
+  signal?: AbortSignal;
+  onDelta: (partial: string, meta: StreamMeta) => void;
+  onProgress?: (label: string) => void;
+}): Promise<void> {
+  if (opts.turn.role !== 'narrator' && opts.turn.role !== 'character') {
+    throw new AIError('Only narrator or character turns can be re-rolled.');
+  }
+  const { provider, model } = proseModelFor(opts.world);
+  const ctx = await loadContext(opts.world, opts.season, opts.episode);
+  const progress = opts.onProgress ?? (() => {});
+  const sceneGuests = () => activeGuests(ctx.episode);
+  // History for the model excludes the turn being replaced.
+  const historyTurns = ctx.turns.filter((t) => t.id !== opts.turn.id);
+
+  if (opts.turn.role === 'narrator') {
+    const meta: StreamMeta = { role: 'narrator' };
+    progress('re-rolling narration…');
+    opts.onDelta('', meta);
+    const narrSystem = buildNarratorSystemPrompt(ctx);
+    const brief =
+      'Rewrite this narration beat with fresh wording and the same dramatic function. ' +
+      'Do not jump ahead of the scene. Prior wording for reference (do not copy):\n' +
+      opts.turn.text.slice(0, 900);
+    const narrText = await streamNarrationComplete({
+      provider, model,
+      system: narrSystem,
+      messages: buildNarrationBeatMessages(
+        historyTurns, ctx.characters, brief, opts.length, sceneGuests(), ctx.episode, narrSystem.length
+      ),
+      length: opts.length,
+      signal: opts.signal,
+      onProgress: progress,
+      onAccumulated: (acc) => opts.onDelta(acc, meta)
+    });
+    if (!narrText) throw new AIError('Re-roll produced no narration. Try again.');
+    await guardStorage(() => db.turns.update(opts.turn.id, { text: narrText, updatedAt: Date.now() }));
+    await clearEpisodeRunningSummary(opts.episode.id);
+    opts.onDelta('', meta);
+    return;
+  }
+
+  const guest = opts.turn.guestId
+    ? (ctx.episode.guests ?? []).find((g) => g.id === opts.turn.guestId)
+    : undefined;
+  const speaking = opts.turn.characterId
+    ? ctx.characters.find((c) => c.id === opts.turn.characterId)
+    : undefined;
+  if (!guest && (!speaking || speaking.isPlayer)) {
+    throw new AIError('Could not find the speaker for this turn.');
+  }
+
+  const brief =
+    'Deliver the same intent with fresh wording. Prior line for reference (do not copy):\n' +
+    opts.turn.text.slice(0, 700);
+  const meta: StreamMeta = guest
+    ? { role: 'character', guestId: guest.id }
+    : { role: 'character', characterId: speaking!.id };
+  progress(`${(guest?.name ?? speaking!.name)} re-rolling…`);
+  opts.onDelta('', meta);
+
+  const cleaned = guest
+    ? await streamSpeakComplete({
+      provider, model,
+      system: buildGuestSystemPrompt(ctx, guest),
+      messages: buildGuestSpeakMessages(
+        historyTurns, ctx.characters, guest, brief, sceneGuests(),
+        { episode: ctx.episode, systemChars: 0 }
+      ),
+      length: opts.length,
+      signal: opts.signal,
+      requireDialogue: true,
+      onProgress: progress,
+      onAccumulated: (acc) => opts.onDelta(acc, meta)
+    })
+    : await streamSpeakComplete({
+      provider, model,
+      system: buildCharacterSystemPrompt(ctx, speaking!),
+      messages: buildCharacterSpeakMessages(
+        historyTurns, ctx.characters, speaking!, brief, sceneGuests(),
+        { episode: ctx.episode, systemChars: 0 }
+      ),
+      length: opts.length,
+      signal: opts.signal,
+      requireDialogue: true,
+      onProgress: progress,
+      onAccumulated: (acc) => opts.onDelta(acc, meta)
+    });
+
+  if (!cleaned) throw new AIError('Re-roll produced no dialogue. Try again.');
+  await guardStorage(() => db.turns.update(opts.turn.id, { text: cleaned, updatedAt: Date.now() }));
+  await clearEpisodeRunningSummary(opts.episode.id);
+  opts.onDelta('', meta);
 }
 
 /**
@@ -896,7 +1051,8 @@ export async function restoreTurns(turns: Turn[]): Promise<void> {
   await db.turns.bulkPut(turns);
 }
 
-async function clearEpisodeRunningSummary(episodeId: string): Promise<void> {
+/** Clear mid-episode digest when the transcript is rewritten (edit / delete / re-roll). */
+export async function clearEpisodeRunningSummary(episodeId: string): Promise<void> {
   await db.episodes.update(episodeId, {
     runningSummary: null,
     runningSummaryAtChars: 0,
@@ -1475,7 +1631,7 @@ function matchOpenThreads(
 }
 
 /** Match wrap hit-target lines to pending plot targets (exact, then loose contains). */
-function matchPlotTargets(
+export function matchPlotTargets(
   targets: PlotTarget[],
   hitLines: string[]
 ): PlotTarget[] {

@@ -319,20 +319,49 @@ function threadBucket(t: OpenThread): string {
   return episodeNumFromOpenedLabel(t.openedLabel) || t.seasonId || 'legacy';
 }
 
-/** Same fact selection the director prompt uses. */
+/** Same fact selection the director prompt uses. Pinned facts fill the cap first. */
 export function selectDirectorFacts(
   continuity: ContinuityFact[],
   preferBuckets: string[] = []
 ): ContinuityFact[] {
-  return pickAcrossBuckets(continuity, factBucket, DIRECTOR_FACT_CAP, preferBuckets);
+  const pinned = continuity
+    .filter((f) => f.pinned)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, DIRECTOR_FACT_CAP);
+  const pinnedIds = new Set(pinned.map((f) => f.id));
+  const restCap = Math.max(0, DIRECTOR_FACT_CAP - pinned.length);
+  const rest = restCap > 0
+    ? pickAcrossBuckets(
+      continuity.filter((f) => !pinnedIds.has(f.id)),
+      factBucket,
+      restCap,
+      preferBuckets
+    )
+    : [];
+  return [...pinned, ...rest].sort((a, b) => b.createdAt - a.createdAt);
 }
 
-/** Same thread selection the director prompt uses. */
+/** Same thread selection the director prompt uses. Pinned threads fill the cap first. */
 export function selectDirectorThreads(
   threads: OpenThread[],
   preferBuckets: string[] = []
 ): OpenThread[] {
-  return pickAcrossBuckets(threads, threadBucket, DIRECTOR_THREAD_CAP, preferBuckets);
+  const open = threads.filter((t) => t.status === 'open');
+  const pinned = open
+    .filter((t) => t.pinned)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, DIRECTOR_THREAD_CAP);
+  const pinnedIds = new Set(pinned.map((t) => t.id));
+  const restCap = Math.max(0, DIRECTOR_THREAD_CAP - pinned.length);
+  const rest = restCap > 0
+    ? pickAcrossBuckets(
+      open.filter((t) => !pinnedIds.has(t.id)),
+      threadBucket,
+      restCap,
+      preferBuckets
+    )
+    : [];
+  return [...pinned, ...rest].sort((a, b) => b.createdAt - a.createdAt);
 }
 
 /** Absolute day that counts as "now" in the active episode scene. */

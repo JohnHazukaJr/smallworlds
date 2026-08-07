@@ -2,7 +2,8 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
 import {
   analyzeEpisode, commitEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, proseModelFor,
-  rollbackTurnSnapshot, snapshotTurnsAfter, snapshotTurnsFrom, writeTurn,
+  clearEpisodeRunningSummary, regenerateBeat, rollbackTurnSnapshot,
+  snapshotTurnsAfter, snapshotTurnsFrom, writeTurn,
   WriteAbortedError, type EpisodeWrapDraft, type StreamMeta
 } from '../ai/engine';
 import {
@@ -21,7 +22,8 @@ import {
 import { generateSceneImage } from '../ai/image';
 import {
   episodeContextPressure, episodeHistoryChars, HISTORY_CHAR_BUDGET,
-  preferBucketsForEpisodes, resolveSpeakerName, selectDirectorFacts, selectDirectorThreads
+  preferBucketsForEpisodes, resolveSpeakerName, selectDirectorFacts, selectDirectorThreads,
+  type DirectorBeat
 } from '../ai/prompts';
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
 import { db, guardStorage, recordTombstones, safeWrite, uid } from '../db';
@@ -412,7 +414,15 @@ export function Story() {
 
   // writing state
   const [composeMode, setComposeMode] = useState<ComposeMode>('continue');
-  const [deliveryTone, setDeliveryTone] = useState<DeliveryTone | null>(null);
+  const [deliveryTone, setDeliveryTone] = useState<DeliveryTone | null>(() => {
+    try {
+      const last = localStorage.getItem('sw-last-delivery-tone');
+      return last && (DELIVERY_TONES as readonly string[]).includes(last) ? last as DeliveryTone : null;
+    } catch { return null; }
+  });
+  const [deliveryTipSeen, setDeliveryTipSeen] = useState(() => {
+    try { return localStorage.getItem('sw-delivery-tip-seen') === '1'; } catch { return false; }
+  });
   const [length, setLength] = useState<TurnLength>('scene');
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
@@ -530,10 +540,12 @@ export function Story() {
     setNudgeDismissedLocId(episode?.locationId ?? null);
   };
 
-  /** Shared streaming runner behind write / rewrite / retry. */
+  /** Shared streaming runner behind write / rewrite / retry / continue-plan. */
   const runNarration = async (
     mode: ComposeMode,
-    text: string
+    text: string,
+    resumeBeats?: DirectorBeat[],
+    lengthOverride?: TurnLength
   ): Promise<{ status: 'ok' | 'error' | 'aborted'; beatsCompleted: number }> => {
     if (!world || !season || !episode) return { status: 'error', beatsCompleted: 0 };
     setError('');
@@ -541,12 +553,13 @@ export function Story() {
     setStreaming(true);
     setPartial('');
     setPartialMeta({ role: 'narrator' });
-    setProgressLabel('planning…');
+    setProgressLabel(resumeBeats?.length ? 'continuing plan…' : 'planning…');
     const controller = new AbortController();
     abortRef.current = controller;
     try {
       await writeTurn({
-        world, season, episode, mode, input: text, length,
+        world, season, episode, mode, input: text, length: lengthOverride ?? length,
+        resumeBeats,
         signal: controller.signal,
         onProgress: setProgressLabel,
         onNotice: setNotice,
@@ -561,10 +574,13 @@ export function Story() {
       setPartial('');
       if (e instanceof WriteAbortedError || (e as Error).name === 'AbortError') {
         const n = e instanceof WriteAbortedError ? e.beatsCompleted : 0;
+        const left = e instanceof WriteAbortedError ? e.remainingBeats.length : 0;
         setNotice(
           n === 0
             ? 'Stopped before any reply — your line was not applied.'
-            : `Stopped after ${n} beat${n === 1 ? '' : 's'}; incomplete beat discarded.`
+            : left > 0
+              ? `Stopped after ${n} beat${n === 1 ? '' : 's'} — ${left} left in the plan. Use Continue plan to finish.`
+              : `Stopped after ${n} beat${n === 1 ? '' : 's'}; incomplete beat discarded.`
         );
         return { status: 'aborted', beatsCompleted: n };
       }
@@ -573,7 +589,7 @@ export function Story() {
         : 0;
       setError(classifyError(e));
       if (n > 0) {
-        setNotice(`${n} beat${n === 1 ? '' : 's'} saved — retry from the last reply if you want to continue.`);
+        setNotice(`${n} beat${n === 1 ? '' : 's'} saved — Continue plan if beats remain, or retry from the last reply.`);
       }
       return { status: 'error', beatsCompleted: n };
     } finally {
@@ -592,6 +608,9 @@ export function Story() {
     const text = tagged;
     const savedTone = deliveryTone;
     setInput('');
+    if (deliveryTone) {
+      try { localStorage.setItem('sw-last-delivery-tone', deliveryTone); } catch { /* ignore */ }
+    }
     setDeliveryTone(null);
     const result = await runNarration(composeMode, text);
     if (result.status === 'ok') {
@@ -600,6 +619,55 @@ export function Story() {
       // Restore composer when nothing was applied (orphan user turn removed).
       setInput(parseDeliveryTone(text).body);
       setDeliveryTone(savedTone);
+    }
+  };
+
+  const continuePlan = async () => {
+    if (!world || !season || !episode || streaming) return;
+    const pending = episode.pendingPlan;
+    if (!pending?.beats?.length) return;
+    await runNarration('continue', '', pending.beats as DirectorBeat[], pending.length);
+  };
+
+  const rerollBeat = async (turn: Turn) => {
+    if (!world || !season || !episode || streaming) return;
+    if (turn.role !== 'narrator' && turn.role !== 'character') return;
+    if (!confirm('Re-roll this beat only? Later turns stay.')) return;
+    setError('');
+    setNotice('');
+    setStreaming(true);
+    setPartial('');
+    setPartialMeta({
+      role: turn.role === 'narrator' ? 'narrator' : 'character',
+      characterId: turn.characterId,
+      guestId: turn.guestId
+    });
+    setProgressLabel('re-rolling…');
+    const controller = new AbortController();
+    abortRef.current = controller;
+    try {
+      await regenerateBeat({
+        world, season, episode, turn, length,
+        signal: controller.signal,
+        onProgress: setProgressLabel,
+        onDelta: (p, meta) => {
+          setPartialMeta(meta);
+          setPartial(p);
+        }
+      });
+      setPartial('');
+      setNotice('Beat re-rolled. Mid-episode summary was cleared.');
+    } catch (e) {
+      setPartial('');
+      if (e instanceof WriteAbortedError || (e as Error).name === 'AbortError') {
+        setNotice('Re-roll stopped.');
+      } else {
+        setError(classifyError(e));
+      }
+    } finally {
+      setStreaming(false);
+      setProgressLabel('');
+      abortRef.current = null;
     }
   };
 
@@ -1058,6 +1126,11 @@ export function Story() {
                 streaming={streaming}
                 hasBelow={ti < visible.length - 1 || streaming}
                 onRetry={() => void retryFrom(turn)}
+                onReroll={
+                  turn.role === 'narrator' || turn.role === 'character'
+                    ? () => void rerollBeat(turn)
+                    : undefined
+                }
                 onDeleteBelow={() => void deleteBelow(turn)}
               />
             ))}
@@ -1146,6 +1219,21 @@ export function Story() {
               <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 14 }} onClick={() => setNotice('')}>×</button>
             </div>
           )}
+          {(episode.pendingPlan?.beats?.length ?? 0) > 0 && !streaming && (
+            <div style={{
+              border: '1px solid rgba(255,255,255,0.16)', borderRadius: 12, padding: '11px 14px',
+              background: 'rgba(255,255,255,0.05)', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap'
+            }}>
+              <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.8)', flex: 1, minWidth: 0 }}>
+                {episode.pendingPlan!.beats.length} beat{episode.pendingPlan!.beats.length === 1 ? '' : 's'} left in the last plan.
+              </div>
+              <button className="btn-primary" style={{ padding: '7px 12px', fontSize: 12, minHeight: 40 }}
+                onClick={() => void continuePlan()}>Continue plan</button>
+              <button className="btn-quiet" style={{ fontSize: 11 }} onClick={() => void safeWrite(async () => {
+                await db.episodes.update(episode.id, { pendingPlan: null, updatedAt: Date.now() });
+              })}>Dismiss</button>
+            </div>
+          )}
           <div style={{
             display: 'grid',
             gridTemplateColumns: narrow ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))',
@@ -1180,6 +1268,15 @@ export function Story() {
               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.45 }}>
                 delivery
               </span>
+              {!deliveryTipSeen && (
+                <div style={{ fontSize: 12, lineHeight: 1.45, color: 'rgba(236,234,230,0.55)' }}>
+                  Optional tone for how you speak or act — e.g. sarcastic, quietly. Tap again to clear.
+                  <button className="btn-quiet" style={{ marginLeft: 8, fontSize: 11 }} onClick={() => {
+                    setDeliveryTipSeen(true);
+                    try { localStorage.setItem('sw-delivery-tip-seen', '1'); } catch { /* ignore */ }
+                  }}>got it</button>
+                </div>
+              )}
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 {DELIVERY_TONES.map((tone) => (
                   <Chip
@@ -1448,6 +1545,18 @@ export function Story() {
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setWorldEditOpen(true); }}>
             Edit world
           </button>
+          <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); go('cast'); }}>
+            Cast
+          </button>
+          <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); goLocations(); }}>
+            Locations
+          </button>
+          <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); go('profile'); }}>
+            Profile
+          </button>
+          <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); go('sequel'); }}>
+            Season wrap
+          </button>
           <Mono style={{ fontSize: 11 }}>mood{episode.moodPinned ? ' · pinned' : ''}</Mono>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
             {(Object.entries(MOODS) as Array<[typeof mood, typeof M]>).map(([id, m]) => (
@@ -1696,7 +1805,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
 
 // ---------- turn row with edit / retry / delete-below ----------
 
-function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, streaming, hasBelow, onRetry, onDeleteBelow }: {
+function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, streaming, hasBelow, onRetry, onReroll, onDeleteBelow }: {
   turn: Turn;
   blocks: ProseBlock[];
   characters: Character[];
@@ -1707,6 +1816,7 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, st
   streaming: boolean;
   hasBelow: boolean;
   onRetry: () => void;
+  onReroll?: () => void;
   onDeleteBelow: () => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -1722,7 +1832,10 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, st
 
   const save = async () => {
     const text = draft.trim();
-    if (text && text !== turn.text) await db.turns.update(turn.id, { text });
+    if (text && text !== turn.text) {
+      await db.turns.update(turn.id, { text, updatedAt: Date.now() });
+      if (turn.episodeId) await clearEpisodeRunningSummary(turn.episodeId);
+    }
     setEditing(false);
   };
 
@@ -1760,6 +1873,10 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, st
           onClick={() => { setDraft(turn.text); setEditing(true); }}>Edit</button>
         <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
           onClick={onRetry}>{retryLabel}</button>
+        {onReroll && (
+          <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
+            onClick={onReroll} title="Replace this beat only">Re-roll</button>
+        )}
         {hasBelow && (
           <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
             onClick={onDeleteBelow}>Delete below</button>
@@ -1771,7 +1888,7 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, st
                 table: 'turns', id: turn.id, worldId: turn.worldId, episodeId: turn.episodeId, payload: turn
               }]);
               await db.turns.delete(turn.id);
-              if (turn.episodeId) await db.episodes.update(turn.episodeId, { runningSummary: null, runningSummaryAtChars: 0, updatedAt: Date.now() });
+              if (turn.episodeId) await clearEpisodeRunningSummary(turn.episodeId);
             }
           }}>Delete</button>
       </div>
@@ -2383,17 +2500,26 @@ function ContinuityPanel({ continuity, world, season, episode, priorEpisodes }: 
           <div key={f.id} style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
             <div style={{
               fontSize: 12, lineHeight: 1.45, paddingLeft: 12,
-              borderLeft: `1px solid ${inPlan ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.08)'}`,
-              flex: 1, color: '#eceae6', opacity: inPlan ? 0.88 : 0.45
+              borderLeft: `1px solid ${f.pinned || inPlan ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.08)'}`,
+              flex: 1, color: '#eceae6', opacity: f.pinned || inPlan ? 0.88 : 0.45
             }}>
               {f.text}
-              {!inPlan && (
-                <span style={{
-                  display: 'block', marginTop: 2,
-                  fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, opacity: 0.7
-                }}>held · not in director cap</span>
-              )}
+              <span style={{
+                display: 'block', marginTop: 2,
+                fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, opacity: 0.7
+              }}>
+                {f.pinned ? 'pinned · always in director plan' : inPlan ? 'in director plan' : 'held · not in director cap'}
+              </span>
             </div>
+            <button
+              className="btn-quiet"
+              style={{ padding: '0 6px', fontSize: 11, minHeight: 36 }}
+              title={f.pinned ? 'Unpin from director plan' : 'Pin into director plan'}
+              onClick={() => void safeWrite(
+                () => db.continuity.update(f.id, { pinned: !f.pinned, updatedAt: Date.now() }),
+                setError
+              )}
+            >{f.pinned ? 'unpin' : 'pin'}</button>
             <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 12 }} onClick={() => void safeWrite(async () => {
               await recordTombstones([{
                 table: 'continuity', id: f.id, worldId: f.worldId, seasonId: f.seasonId, payload: f
@@ -2441,26 +2567,38 @@ function ThreadsPanel({ threads, episode, priorEpisodes }: {
         const inPlan = inPlanIds.has(t.id);
         return (
           <div key={t.id} style={{
-            border: `1px solid ${inPlan ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.06)'}`,
+            border: `1px solid ${t.pinned || inPlan ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.06)'}`,
             borderRadius: 11, padding: '10px 12px',
             background: 'rgba(255,255,255,0.04)', display: 'flex', flexDirection: 'column', gap: 5,
-            opacity: inPlan ? 1 : 0.55
+            opacity: t.pinned || inPlan ? 1 : 0.55
           }}>
             <div style={{ fontSize: 12.5, lineHeight: 1.4, color: '#eceae6' }}>{t.text}</div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.45 }}>
-                {t.openedLabel}{!inPlan ? ' · held' : ''}
+                {t.openedLabel}{t.pinned ? ' · pinned' : !inPlan ? ' · held' : ''}
               </div>
-              <button
-                className="btn-quiet"
-                style={{ padding: 0, fontSize: 10 }}
-                onClick={() => void safeWrite(
-                  () => db.threads.update(t.id, { status: 'resolved', updatedAt: Date.now() }),
-                  setError
-                )}
-              >
-                resolve
-              </button>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  className="btn-quiet"
+                  style={{ padding: 0, fontSize: 10 }}
+                  onClick={() => void safeWrite(
+                    () => db.threads.update(t.id, { pinned: !t.pinned, updatedAt: Date.now() }),
+                    setError
+                  )}
+                >
+                  {t.pinned ? 'unpin' : 'pin'}
+                </button>
+                <button
+                  className="btn-quiet"
+                  style={{ padding: 0, fontSize: 10 }}
+                  onClick={() => void safeWrite(
+                    () => db.threads.update(t.id, { status: 'resolved', updatedAt: Date.now() }),
+                    setError
+                  )}
+                >
+                  resolve
+                </button>
+              </div>
             </div>
           </div>
         );
@@ -2541,8 +2679,28 @@ function DirectorContent(props: {
 }) {
   const inScene = props.characters.filter((c) => props.episode.castIds.includes(c.id));
   const labelSize = props.narrow ? 11 : 9;
-  const [open, setOpen] = useState({ calendar: true, scene: true, memory: false, nudges: false });
-  const toggle = (key: keyof typeof open) => setOpen((o) => ({ ...o, [key]: !o[key] }));
+  const hasPlotTargets = [
+    ...(props.episode.plotTargets ?? []),
+    ...(props.season.plotTargets ?? [])
+  ].some((t) => t.status === 'pending' && t.text.trim());
+  const [open, setOpen] = useState(() => {
+    let openMemory = false;
+    if (hasPlotTargets) {
+      try {
+        if (localStorage.getItem('sw-direct-memory-opened') !== '1') {
+          openMemory = true;
+          localStorage.setItem('sw-direct-memory-opened', '1');
+        }
+      } catch { /* ignore */ }
+    }
+    return { calendar: true, scene: true, memory: openMemory, nudges: false };
+  });
+  const toggle = (key: keyof typeof open) => {
+    setOpen((o) => ({ ...o, [key]: !o[key] }));
+    if (key === 'memory') {
+      try { localStorage.setItem('sw-direct-memory-opened', '1'); } catch { /* ignore */ }
+    }
+  };
   // Wrap presence for prune UI; recap-bearing for director-cap badges (matches prompts).
   const priorForPrune = useLiveQuery(
     async () => {

@@ -54,7 +54,10 @@ const PROMISES = [
   { t: 'Characters that hold a line', d: 'Behaviour anchors ride along in every prompt. They can refuse you, and they will.' },
   { t: 'Your key, any model', d: 'OpenRouter, Anthropic, Gemini, Kimi, local models — swap engines per world, any time.' },
   { t: 'Seasons that remember selectively', d: 'At each season’s end the story is read back and you decide what the next one carries.' },
-  { t: 'Private by design', d: 'Everything lives on this device. Nothing is sent anywhere but the AI endpoint you name.' }
+  { t: 'Private by design', d: 'Everything lives on this device. Nothing is sent anywhere but the AI endpoint you name.' },
+  { t: 'Direct the scene', d: 'Open Direct anytime to edit cast, pin continuity, and set plot targets the director should chase.' },
+  { t: 'Wrap to remember', d: 'End an episode to file facts into continuity — Aim beats become the next episode’s targets.' },
+  { t: 'Speak with delivery', d: 'On Speak or Act, pick a tone chip (sarcastic, quietly…) so the scene hears how you mean it.' }
 ];
 
 /** A not-yet-persisted world shape, just enough context for AI drafting before the world exists in the DB. */

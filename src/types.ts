@@ -173,6 +173,19 @@ export interface Episode {
   runningSummaryAtChars?: number;
   /** Episode plot targets the director should work toward (Aim-from-wrap / manual). */
   plotTargets?: PlotTarget[];
+  /**
+   * Leftover director beats after Stop/error mid-write.
+   * Resume with Continue plan instead of a full re-plan.
+   */
+  pendingPlan?: {
+    beats: Array<
+      | { type: 'narration'; brief: string }
+      | { type: 'speak'; characterId: string; brief: string }
+      | { type: 'speak'; guestId: string; brief: string }
+    >;
+    length: TurnLength;
+    createdAt: number;
+  } | null;
   status: 'active' | 'ended';
   createdAt: number;
   /** bumped on mutating writes — used for sync LWW */
@@ -306,6 +319,8 @@ export interface ContinuityFact {
   episodeId?: string;
   text: string;
   source: 'auto' | 'manual';
+  /** When true, always included in the director fact cap before soft picks. */
+  pinned?: boolean;
   createdAt: number;
   updatedAt?: number;
 }
@@ -318,6 +333,8 @@ export interface OpenThread {
   /** e.g. "opened S2 · E7" */
   openedLabel: string;
   status: 'open' | 'resolved';
+  /** When true, always included in the director thread cap before soft picks. */
+  pinned?: boolean;
   createdAt: number;
   updatedAt?: number;
 }
