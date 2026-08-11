@@ -9,7 +9,7 @@ import { formatUserError } from '../errors';
 import { decryptDeviceExport } from '../sync/serialize';
 import { seedStarterWorld } from '../data/seed';
 import { useApp } from '../store/app';
-import { Mono, useVw, ErrorNote } from '../ui/bits';
+import { useVw, ErrorNote } from '../ui/bits';
 import { plateStyle, VIS } from '../ui/theme';
 
 function download(data: unknown, filename: string) {
@@ -102,10 +102,14 @@ export function Library() {
       paddingTop: narrow ? 'calc(26px + env(safe-area-inset-top))' : 42,
       maxWidth: 1260
     }}>
-      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 24, flexWrap: 'wrap', marginBottom: 30 }}>
-        <div>
-          <Mono style={{ letterSpacing: '0.16em', marginBottom: 10 }}>nothing here you didn't make</Mono>
-          <h1 className="serif" style={{ fontWeight: 300, fontSize: narrow ? 34 : 44, lineHeight: 1.08, margin: 0, color: '#f8f6f2' }}>Worlds</h1>
+      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 24, flexWrap: 'wrap', marginBottom: 36 }}>
+        <div style={{ maxWidth: 520 }}>
+          <h1 className="serif" style={{ fontWeight: 300, fontSize: narrow ? 38 : 52, lineHeight: 1.05, margin: 0, color: '#f2f4f5' }}>
+            Small Worlds
+          </h1>
+          <p style={{ margin: '12px 0 0', fontSize: 15, lineHeight: 1.55, color: 'rgba(230,233,235,0.58)', maxWidth: '42ch' }}>
+            Nothing here you didn’t make — seasons, cast, and a desk for the story that stays.
+          </p>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           <button className="btn-ghost" onClick={() => fileRef.current?.click()}>Import world</button>
@@ -121,8 +125,8 @@ export function Library() {
 
       {worlds && worlds.length === 0 && (
         <div className="glass" style={{ padding: narrow ? 22 : 34, display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 620 }}>
-          <div className="serif" style={{ fontWeight: 300, fontSize: 26, color: '#f6f4f0' }}>Start from nothing — or almost nothing.</div>
-          <div style={{ fontSize: 13.5, lineHeight: 1.65, color: 'rgba(236,234,230,0.6)' }}>
+          <div className="serif" style={{ fontWeight: 300, fontSize: 26, color: '#f2f4f5' }}>Start from nothing — or almost nothing.</div>
+          <div style={{ fontSize: 13.5, lineHeight: 1.65, color: 'rgba(230,233,235,0.6)' }}>
             Create a world of your own, or open the starter world — a harbour city, a false name, a debt in the public
             record — to see how cast, continuity and seasons work. Everything in it is editable.
           </div>
@@ -135,6 +139,10 @@ export function Library() {
         </div>
       )}
 
+      {worlds && worlds.length > 0 && (
+        <div className="label" style={{ marginBottom: 14 }}>Your worlds</div>
+      )}
+
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 272px), 1fr))', gap: 18 }}>
         {(worlds ?? []).map((w) => {
           const st = stats?.[w.id];
@@ -144,36 +152,33 @@ export function Library() {
               className="hover-bright"
               onClick={() => openWorld(w.id)}
               style={{
-                border: '1px solid rgba(255,255,255,0.09)', borderRadius: 18, overflow: 'hidden',
-                background: 'rgba(255,255,255,0.045)', backdropFilter: 'blur(20px) saturate(140%)',
-                cursor: 'pointer', display: 'flex', flexDirection: 'column', boxShadow: '0 18px 40px rgba(0,0,0,0.35)'
+                border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, overflow: 'hidden',
+                background: 'rgba(255,255,255,0.03)', backdropFilter: 'blur(12px) saturate(110%)',
+                cursor: 'pointer', display: 'flex', flexDirection: 'column'
               }}
             >
               <div style={plateStyle(w.hue, 138)}>
-                <span style={{
-                  fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.1em',
-                  color: 'rgba(236,234,230,0.62)', background: 'rgba(8,9,12,0.5)', backdropFilter: 'blur(6px)',
-                  padding: '5px 8px', borderRadius: 6
+                <span className="mono meta" style={{
+                  color: 'rgba(230,233,235,0.7)', background: 'rgba(10,12,14,0.55)',
+                  padding: '5px 8px', borderRadius: 4
                 }}>
                   {st ? `S${st.seasons} · E${st.episodes}` : '—'}
                 </span>
-                <span style={{
-                  display: 'flex', alignItems: 'center', gap: 5, fontFamily: "'IBM Plex Mono', monospace",
-                  fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'rgba(236,234,230,0.5)',
-                  background: 'rgba(8,9,12,0.5)', backdropFilter: 'blur(6px)', border: '1px solid rgba(255,255,255,0.1)',
-                  padding: '4px 8px', borderRadius: 6
+                <span className="label" style={{
+                  color: 'rgba(230,233,235,0.55)', background: 'rgba(10,12,14,0.55)',
+                  border: '1px solid rgba(255,255,255,0.1)', padding: '4px 8px', borderRadius: 4
                 }}>
                   {VIS[w.visibility].label}
                 </span>
               </div>
               <div style={{ padding: '16px 17px 18px', display: 'flex', flexDirection: 'column', gap: 10, flex: 1 }}>
                 <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 }}>
-                  <div className="serif" style={{ fontSize: 19, color: '#f4f2ee' }}>{w.title}</div>
+                  <div className="serif" style={{ fontSize: 19, color: '#f2f4f5' }}>{w.title}</div>
                 </div>
-                <div style={{ fontSize: 13, lineHeight: 1.55, color: 'rgba(236,234,230,0.58)', flex: 1 }}>{w.line}</div>
+                <div style={{ fontSize: 13, lineHeight: 1.55, color: 'rgba(230,233,235,0.58)', flex: 1 }}>{w.line}</div>
                 <div style={{
-                  display: 'flex', gap: 14, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10,
-                  color: 'rgba(236,234,230,0.38)', paddingTop: 4, borderTop: '1px solid rgba(255,255,255,0.07)',
+                  display: 'flex', gap: 14, fontSize: 11,
+                  color: 'rgba(230,233,235,0.4)', paddingTop: 4, borderTop: '1px solid rgba(255,255,255,0.08)',
                   alignItems: 'center'
                 }}>
                   <span>{st ? `${st.cast} cast` : '…'}</span>

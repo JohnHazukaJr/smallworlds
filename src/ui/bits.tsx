@@ -26,17 +26,17 @@ export function Chip({
       onClick={onClick}
       disabled={disabled}
       style={{
-        border: `1px solid ${active ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.11)'}`,
-        background: active ? accent : 'rgba(255,255,255,0.05)',
-        color: active ? '#181307' : 'rgba(236,234,230,0.62)',
-        borderRadius: 9,
-        padding: '10px 13px',
-        minHeight: 40,
+        border: `1px solid ${active ? 'oklch(0.72 0.06 195 / 0.55)' : 'rgba(255,255,255,0.12)'}`,
+        background: active ? 'oklch(0.72 0.06 195 / 0.14)' : 'transparent',
+        color: active ? '#e8f2f4' : 'rgba(230,233,235,0.62)',
+        borderRadius: 6,
+        padding: '8px 12px',
+        minHeight: 36,
         fontSize: 12,
         fontWeight: active ? 600 : 500,
         cursor: disabled ? 'default' : 'pointer',
         whiteSpace: 'nowrap',
-        backdropFilter: 'blur(14px)',
+        boxShadow: active ? `inset 0 -2px 0 ${accent}` : 'none',
         opacity: disabled ? 0.5 : 1
       }}
     >
@@ -50,22 +50,25 @@ export function Toggle({ on, onClick, accent = ACCENT }: { on: boolean; onClick:
     <button
       onClick={onClick}
       style={{
-        width: 46, height: 26, borderRadius: 14, flexShrink: 0,
-        border: `1px solid rgba(255,255,255,${on ? '0.2' : '0.12'})`,
-        background: on ? accent : 'rgba(255,255,255,0.06)',
+        width: 44, height: 24, borderRadius: 6, flexShrink: 0,
+        border: `1px solid rgba(255,255,255,${on ? '0.22' : '0.12'})`,
+        background: on ? accent : 'rgba(255,255,255,0.05)',
         cursor: 'pointer', padding: 3, display: 'flex',
         justifyContent: on ? 'flex-end' : 'flex-start', transition: 'all 0.2s ease'
       }}
     >
-      <div style={{ width: 18, height: 18, borderRadius: '50%', background: on ? '#1a1409' : 'rgba(236,234,230,0.5)' }} />
+      <div style={{
+        width: 16, height: 16, borderRadius: 3,
+        background: on ? '#0a1416' : 'rgba(230,233,235,0.55)'
+      }} />
     </button>
   );
 }
 
 export function Bar({ pct, color = ACCENT }: { pct: number; color?: string }) {
   return (
-    <div style={{ height: 3, borderRadius: 2, background: 'rgba(255,255,255,0.1)', overflow: 'hidden' }}>
-      <div style={{ height: '100%', width: `${pct}%`, background: color, borderRadius: 2 }} />
+    <div style={{ height: 2, borderRadius: 1, background: 'rgba(255,255,255,0.1)', overflow: 'hidden' }}>
+      <div style={{ height: '100%', width: `${pct}%`, background: color, borderRadius: 1 }} />
     </div>
   );
 }
@@ -76,8 +79,8 @@ export function Field({
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, justifyContent: 'space-between' }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: 'rgba(236,234,230,0.9)' }}>{label}</div>
-        {note && <div className="mono" style={{ letterSpacing: '0.08em', textTransform: 'none' }}>{note}</div>}
+        <div style={{ fontSize: 13, fontWeight: 600, color: 'rgba(230,233,235,0.9)' }}>{label}</div>
+        {note && <div className="label">{note}</div>}
       </div>
       {children}
     </div>
@@ -86,13 +89,13 @@ export function Field({
 
 export function Spinner({ label, accent = ACCENT }: { label: string; accent?: string }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 10, opacity: 0.7 }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, opacity: 0.75 }}>
       <div style={{
-        width: 5, height: 5, borderRadius: '50%', background: accent,
-        boxShadow: `12px 0 0 ${accent}80, 24px 0 0 ${accent}40`,
+        width: 4, height: 4, borderRadius: 1, background: accent,
+        boxShadow: `10px 0 0 ${accent}99, 20px 0 0 ${accent}44`,
         animation: 'wr-pulse 1.2s ease-in-out infinite'
       }} />
-      <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, marginLeft: 28 }}>{label}</span>
+      <span className="label" style={{ marginLeft: 24, color: 'rgba(230,233,235,0.65)' }}>{label}</span>
     </div>
   );
 }
@@ -112,15 +115,15 @@ export function ErrorNote({
   const warn = tone === 'warn';
   return (
     <div style={{
-      border: warn ? '1px solid rgba(224,165,95,0.45)' : '1px solid rgba(220,110,90,0.4)',
-      borderRadius: 12, padding: '11px 14px',
-      background: warn ? 'rgba(224,165,95,0.1)' : 'rgba(220,110,90,0.09)',
+      border: warn ? '1px solid oklch(0.72 0.06 195 / 0.45)' : '1px solid rgba(200,100,90,0.4)',
+      borderRadius: 8, padding: '11px 14px',
+      background: warn ? 'oklch(0.72 0.06 195 / 0.08)' : 'rgba(200,100,90,0.08)',
       display: 'flex', gap: 12, alignItems: 'flex-start'
     }}>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{
           fontSize: 12.5, lineHeight: 1.55, wordBreak: 'break-word',
-          color: warn ? 'rgba(240,210,170,0.95)' : 'rgba(240,200,190,0.95)'
+          color: warn ? 'rgba(200,230,235,0.95)' : 'rgba(240,200,190,0.95)'
         }}>
           {message}
         </div>
@@ -188,12 +191,12 @@ export function Sheet({
       <aside style={{
         position: 'fixed', zIndex: 51,
         ...(narrow
-          ? { left: 0, right: 0, bottom: 0, top: '8vh', borderTop: '1px solid rgba(255,255,255,0.12)', borderRadius: '18px 18px 0 0', animation: 'wr-slide-up 0.25s ease both' }
+          ? { left: 0, right: 0, bottom: 0, top: '8vh', borderTop: '1px solid rgba(255,255,255,0.12)', borderRadius: '14px 14px 0 0', animation: 'wr-slide-up 0.25s ease both' }
           : { top: 0, right: 0, bottom: 0, width, borderLeft: '1px solid rgba(255,255,255,0.12)', animation: 'wr-fade 0.25s ease both' }),
         display: 'flex', flexDirection: 'column', gap: 0,
         padding: 0,
-        background: 'rgba(14,16,20,0.92)', backdropFilter: 'blur(30px) saturate(150%)',
-        boxShadow: '-30px 0 80px rgba(0,0,0,0.5)',
+        background: 'rgba(12,14,16,0.94)', backdropFilter: 'blur(18px) saturate(120%)',
+        boxShadow: '-16px 0 40px rgba(0,0,0,0.4)',
         overflow: 'hidden',
         minHeight: 0
       }}>
@@ -211,7 +214,7 @@ export function Sheet({
             padding: narrow
               ? '12px 16px calc(12px + env(safe-area-inset-bottom))'
               : '14px 22px 18px',
-            background: 'rgba(10,12,16,0.96)',
+            background: 'rgba(10,12,14,0.96)',
             display: 'flex', flexDirection: 'column', gap: 10
           }}>
             {footer}

@@ -1,5 +1,5 @@
 import { db, uid } from '../db';
-import { emptyCharacter } from '../worldOps';
+import { emptyCharacter, emptyLocation } from '../worldOps';
 import { DEFAULT_AI } from '../worldOps';
 import type { Character, World } from '../types';
 
@@ -133,8 +133,28 @@ export async function seedStarterWorld(): Promise<string> {
 
   const characters: Character[] = [player, marisol, ivo, cartwright, emine];
 
+  const longRoom = emptyLocation(worldId, {
+    id: uid(),
+    name: 'The long room',
+    tagline: 'above the customs house · lamplit · one door',
+    hue: 32,
+    summary:
+      'A private deal room above the customs house floor. Tide sound comes up through the boards; lamp-smoke gathers along the ceiling beams and stays there. Conversations here have the shape of something overheard.',
+    atmosphere: 'Lamp oil, salt damp, and the low grind of the harbour through the floor.',
+    features: 'One long table, one door, a window that does not open onto the quay.',
+    history: 'Built when the guild decided some debts were too delicate for the ledger floor.',
+    inhabitants: 'Whoever holds the current trade — clerks do not enter unbidden.',
+    rules: [
+      'Nothing spoken here is recorded in the public ledger unless someone carries it downstairs.',
+      'The Cartwright never touches food or drink he is offered.',
+      'One door — no second exit for a clean escape.'
+    ],
+    secrets: 'A false-bottom drawer under the near end of the table has held more than one unsigned page.',
+    currentState: 'The Cartwright has arranged the manifest so the false signature faces you.'
+  });
+
   await db.transaction('rw',
-    [db.worlds, db.seasons, db.episodes, db.turns, db.characters, db.continuity, db.threads],
+    [db.worlds, db.seasons, db.episodes, db.turns, db.characters, db.locations, db.continuity, db.threads],
     async () => {
       await db.worlds.add(world);
       await db.seasons.add({
@@ -142,9 +162,11 @@ export async function seedStarterWorld(): Promise<string> {
         premise: 'The Cartwright has asked for a meeting in the long room, and he has arranged the manifest pages so the false signature faces you. Marisol is on the tide stairs outside. Whatever is said in the next hour becomes ink.',
         timeGap: null, bible: null, status: 'active', createdAt: now
       });
+      await db.locations.add(longRoom);
       await db.episodes.add({
         id: episodeId, seasonId, worldId, number: 1, title: 'The long room',
         location: 'The long room, above the customs house. Lamplit, tide-loud, one door.',
+        locationId: longRoom.id,
         castIds: [player.id, marisol.id, cartwright.id],
         storyDay: 1, storyDayEnd: null, dateNote: null,
         status: 'active', createdAt: now

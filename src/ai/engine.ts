@@ -2504,13 +2504,36 @@ export async function draftCharacter(world: World | null, description: string): 
     name: string; role: string; age: string; appearance: string; mannerisms: string;
     backstory: string; summary: string;
     speechStyle: string; exampleLines: string[]; traits: string; desires: string;
-    fears: string; flaws: string; secrets: string; anchors: string[];
+    fears: string; flaws: string; secrets: string; mustNotKnow?: string; anchors: string[];
+    state?: { goal?: string; emotion?: string; location?: string; condition?: string };
   }>(
     world,
-    'You design deep NPC character sheets for longform interactive fiction. Respond with JSON only:\n{"name": string, "role": "<role · relationship to protagonist>", "age": string, "appearance": string, "mannerisms": "<2-3 recurring physical habits or tics, concrete and observable>", "backstory": "<the history that shaped them, 2-3 sentences>", "summary": "<who they are, 2-4 sentences of prose>", "speechStyle": "<how they talk, 1-2 sentences>", "exampleLines": [<2-3 sample spoken lines>], "traits": string, "desires": string, "fears": string, "flaws": string, "secrets": "<something they hide>", "anchors": [<3-4 hard behavioural rules they never break, e.g. "Never lies in writing">]}\nMake them specific, contradictory in believable ways, never generic.',
+    'You design deep NPC character sheets for longform interactive fiction. Respond with JSON only:\n' +
+    '{"name": string, "role": "<role · relationship to protagonist>", "age": string, "appearance": string, ' +
+    '"mannerisms": "<2-3 recurring physical habits or tics, concrete and observable>", ' +
+    '"backstory": "<the history that shaped them, 2-3 sentences>", "summary": "<who they are, 2-4 sentences of prose>", ' +
+    '"speechStyle": "<how they talk, 1-2 sentences>", "exampleLines": [<2-3 sample spoken lines>], ' +
+    '"traits": string, "desires": string, "fears": string, "flaws": string, "secrets": "<something they hide>", ' +
+    '"mustNotKnow": "<facts they must not know yet, or empty>", ' +
+    '"anchors": [<3-4 hard behavioural rules they never break, e.g. "Never lies in writing">], ' +
+    '"state":{"goal":"<what they want right now>","emotion":"<mood>","location":"<where they are>","condition":"<physical/social condition>"}}\n' +
+    'Make them specific, contradictory in believable ways, never generic.',
     `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}Character to create: ${description}`
   );
-  return result;
+  const state: CharacterState | undefined = result.state
+    ? {
+        goal: (result.state.goal ?? '').trim(),
+        emotion: (result.state.emotion ?? '').trim(),
+        location: (result.state.location ?? '').trim(),
+        condition: (result.state.condition ?? '').trim()
+      }
+    : undefined;
+  const { state: _s, ...rest } = result;
+  return {
+    ...rest,
+    mustNotKnow: (result.mustNotKnow ?? '').trim(),
+    ...(state ? { state } : {})
+  };
 }
 
 /** AI-assisted location draft from a one-line description. */
@@ -2632,7 +2655,9 @@ export async function fleshOutCharacter(
     mannerisms: character.mannerisms, backstory: character.backstory, summary: character.summary,
     speechStyle: character.speechStyle, exampleLines: character.exampleLines, traits: character.traits,
     desires: character.desires, fears: character.fears, flaws: character.flaws, secrets: character.secrets,
+    mustNotKnow: character.mustNotKnow,
     anchors: character.anchors,
+    state: character.state,
     relationships: character.relationships.map((r) => {
       const target = others.find((c) => c.id === r.targetId);
       return { targetName: target?.name ?? '', kind: r.kind, note: r.note };
@@ -2644,16 +2669,19 @@ export async function fleshOutCharacter(
     name: string; role: string; age: string; appearance: string; mannerisms: string;
     backstory: string; summary: string;
     speechStyle: string; exampleLines: string[]; traits: string; desires: string;
-    fears: string; flaws: string; secrets: string; anchors: string[];
+    fears: string; flaws: string; secrets: string; mustNotKnow?: string; anchors: string[];
+    state?: { goal?: string; emotion?: string; location?: string; condition?: string };
     relationships?: { targetName?: string; kind?: string; note?: string }[];
   }>(
     world,
     `You flesh out character sheets for longform interactive fiction. ${subjectFrame} ${NON_DESTRUCTIVE_RULE}\n` +
     `Respond with JSON only: {"name": string, "role": string, "age": string, "appearance": string, "mannerisms": string, ` +
     `"backstory": string, "summary": string, "speechStyle": string, "exampleLines": string[], "traits": string, ` +
-    `"desires": string, "fears": string, "flaws": string, "secrets": string, "anchors": string[], ` +
+    `"desires": string, "fears": string, "flaws": string, "secrets": string, "mustNotKnow": string, "anchors": string[], ` +
+    `"state":{"goal":string,"emotion":string,"location":string,"condition":string}, ` +
     `"relationships":[{"targetName":"<exact name from Other cast>","kind":"ally|rival|lover|debt|family|…","note":"<one-line history>"}]}\n` +
-    `Only link to names listed in Other cast. Prefer unlinked cast first. If Other cast is empty, return relationships: []. ${RELATIONSHIP_POV_RULES}`,
+    `Only link to names listed in Other cast. Prefer unlinked cast first. If Other cast is empty, return relationships: []. ` +
+    `state is live opening condition (goal/emotion/where/condition), separate from enduring voice fields. ${RELATIONSHIP_POV_RULES}`,
     worldFleshPreamble(world) +
     `Other cast (relationship targets):\n${JSON.stringify(roster, null, 2)}\n\n` +
     `SUBJECT sheet (JSON, blank strings/arrays mean unset):\n${JSON.stringify(current, null, 2)}`
@@ -2663,6 +2691,14 @@ export async function fleshOutCharacter(
   const relIncoming = others.length > 0
     ? resolveRelationshipsByName(result.relationships ?? [], others)
     : [];
+
+  const stateIncoming = result.state ?? {};
+  const state: CharacterState = {
+    goal: keepIfBlank(character.state.goal, stateIncoming.goal),
+    emotion: keepIfBlank(character.state.emotion, stateIncoming.emotion),
+    location: keepIfBlank(character.state.location, stateIncoming.location),
+    condition: keepIfBlank(character.state.condition, stateIncoming.condition)
+  };
 
   return {
     name: keepIfBlank(character.name, result.name),
@@ -2679,7 +2715,9 @@ export async function fleshOutCharacter(
     fears: keepIfBlank(character.fears, result.fears),
     flaws: keepIfBlank(character.flaws, result.flaws),
     secrets: keepIfBlank(character.secrets, result.secrets),
+    mustNotKnow: keepIfBlank(character.mustNotKnow, result.mustNotKnow),
     anchors: mergeLines(character.anchors, result.anchors ?? []),
+    state,
     relationships: normalizeRelationships(
       mergeRelationships(character.relationships, relIncoming),
       castIds,
@@ -2773,16 +2811,27 @@ export async function fleshOutLocation(world: World | null, location: Location):
 }
 
 /** AI-assisted flesh-out of the world's title/logline/bible. */
-export async function fleshOutWorldLore(world: World): Promise<{ title: string; line: string; bible: string }> {
-  const result = await utilityJson<{ title: string; line: string; bible: string }>(
+export async function fleshOutWorldLore(world: World): Promise<{
+  title: string; line: string; bible: string; calendarSystem?: string;
+}> {
+  const result = await utilityJson<{
+    title: string; line: string; bible: string; calendarSystem?: string;
+  }>(
     world,
-    `You flesh out the lore of a story world for longform interactive fiction. ${NON_DESTRUCTIVE_RULE}\nRespond with JSON only: {"title": string, "line": "<one-sentence logline in second person>", "bible": "<setting, atmosphere, rules of the world, pressures at work — prose the narrator will follow>"}`,
-    `Current world sheet (JSON, blank strings mean unset):\n${JSON.stringify({ title: world.title, line: world.line, bible: world.bible }, null, 2)}`
+    `You flesh out the lore of a story world for longform interactive fiction. ${NON_DESTRUCTIVE_RULE}\n` +
+    `Respond with JSON only: {"title": string, "line": "<one-sentence logline in second person>", ` +
+    `"bible": "<setting, atmosphere, rules of the world, pressures at work — prose the narrator will follow>", ` +
+    `"calendarSystem": "<optional short flavor for how time is named here, e.g. 'harbor reckoning' — omit or empty if Earth-like>"}`,
+    `Current world sheet (JSON, blank strings mean unset):\n${JSON.stringify({
+      title: world.title, line: world.line, bible: world.bible,
+      calendarSystem: world.calendar?.system ?? ''
+    }, null, 2)}`
   );
   return {
     title: keepIfBlank(world.title, result.title),
     line: keepIfBlank(world.line, result.line),
-    bible: keepIfBlank(world.bible, result.bible)
+    bible: keepIfBlank(world.bible, result.bible),
+    calendarSystem: (result.calendarSystem ?? '').trim() || undefined
   };
 }
 
@@ -2811,13 +2860,94 @@ export async function fleshOutNarratorRules(world: World): Promise<string[]> {
   return mergeLines(world.ai.narratorRules, result.rules ?? []);
 }
 
-/** AI-assisted world draft from onboarding inputs. */
-export async function draftWorld(seed: string, shape: string): Promise<{ title: string; line: string; bible: string; premise: string }> {
-  return utilityJson<{ title: string; line: string; bible: string; premise: string }>(
+export interface WorldInterviewQuestion {
+  id: string;
+  question: string;
+  hint?: string;
+}
+
+/** Ask 4–5 clarifying questions from a raw RP idea before world generation. */
+export async function interviewWorldIdea(
+  idea: string,
+  shape: string
+): Promise<WorldInterviewQuestion[]> {
+  const result = await utilityJson<{
+    questions?: Array<{ id?: string; question?: string; hint?: string }>;
+  }>(
     null,
-    'You design story worlds for longform interactive fiction. Respond with JSON only:\n{"title": "<evocative 1-4 word title>", "line": "<one-sentence logline in second person>", "bible": "<the world bible: setting, atmosphere, rules of the world, pressures at work — 150-300 words of prose the narrator will follow>", "premise": "<season one premise: where the story opens, 2-3 sentences>"}\nBe specific and concrete. The world should have its own weather, its own rules, and at least one pressure that will not wait.',
-    `Story shape the player wants: ${shape}\n\nThe one true thing about this world: ${seed}`
+    'You help authors lock a roleplay premise before world generation. Respond with JSON only:\n' +
+    '{"questions":[{"id":"<short_slug>","question":"<one concrete question>","hint":"<optional short example answer>"}]}\n' +
+    'Ask exactly 4 or 5 questions covering: who the player is / what they want, the opening pressure, ' +
+    'who shares the opening scene, where it opens, and hard boundaries (tone, content, or plot lines that must never break). ' +
+    'Do not invent the world yet — only ask. Questions must be specific to THIS idea, never generic.',
+    `Story shape the player wants: ${shape}\n\nPlayer's idea:\n${idea.trim()}`
   );
+  return (result.questions ?? [])
+    .map((q, i) => ({
+      id: (q.id ?? `q${i}`).trim() || `q${i}`,
+      question: (q.question ?? '').trim(),
+      hint: (q.hint ?? '').trim() || undefined
+    }))
+    .filter((q) => q.question)
+    .slice(0, 5);
+}
+
+export interface WorldBriefFromInterview {
+  title: string;
+  line: string;
+  bible: string;
+  premise: string;
+  contentNotes: string;
+  narratorRules: string[];
+  mature: boolean;
+  customInstructions: string;
+}
+
+/** Turn idea + interview answers into a seed-quality brief for create/flesh. */
+export async function composeWorldBriefFromInterview(
+  idea: string,
+  shape: string,
+  answers: Array<{ question: string; answer: string }>
+): Promise<WorldBriefFromInterview> {
+  const answered = answers
+    .map((a) => ({ question: a.question.trim(), answer: a.answer.trim() }))
+    .filter((a) => a.question);
+  const result = await utilityJson<{
+    title?: string;
+    line?: string;
+    bible?: string;
+    premise?: string;
+    contentNotes?: string;
+    narratorRules?: string[];
+    mature?: boolean;
+    customInstructions?: string;
+  }>(
+    null,
+    'You turn a roleplay idea and clarifying answers into a world brief for longform interactive fiction. Respond with JSON only:\n' +
+    '{"title":"<1-4 evocative words>","line":"<one-sentence logline in second person>",' +
+    '"bible":"<150-350 words: setting, atmosphere, rules, pressures — narrator will follow this>",' +
+    '"premise":"<season 1 opening pressure, 2-5 sentences, present tense>",' +
+    '"contentNotes":"<hard content boundaries from the answers, or empty>",' +
+    '"narratorRules":["<2-5 hard narrator constraints>"],' +
+    '"mature":boolean,' +
+    '"customInstructions":"<themes, imagery, and author intent to keep verbatim in prompts>"}\n' +
+    'Be concrete and pressurized. Honor every answered constraint. Unanswered questions: invent carefully from the idea without contradicting it.',
+    `Story shape: ${shape}\n\nOriginal idea:\n${idea.trim()}\n\n` +
+    `Interview:\n${answered.map((a) => `Q: ${a.question}\nA: ${a.answer || '(skipped)'}`).join('\n\n')}`
+  );
+
+  const bible = (result.bible ?? '').trim() || idea.trim();
+  const line = (result.line ?? '').trim() || bible.slice(0, 140);
+  return {
+    title: (result.title ?? '').trim() || 'Untitled world',
+    line,
+    bible,
+    premise: (result.premise ?? '').trim(),
+    contentNotes: (result.contentNotes ?? '').trim(),
+    narratorRules: (result.narratorRules ?? []).map((r) => r.trim()).filter(Boolean).slice(0, 8),
+    mature: result.mature !== false,
+    customInstructions: (result.customInstructions ?? '').trim() || `Shape: ${shape}`
+  };
 }
 
 export interface WorldRosterProposal {
@@ -2865,16 +2995,141 @@ export interface FleshOutEverythingOpts {
   targetCharacters: number;
   targetLocations: number;
   onProgress?: (label: string) => void;
+  /** When true, invent a short cold-open narrator turn if the episode has none. */
+  seedColdOpen?: boolean;
+}
+
+/** Link opening place; set episode title from place name when title is blank. */
+async function linkEpisodeOpening(episode: Episode, open: Location): Promise<Episode> {
+  const patch: Partial<Episode> = {
+    location: open.name,
+    locationId: open.id
+  };
+  if (!(episode.title ?? '').trim() && open.name.trim()) {
+    patch.title = open.name.trim();
+  }
+  await db.episodes.update(episode.id, patch);
+  return { ...episode, ...patch };
 }
 
 export interface FleshOutEverythingResult {
   characterIds: string[];
   locationIds: string[];
+  continuityIds: string[];
+  threadIds: string[];
 }
 
 /**
- * Flesh lore/premise/rules, invent opening cast & places when the world is thin,
- * and link them to episode 1. Does not open Story — caller leaves the user to review.
+ * Seed 2–4 opening continuity facts + open threads from bible/premise/cast.
+ * Skips if the season already has continuity.
+ */
+export async function seedOpeningMemory(
+  world: World,
+  season: Season,
+  episode: Episode,
+  cast: Character[]
+): Promise<{ continuityIds: string[]; threadIds: string[] }> {
+  const existingFacts = await db.continuity.where('seasonId').equals(season.id).count();
+  if (existingFacts > 0) return { continuityIds: [], threadIds: [] };
+
+  const castBrief = cast
+    .filter((c) => c.name.trim())
+    .map((c) => ({
+      name: c.name,
+      role: c.role,
+      isPlayer: !!c.isPlayer,
+      summary: c.summary.slice(0, 160),
+      goal: c.state.goal.slice(0, 80)
+    }));
+
+  const result = await utilityJson<{ facts: string[]; threads: string[] }>(
+    world,
+    'You seed opening continuity for episode 1 of a longform interactive story. Respond with JSON only:\n' +
+    '{"facts":[<2-4 durable facts already true as the story opens>],' +
+    '"threads":[<2-4 unresolved tensions already live as the story opens>]}\n' +
+    'Facts are things that will still be true next episode (debts, alliances, injuries, public rules). ' +
+    'Threads are pressures already in motion, not resolved. Be concrete and rooted in THIS world — no generic filler.',
+    `World: ${world.title} — ${world.line}\nBible:\n${world.bible.slice(0, 1600)}\n\n` +
+    `Season ${season.number} premise:\n${season.premise || '(blank)'}\n\n` +
+    `Opening location: ${episode.location || '(unset)'}\n` +
+    `Cast:\n${JSON.stringify(castBrief, null, 2)}`
+  );
+
+  const now = Date.now();
+  const facts = (result.facts ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 4);
+  const threads = (result.threads ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 4);
+  const continuityIds: string[] = [];
+  const threadIds: string[] = [];
+
+  if (facts.length > 0) {
+    const rows = facts.map((text) => {
+      const id = uid();
+      continuityIds.push(id);
+      return {
+        id, worldId: world.id, seasonId: season.id, episodeId: episode.id,
+        text, source: 'auto' as const, pinned: false, createdAt: now, updatedAt: now
+      };
+    });
+    await db.continuity.bulkAdd(rows);
+  }
+  if (threads.length > 0) {
+    const rows = threads.map((text) => {
+      const id = uid();
+      threadIds.push(id);
+      return {
+        id, worldId: world.id, seasonId: season.id, text,
+        openedLabel: `opened S${season.number} · E${episode.number}`,
+        status: 'open' as const, pinned: false, createdAt: now, updatedAt: now
+      };
+    });
+    await db.threads.bulkAdd(rows);
+  }
+  return { continuityIds, threadIds };
+}
+
+/** Optional cold-open narrator turn (~80–150 words) when episode has zero turns. */
+export async function draftColdOpenNarration(
+  world: World,
+  season: Season,
+  episode: Episode
+): Promise<string | null> {
+  const turnCount = await db.turns.where('episodeId').equals(episode.id).count();
+  if (turnCount > 0) return null;
+
+  const { provider, model } = proseModelFor(world);
+  const { text } = await streamChat({
+    provider, model,
+    system:
+      `You write the opening narrator beat for longform interactive fiction. ` +
+      `POV: ${world.ai.pov}. Tense: ${world.ai.tense}. ` +
+      `80–150 words. Second-person when POV is second. No dialogue. Establish place and pressure; do not resolve anything. Return only the prose.`,
+    messages: [{
+      role: 'user',
+      content:
+        `World: ${world.title} — ${world.line}\nBible:\n${world.bible.slice(0, 1200)}\n\n` +
+        `Premise:\n${season.premise}\n\n` +
+        `Opening location: ${episode.location || '(unnamed)'}\n` +
+        `Write the cold open.`
+    }],
+    maxTokens: 400, temperature: 0.75
+  });
+  const body = text.trim();
+  if (!body) return null;
+  await db.turns.add({
+    id: uid(),
+    worldId: world.id,
+    episodeId: episode.id,
+    role: 'narrator',
+    mode: null,
+    text: body,
+    createdAt: Date.now()
+  });
+  return body;
+}
+
+/**
+ * Flesh lore/premise/rules, invent opening cast & places to roster targets,
+ * relationship-pass NPCs, seed opening memory, optionally cold-open.
  */
 export async function fleshOutWorldEverything(
   world: World,
@@ -2883,17 +3138,33 @@ export async function fleshOutWorldEverything(
   opts: FleshOutEverythingOpts
 ): Promise<FleshOutEverythingResult> {
   const progress = opts.onProgress ?? (() => {});
+  let liveEpisode = episode;
 
   progress('Fleshing lore…');
   const lore = await fleshOutWorldLore(world);
+  const calPatch =
+    lore.calendarSystem && !(world.calendar?.system ?? '').trim()
+      ? calendarPatch(world, { system: lore.calendarSystem })
+      : undefined;
   await db.worlds.update(world.id, {
-    title: lore.title, line: lore.line, bible: lore.bible, updatedAt: Date.now()
+    title: lore.title,
+    line: lore.line,
+    bible: lore.bible,
+    ...(calPatch ? { calendar: calPatch } : {}),
+    updatedAt: Date.now()
   });
-  let live: World = { ...world, ...lore };
+  let live: World = {
+    ...world,
+    title: lore.title,
+    line: lore.line,
+    bible: lore.bible,
+    ...(calPatch ? { calendar: calPatch } : {})
+  };
 
   progress('Fleshing premise…');
   const premise = await fleshOutPremise(live, season);
   await db.seasons.update(season.id, { premise });
+  const liveSeason: Season = { ...season, premise };
 
   progress('Fleshing narrator rules…');
   const rules = await fleshOutNarratorRules(live);
@@ -2903,20 +3174,19 @@ export async function fleshOutWorldEverything(
   });
   live = { ...live, ai: { ...live.ai, narratorRules: rules } };
 
-  const allChars = await db.characters.where('worldId').equals(live.id).toArray();
+  let allChars = await db.characters.where('worldId').equals(live.id).toArray();
   const player = allChars.find((c) => c.isPlayer);
-  if (player && !player.summary.trim() && !player.speechStyle.trim()) {
+  if (player && (!player.summary.trim() || !player.state.goal.trim())) {
     progress('Fleshing you…');
     const sheet = await fleshOutCharacter(live, player, allChars);
     await db.characters.update(player.id, { ...sheet, isPlayer: true, updatedAt: Date.now() });
+    allChars = await db.characters.where('worldId').equals(live.id).toArray();
   }
 
-  const npcs = allChars.filter((c) => !c.isPlayer);
-  const existingPlaces = await db.locations.where('worldId').equals(live.id).toArray();
-  const needChars = npcs.length < 2;
-  const needPlaces = existingPlaces.length < 1;
-  const charSlots = needChars ? Math.max(0, opts.targetCharacters - npcs.length) : 0;
-  const placeSlots = needPlaces ? Math.max(0, opts.targetLocations - existingPlaces.length) : 0;
+  let npcs = allChars.filter((c) => !c.isPlayer);
+  let existingPlaces = await db.locations.where('worldId').equals(live.id).toArray();
+  const charSlots = Math.max(0, opts.targetCharacters - npcs.length);
+  const placeSlots = Math.max(0, opts.targetLocations - existingPlaces.length);
 
   const createdCharacterIds: string[] = [];
   const createdLocationIds: string[] = [];
@@ -2947,26 +3217,69 @@ export async function fleshOutWorldEverything(
       const draft = await draftLocation(live, description);
       const l = emptyLocation(live.id, { ...draft, updatedAt: Date.now() });
       if (!l.name.trim()) l.name = description.slice(0, 40);
+      // Leave rules empty if the draft missed them — write-ready gate requires a real rule.
       await db.locations.add(l);
       createdLocationIds.push(l.id);
     }
 
-    // Link new NPCs into episode cast; set opening location if episode has none.
     if (createdCharacterIds.length > 0) {
-      const castIds = [...new Set([...episode.castIds, ...createdCharacterIds])];
-      await db.episodes.update(episode.id, { castIds });
+      const castIds = [...new Set([...liveEpisode.castIds, ...createdCharacterIds])];
+      await db.episodes.update(liveEpisode.id, { castIds });
+      liveEpisode = { ...liveEpisode, castIds };
     }
 
-    if (createdLocationIds.length > 0 && !episode.locationId && !episode.location.trim()) {
+    if (createdLocationIds.length > 0 && !liveEpisode.locationId && !liveEpisode.location.trim()) {
       const idx = Math.max(0, Math.min(createdLocationIds.length - 1, roster.openingLocationIndex));
       const openId = createdLocationIds[idx] ?? createdLocationIds[0];
       const open = await db.locations.get(openId);
       if (open) {
-        await db.episodes.update(episode.id, { location: open.name, locationId: open.id });
+        liveEpisode = await linkEpisodeOpening(liveEpisode, open);
       }
     }
   }
 
+  // Ensure episode has an opening location if places exist but none linked.
+  existingPlaces = await db.locations.where('worldId').equals(live.id).toArray();
+  if (!liveEpisode.locationId && existingPlaces.length > 0) {
+    liveEpisode = await linkEpisodeOpening(liveEpisode, existingPlaces[0]);
+  } else if (liveEpisode.locationId && !(liveEpisode.title ?? '').trim()) {
+    const open = existingPlaces.find((l) => l.id === liveEpisode.locationId)
+      ?? await db.locations.get(liveEpisode.locationId);
+    if (open?.name.trim()) {
+      await db.episodes.update(liveEpisode.id, { title: open.name.trim() });
+      liveEpisode = { ...liveEpisode, title: open.name.trim() };
+    }
+  }
+
+  allChars = await db.characters.where('worldId').equals(live.id).toArray();
+  npcs = allChars.filter((c) => !c.isPlayer);
+
+  if (npcs.length > 0) {
+    progress('Linking relationships…');
+    for (const npc of npcs) {
+      const relationships = await fleshOutRelationships(live, npc, allChars);
+      await db.characters.update(npc.id, { relationships, updatedAt: Date.now() });
+    }
+    allChars = await db.characters.where('worldId').equals(live.id).toArray();
+  }
+
+  progress('Seeding opening memory…');
+  const memory = await seedOpeningMemory(live, liveSeason, liveEpisode, allChars);
+
+  if (opts.seedColdOpen) {
+    progress('Drafting cold open…');
+    try {
+      await draftColdOpenNarration(live, liveSeason, liveEpisode);
+    } catch {
+      // Cold open is optional — don't fail the whole flesh pass.
+    }
+  }
+
   await db.worlds.update(live.id, { updatedAt: Date.now() });
-  return { characterIds: createdCharacterIds, locationIds: createdLocationIds };
+  return {
+    characterIds: createdCharacterIds,
+    locationIds: createdLocationIds,
+    continuityIds: memory.continuityIds,
+    threadIds: memory.threadIds
+  };
 }

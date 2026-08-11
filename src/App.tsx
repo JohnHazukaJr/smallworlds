@@ -44,27 +44,27 @@ export default function App() {
 
   return (
     <div className="app-shell" style={{
-      position: 'relative', background: '#08090c',
-      color: '#eceae6', overflowX: 'hidden'
+      position: 'relative', background: '#0c0e10',
+      color: '#e6e9eb', overflowX: 'hidden'
     }}>
       {!readMode && (
         <div style={{
           position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 0,
           background:
-            'radial-gradient(900px 700px at 12% -5%, rgba(224,165,95,0.14), transparent 65%), radial-gradient(800px 620px at 88% 8%, rgba(120,150,200,0.12), transparent 62%), radial-gradient(900px 800px at 55% 110%, rgba(180,140,220,0.09), transparent 60%)',
-          animation: 'wr-drift 34s ease-in-out infinite'
+            'radial-gradient(1000px 720px at 18% -8%, rgba(90,140,155,0.1), transparent 62%), radial-gradient(900px 700px at 92% 12%, rgba(70,90,110,0.08), transparent 60%), radial-gradient(ellipse 80% 50% at 50% 100%, rgba(0,0,0,0.45), transparent 70%)',
+          animation: 'wr-drift 48s ease-in-out infinite'
         }} />
       )}
 
       {storagePressure && screen !== 'profile' && (
         <div style={{
           position: 'sticky', top: 0, zIndex: 40,
-          borderBottom: '1px solid rgba(224,165,95,0.35)',
-          background: 'rgba(40, 28, 16, 0.92)', backdropFilter: 'blur(16px)',
+          borderBottom: '1px solid oklch(0.72 0.06 195 / 0.4)',
+          background: 'rgba(16, 28, 32, 0.92)', backdropFilter: 'blur(14px)',
           padding: '10px 16px', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap'
         }}>
-          <Mono style={{ fontSize: 9, color: 'rgba(224,165,95,0.95)' }}>storage pressure</Mono>
-          <div style={{ flex: 1, minWidth: 180, fontSize: 12.5, lineHeight: 1.45, color: 'rgba(236,234,230,0.8)' }}>
+          <Mono style={{ fontSize: 10, color: 'oklch(0.78 0.06 195)' }}>Storage pressure</Mono>
+          <div style={{ flex: 1, minWidth: 180, fontSize: 12.5, lineHeight: 1.45, color: 'rgba(230,233,235,0.8)' }}>
             This browser is low on space. Back up now — worlds or keys can fail to save.
           </div>
           <button className="btn-primary" style={{ padding: '7px 12px', fontSize: 12 }} onClick={() => go('profile')}>

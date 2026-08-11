@@ -1,7 +1,7 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
 import {
-  analyzeEpisode, commitEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, proseModelFor,
+  analyzeEpisode, commitEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, draftColdOpenNarration, proseModelFor,
   clearEpisodeRunningSummary, regenerateBeat, rollbackTurnSnapshot,
   snapshotTurnsAfter, snapshotTurnsFrom, writeTurn,
   WriteAbortedError, type EpisodeWrapDraft, type StreamMeta
@@ -28,6 +28,7 @@ import {
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
 import { db, guardStorage, recordTombstones, safeWrite, uid } from '../db';
 import { AVATAR_PX, DEFAULT_DISPLAY, moodFromHue, useApp, type AvatarSize, type StoryLayout } from '../store/app';
+import { useSettings } from '../store/settings';
 import type {
   Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, EpisodeWrap, EpisodeWrapBeat,
   Location, OpenThread, PlotTarget, PlotTargetStatus, Season, Turn, TurnLength, TURN_LENGTH_LABELS, World
@@ -370,6 +371,8 @@ export function Story() {
   const vw = useVw();
   const narrow = vw < 780;
   const { currentWorldId, layout, setLayout, mood, setMood, backdrop, setBackdrop, go, display, goLocations: openLocations } = useApp();
+  const providers = useSettings((s) => s.providers);
+  const hasAI = providers.length > 0;
   const M = MOODS[mood];
   const BD = BACKDROPS[backdrop];
   const readMode = layout === 'read';
@@ -1046,12 +1049,15 @@ export function Story() {
           paddingLeft: narrow ? 14 : 22,
           paddingRight: narrow ? 14 : 22,
           borderBottom: '1px solid rgba(255,255,255,0.06)',
-          background: 'rgba(8,9,12,0.28)', backdropFilter: 'blur(18px) saturate(140%)'
+          background: 'rgba(12,14,16,0.45)', backdropFilter: 'blur(14px) saturate(110%)'
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-            <div style={{ width: 7, height: 7, borderRadius: '50%', flexShrink: 0, background: M.accent, boxShadow: `0 0 12px ${M.accent}` }} />
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, letterSpacing: '0.08em', opacity: 0.72, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {world.title.toLowerCase()} · ep {episode.number}{locLabel ? ` · ${locLabel}` : ''}
+            <div style={{
+              width: 3, height: 18, borderRadius: 1, flexShrink: 0,
+              background: M.accent, opacity: 0.9
+            }} />
+            <div className="label" style={{ fontSize: 12, color: 'rgba(230,233,235,0.72)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {world.title} · ep {episode.number}{locLabel ? ` · ${locLabel}` : ''}
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
@@ -1085,14 +1091,17 @@ export function Story() {
           paddingLeft: narrow ? 14 : 24,
           paddingRight: narrow ? 14 : 24,
           borderBottom: '1px solid rgba(255,255,255,0.08)',
-          flexWrap: 'wrap', background: 'rgba(8,9,12,0.35)', backdropFilter: 'blur(22px) saturate(140%)'
+          flexWrap: 'wrap', background: 'rgba(12,14,16,0.5)', backdropFilter: 'blur(14px) saturate(110%)'
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 13, minWidth: 0 }}>
-            <div style={{ width: 9, height: 9, borderRadius: '50%', flexShrink: 0, background: M.accent, boxShadow: `0 0 16px ${M.accent}` }} />
+            <div style={{
+              width: 3, height: 28, borderRadius: 1, flexShrink: 0,
+              background: M.accent, opacity: 0.9
+            }} />
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
               <div className="serif" style={{ fontSize: 16, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{world.title}</div>
-              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.1em', opacity: 0.5 }}>
-                season {season.number} · episode {episode.number}{locLabel ? ` · ${locLabel}` : ''} · {formatStoryDate(worldCalendar(world), worldCalendar(world).currentDay).toLowerCase()} · {M.label.toLowerCase()}
+              <div className="label" style={{ fontSize: 11 }}>
+                Season {season.number} · episode {episode.number}{locLabel ? ` · ${locLabel}` : ''} · {formatStoryDate(worldCalendar(world), worldCalendar(world).currentDay)} · {M.label}
               </div>
             </div>
           </div>
@@ -1113,7 +1122,7 @@ export function Story() {
             ) : (
               <>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 7, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px', background: 'rgba(255,255,255,0.05)' }}>
-                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.45 }}>backdrop</span>
+                  <span className="label" style={{ fontSize: 11, opacity: 0.55 }}>Backdrop</span>
                   {(Object.keys(BACKDROPS) as Array<keyof typeof BACKDROPS>).map((id) => (
                     <Chip key={id} active={backdrop === id} accent={M.accent} onClick={() => setBackdrop(id)}>
                       {id === 'none' ? 'Off' : id[0].toUpperCase() + id.slice(1)}
@@ -1158,7 +1167,7 @@ export function Story() {
               backdropFilter: 'blur(10px)'
             } : {})
           }}>
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.16em', textTransform: 'uppercase', opacity: 0.42, marginBottom: 24 }}>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.06em', opacity: 0.42, marginBottom: 24 }}>
               season {numberWord(season.number)}, episode {numberWord(episode.number)}{episode.title ? ` — ${episode.title.toLowerCase()}` : ''}
             </div>
 
@@ -1170,12 +1179,70 @@ export function Story() {
             )}
 
             {turns.length === 0 && !streaming && (
-              <div style={{ opacity: 0.55, fontSize: 14, lineHeight: 1.7 }}>
-                <p className="serif" style={{ fontSize: 17 }}>
+              <div style={{ fontSize: 14, lineHeight: 1.7, display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 8 }}>
+                <p className="serif" style={{ fontSize: 17, opacity: 0.7, margin: 0 }}>
                   {season.premise
                     ? <>Current pressure: <em>{season.premise}</em></>
                     : 'A blank page. Steer, speak, act — or just press Write and see where the story opens.'}
                 </p>
+                {(() => {
+                  const openLoc = episode.locationId
+                    ? locations.find((l) => l.id === episode.locationId)
+                    : undefined;
+                  const sceneCast = characters.filter((c) => episode.castIds.includes(c.id));
+                  return (
+                    <div className="glass" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10, opacity: 0.95 }}>
+                      <div className="label" style={{ color: 'rgba(230,233,235,0.5)' }}>
+                        Scene
+                      </div>
+                      <div style={{ fontSize: 13, color: 'rgba(230,233,235,0.75)' }}>
+                        {openLoc?.name || episode.location || 'No opening place linked'}
+                        {continuity.length || threads.length
+                          ? ` · ${continuity.length} fact${continuity.length === 1 ? '' : 's'} · ${threads.length} thread${threads.length === 1 ? '' : 's'}`
+                          : ''}
+                      </div>
+                      {sceneCast.length > 0 && (
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                          {sceneCast.map((c) => (
+                            <Chip key={c.id} active={false}>{c.name || 'unnamed'}{c.isPlayer ? ' · you' : ''}</Chip>
+                          ))}
+                        </div>
+                      )}
+                      <div style={{ fontSize: 12.5, color: 'rgba(236,234,230,0.5)' }}>
+                        Open Direct anytime to edit cast, place, and continuity — then Write or Speak below.
+                      </div>
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                        <button className="btn-ghost" style={{ fontSize: 12, padding: '7px 12px' }} onClick={() => setDirectorSheet(true)}>
+                          Open Direct
+                        </button>
+                        {hasAI && world && season && episode && (
+                          <button
+                            className="btn-ghost"
+                            style={{ fontSize: 12, padding: '7px 12px' }}
+                            disabled={!!streaming}
+                            onClick={() => {
+                              void (async () => {
+                                setError('');
+                                setProgressLabel('drafting cold open…');
+                                setStreaming(true);
+                                try {
+                                  await draftColdOpenNarration(world, season, episode);
+                                } catch (e) {
+                                  setError(formatUserError(e));
+                                } finally {
+                                  setStreaming(false);
+                                  setProgressLabel('writing…');
+                                }
+                              })();
+                            }}
+                          >
+                            ✦ Draft cold open
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             )}
 

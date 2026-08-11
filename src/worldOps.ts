@@ -448,6 +448,117 @@ export function emptyLocation(worldId: string, patch: Partial<Location> = {}): L
   };
 }
 
+export interface WorldWriteReadyResult {
+  ok: boolean;
+  missing: string[];
+  /** Soft warnings — do not block Enter. */
+  warnings: string[];
+}
+
+const BIBLE_MIN_CHARS = 120;
+
+/** Generic filler rule formerly auto-injected — soft-warn if still present. */
+export const GENERIC_LOCATION_RULE =
+  'Respect the place’s hard rules as written on this sheet.';
+
+export function isGenericLocationRule(rule: string): boolean {
+  const t = rule.trim().toLowerCase();
+  return t === GENERIC_LOCATION_RULE.toLowerCase()
+    || t.startsWith('respect the place');
+}
+
+/**
+ * Checklist for an onboard / day-0 world before Story.
+ * Pure evaluation of loaded rows — no AI.
+ * Hard blockers stay in `missing`; quality nudges stay in `warnings`.
+ */
+export function evaluateWorldWriteReady(opts: {
+  world: World | null | undefined;
+  season: Season | null | undefined;
+  episode: Episode | null | undefined;
+  characters: Character[];
+  locations: Location[];
+  continuityCount?: number;
+}): WorldWriteReadyResult {
+  const missing: string[] = [];
+  const warnings: string[] = [];
+  const { world, season, episode, characters, locations } = opts;
+
+  if (!world) {
+    return { ok: false, missing: ['Create the world first'], warnings: [] };
+  }
+  if (!world.title.trim() || world.title.trim() === 'Untitled world') {
+    missing.push('Give the world a title');
+  }
+  if (!world.line.trim()) missing.push('Add a one-sentence world logline');
+  if (world.bible.trim().length < BIBLE_MIN_CHARS) {
+    missing.push(`Expand the world bible (at least ${BIBLE_MIN_CHARS} characters)`);
+  }
+  if (!season?.premise?.trim()) missing.push('Write a season 1 premise');
+
+  const player = characters.find((c) => c.isPlayer);
+  if (!player) missing.push('Player character is missing');
+  else if (!player.summary.trim() && !player.state.goal.trim()) {
+    missing.push('Fill who you are (summary or current goal)');
+  } else if (!player.appearance.trim() && !player.desires.trim()) {
+    warnings.push('Player sheet is thin — appearance or desires help the first scene');
+  }
+
+  const castIds = new Set(episode?.castIds ?? []);
+  const sceneNpcs = characters.filter((c) => !c.isPlayer && castIds.has(c.id));
+  const readyNpc = sceneNpcs.find(
+    (c) => c.summary.trim() && c.speechStyle.trim() && c.anchors.some((a) => a.trim())
+  );
+  if (!readyNpc) {
+    missing.push('Add at least one NPC in the scene with voice, summary, and an anchor');
+  } else if (!readyNpc.exampleLines.some((l) => l.trim())) {
+    warnings.push('Scene NPC has no example lines — voice lands cleaner with 1–2 samples');
+  }
+
+  const openLoc = episode?.locationId
+    ? locations.find((l) => l.id === episode.locationId)
+    : undefined;
+  if (!openLoc) {
+    missing.push('Link an opening location to episode 1');
+  } else if (openLoc.rules.filter((r) => r.trim()).length === 0) {
+    missing.push('Give the opening location at least one hard rule');
+  } else {
+    if (!openLoc.atmosphere.trim()) {
+      warnings.push('Opening place has no atmosphere — sensory detail helps the narrator');
+    }
+    if (openLoc.rules.some(isGenericLocationRule)) {
+      warnings.push('Replace the generic place rule with something specific to this location');
+    }
+  }
+
+  if ((opts.continuityCount ?? 0) === 0) {
+    warnings.push('No opening continuity facts yet — seed memory before entering if you can');
+  }
+
+  return { ok: missing.length === 0, missing, warnings };
+}
+
+/** Load world rows and evaluate write-readiness. */
+export async function worldWriteReady(worldId: string): Promise<WorldWriteReadyResult> {
+  const world = await db.worlds.get(worldId);
+  if (!world) return { ok: false, missing: ['World not found'], warnings: [] };
+  const season = world.activeSeasonId
+    ? await db.seasons.get(world.activeSeasonId)
+    : await db.seasons.where('worldId').equals(worldId).first();
+  const episode = season
+    ? await db.episodes.where('seasonId').equals(season.id).filter((e) => e.status === 'active').first()
+      ?? await db.episodes.where('seasonId').equals(season.id).first()
+    : undefined;
+  const characters = await db.characters.where('worldId').equals(worldId).toArray();
+  const locations = await db.locations.where('worldId').equals(worldId).toArray();
+  const continuityCount = season
+    ? await db.continuity.where('seasonId').equals(season.id).count()
+    : 0;
+  return evaluateWorldWriteReady({
+    world, season, episode, characters, locations, continuityCount
+  });
+}
+
 export interface NextEpisodeOpts {
   /** Story day the ending episode closed on; defaults to world.currentDay */
   storyDayEnd?: number;

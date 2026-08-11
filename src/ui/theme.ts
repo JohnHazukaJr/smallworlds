@@ -1,23 +1,24 @@
 import type { CSSProperties } from 'react';
 import type { MoodId, BackdropId } from '../store/app';
 
-export const ACCENT = 'oklch(0.85 0.1 62)';
+/** Interactive chrome accent — ink teal (not amber gold). */
+export const ACCENT = 'oklch(0.72 0.06 195)';
 
 export const MOODS: Record<MoodId, { label: string; tint: string; text: string; accent: string; prose: string }> = {
-  ember: { label: 'Ember', tint: 'rgba(224,165,95,0.16)', text: '#f2ece2', accent: 'oklch(0.83 0.1 58)', prose: '#ece2d4' },
-  ash:   { label: 'Ash',   tint: 'rgba(160,175,200,0.14)', text: '#eef0f3', accent: 'oklch(0.84 0.04 250)', prose: '#e2e5ea' },
-  frost: { label: 'Frost', tint: 'rgba(120,180,210,0.16)', text: '#e8f1f5', accent: 'oklch(0.85 0.07 215)', prose: '#dae7ee' },
-  rot:   { label: 'Rot',   tint: 'rgba(150,190,130,0.14)', text: '#eaf0e4', accent: 'oklch(0.83 0.08 135)', prose: '#dfe7d4' }
+  ember: { label: 'Ember', tint: 'rgba(196,150,110,0.12)', text: '#f0ebe4', accent: 'oklch(0.72 0.05 55)', prose: '#ebe2d6' },
+  ash:   { label: 'Ash',   tint: 'rgba(150,165,185,0.11)', text: '#eef0f3', accent: 'oklch(0.74 0.03 250)', prose: '#e2e5ea' },
+  frost: { label: 'Frost', tint: 'rgba(120,170,195,0.12)', text: '#e8f1f5', accent: 'oklch(0.74 0.05 210)', prose: '#dae7ee' },
+  rot:   { label: 'Rot',   tint: 'rgba(140,175,130,0.11)', text: '#eaf0e4', accent: 'oklch(0.72 0.06 140)', prose: '#dfe7d4' }
 };
 
 export const STRIPE = (a: string, b: string) =>
   `repeating-linear-gradient(135deg, ${a} 0 7px, ${b} 7px 14px)`;
 
 export const BACKDROPS: Record<BackdropId, { tag: string; a: string; b: string }> = {
-  scene: { tag: 'scene plate', a: 'rgba(70,54,38,0.75)', b: 'rgba(14,15,19,0.9)' },
-  moment: { tag: 'moment plate', a: 'rgba(84,60,34,0.7)', b: 'rgba(12,13,17,0.92)' },
-  character: { tag: 'character plate', a: 'rgba(52,48,66,0.72)', b: 'rgba(11,12,16,0.92)' },
-  none: { tag: 'no backdrop · plain page', a: 'rgba(255,255,255,0.02)', b: 'rgba(8,9,12,0.98)' }
+  scene: { tag: 'scene plate', a: 'rgba(48,52,56,0.78)', b: 'rgba(10,12,14,0.92)' },
+  moment: { tag: 'moment plate', a: 'rgba(56,50,42,0.72)', b: 'rgba(10,12,14,0.93)' },
+  character: { tag: 'character plate', a: 'rgba(42,48,54,0.74)', b: 'rgba(10,12,14,0.93)' },
+  none: { tag: 'plain page', a: 'rgba(255,255,255,0.02)', b: 'rgba(12,14,16,0.98)' }
 };
 
 export const VIS: Record<'private' | 'invited' | 'public', { label: string; line: string }> = {
@@ -41,11 +42,11 @@ export function avatarStyle(hue: number, size: number, ring?: string): CSSProper
   return {
     width: size,
     height: size,
-    borderRadius: size > 30 ? 12 : '50%',
+    borderRadius: size > 30 ? 10 : '50%',
     flexShrink: 0,
-    border: `1px solid ${ring || 'rgba(255,255,255,0.16)'}`,
-    backgroundImage: `linear-gradient(150deg, oklch(0.6 0.08 ${hue}), rgba(255,255,255,0.06)), ${STRIPE('rgba(255,255,255,0.1)', 'rgba(255,255,255,0.02)')}`,
-    boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.18)'
+    border: `1px solid ${ring || 'rgba(255,255,255,0.14)'}`,
+    backgroundImage: `linear-gradient(150deg, oklch(0.52 0.05 ${hue}), rgba(255,255,255,0.05)), ${STRIPE('rgba(255,255,255,0.08)', 'rgba(255,255,255,0.015)')}`,
+    boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.12)'
   };
 }
 
@@ -57,6 +58,6 @@ export function plateStyle(hue: number, height: number): CSSProperties {
     justifyContent: 'space-between',
     gap: 8,
     padding: 12,
-    background: `linear-gradient(155deg, oklch(0.45 0.06 ${hue} / 0.75), rgba(8,9,12,0.85)), ${STRIPE('rgba(255,255,255,0.06)', 'rgba(255,255,255,0.015)')}`
+    background: `linear-gradient(155deg, oklch(0.42 0.04 ${hue} / 0.7), rgba(10,12,14,0.88)), ${STRIPE('rgba(255,255,255,0.05)', 'rgba(255,255,255,0.012)')}`
   };
 }

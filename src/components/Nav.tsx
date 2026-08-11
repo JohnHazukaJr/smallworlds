@@ -3,7 +3,7 @@ import { db } from '../db';
 import { useApp, type Screen } from '../store/app';
 import { resolveModel, useSettings } from '../store/settings';
 import { useSyncMeta } from '../sync/engine';
-import { Mono } from '../ui/bits';
+import { useVw } from '../ui/bits';
 
 const ITEMS: Array<[string, string, Screen]> = [
   ['01', 'Worlds', 'library'],
@@ -34,16 +34,17 @@ export function Rail() {
 
   return (
     <nav style={{
-      borderRight: '1px solid rgba(255,255,255,0.07)', padding: '22px 15px',
+      borderRight: '1px solid rgba(255,255,255,0.08)', padding: '22px 15px',
       display: 'flex', flexDirection: 'column', gap: 26, position: 'sticky', top: 0, height: '100vh',
-      background: 'rgba(255,255,255,0.025)', backdropFilter: 'blur(24px) saturate(140%)'
+      background: 'rgba(12,14,16,0.55)', backdropFilter: 'blur(14px) saturate(110%)'
     }}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, paddingLeft: 4 }}>
-        <div className="serif" style={{ fontSize: 21, letterSpacing: '0.02em', color: '#f6f4f0', lineHeight: 1.1 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingLeft: 4 }}>
+        <div className="serif" style={{ fontSize: 24, fontWeight: 300, letterSpacing: '0.01em', color: '#f2f4f5', lineHeight: 1.1 }}>
           Small Worlds
-          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.14em', opacity: 0.5, paddingLeft: 6 }}>AI</span>
         </div>
-        <Mono>everything you've ever wanted</Mono>
+        <div className="label" style={{ fontSize: 12, lineHeight: 1.4 }}>
+          nothing here you didn’t make
+        </div>
         {syncError && (
           <button
             className="btn-quiet"
@@ -54,7 +55,7 @@ export function Rail() {
             onClick={() => go('profile')}
             title={syncError}
           >
-            sync failed · open Profile
+            Sync failed · open Profile
           </button>
         )}
       </div>
@@ -62,30 +63,30 @@ export function Rail() {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
         {ITEMS.map(([num, label, key]) => (
           <button key={key} className={`nav-btn${screen === key ? ' active' : ''}`} onClick={() => go(key)}>
-            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.45, width: 14 }}>{num}</span>
+            <span className="mono meta" style={{ width: 18, opacity: 0.45 }}>{num}</span>
             <span style={{ whiteSpace: 'nowrap' }}>{label}</span>
           </button>
         ))}
       </div>
 
       <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div className="glass" style={{ borderRadius: 14, padding: 13, display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <Mono style={{ fontSize: 9 }}>engine</Mono>
-          <div style={{ fontSize: 13, color: 'rgba(236,234,230,0.9)', wordBreak: 'break-all' }}>
+        <div className="glass" style={{ borderRadius: 10, padding: 13, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div className="label">Engine</div>
+          <div style={{ fontSize: 13, color: 'rgba(230,233,235,0.9)', wordBreak: 'break-all' }}>
             {resolved ? resolved.model : 'no model configured'}
           </div>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)' }}>
+          <div className="mono" style={{ fontSize: 10, color: 'rgba(230,233,235,0.4)' }}>
             {resolved ? resolved.provider.label + ' · your key' : 'set one in Settings'}
           </div>
         </div>
         {world && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, paddingLeft: 4 }}>
             <div style={{
-              width: 28, height: 28, borderRadius: '50%', flexShrink: 0,
-              background: `linear-gradient(140deg, oklch(0.6 0.09 ${world.hue} / 0.7), rgba(255,255,255,0.08))`,
-              border: '1px solid rgba(255,255,255,0.14)'
+              width: 28, height: 28, borderRadius: 8, flexShrink: 0,
+              background: `linear-gradient(140deg, oklch(0.55 0.05 ${world.hue} / 0.7), rgba(255,255,255,0.06))`,
+              border: '1px solid rgba(255,255,255,0.12)'
             }} />
-            <div style={{ fontSize: 12, color: 'rgba(236,234,230,0.55)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <div style={{ fontSize: 12, color: 'rgba(230,233,235,0.55)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {world.title}
             </div>
           </div>
