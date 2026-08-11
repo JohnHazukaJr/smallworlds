@@ -59,16 +59,16 @@ export function utilityModelFor(world: World | null) {
 
 const SPEAK_CONTINUE_NUDGE =
   'Your previous reply was cut off mid-line. Continue from exactly where you stopped — ' +
-  'finish the unfinished *action* or "dialogue" only. Do not restart or repeat completed words. ' +
-  'Keep the same *action* / "speech" format.';
+  'finish the unfinished *action* or "dialogue" only. Do not restart, repeat, or add new points. ' +
+  'Keep it brief. Same *action* / "speech" format.';
 
 const NARRATION_CONTINUE_NUDGE =
   'Your previous narration was cut off mid-sentence. Continue from exactly where you stopped — ' +
   'do not restart or repeat completed words. Stay in narrator voice; no character dialogue.';
 
 const SPEAK_DIALOGUE_NUDGE =
-  'Your reply had no spoken dialogue. Answer the player aloud with at least one line in "double quotes". ' +
-  'You may keep a short *action*, but speech is required.';
+  'Your reply had no spoken dialogue. Answer the player aloud with one short line in "double quotes". ' +
+  'You may keep a brief *action*, but speech is required — do not expand into a monologue.';
 
 /**
  * Stream a character/guest speak beat; if the provider stops for length, make one
@@ -87,6 +87,8 @@ async function streamSpeakComplete(opts: {
   onAccumulated: (text: string) => void;
 }): Promise<string> {
   const maxTokens = characterSpeakTokens(opts.length);
+  // Continuation only finishes a cut-off line — smaller budget so it cannot balloon.
+  const continueTokens = Math.min(160, Math.max(80, Math.floor(maxTokens / 2)));
   let acc = '';
   const first = await streamChat({
     provider: opts.provider,
@@ -111,7 +113,7 @@ async function streamSpeakComplete(opts: {
         { role: 'assistant', content: acc },
         { role: 'user', content: SPEAK_CONTINUE_NUDGE }
       ],
-      maxTokens,
+      maxTokens: continueTokens,
       signal: opts.signal,
       onDelta: (d) => {
         acc += d;
@@ -132,7 +134,7 @@ async function streamSpeakComplete(opts: {
         { role: 'assistant', content: cleaned },
         { role: 'user', content: SPEAK_DIALOGUE_NUDGE }
       ],
-      maxTokens,
+      maxTokens: continueTokens,
       signal: opts.signal,
       onDelta: (d) => {
         acc += d;
@@ -738,7 +740,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
           system: guestSystem,
           messages: buildGuestSpeakMessages(
             ctx.turns, ctx.characters, guest, beat.brief, sceneGuests(),
-            { ...speakOpts, systemChars: guestSystem.length }
+            { ...speakOpts, systemChars: guestSystem.length, length: opts.length }
           ),
           length: opts.length,
           signal: opts.signal,
@@ -775,7 +777,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         system: charSystem,
         messages: buildCharacterSpeakMessages(
           ctx.turns, ctx.characters, speaking, beat.brief, sceneGuests(),
-          { ...speakOpts, systemChars: charSystem.length }
+          { ...speakOpts, systemChars: charSystem.length, length: opts.length }
         ),
         length: opts.length,
         signal: opts.signal,
@@ -832,7 +834,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
     }
     await clearPendingPlan(opts.episode.id);
     throw new AIError(
-      'The model produced no usable narration or dialogue. Try again, or shorten Display length.'
+      'The model produced no usable narration or dialogue. Try again, or choose a shorter reply size.'
     );
   }
 
@@ -930,7 +932,7 @@ export async function regenerateBeat(opts: {
       system: buildGuestSystemPrompt(ctx, guest),
       messages: buildGuestSpeakMessages(
         historyTurns, ctx.characters, guest, brief, sceneGuests(),
-        { episode: ctx.episode, systemChars: 0 }
+        { episode: ctx.episode, systemChars: 0, length: opts.length }
       ),
       length: opts.length,
       signal: opts.signal,
@@ -943,7 +945,7 @@ export async function regenerateBeat(opts: {
       system: buildCharacterSystemPrompt(ctx, speaking!),
       messages: buildCharacterSpeakMessages(
         historyTurns, ctx.characters, speaking!, brief, sceneGuests(),
-        { episode: ctx.episode, systemChars: 0 }
+        { episode: ctx.episode, systemChars: 0, length: opts.length }
       ),
       length: opts.length,
       signal: opts.signal,

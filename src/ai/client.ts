@@ -41,7 +41,7 @@ function throwEmptyResponse(finishReason: string, sawReasoning: boolean): never 
   }
   throw new AIError(
     `The model returned an empty response${reason}. ` +
-    'If this keeps happening deep in a season, the context is likely too large — wrap the episode or shorten Display length.'
+    'If this keeps happening deep in a season, the context is likely too large — wrap the episode or choose a shorter reply size.'
   );
 }
 

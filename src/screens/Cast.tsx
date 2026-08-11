@@ -456,6 +456,9 @@ export function Cast() {
                     </div>
                   ))}
                 </div>
+                <div style={{ fontSize: 12, lineHeight: 1.5, color: 'rgba(236,234,230,0.5)' }}>
+                  Live state evolves with wraps and the story. Voice, anchors, and psyche stay who they are.
+                </div>
               </div>
             </div>
 
@@ -494,11 +497,11 @@ export function Cast() {
 
               {tab === 'voice' && (
                 <>
-                  <Field label="How they speak" note="they speak as themselves — rhythm and tone for their own lines">
+                  <Field label="How they speak" note="stable identity — cadence stays even as goals and mood shift">
                     <textarea rows={3} value={d.speechStyle} onChange={(e) => patch({ speechStyle: e.target.value })}
                       placeholder="Clipped. Rarely finishes a thought aloud if a look will do it." />
                   </Field>
-                  <Field label="Example lines" note="2–4 sample lines in their voice — one per line">
+                  <Field label="Example lines" note="2–4 sample lines in their voice — one per line; models imitate rhythm, not copy">
                     <textarea
                       rows={4}
                       value={d.exampleLines.join('\n')}

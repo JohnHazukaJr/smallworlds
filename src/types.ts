@@ -194,7 +194,18 @@ export interface Episode {
 
 export type TurnRole = 'user' | 'narrator' | 'character';
 export type ComposeMode = 'continue' | 'steer' | 'speak' | 'act';
+/**
+ * Reply-size preset for a Write-on (not story structure).
+ * Story units remain Season → Episode → Turns; director plans micro-beats inside a turn.
+ * UI labels: Short / Medium / Long.
+ */
 export type TurnLength = 'beat' | 'scene' | 'episode';
+
+export const TURN_LENGTH_LABELS: Record<TurnLength, string> = {
+  beat: 'Short',
+  scene: 'Medium',
+  episode: 'Long'
+};
 
 export interface Turn {
   id: string;

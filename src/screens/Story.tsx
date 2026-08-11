@@ -30,7 +30,7 @@ import { db, guardStorage, recordTombstones, safeWrite, uid } from '../db';
 import { AVATAR_PX, DEFAULT_DISPLAY, moodFromHue, useApp, type AvatarSize, type StoryLayout } from '../store/app';
 import type {
   Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, EpisodeWrap, EpisodeWrapBeat,
-  Location, OpenThread, PlotTarget, PlotTargetStatus, Season, Turn, TurnLength, World
+  Location, OpenThread, PlotTarget, PlotTargetStatus, Season, Turn, TurnLength, TURN_LENGTH_LABELS, World
 } from '../types';
 import { AppError, classifyError, formatUserError } from '../errors';
 import { Chip, ErrorNote, Mono, Sheet, Spinner, Toggle, useVw } from '../ui/bits';
@@ -1293,10 +1293,15 @@ export function Story() {
           )}
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.45 }}>length</span>
+              <span
+                style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.45 }}
+                title="How long each narration or spoken reply runs — not story structure"
+              >
+                reply size
+              </span>
               {(['beat', 'scene', 'episode'] as const).map((l) => (
                 <Chip key={l} active={length === l} accent={M.accent} onClick={() => setLength(l)}>
-                  {l[0].toUpperCase() + l.slice(1)}
+                  {TURN_LENGTH_LABELS[l]}
                 </Chip>
               ))}
             </div>

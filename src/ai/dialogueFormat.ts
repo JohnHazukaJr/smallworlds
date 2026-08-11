@@ -202,9 +202,9 @@ export const SPEAK_FORMAT_RULES =
   '- Physical looks, gestures, mannerisms, and body language go inside *asterisks* outside the spoken quotes.\n' +
   '- Words said aloud go inside "double quotes" only.\n' +
   '- Vocal stress on a word: wrap it in *asterisks* or **double asterisks** inside the quotes (shown bold). Example: "I *said* leave."\n' +
-  '- Separate emotional beats or shifts with a blank line between actions/lines so the reader gets paragraphs.\n' +
+  '- Prefer one tight beat: a short *action* plus one or two spoken lines. Do not monologue or lecture.\n' +
+  '- Use a blank line only when tone truly shifts mid-reply; most replies need none.\n' +
   '- Example:\n' +
-  '  *she smiled shyly, showing her dimples* "It\'s good to see you."\n\n' +
-  '  *her voice dropped* "I *meant* what I said earlier."\n' +
+  '  *she smiled shyly, showing her dimples* "It\'s good to see you."\n' +
   '- You may use dialogue-only. Action-only (*gestures* with no quotes) is allowed only when the beat brief says so; otherwise prefer at least one spoken line. ' +
   'Do NOT prefix with your name. Do NOT wrap the whole reply in one outer quote.';

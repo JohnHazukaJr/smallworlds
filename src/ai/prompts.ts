@@ -14,13 +14,13 @@ const NARRATION_BEAT_TOKENS: Record<TurnLength, number> = {
 };
 
 /**
- * Character/guest speak budgets — scaled by turn length so *action* + "dialogue"
- * does not hit max_tokens mid-sentence on longer scenes.
+ * Character/guest speak budgets — sized for tight *action* + "dialogue".
+ * Soft word hints in speak messages do the real anti-ramble work; tokens are a hard ceiling.
  */
 const CHARACTER_SPEAK_TOKENS: Record<TurnLength, number> = {
-  beat: 500,
-  scene: 720,
-  episode: 900
+  beat: 280,
+  scene: 420,
+  episode: 560
 };
 
 export function narrationBeatTokens(length: TurnLength): number {
@@ -29,6 +29,33 @@ export function narrationBeatTokens(length: TurnLength): number {
 
 export function characterSpeakTokens(length: TurnLength = 'scene'): number {
   return CHARACTER_SPEAK_TOKENS[length];
+}
+
+/** Soft word budgets for narration slices (reply-size chips). */
+export function narrationSizeHint(length: TurnLength): string {
+  if (length === 'beat') return 'Keep this narration slice short (about 40–100 words).';
+  if (length === 'scene') return 'This narration slice: about 80–180 words.';
+  return 'This narration slice: about 120–250 words.';
+}
+
+/** Soft word budgets for character/guest speak — keep replies focused. */
+export function speakSizeHint(length: TurnLength): string {
+  if (length === 'beat') {
+    return (
+      'Keep this reply short (about 20–50 words of speech, plus a brief *action* if needed). ' +
+      'One reaction only — no monologue, no restating what just happened.'
+    );
+  }
+  if (length === 'scene') {
+    return (
+      'Aim for about 30–80 words of speech (plus a short *action*). ' +
+      'Say what this beat needs and stop — leave room for the player.'
+    );
+  }
+  return (
+    'About 50–120 words of speech max (plus short *actions*). ' +
+    'Still one focused reply, not a speech; cut any filler or repeated points.'
+  );
 }
 
 function characterSheet(c: Character, all: Character[]): string {
@@ -57,7 +84,7 @@ function characterSheet(c: Character, all: Character[]): string {
     c.mannerisms && `Mannerisms (recurring physical habits and tics — weave them in naturally, never all at once): ${c.mannerisms}`,
     c.summary && `Who they are: ${c.summary}`,
     c.backstory && `Backstory (informs behaviour; reveal only in earned fragments, never as exposition): ${c.backstory}`,
-    c.speechStyle && `Voice: ${c.speechStyle}`,
+    c.speechStyle && `Voice (stable identity — keep this cadence even as mood/goals shift): ${c.speechStyle}`,
     c.exampleLines.length > 0 &&
       `Example lines (imitate the rhythm, never reuse verbatim):\n${c.exampleLines.map((l) => `  "${l}"`).join('\n')}`,
     c.traits && `Traits: ${c.traits}`,
@@ -73,12 +100,13 @@ function characterSheet(c: Character, all: Character[]): string {
       `BEHAVIOUR ANCHORS — non-negotiable, never break these under any circumstances:\n${c.anchors.map((a, i) => `  ${String(i + 1).padStart(2, '0')}. ${a}`).join('\n')}`,
     c.customInstructions && `Author's directives for this character (follow verbatim): ${c.customInstructions}`,
     (c.state.goal || c.state.emotion || c.state.location || c.state.condition) &&
-      `Current state: ${[
-        c.state.goal && `goal — ${c.state.goal}`,
-        c.state.emotion && `emotional — ${c.state.emotion}`,
-        c.state.location && `location — ${c.state.location}`,
-        c.state.condition && `condition — ${c.state.condition}`
-      ].filter(Boolean).join('; ')}`
+      `Current state (live — may evolve with the story; colors this moment, does not rewrite Voice/anchors):\n` +
+      [
+        c.state.goal && `  goal — ${c.state.goal}`,
+        c.state.emotion && `  emotional — ${c.state.emotion}`,
+        c.state.location && `  location — ${c.state.location}`,
+        c.state.condition && `  condition — ${c.state.condition}`
+      ].filter(Boolean).join('\n')
   ];
   return lines.filter(Boolean).join('\n');
 }
@@ -806,7 +834,10 @@ export function buildNarratorSystemPrompt(ctx: PromptContext): string {
 export function buildCharacterSystemPrompt(ctx: PromptContext, character: Character): string {
   const { world, characters } = ctx;
   const ai = world.ai;
-  const others = characters.filter((c) => c.id !== character.id);
+  // Only people actually in the scene — avoids over-knowing absent cast.
+  const others = characters.filter(
+    (c) => c.id !== character.id && ctx.episode.castIds.includes(c.id)
+  );
   const guests = activeGuests(ctx.episode);
   const sections: string[] = [];
 
@@ -822,7 +853,7 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
 
   if (others.length > 0) {
     sections.push(
-      `## Others you may address or react to\n` +
+      `## Others present\n` +
       others.map((c) => briefSheet(c)).join('\n')
     );
   }
@@ -841,7 +872,10 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
   // Speak format lives on the user message only (buildCharacterSpeakMessages).
   sections.push(
     `## How you respond\n` +
-    `- Speak as ${character.name} in your natural voice. Use short paragraphs and a blank line when tone or intent shifts so the reader can follow emotion.\n` +
+    `- Speak as ${character.name}. Match your Voice and example-line rhythm exactly — that identity stays fixed.\n` +
+    `- Let Current state (goal, emotion, condition) color *this* moment; do not invent a new personality because the plot moved.\n` +
+    `- Be concise: one clear reaction for this beat. Do not ramble, lecture, recap the scene, or pad with filler.\n` +
+    `- Short *action* + spoken line(s). Blank line only if tone truly shifts.\n` +
     `- Mark vocal stress with *asterisks* or **double asterisks** inside your quoted lines. Physical beats stay in *asterisks* outside the quotes.\n` +
     `- No narration of the room, weather, or other people — only your body and your words.\n` +
     `- Honour behaviour anchors and MUST NOT KNOW. Never soften yourself to please the player.\n` +
@@ -897,7 +931,8 @@ export function buildGuestSystemPrompt(ctx: PromptContext, guest: EpisodeGuest):
 
   sections.push(
     `## How you respond\n` +
-    `- Speak in short paragraphs; use a blank line when your tone shifts. Optional short physical beat of your own body.\n` +
+    `- Speak in a short, focused reply; one reaction for this beat — no monologue or scene-stealing speech.\n` +
+    `- Optional short physical beat of your own body. Blank line only if tone truly shifts.\n` +
     `- Vocal stress: *word* or **word** inside quotes. Physical beats: *asterisks* outside quotes.\n` +
     `- Do not steal the scene from the main cast; add pressure or texture.\n` +
     `- Stay in ${ai.tense} tense for physical beats.`
@@ -1098,13 +1133,9 @@ export function buildNarrationBeatMessages(
   systemChars = 0
 ): ChatMessage[] {
   const messages = historyMessages(turns, characters, guests, episode, systemChars);
-  const sizeHint =
-    length === 'beat' ? 'Keep this narration slice short (about 40–100 words).'
-    : length === 'scene' ? 'This narration slice: about 80–180 words.'
-    : 'This narration slice: about 120–250 words.';
   const userContent =
     `(Narration only — no spoken dialogue, no CharacterName: "…" lines.)\n` +
-    `Beat brief: ${brief}\n\n${sizeHint}`;
+    `Beat brief: ${brief}\n\n${narrationSizeHint(length)}`;
   return mergeMessages([...messages, { role: 'user', content: userContent }]);
 }
 
@@ -1120,13 +1151,15 @@ export function buildCharacterSpeakMessages(
   speaking: Character,
   brief: string,
   guests: EpisodeGuest[] = [],
-  opts?: { requireDialogue?: boolean; episode?: Episode; systemChars?: number }
+  opts?: { requireDialogue?: boolean; episode?: Episode; systemChars?: number; length?: TurnLength }
 ): ChatMessage[] {
   const messages = historyMessages(turns, characters, guests, opts?.episode, opts?.systemChars ?? 0);
+  const length = opts?.length ?? 'scene';
   const userContent =
     `(You are ${speaking.name}. Respond now in character.)\n` +
     `Intent for this line: ${brief}\n\n` +
     `Use the required *action* "dialogue" format. No other speakers.\n` +
+    `${speakSizeHint(length)}\n\n` +
     SPEAK_FORMAT_RULES +
     (opts?.requireDialogue ? `\n\n${SPEAK_MUST_DIALOGUE}` : '');
   return mergeMessages([...messages, { role: 'user', content: userContent }]);
@@ -1139,12 +1172,14 @@ export function buildGuestSpeakMessages(
   guest: EpisodeGuest,
   brief: string,
   guests: EpisodeGuest[] = [],
-  opts?: { requireDialogue?: boolean; episode?: Episode; systemChars?: number }
+  opts?: { requireDialogue?: boolean; episode?: Episode; systemChars?: number; length?: TurnLength }
 ): ChatMessage[] {
   const messages = historyMessages(turns, characters, guests, opts?.episode, opts?.systemChars ?? 0);
+  const length = opts?.length ?? 'scene';
   const userContent =
     `(You are ${guest.name}, a walk-on. Respond now.)\n` +
     `Intent for this line: ${brief}\n\n` +
+    `${speakSizeHint(length)}\n\n` +
     SPEAK_FORMAT_RULES +
     (opts?.requireDialogue ? `\n\n${SPEAK_MUST_DIALOGUE}` : '');
   return mergeMessages([...messages, { role: 'user', content: userContent }]);
@@ -1186,10 +1221,11 @@ export function directorSystemPrompt(mode: ComposeMode, hasSpeakers: boolean): s
     'For an existing guest already listed, use their guest id or exact name. ' +
     'Speak characterId may be the cast id OR the exact character name (never the player). ' +
     'Narration briefs describe atmosphere or physical action — never finished dialogue. ' +
-    'Speak briefs are intent only (tone/goal), never the finished line. ' +
+    'Speak briefs are a single intent (tone/goal), never the finished line — and never "give a speech" or multi-point monologue. ' +
     engageReply +
     'Typical: 1–2 narration beats and at most 3 speak beats. ' +
     'Hard cap: at most 3 speak beats and at most 5 beats total. ' +
+    'Prefer fewer, sharper speak beats over several characters holding the floor. ' +
     'Always include at least one narration beat unless the player just spoke and an immediate reply is natural — then you may open with speak. ' +
     'End the plan on tension or an opening for the player.'
   );
