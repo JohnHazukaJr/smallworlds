@@ -613,7 +613,6 @@ export function Onboard() {
     setBusy('Building the world…');
     try {
       let wid = worldId;
-      let sid = seasonId;
       if (!wid) {
         const custom = shapeTag(shape);
         const world = await createWorld({
@@ -624,7 +623,6 @@ export function Onboard() {
           ai: { ...ai, customInstructions: custom }
         });
         wid = world.id;
-        sid = world.activeSeasonId;
         setWorldId(world.id);
         setSeasonId(world.activeSeasonId);
         setAi(world.ai);

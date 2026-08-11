@@ -31,8 +31,9 @@ import { AVATAR_PX, DEFAULT_DISPLAY, moodFromHue, useApp, type AvatarSize, type 
 import { useSettings } from '../store/settings';
 import type {
   Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, EpisodeWrap, EpisodeWrapBeat,
-  Location, OpenThread, PlotTarget, PlotTargetStatus, Season, Turn, TurnLength, TURN_LENGTH_LABELS, World
+  Location, OpenThread, PlotTarget, PlotTargetStatus, Season, Turn, TurnLength, World
 } from '../types';
+import { TURN_LENGTH_LABELS } from '../types';
 import { AppError, classifyError, formatUserError } from '../errors';
 import { Chip, ErrorNote, Mono, Sheet, Spinner, Toggle, useVw } from '../ui/bits';
 import { fileToSceneImage } from '../ui/image';

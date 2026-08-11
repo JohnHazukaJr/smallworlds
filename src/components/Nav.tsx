@@ -3,7 +3,6 @@ import { db } from '../db';
 import { useApp, type Screen } from '../store/app';
 import { resolveModel, useSettings } from '../store/settings';
 import { useSyncMeta } from '../sync/engine';
-import { useVw } from '../ui/bits';
 
 const ITEMS: Array<[string, string, Screen]> = [
   ['01', 'Worlds', 'library'],
