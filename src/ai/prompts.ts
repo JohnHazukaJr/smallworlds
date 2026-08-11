@@ -228,8 +228,10 @@ const CONTINUITY_FACT_CAP = 24;
 /** Cap open threads so the system frame does not drown the transcript. */
 const THREAD_CAP = 12;
 /** Tighter caps for the director utility prompt. */
-export const DIRECTOR_FACT_CAP = 12;
-export const DIRECTOR_THREAD_CAP = 8;
+export const DIRECTOR_FACT_CAP = 16;
+export const DIRECTOR_THREAD_CAP = 10;
+/** How many recent packed turns the director sees (after history packing). */
+export const DIRECTOR_TRANSCRIPT_TURNS = 28;
 /** How many prior wrapped episodes to surface in prompts. */
 const PRIOR_EPISODE_DIGEST_COUNT = 3;
 
@@ -259,7 +261,7 @@ const PRIOR_CAPS: Record<PromptAgent, PriorCapPreset> = {
   },
   director: {
     beatCapImmediate: 6, beatCapDigest: 2,
-    recapDigestChars: 220, recapImmediateChars: 520, runningCap: 400
+    recapDigestChars: 220, recapImmediateChars: 720, runningCap: 700
   }
 };
 
@@ -832,6 +834,38 @@ function worldFrameSections(ctx: PromptContext): string[] {
 }
 
 /**
+ * Soft situation pressure for speak agents — due calendar + aimed beats without a
+ * narrator-style checklist. Characters react if it touches them; they do not force it.
+ */
+function speakSituationPressure(ctx: PromptContext): string | null {
+  const lines: string[] = [];
+  if (worldCalendarEventPrefs(ctx.world).enabled) {
+    const cal = worldCalendar(ctx.world);
+    const scene = episodeSceneDay(ctx.episode, cal);
+    const { due } = selectCalendarEventsForPrompt(ctx.calendarEvents ?? [], { sceneDay: scene });
+    for (const ev of due.slice(0, 6)) {
+      const hard = ev.promptPolicy === 'hard' || ev.scale === 'large' || ev.scale === 'season';
+      lines.push(
+        `- Calendar${hard ? ' (should be felt)' : ''}: ${ev.title.trim() || '(untitled)'}` +
+        (ev.summary.trim() ? ` — ${clipText(ev.summary.trim(), 120)}` : '')
+      );
+    }
+  }
+  const pending = [
+    ...(ctx.episode.plotTargets ?? []),
+    ...(ctx.season.plotTargets ?? [])
+  ].filter((t) => t.status === 'pending' && t.text.trim()).slice(0, 4);
+  for (const t of pending) {
+    lines.push(`- Aimed pressure: ${clipText(t.text.trim(), 160)}`);
+  }
+  if (lines.length === 0) return null;
+  return (
+    `## Situation pressure (ambient — react if it touches you; do not force or checklist)\n` +
+    lines.join('\n')
+  );
+}
+
+/**
  * Shared lean frame for character / guest speak agents (no plot-target checklist).
  * Role sheets go between this and continuity/threads (callers append those next).
  */
@@ -846,6 +880,10 @@ function leanAgentFrame(ctx: PromptContext, agent: 'character' | 'guest'): strin
   const running = runningSummaryFor(ctx.episode, PRIOR_CAPS[agent].runningCap);
   if (running) sections.push(running);
   sections.push(calendarBlock(ctx.world, ctx.episode, 'compact'));
+  const calEvents = calendarEventsSection(ctx, 'compact');
+  if (calEvents) sections.push(calEvents.startsWith('##') ? calEvents : `## Calendar texture\n${calEvents}`);
+  const pressure = speakSituationPressure(ctx);
+  if (pressure) sections.push(pressure);
   sections.push(...currentLocationBlock(ctx));
   return sections;
 }
@@ -952,6 +990,7 @@ export function buildCharacterSystemPrompt(ctx: PromptContext, character: Charac
     `- Let Current state (goal, emotion, condition) color *this* moment; do not invent a new personality because the plot moved.\n` +
     `- Be concise: one clear reaction for this beat. Do not ramble, lecture, recap the scene, or pad with filler.\n` +
     `- Short *action* + spoken line(s). Blank line only if tone truly shifts.\n` +
+    `- Never prefix your reply with your name or "Name:". History may show "Name: …" for clarity — your output must be only *action* and "speech".\n` +
     `- Mark vocal stress with *asterisks* or **double asterisks** inside your quoted lines. Physical beats stay in *asterisks* outside the quotes.\n` +
     `- No narration of the room, weather, or other people — only your body and your words.\n` +
     `- Honour behaviour anchors and MUST NOT KNOW. Never soften yourself to please the player.\n` +
@@ -1010,6 +1049,7 @@ export function buildGuestSystemPrompt(ctx: PromptContext, guest: EpisodeGuest):
     `- Speak in a short, focused reply; one reaction for this beat — no monologue or scene-stealing speech.\n` +
     (guest.voice ? `- Voice guide: ${guest.voice}\n` : '') +
     `- Optional short physical beat of your own body. Blank line only if tone truly shifts.\n` +
+    `- Never prefix your reply with your name or "Name:" — only *action* and "speech".\n` +
     `- Vocal stress: *word* or **word** inside quotes. Physical beats: *asterisks* outside quotes.\n` +
     `- Do not steal the scene from the main cast; add pressure or texture.\n` +
     `- Stay in ${ai.tense} tense for physical beats.`
@@ -1061,8 +1101,8 @@ const PACK_MIN_TURNS = 4;
 /** Cap world bible / season bible slices in agent frames. */
 const WORLD_BIBLE_CAP = 6000;
 const SEASON_BIBLE_RECAP_CAP = 1600;
-/** Target size for deterministic omitted-turn digests. */
-const OMITTED_DIGEST_CHARS = 1100;
+/** Target size for deterministic omitted-turn digests (head / mid / tail). */
+const OMITTED_DIGEST_CHARS = 1800;
 
 /** Sum of turn text lengths for an episode — used for context-pressure UI. */
 export function episodeHistoryChars(turns: Array<{ text: string }>): number {
@@ -1071,11 +1111,12 @@ export function episodeHistoryChars(turns: Array<{ text: string }>): number {
 
 /**
  * How close the episode transcript is to rolling older beats out of the prompt.
- * warn ≈ 55% of budget, escalate ≈ 75%.
+ * warm ≈ 35% (start keeping a running summary), warn ≈ 55%, escalate ≈ 75%.
  */
-export function episodeContextPressure(chars: number): 'ok' | 'warn' | 'escalate' {
+export function episodeContextPressure(chars: number): 'ok' | 'warm' | 'warn' | 'escalate' {
   if (chars >= HISTORY_CHAR_BUDGET * 0.75) return 'escalate';
   if (chars >= HISTORY_CHAR_BUDGET * 0.55) return 'warn';
+  if (chars >= HISTORY_CHAR_BUDGET * 0.35) return 'warm';
   return 'ok';
 }
 
@@ -1153,11 +1194,15 @@ export function compressOmittedTurns(
   if (omitted.length === 0) return '';
   const labeled = omitted.map((t) => labelTurnCompact(t, characters, guests)).join('\n\n');
   if (labeled.length <= OMITTED_DIGEST_CHARS) return labeled;
-  const half = Math.floor(OMITTED_DIGEST_CHARS / 2) - 20;
+  // Head + mid + tail so early setup, mid-episode turns, and the cutover all survive.
+  const third = Math.max(120, Math.floor(OMITTED_DIGEST_CHARS / 3) - 12);
+  const midStart = Math.max(0, Math.floor((labeled.length - third) / 2));
   return (
-    labeled.slice(0, half).trimEnd() +
+    labeled.slice(0, third).trimEnd() +
     '\n\n…\n\n' +
-    labeled.slice(-half).trimStart()
+    labeled.slice(midStart, midStart + third).trim() +
+    '\n\n…\n\n' +
+    labeled.slice(-third).trimStart()
   );
 }
 
@@ -1378,7 +1423,7 @@ export function directorUserPrompt(
       ? `Player preference: the speak reply should be from walk-on ${preferGuest.name} (${preferGuest.id}) unless they have left.\n`
       : '';
 
-  const recent = packTurns(ctx.turns).slice(-20);
+  const recent = packTurns(ctx.turns).slice(-DIRECTOR_TRANSCRIPT_TURNS);
   const allGuests = ctx.episode.guests ?? [];
   const transcript = recent.map((t) => {
     if (t.role === 'user') {

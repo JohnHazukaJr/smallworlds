@@ -36,6 +36,7 @@ import {
   episodeHistoryChars,
   HISTORY_CHAR_BUDGET,
   packTurnsDetailed,
+  resolveSpeakerName,
   type DirectorBeat,
   narrationBeatTokens,
   planCapsForLength
@@ -731,7 +732,10 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         asWriteAbort(e, 0);
       }
       logAppError(e, 'director plan (fallback)');
-      opts.onNotice?.('Planning failed — continuing with a simple beat.');
+      opts.onNotice?.(
+        'Director planning failed — using a simple beat so the scene can continue. ' +
+        'Check your utility model if this keeps happening.'
+      );
       const fallback: DirectorBeat[] = [{
         type: 'narration',
         brief: 'Continue the scene with atmosphere and physical action; leave space for the player.'
@@ -910,9 +914,13 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
 
   await clearPendingPlan(opts.episode.id);
 
-  // Summary is best-effort after beats are saved — abort here must not look like a zero-beat stop.
+  // Summary + light cast-state refresh are best-effort after beats are saved —
+  // abort here must not look like a zero-beat stop.
   try {
     await maybeRefreshRunningSummary(opts.world, ctx, opts.signal, progress, opts.onNotice);
+    await maybeRefreshLiveCastState(
+      opts.world, ctx, speakTurnsSaved, opts.signal, progress, opts.onNotice
+    );
   } catch (e) {
     if ((e as Error).name === 'AbortError' || e instanceof WriteAbortedError) {
       if (beatsCompleted > 0) {
@@ -1043,16 +1051,21 @@ async function maybeRefreshRunningSummary(
 ): Promise<void> {
   const chars = episodeHistoryChars(ctx.turns);
   const pressure = episodeContextPressure(chars);
+  // Warm early so the summary is ready before packing starts dropping turns.
   if (pressure === 'ok') return;
 
   const lastAt = ctx.episode.runningSummaryAtChars ?? 0;
-  const growthNeeded = HISTORY_CHAR_BUDGET * 0.1;
+  const growthNeeded = pressure === 'warm'
+    ? HISTORY_CHAR_BUDGET * 0.12
+    : HISTORY_CHAR_BUDGET * 0.08;
   if (ctx.episode.runningSummary && chars < lastAt + growthNeeded) return;
 
   const { omitted } = packTurnsDetailed(ctx.turns);
-  // Also summarize when we are in warn/escalate even if nothing is omitted yet —
-  // packing will start soon and the summary should already be warm.
-  const sourceTurns = omitted.length > 0 ? omitted : ctx.turns.slice(0, Math.max(4, Math.floor(ctx.turns.length * 0.4)));
+  // Summarize on warm/warn/escalate even if nothing is omitted yet —
+  // packing will start soon and the summary should already be ready.
+  const sourceTurns = omitted.length > 0
+    ? omitted
+    : ctx.turns.slice(0, Math.max(4, Math.floor(ctx.turns.length * 0.45)));
   if (sourceTurns.length < 3) return;
 
   const guests = ctx.episode.guests ?? [];
@@ -1067,7 +1080,7 @@ async function maybeRefreshRunningSummary(
       model,
       system:
         'You compress interactive-fiction episode transcripts into a running summary. ' +
-        'Write 120–220 words in past tense: what happened, who was present, open tensions. ' +
+        'Write 140–260 words in past tense: what happened, who was present, emotional shifts, open tensions, and any dated/calendar beats that mattered. ' +
         'No dialogue quotes. No preamble — return only the summary.',
       messages: [{
         role: 'user',
@@ -1076,9 +1089,9 @@ async function maybeRefreshRunningSummary(
           (ctx.episode.runningSummary
             ? `Prior running summary:\n${ctx.episode.runningSummary}\n\n`
             : '') +
-          `New material to fold in:\n${digest.slice(0, 12000)}`
+          `New material to fold in:\n${digest.slice(0, 14000)}`
       }],
-      maxTokens: 500,
+      maxTokens: 600,
       signal
     });
     const summary = text.trim();
@@ -1099,6 +1112,275 @@ async function maybeRefreshRunningSummary(
     logAppError(e, 'running summary');
     onNotice?.('Couldn’t refresh mid-episode memory — older beats may thin out until the next successful turn.');
   }
+}
+
+/**
+ * Token overlap for wrap matching — prefers shared content words over raw substring
+ * false-positives on short fragments.
+ */
+export function textMatchScore(a: string, b: string): number {
+  const tokenize = (s: string) =>
+    new Set(
+      s
+        .toLowerCase()
+        .replace(/[^a-z0-9\s']/g, ' ')
+        .split(/\s+/)
+        .filter((w) => w.length > 2)
+    );
+  const A = tokenize(a);
+  const B = tokenize(b);
+  if (A.size === 0 || B.size === 0) return 0;
+  let inter = 0;
+  for (const t of A) if (B.has(t)) inter++;
+  // Need at least two shared content words — single-token hits are too noisy for wrap matching.
+  if (inter < 2) return 0;
+  return inter / Math.min(A.size, B.size);
+}
+
+function matchByExactContainsOrTokens<T extends { id: string }>(
+  items: T[],
+  lines: string[],
+  textOf: (item: T) => string
+): T[] {
+  const matched: T[] = [];
+  const used = new Set<string>();
+  for (const line of lines) {
+    const key = line.trim().toLowerCase();
+    if (!key) continue;
+    let hit = items.find((t) => !used.has(t.id) && textOf(t).trim().toLowerCase() === key);
+    if (!hit) {
+      hit = items.find((t) => {
+        if (used.has(t.id)) return false;
+        const tKey = textOf(t).trim().toLowerCase();
+        // Avoid matching very short needles into long texts.
+        if (key.length < 8 && tKey.length > key.length * 2) return false;
+        return tKey.includes(key) || key.includes(tKey);
+      });
+    }
+    if (!hit) {
+      let best: T | undefined;
+      let bestScore = 0.62;
+      for (const t of items) {
+        if (used.has(t.id)) continue;
+        const score = textMatchScore(key, textOf(t));
+        if (score > bestScore) {
+          bestScore = score;
+          best = t;
+        }
+      }
+      hit = best;
+    }
+    if (hit) {
+      used.add(hit.id);
+      matched.push(hit);
+    }
+  }
+  return matched;
+}
+
+/**
+ * Light mid-episode patch of in-scene cast goal/emotion/location/condition.
+ * Throttled so it does not run every Write — full relationship updates stay on wrap.
+ */
+async function maybeRefreshLiveCastState(
+  world: World,
+  ctx: Awaited<ReturnType<typeof loadContext>>,
+  speakTurnsSaved: number,
+  signal: AbortSignal | undefined,
+  progress: (label: string) => void,
+  onNotice?: (message: string) => void
+): Promise<void> {
+  if (speakTurnsSaved <= 0) return;
+  const inScene = ctx.characters.filter(
+    (c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer
+  );
+  if (inScene.length === 0) return;
+
+  const chars = episodeHistoryChars(ctx.turns);
+  const pressure = episodeContextPressure(chars);
+  const lastAt = ctx.episode.liveStateAtChars ?? 0;
+  const growthNeeded = pressure === 'ok' || pressure === 'warm'
+    ? HISTORY_CHAR_BUDGET * 0.18
+    : HISTORY_CHAR_BUDGET * 0.1;
+  // First patch once the scene has some meat; then throttle by transcript growth.
+  if (lastAt === 0 && ctx.turns.length < 6) return;
+  if (lastAt > 0 && chars < lastAt + growthNeeded) return;
+
+  const recent = ctx.turns.slice(-14);
+  const guests = ctx.episode.guests ?? [];
+  const digest = recent
+    .map((t) => {
+      if (t.role === 'user') return `[player]: ${t.text.slice(0, 280)}`;
+      if (t.role === 'character') {
+        const name = resolveSpeakerName(t, ctx.characters, guests);
+        return `[${name}]: ${t.text.slice(0, 320)}`;
+      }
+      return `[narrator]: ${t.text.slice(0, 320)}`;
+    })
+    .join('\n\n');
+  if (!digest.trim()) return;
+
+  const castLines = inScene
+    .map((c) => {
+      const s = c.state;
+      return (
+        `- ${c.name}: goal="${s.goal || ''}"; emotion="${s.emotion || ''}"; ` +
+        `location="${s.location || ''}"; condition="${s.condition || ''}"`
+      );
+    })
+    .join('\n');
+
+  try {
+    progress('updating cast state…');
+    const result = await utilityJson<{
+      updates?: Array<{
+        name?: string;
+        goal?: string;
+        emotion?: string;
+        location?: string;
+        condition?: string;
+      }>;
+    }>(
+      world,
+      'You track live character state in an interactive story. ' +
+        'Return JSON only: {"updates":[{"name":"<exact cast name>","goal":"...","emotion":"...","location":"...","condition":"..."}]}. ' +
+        'Only include characters whose state clearly shifted in the recent beats. ' +
+        'Omit unchanged fields. Keep each field under 120 characters. No relationships.',
+      `World: ${world.title}. Episode ${ctx.episode.number}.\n` +
+        `In-scene cast (current state):\n${castLines}\n\n` +
+        `Recent beats:\n${digest.slice(0, 10000)}\n\n` +
+        `Return updates JSON.`,
+      900,
+      signal,
+      25_000
+    );
+
+    const applied = await applyLiveCharacterStateUpdates(
+      world.id,
+      inScene,
+      result.updates ?? []
+    );
+    await db.episodes.update(ctx.episode.id, {
+      liveStateAtChars: chars,
+      updatedAt: Date.now()
+    });
+    ctx.episode = { ...ctx.episode, liveStateAtChars: chars };
+    if (applied > 0) {
+      // Refresh local character sheets for any follow-on work in this write.
+      const refreshed = await db.characters.where('worldId').equals(world.id).toArray();
+      ctx.characters = refreshed;
+    }
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') throw e;
+    logAppError(e, 'live cast state');
+    onNotice?.('Couldn’t refresh live cast state — sheets will catch up at episode wrap.');
+  }
+}
+
+/** OR-merge live state patches onto cast cards (exported for tests). */
+export async function applyLiveCharacterStateUpdates(
+  worldId: string,
+  cast: Character[],
+  updates: Array<{
+    name?: string;
+    goal?: string;
+    emotion?: string;
+    location?: string;
+    condition?: string;
+  }>
+): Promise<number> {
+  let applied = 0;
+  const now = Date.now();
+  for (const u of updates) {
+    const name = (u.name ?? '').trim().toLowerCase();
+    if (!name) continue;
+    const c = cast.find((x) => x.name.toLowerCase() === name);
+    if (!c || c.isPlayer) continue;
+    const state: CharacterState = {
+      goal: u.goal?.trim() || c.state.goal,
+      emotion: u.emotion?.trim() || c.state.emotion,
+      location: u.location?.trim() || c.state.location,
+      condition: u.condition?.trim() || c.state.condition
+    };
+    if (
+      state.goal === c.state.goal &&
+      state.emotion === c.state.emotion &&
+      state.location === c.state.location &&
+      state.condition === c.state.condition
+    ) {
+      continue;
+    }
+    await db.characters.update(c.id, { state, updatedAt: now });
+    c.state = state;
+    applied++;
+  }
+  void worldId;
+  return applied;
+}
+
+/**
+ * File a minimal previously-on wrap so skipped reviews still leave prior-episode memory.
+ * Does not invent facts, threads, or relationship updates — only a recap (+ optional beats).
+ */
+export async function commitSoftEpisodeWrap(
+  world: World,
+  season: Season,
+  episode: Episode
+): Promise<EpisodeWrap> {
+  const turns = await db.turns.where('episodeId').equals(episode.id).sortBy('createdAt');
+  const characters = await db.characters.where('worldId').equals(world.id).toArray();
+  const guests = episode.guests ?? [];
+  const existing = episode.runningSummary?.trim();
+  let recap = existing ?? '';
+  if (!recap) {
+    const digest = compressOmittedTurns(
+      turns.length > 12 ? turns.slice(0, -4) : turns,
+      characters,
+      guests
+    );
+    if (digest.trim()) {
+      try {
+        const { provider, model } = utilityModelFor(world);
+        const { text } = await streamChat({
+          provider,
+          model,
+          system:
+            'Summarize an interactive-fiction episode for a previously-on card. ' +
+            'Write 80–160 words in past tense. No dialogue quotes. No preamble.',
+          messages: [{
+            role: 'user',
+            content:
+              `World: ${world.title}. Season ${season.number}, episode ${episode.number}` +
+              `${episode.title ? ` (${episode.title})` : ''}.\n\n${digest.slice(0, 12000)}`
+          }],
+          maxTokens: 400
+        });
+        recap = text.trim();
+      } catch (e) {
+        logAppError(e, 'soft wrap recap');
+      }
+    }
+  }
+  if (!recap) {
+    const last = turns.slice(-3).map((t) => t.text.trim()).filter(Boolean);
+    recap = last.length > 0
+      ? `Episode ${episode.number} ended without a full wrap. Last beats: ${last.map((t) => t.slice(0, 120)).join(' / ')}`
+      : `Episode ${episode.number} ended without a filed summary.`;
+  }
+  recap = recap.slice(0, 1200);
+
+  const wrap: EpisodeWrap = {
+    recap,
+    beats: existing
+      ? [{ text: 'Continued from mid-episode summary (full wrap skipped).', consequence: '' }]
+      : [],
+    guestEffects: []
+  };
+  await db.episodes.update(episode.id, {
+    wrap,
+    updatedAt: Date.now()
+  });
+  return wrap;
 }
 
 /** Snapshot turns that would be removed by deleteTurnsFrom (inclusive). */
@@ -1123,11 +1405,12 @@ export async function restoreTurns(turns: Turn[]): Promise<void> {
   await db.turns.bulkPut(turns);
 }
 
-/** Clear mid-episode digest when the transcript is rewritten (edit / delete / re-roll). */
+/** Clear mid-episode digests when the transcript is rewritten (edit / delete / re-roll). */
 export async function clearEpisodeRunningSummary(episodeId: string): Promise<void> {
   await db.episodes.update(episodeId, {
     runningSummary: null,
     runningSummaryAtChars: 0,
+    liveStateAtChars: 0,
     updatedAt: Date.now()
   });
 }
@@ -1277,6 +1560,10 @@ async function buildEpisodeWrapCorpus(
 }
 
 /** Extract new continuity facts + open threads after an episode ends. */
+/**
+ * Legacy auto-extract — superseded by analyzeEpisode + commitEpisodeWrap.
+ * Kept for older call sites / scripts; Story no longer uses this path.
+ */
 export async function extractContinuity(world: World, season: Season, episode: Episode): Promise<void> {
   const turns = await db.turns.where('episodeId').equals(episode.id).sortBy('createdAt');
   if (turns.length === 0) return;
@@ -1354,8 +1641,8 @@ export interface EpisodeWrapDraft {
   dateNote: string;
   /** Pending plot targets this episode appears to have hit (near-exact to current list). */
   hitTargets: string[];
-  /** Due calendar events this episode appears to have played (near-exact titles). */
-  hitCalendarEvents: string[];
+  /** Calendar events this episode played — id-backed for reliable commit. */
+  hitCalendarEvents: Array<{ id: string; title: string; kind?: string; storyDay?: number }>;
 }
 
 /** Season-like episode analysis for the wrap review UI. */
@@ -1449,15 +1736,18 @@ export async function analyzeEpisode(
     ? pendingTargets.map((t) => `- [${t.scope}] ${t.text}`).join('\n')
     : '(none)';
 
-  const dueCalendarEvents = (await db.calendarEvents.where('seasonId').equals(season.id).toArray())
-    .filter((e) => e.status === 'due' || e.status === 'scheduled')
-    .filter((e) => {
-      const start = Math.max(1, e.storyDay);
-      const end = e.endDay != null && e.endDay >= start ? e.endDay : start;
-      return start <= Math.max(dayStart, dayNow) && end >= dayStart;
-    });
+  const calPrefs = worldCalendarEventPrefs(world);
+  const dueCalendarEvents = calPrefs.enabled
+    ? (await db.calendarEvents.where('seasonId').equals(season.id).toArray())
+      .filter((e) => e.status === 'due' || e.status === 'scheduled')
+      .filter((e) => {
+        const start = Math.max(1, e.storyDay);
+        const end = e.endDay != null && e.endDay >= start ? e.endDay : start;
+        return start <= Math.max(dayStart, dayNow) && end >= dayStart;
+      })
+    : [];
   const dueCalendarBlock = dueCalendarEvents.length > 0
-    ? dueCalendarEvents.map((e) => `- ${e.title}: ${e.summary}`).join('\n')
+    ? dueCalendarEvents.map((e) => `- [${e.id}] ${e.title}: ${e.summary}`).join('\n')
     : '(none)';
 
   const dateBlock =
@@ -1508,7 +1798,7 @@ export async function analyzeEpisode(
     '"threads":["<NEW unresolved tensions raised this episode>"],' +
     '"resolvedThreads":["<exact or near-exact text of prior open threads this episode settled — omit if none>"],' +
     '"hitTargets":["<exact or near-exact text of pending plot targets this episode meaningfully advanced or fulfilled — omit if none>"],' +
-    '"hitCalendarEvents":["<exact or near-exact titles of due calendar events this episode played out or clearly addressed — omit if none>"],' +
+    '"hitCalendarEvents":["<exact id from the Due calendar list, or near-exact title — omit if none>"],' +
     '"guestEffects":["<how walk-ons changed the story, if any>"],' +
     '"characterUpdates":[{"name":"<exact cast name>","goal":"<current goal or empty>","emotion":"<emotional state>","location":"<where they are>","condition":"<injuries/status>"}],' +
     '"knowledgeUpdates":[{"name":"<exact cast name>","nowKnows":"<what they learned>","clearMustNotKnow":"<clause from MUST NOT KNOW that is no longer secret to them>"}],' +
@@ -1522,7 +1812,7 @@ export async function analyzeEpisode(
     '- Facts: 4–12 new durable facts; do NOT repeat Known facts; each fact stands alone with names; date when relevant.\n' +
     '- Threads: only NEW open tensions (0–8). Put settled prior threads in resolvedThreads.\n' +
     '- hitTargets: only from the Pending plot targets list; copy text near-exactly; omit if the target was not advanced.\n' +
-    '- hitCalendarEvents: only from Due calendar events; copy titles near-exactly; omit if the event was not addressed in play.\n' +
+    '- hitCalendarEvents: only from Due calendar events; prefer the bracketed id; title fallback allowed; omit if not addressed.\n' +
     '- characterUpdates: every non-player cast member who appeared or was meaningfully affected; omit empties.\n' +
     '- knowledgeUpdates: only when someone learned something that was blocked or newly revealed; clearMustNotKnow should match their wall when possible.\n' +
     '- relationshipUpdates: only real shifts (trust, debt, romance, enmity); use exact cast names.\n' +
@@ -1609,7 +1899,20 @@ export async function analyzeEpisode(
     nextStoryDay,
     dateNote: (result.dateNote ?? '').trim(),
     hitTargets: (result.hitTargets ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 10),
-    hitCalendarEvents: (result.hitCalendarEvents ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 10)
+    hitCalendarEvents: matchCalendarEventsByTitle(
+      dueCalendarEvents,
+      (result.hitCalendarEvents ?? []).map((t) => {
+        const s = t.trim();
+        // Accept raw ids returned by the model.
+        if (dueCalendarEvents.some((e) => e.id === s)) return { id: s, title: '' };
+        return s;
+      })
+    ).map((e) => ({
+      id: e.id,
+      title: e.title,
+      kind: e.kind,
+      storyDay: e.storyDay
+    })).slice(0, 10)
   };
 
   try {
@@ -1648,8 +1951,8 @@ export interface CommitEpisodeWrapInput {
   aimedBeatTexts?: string[];
   /** Pending plot target texts the author confirmed as hit this episode. */
   hitTargets?: string[];
-  /** Calendar event titles the author confirmed as played this episode. */
-  hitCalendarEvents?: string[];
+  /** Calendar event ids (preferred) or titles the author confirmed as played. */
+  hitCalendarEvents?: Array<{ id?: string; title?: string } | string>;
 }
 
 /**
@@ -1697,76 +2000,64 @@ export async function evolveSeasonPremise(
   return next || season.premise;
 }
 
-/** Match wrap "resolved" lines to open threads (exact, then loose contains). */
+/** Match wrap "resolved" lines to open threads (exact, contains, then token overlap). */
 function matchOpenThreads(
   open: OpenThread[],
   resolvedLines: string[]
 ): OpenThread[] {
-  const matched: OpenThread[] = [];
-  const used = new Set<string>();
-  for (const line of resolvedLines) {
-    const key = line.trim().toLowerCase();
-    if (!key) continue;
-    let hit = open.find((t) => !used.has(t.id) && t.text.trim().toLowerCase() === key);
-    if (!hit) {
-      hit = open.find((t) => {
-        if (used.has(t.id)) return false;
-        const tKey = t.text.trim().toLowerCase();
-        return tKey.includes(key) || key.includes(tKey);
-      });
-    }
-    if (hit) {
-      used.add(hit.id);
-      matched.push(hit);
-    }
-  }
-  return matched;
+  return matchByExactContainsOrTokens(open, resolvedLines, (t) => t.text);
 }
 
-/** Match wrap hit-target lines to pending plot targets (exact, then loose contains). */
+/** Match wrap hit-target lines to pending plot targets (exact, contains, then token overlap). */
 export function matchPlotTargets(
   targets: PlotTarget[],
   hitLines: string[]
 ): PlotTarget[] {
   const pending = targets.filter((t) => t.status === 'pending');
-  const matched: PlotTarget[] = [];
-  const used = new Set<string>();
-  for (const line of hitLines) {
-    const key = line.trim().toLowerCase();
-    if (!key) continue;
-    let hit = pending.find((t) => !used.has(t.id) && t.text.trim().toLowerCase() === key);
-    if (!hit) {
-      hit = pending.find((t) => {
-        if (used.has(t.id)) return false;
-        const tKey = t.text.trim().toLowerCase();
-        return tKey.includes(key) || key.includes(tKey);
-      });
-    }
-    if (hit) {
-      used.add(hit.id);
-      matched.push(hit);
-    }
-  }
-  return matched;
+  return matchByExactContainsOrTokens(pending, hitLines, (t) => t.text);
 }
 
-/** Match wrap hit lines to calendar events by title (exact, then loose contains). */
+/** Match wrap hits to calendar events by id first, then title. */
 export function matchCalendarEventsByTitle(
   events: CalendarEvent[],
-  hitLines: string[]
+  hitLines: Array<{ id?: string; title?: string } | string>
 ): CalendarEvent[] {
   const matched: CalendarEvent[] = [];
   const used = new Set<string>();
-  for (const line of hitLines) {
-    const key = line.trim().toLowerCase();
+  for (const raw of hitLines) {
+    const id = typeof raw === 'string' ? '' : (raw.id ?? '').trim();
+    const title = typeof raw === 'string' ? raw.trim() : (raw.title ?? '').trim();
+    if (id) {
+      const byId = events.find((e) => !used.has(e.id) && e.id === id);
+      if (byId) {
+        used.add(byId.id);
+        matched.push(byId);
+        continue;
+      }
+    }
+    const key = title.toLowerCase();
     if (!key) continue;
     let hit = events.find((e) => !used.has(e.id) && e.title.trim().toLowerCase() === key);
     if (!hit) {
       hit = events.find((e) => {
         if (used.has(e.id)) return false;
         const tKey = e.title.trim().toLowerCase();
+        if (key.length < 8 && tKey.length > key.length * 2) return false;
         return tKey.includes(key) || key.includes(tKey);
       });
+    }
+    if (!hit) {
+      let best: CalendarEvent | undefined;
+      let bestScore = 0.62;
+      for (const e of events) {
+        if (used.has(e.id)) continue;
+        const score = textMatchScore(key, e.title);
+        if (score > bestScore) {
+          bestScore = score;
+          best = e;
+        }
+      }
+      hit = best;
     }
     if (hit) {
       used.add(hit.id);
@@ -1976,39 +2267,46 @@ export async function commitEpisodeWrap(
       : dayEnd + cal.episodeAdvanceDays
   );
 
-  // Activate / miss calendar events across this episode's date span (wrap grace for misses).
+  // Mark author-confirmed calendar events as played BEFORE wrap miss evaluation.
+  const playedIds = new Set<string>();
+  if (worldCalendarEventPrefs(world).enabled) {
+    const hitCal = input.hitCalendarEvents ?? [];
+    if (hitCal.length > 0) {
+      const seasonEvents = await db.calendarEvents.where('seasonId').equals(season.id).toArray();
+      const matched = matchCalendarEventsByTitle(
+        seasonEvents.filter((e) =>
+          e.status === 'due' || e.status === 'scheduled' || e.status === 'missed'
+        ),
+        hitCal
+      );
+      const nowCal = Date.now();
+      for (const ev of matched) {
+        playedIds.add(ev.id);
+        await db.calendarEvents.update(ev.id, { status: 'played', updatedAt: nowCal });
+        const factText = `Calendar: ${ev.title.trim()}${ev.summary.trim() ? ` — ${ev.summary.trim()}` : ''}`;
+        await db.continuity.add({
+          id: uid(),
+          worldId: world.id,
+          seasonId: season.id,
+          episodeId: episode.id,
+          text: factText.slice(0, 400),
+          source: 'auto',
+          createdAt: nowCal
+        });
+      }
+    }
+  }
+
+  // Activate / miss remaining calendar events across this episode's date span.
   await evaluateCalendarEvents({
     worldId: world.id,
     seasonId: season.id,
     fromDay: dayStart,
     toDay: dayEnd,
     mode: 'wrap',
-    world
+    world,
+    excludeIds: playedIds
   });
-
-  // Mark author-confirmed calendar events as played (+ optional continuity fact).
-  const hitCalLines = (input.hitCalendarEvents ?? []).map((t) => t.trim()).filter(Boolean);
-  if (hitCalLines.length > 0) {
-    const seasonEvents = await db.calendarEvents.where('seasonId').equals(season.id).toArray();
-    const matched = matchCalendarEventsByTitle(
-      seasonEvents.filter((e) => e.status === 'due' || e.status === 'scheduled'),
-      hitCalLines
-    );
-    const nowCal = Date.now();
-    for (const ev of matched) {
-      await db.calendarEvents.update(ev.id, { status: 'played', updatedAt: nowCal });
-      const factText = `Calendar: ${ev.title.trim()}${ev.summary.trim() ? ` — ${ev.summary.trim()}` : ''}`;
-      await db.continuity.add({
-        id: uid(),
-        worldId: world.id,
-        seasonId: season.id,
-        episodeId: episode.id,
-        text: factText.slice(0, 400),
-        source: 'auto',
-        createdAt: nowCal
-      });
-    }
-  }
 
   const aimedTexts = (input.aimedBeatTexts ?? []).map((t) => t.trim()).filter(Boolean);
   // Carry unfinished pending from the ending episode (after hit marks applied).
@@ -2622,7 +2920,8 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
   });
 
   // Optional AI seed for the new season's calendar texture.
-  if (worldCalendarEventPrefs(world).aiSeedOnSeasonStart) {
+  const nextPrefs = worldCalendarEventPrefs(world);
+  if (nextPrefs.enabled && nextPrefs.aiSeedOnSeasonStart) {
     try {
       await seedSeasonCalendarEvents(world, next, { autoCommit: true });
     } catch (e) {
@@ -2751,10 +3050,9 @@ export async function seedSeasonCalendarEvents(
         ...d,
         visibility: defaultVisibilityForKind(d.kind),
         source: 'ai-seed',
-        status: d.storyDay <= openDay ? 'due' : 'scheduled',
         createdAt: now,
         updatedAt: now
-      }))
+      }, { currentDay: openDay }))
     );
   }
 

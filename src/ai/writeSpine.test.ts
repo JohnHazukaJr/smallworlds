@@ -150,7 +150,8 @@ describe('packTurnsDetailed / pressure', () => {
   });
 
   it('escalates pressure near budget', () => {
-    expect(episodeContextPressure(HISTORY_CHAR_BUDGET * 0.4)).toBe('ok');
+    expect(episodeContextPressure(HISTORY_CHAR_BUDGET * 0.2)).toBe('ok');
+    expect(episodeContextPressure(HISTORY_CHAR_BUDGET * 0.4)).toBe('warm');
     expect(episodeContextPressure(HISTORY_CHAR_BUDGET * 0.6)).toBe('warn');
     expect(episodeContextPressure(HISTORY_CHAR_BUDGET * 0.8)).toBe('escalate');
   });
@@ -160,12 +161,18 @@ describe('matchPlotTargets', () => {
   const targets: PlotTarget[] = [
     { id: 'a', text: 'Find the key', status: 'pending', source: 'manual' },
     { id: 'b', text: 'Confront Mira', status: 'pending', source: 'manual' },
-    { id: 'c', text: 'Old debt', status: 'hit', source: 'manual' }
+    { id: 'c', text: 'Old debt', status: 'hit', source: 'manual' },
+    { id: 'd', text: 'Recover the stolen harbour ledger before dawn', status: 'pending', source: 'manual' }
   ];
 
   it('matches exact and loose contains', () => {
     const hits = matchPlotTargets(targets, ['find the key', 'confront mira about the past']);
     expect(hits.map((t) => t.id)).toEqual(['a', 'b']);
+  });
+
+  it('matches paraphrases via token overlap', () => {
+    const hits = matchPlotTargets(targets, ['recover stolen harbour ledger']);
+    expect(hits.map((t) => t.id)).toEqual(['d']);
   });
 
   it('ignores already-hit targets', () => {
@@ -183,7 +190,7 @@ describe('selectDirectorFacts / Threads pin', () => {
     }));
     const selected = selectDirectorFacts(facts, ['e']);
     expect(selected.some((f) => f.id === 'f19')).toBe(true);
-    expect(selected.length).toBeLessThanOrEqual(12);
+    expect(selected.length).toBeLessThanOrEqual(16);
   });
 
   it('includes pinned threads before soft cap picks', () => {
@@ -196,6 +203,7 @@ describe('selectDirectorFacts / Threads pin', () => {
     const selected = selectDirectorThreads(threads, ['E1']);
     expect(selected[0]?.id === 't0' || selected.some((t) => t.id === 't0')).toBe(true);
     expect(selected.every((t) => t.status === 'open')).toBe(true);
+    expect(selected.length).toBeLessThanOrEqual(10);
   });
 
   it('agent fact selection honors pins at narrator cap', () => {

@@ -176,6 +176,11 @@ export interface Episode {
   runningSummary?: string | null;
   /** Episode transcript char count when runningSummary was last refreshed */
   runningSummaryAtChars?: number;
+  /**
+   * Transcript char count when in-scene cast live state (goal/emotion/…) was last
+   * lightly patched mid-episode. Throttles utility updates between wraps.
+   */
+  liveStateAtChars?: number;
   /** Episode plot targets the director should work toward (Aim-from-wrap / manual). */
   plotTargets?: PlotTarget[];
   /**

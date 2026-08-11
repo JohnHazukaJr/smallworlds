@@ -5,6 +5,7 @@ import {
   episodeSceneDay, preferBucketsForEpisodes, selectDirectorFacts, selectDirectorThreads
 } from '../ai/prompts';
 import { db, safeWrite } from '../db';
+import { evaluateCalendarEvents } from '../calendarEvents';
 import { formatUserError } from '../errors';
 import { ModelPicker } from '../screens/Settings';
 import { useApp } from '../store/app';
@@ -198,6 +199,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 /** Match Direct calendar: advancing today also stamps active episode scene day. */
                 const setDay = (day: number) => {
                   const next = Math.max(1, Math.floor(day));
+                  const fromDay = cal.currentDay;
                   void safeWrite(async () => {
                     await db.worlds.update(world.id, {
                       calendar: calendarPatch(world, { currentDay: next }),
@@ -205,6 +207,16 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                     });
                     if (episode.status === 'active') {
                       await db.episodes.update(episode.id, { storyDay: next, updatedAt: Date.now() });
+                    }
+                    if (next > fromDay) {
+                      await evaluateCalendarEvents({
+                        worldId: world.id,
+                        seasonId: season.id,
+                        fromDay,
+                        toDay: next,
+                        mode: 'advance',
+                        world
+                      });
                     }
                   }, onSaveFail);
                 };

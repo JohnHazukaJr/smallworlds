@@ -1,7 +1,7 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
 import {
-  analyzeEpisode, commitEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, draftColdOpenNarration, proseModelFor,
+  analyzeEpisode, commitEpisodeWrap, commitSoftEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, draftColdOpenNarration, proseModelFor,
   clearEpisodeRunningSummary, regenerateBeat, rollbackTurnSnapshot,
   snapshotTurnsAfter, snapshotTurnsFrom, writeTurn, seedSeasonCalendarEvents,
   WriteAbortedError, type EpisodeWrapDraft, type StreamMeta, type SeedCalendarEventDraft
@@ -40,7 +40,7 @@ import type {
 } from '../types';
 import {
   defaultVisibilityForKind, isPlayerAgencyMode, resolveComposeMode, TURN_LENGTH_LABELS,
-  worldCalendarEventPrefs
+  worldCalendarEventPrefs, CALENDAR_EVENT_CAP
 } from '../types';
 import { AppError, classifyError, formatUserError } from '../errors';
 import { Chip, ErrorNote, Mono, Sheet, Spinner, Toggle, useVw } from '../ui/bits';
@@ -61,7 +61,7 @@ interface WrapReviewDraft {
   guestEffects: Array<{ text: string; keep: boolean }>;
   resolvedThreads: Array<{ text: string; keep: boolean }>;
   hitTargets: Array<{ text: string; keep: boolean }>;
-  hitCalendarEvents: Array<{ text: string; keep: boolean }>;
+  hitCalendarEvents: Array<{ id: string; title: string; kind?: string; storyDay?: number; keep: boolean }>;
   characterUpdates: Array<{
     name: string;
     goal: string;
@@ -100,7 +100,13 @@ function draftFromAnalysis(d: EpisodeWrapDraft): WrapReviewDraft {
     guestEffects: d.guestEffects.map((text) => ({ text, keep: true })),
     resolvedThreads: d.resolvedThreads.map((text) => ({ text, keep: true })),
     hitTargets: (d.hitTargets ?? []).map((text) => ({ text, keep: true })),
-    hitCalendarEvents: (d.hitCalendarEvents ?? []).map((text) => ({ text, keep: true })),
+    hitCalendarEvents: (d.hitCalendarEvents ?? []).map((row) => ({
+      id: row.id,
+      title: row.title,
+      kind: row.kind,
+      storyDay: row.storyDay,
+      keep: true
+    })),
     characterUpdates: d.characterUpdates.map((u) => ({
       name: u.name,
       goal: u.goal ?? '',
@@ -559,10 +565,10 @@ export function Story() {
   const locationShiftNudge = nudgeDismissedLocId !== undefined
     && (episode?.locationId ?? null) !== nudgeDismissedLocId
     && episodeChars >= HISTORY_CHAR_BUDGET * 0.25;
-  const pressurePastDismiss = pressure !== 'ok'
+  const pressurePastDismiss = (pressure === 'warn' || pressure === 'escalate')
     && episodeChars >= nudgeDismissedAtChars + HISTORY_CHAR_BUDGET * 0.1;
   const showWrapNudge = !!episode && turns.length > 0 && (
-    (pressure !== 'ok' && (nudgeDismissedAtChars === 0 || pressurePastDismiss))
+    ((pressure === 'warn' || pressure === 'escalate') && (nudgeDismissedAtChars === 0 || pressurePastDismiss))
     || locationShiftNudge
   );
 
@@ -929,14 +935,16 @@ export function Story() {
     }
   };
 
-  /** End without filing a wrap — used when analysis fails or the author opts out. */
+  /** End with a minimal recap so prior-episode memory survives (no full analyze review). */
   const skipWrapAndEnd = async () => {
-    if (!episode) return;
+    if (!world || !season || !episode) return;
     setWrapBusy(true);
     setError('');
     try {
+      await commitSoftEpisodeWrap(world, season, episode);
       await nextEpisode(episode);
       resetAfterEpisodeEnd();
+      setNotice('Episode ended with a short recap — full continuity review was skipped.');
     } catch (e) {
       setError(classifyError(e));
     } finally {
@@ -959,7 +967,9 @@ export function Story() {
           .filter((b) => b.keep && b.aim && b.text.trim())
           .map((b) => `${b.text.trim()}${b.consequence.trim() ? ` → ${b.consequence.trim()}` : ''}`),
         hitTargets: wrapDraft.hitTargets.filter((t) => t.keep).map((t) => t.text),
-        hitCalendarEvents: wrapDraft.hitCalendarEvents.filter((t) => t.keep).map((t) => t.text),
+        hitCalendarEvents: wrapDraft.hitCalendarEvents
+          .filter((t) => t.keep)
+          .map((t) => ({ id: t.id, title: t.title })),
         facts: wrapDraft.facts.filter((f) => f.keep).map((f) => f.text),
         threads: wrapDraft.threads.filter((t) => t.keep).map((t) => t.text),
         guestEffects: wrapDraft.guestEffects.filter((g) => g.keep).map((g) => g.text),
@@ -1523,7 +1533,7 @@ export function Story() {
               <div style={{ flex: 1, minWidth: narrow ? 0 : 200, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.78)' }}>
                 {pressure === 'escalate'
                   ? 'Earlier beats may already be dropping from context. File this episode so continuity keeps them.'
-                  : locationShiftNudge && pressure === 'ok'
+                  : locationShiftNudge && (pressure === 'ok' || pressure === 'warm')
                     ? 'The scene moved. End the episode to file key details into continuity before they crowd the narrator\'s memory.'
                     : 'This episode is getting long for the narrator\'s memory. End it to file key details into continuity.'}
               </div>
@@ -1778,7 +1788,7 @@ export function Story() {
                 disabled={wrapBusy}
                 onClick={() => void skipWrapAndEnd()}
               >
-                Skip summary · end anyway
+                Skip full review · keep a short recap
               </button>
             </>
           ) : wrapPhase === 'analyzing' ? (
@@ -1811,7 +1821,7 @@ export function Story() {
                 disabled={wrapBusy}
                 onClick={() => void skipWrapAndEnd()}
               >
-                Skip summary · end anyway
+                Skip full review · keep a short recap
               </button>
             </>
           )
@@ -1828,7 +1838,7 @@ export function Story() {
             <div style={{ fontSize: 13, lineHeight: 1.6, opacity: 0.62, maxWidth: '48ch', color: '#eceae6' }}>
               {wrapPhase === 'review'
                 ? 'Edit the recap, Keep or Drop beats/facts/threads/cast state, then confirm to file memory and open the next episode.'
-                : 'The utility model reads the full episode (compressing long ones) and proposes a previously-on recap, beats, continuity, resolved threads, and cast state — you review before anything is filed.'}
+                : 'The utility model reads the full episode (compressing long ones) and proposes a previously-on recap, beats, continuity, resolved threads, and cast state — you review before anything is filed. Skipping still keeps a short recap so the next episode remembers this one.'}
             </div>
           </div>
           <button className="btn-ghost" style={{ width: 30, height: 30, padding: 0, flexShrink: 0 }} onClick={closeWrapSheet}>×</button>
@@ -3321,11 +3331,19 @@ function CalendarSeasonEventsPanel({ world, season }: { world: World; season: Se
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
+  const [peeked, setPeeked] = useState<Set<string>>(() => new Set());
   const [drafts, setDrafts] = useState<Array<SeedCalendarEventDraft & { keep: boolean }>>([]);
   const sorted = useMemo(
     () => [...events].sort((a, b) => a.storyDay - b.storyDay || a.title.localeCompare(b.title)),
     [events]
   );
+  const dueCount = events.filter((e) => e.status === 'due').length;
+  const scheduledCount = events.filter((e) => e.status === 'scheduled').length;
+  const selectStyle: CSSProperties = {
+    fontFamily: "'IBM Plex Mono', monospace", fontSize: 12,
+    background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.12)',
+    borderRadius: 8, padding: '6px 8px', color: '#f0eee9', width: '100%'
+  };
 
   const patchPrefs = (patch: Partial<typeof prefs>) => {
     void safeWrite(
@@ -3338,15 +3356,19 @@ function CalendarSeasonEventsPanel({ world, season }: { world: World; season: Se
   };
 
   const addManual = () => {
-    const ev = emptyCalendarEvent(world.id, season.id, {
-      title: 'New beat',
-      summary: '',
-      kind: 'mundane',
-      storyDay: cal.currentDay,
-      visibility: prefs.defaultVisibility,
-      source: 'manual',
-      status: 'scheduled'
-    });
+    const ev = emptyCalendarEvent(
+      world.id,
+      season.id,
+      {
+        title: 'New beat',
+        summary: '',
+        kind: 'mundane',
+        storyDay: cal.currentDay,
+        visibility: prefs.defaultVisibility,
+        source: 'manual'
+      },
+      { currentDay: cal.currentDay }
+    );
     void safeWrite(async () => {
       await db.calendarEvents.add(ev);
       setEditId(ev.id);
@@ -3359,7 +3381,10 @@ function CalendarSeasonEventsPanel({ world, season }: { world: World; season: Se
     try {
       const proposed = await seedSeasonCalendarEvents(world, season, { autoCommit: false });
       setDrafts(proposed.map((d) => ({ ...d, keep: true })));
-      if (proposed.length === 0) setErr('No room or no proposals — cancel some events first.');
+      if (proposed.length === 0) {
+        const active = events.filter((e) => e.status === 'scheduled' || e.status === 'due').length;
+        setErr(`No room or no proposals — ${active}/${CALENDAR_EVENT_CAP} active. Cancel some events first.`);
+      }
     } catch (e) {
       setErr(formatUserError(e));
     } finally {
@@ -3374,18 +3399,30 @@ function CalendarSeasonEventsPanel({ world, season }: { world: World; season: Se
       return;
     }
     void safeWrite(async () => {
+      const active = events.filter((e) => e.status === 'scheduled' || e.status === 'due').length;
+      const room = Math.max(0, CALENDAR_EVENT_CAP - active);
+      if (room === 0) {
+        setErr(`Season already has ${CALENDAR_EVENT_CAP} active events.`);
+        return;
+      }
       const now = Date.now();
-      await db.calendarEvents.bulkAdd(
-        kept.map((d) => emptyCalendarEvent(world.id, season.id, {
+      const toAdd = kept.slice(0, room).map((d) => emptyCalendarEvent(
+        world.id,
+        season.id,
+        {
           ...d,
           visibility: defaultVisibilityForKind(d.kind),
           source: 'ai-seed',
-          status: d.storyDay <= cal.currentDay ? 'due' : 'scheduled',
           createdAt: now,
           updatedAt: now
-        }))
-      );
+        },
+        { currentDay: cal.currentDay }
+      ));
+      await db.calendarEvents.bulkAdd(toAdd);
       setDrafts([]);
+      if (kept.length > room) {
+        setErr(`Committed ${room}; ${kept.length - room} skipped (cap ${CALENDAR_EVENT_CAP}).`);
+      }
     }, setErr);
   };
 
@@ -3396,47 +3433,86 @@ function CalendarSeasonEventsPanel({ world, season }: { world: World; season: Se
     );
   };
 
+  const deleteEvent = (ev: CalendarEvent) => {
+    void safeWrite(async () => {
+      await recordTombstones([{
+        table: 'calendarEvents',
+        id: ev.id,
+        worldId: ev.worldId,
+        seasonId: ev.seasonId,
+        payload: ev
+      }]);
+      await db.calendarEvents.delete(ev.id);
+      setEditId((cur) => (cur === ev.id ? null : cur));
+    }, setErr);
+  };
+
+  const togglePeek = (id: string) => {
+    setPeeked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
   return (
     <div style={{
       marginTop: 8, paddingTop: 14, borderTop: '1px solid rgba(255,255,255,0.1)',
       display: 'flex', flexDirection: 'column', gap: 12
     }}>
-      <Mono style={{ fontSize: 9 }}>season calendar events</Mono>
+      <Mono style={{ fontSize: 9 }}>
+        season calendar · {dueCount} due · {scheduledCount} scheduled
+      </Mono>
       <div style={{ fontSize: 12, lineHeight: 1.45, color: 'rgba(236,234,230,0.5)' }}>
-        Dated texture as the calendar ticks — festivals, gatherings, small beats, the occasional shock.
-        Visibility controls what you see; the narrator always gets the full beat when due.
+        Dated texture as the calendar ticks. Peek shows a summary once; visibility is the lasting spoil policy.
+        The narrator always gets the full beat when due.
       </div>
+
+      {err && <ErrorNote error={err} onDismiss={() => setErr('')} />}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}>
           <Toggle on={prefs.enabled} onClick={() => patchPrefs({ enabled: !prefs.enabled })} />
           enable calendar events
         </label>
+        {!prefs.enabled && (
+          <Mono style={{ fontSize: 10, opacity: 0.5 }}>Ignored by narrator while off.</Mono>
+        )}
         <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}>
           <Toggle on={prefs.aiSeedOnSeasonStart} onClick={() => patchPrefs({ aiSeedOnSeasonStart: !prefs.aiSeedOnSeasonStart })} />
           AI-seed on season start
         </label>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
-          <span style={{ fontSize: 11, opacity: 0.45 }}>default visibility</span>
-          {CALENDAR_EVENT_VISIBILITIES.map((v) => (
-            <Chip key={v} active={prefs.defaultVisibility === v} onClick={() => patchPrefs({ defaultVisibility: v })}>
-              {v}
-            </Chip>
-          ))}
-        </div>
+        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <Mono style={{ fontSize: 8, opacity: 0.5 }}>default visibility</Mono>
+          <select
+            value={prefs.defaultVisibility}
+            onChange={(e) => patchPrefs({ defaultVisibility: e.target.value as CalendarEventVisibility })}
+            style={selectStyle}
+          >
+            {CALENDAR_EVENT_VISIBILITIES.map((v) => (
+              <option key={v} value={v}>{v}</option>
+            ))}
+          </select>
+        </label>
       </div>
 
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-        <button className="btn-ghost" style={{ fontSize: 12, minHeight: 36 }} onClick={addManual} disabled={!prefs.enabled}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+        <button className="btn-ghost" style={{ fontSize: 12, minHeight: 36 }} onClick={addManual} disabled={!prefs.enabled || busy}>
           Add event
         </button>
         <button className="btn-ghost" style={{ fontSize: 12, minHeight: 36 }} onClick={() => void generate()} disabled={!prefs.enabled || busy}>
-          {busy ? 'Generating…' : 'Generate season texture'}
+          Generate season texture
         </button>
+        {busy && <Spinner label="seeding calendar" />}
       </div>
 
       {drafts.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 10, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 4 }}>
+        <div style={{
+          display: 'flex', flexDirection: 'column', gap: 8, padding: 12,
+          border: '1px solid rgba(255,255,255,0.12)', borderRadius: 11,
+          background: 'rgba(255,255,255,0.04)'
+        }}>
           <Mono style={{ fontSize: 9 }}>review generated</Mono>
           {drafts.map((d, i) => (
             <div key={i} style={{ opacity: d.keep ? 1 : 0.4, display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -3454,17 +3530,32 @@ function CalendarSeasonEventsPanel({ world, season }: { world: World; season: Se
         </div>
       )}
 
-      {sorted.length === 0 && (
-        <div style={{ fontSize: 12, opacity: 0.45 }}>No events yet this season.</div>
+      {sorted.length === 0 && prefs.enabled && (
+        <div style={{ fontSize: 12, opacity: 0.55, lineHeight: 1.45 }}>
+          No events yet this season.{' '}
+          <button className="btn-quiet" style={{ fontSize: 12 }} onClick={addManual}>Add event</button>
+          {' · '}
+          <button className="btn-quiet" style={{ fontSize: 12 }} onClick={() => void generate()} disabled={busy}>
+            Generate…
+          </button>
+        </div>
       )}
+      {sorted.length === 0 && !prefs.enabled && (
+        <div style={{ fontSize: 12, opacity: 0.45 }}>Enable calendar events to add season texture.</div>
+      )}
+
       {sorted.map((ev) => {
         const open = editId === ev.id;
-        const showSummary = ev.visibility === 'spoiler';
-        const title = ev.visibility === 'hidden' && !showSummary ? 'Hidden beat' : (ev.title || '(untitled)');
+        const peekedOn = peeked.has(ev.id);
+        const settled = ev.status === 'played' || ev.status === 'missed' || ev.status === 'cancelled';
+        const hiddenCollapsed = ev.visibility === 'hidden' && !peekedOn && !open;
+        const title = hiddenCollapsed ? 'Hidden beat' : (ev.title || '(untitled)');
+        const showSummary = ev.visibility === 'spoiler' || peekedOn;
         return (
           <div key={ev.id} style={{
-            border: '1px solid rgba(255,255,255,0.1)', borderRadius: 4, padding: '10px 12px',
-            background: 'rgba(255,255,255,0.03)', display: 'flex', flexDirection: 'column', gap: 8
+            border: '1px solid rgba(255,255,255,0.1)', borderRadius: 11, padding: '12px 14px',
+            background: 'rgba(255,255,255,0.04)', display: 'flex', flexDirection: 'column', gap: 8,
+            opacity: settled ? 0.45 : 1
           }}>
             <button
               type="button"
@@ -3477,17 +3568,19 @@ function CalendarSeasonEventsPanel({ world, season }: { world: World; season: Se
               <span style={{ fontSize: 13, fontWeight: 600 }}>
                 {formatStoryDateShort(cal, ev.storyDay)} · {title}
               </span>
-              <span style={{ fontSize: 11, opacity: 0.5 }}>
-                {ev.kind} · {ev.scale} · {ev.status} · {ev.visibility}
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.45 }}>
+                {hiddenCollapsed
+                  ? ev.status
+                  : `${ev.status}${ev.kind ? ` · ${ev.kind}` : ''}${ev.scale !== 'small' ? ` · ${ev.scale}` : ''}`}
               </span>
-              {showSummary && ev.summary.trim() && (
+              {showSummary && !hiddenCollapsed && ev.summary.trim() && (
                 <span style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>{ev.summary}</span>
               )}
             </button>
-            {!showSummary && (
+            {(ev.visibility === 'hidden' || ev.visibility === 'title') && (
               <button className="btn-quiet" style={{ fontSize: 11, alignSelf: 'flex-start' }}
-                onClick={() => patchEvent(ev.id, { visibility: 'spoiler' })}>
-                Reveal
+                onClick={() => togglePeek(ev.id)}>
+                {peekedOn ? 'Hide peek' : 'Peek'}
               </button>
             )}
             {open && (
@@ -3505,44 +3598,77 @@ function CalendarSeasonEventsPanel({ world, season }: { world: World; season: Se
                   placeholder="Full beat (model always sees this when due)"
                   style={{ fontSize: 12.5, lineHeight: 1.45 }}
                 />
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                  {CALENDAR_EVENT_KINDS.map((k) => (
-                    <Chip key={k} active={ev.kind === k} onClick={() => patchEvent(ev.id, {
-                      kind: k as CalendarEventKind,
-                      visibility: ev.source === 'manual' ? ev.visibility : defaultVisibilityForKind(k as CalendarEventKind)
-                    })}>{k}</Chip>
-                  ))}
-                </div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                  {CALENDAR_EVENT_SCALES.map((s) => (
-                    <Chip key={s} active={ev.scale === s} onClick={() => patchEvent(ev.id, { scale: s as CalendarEventScale })}>{s}</Chip>
-                  ))}
-                </div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                  {CALENDAR_EVENT_VISIBILITIES.map((v) => (
-                    <Chip key={v} active={ev.visibility === v} onClick={() => patchEvent(ev.id, { visibility: v as CalendarEventVisibility })}>{v}</Chip>
-                  ))}
-                </div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                  <Chip active={ev.promptPolicy === 'soft'} onClick={() => patchEvent(ev.id, { promptPolicy: 'soft' })}>soft</Chip>
-                  <Chip active={ev.promptPolicy === 'hard'} onClick={() => patchEvent(ev.id, { promptPolicy: 'hard' })}>hard</Chip>
-                  <Chip active={ev.status === 'cancelled'} onClick={() => patchEvent(ev.id, { status: 'cancelled' })}>cancel</Chip>
-                  <Chip active={ev.status === 'played'} onClick={() => patchEvent(ev.id, { status: 'played' })}>played</Chip>
-                  <Chip active={ev.status === 'due'} onClick={() => patchEvent(ev.id, { status: 'due' })}>due</Chip>
-                  <Chip active={ev.status === 'scheduled'} onClick={() => patchEvent(ev.id, { status: 'scheduled' })}>scheduled</Chip>
-                </div>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
-                  day
-                  <input
-                    type="number"
-                    min={1}
-                    value={ev.storyDay}
-                    onChange={(e) => patchEvent(ev.id, { storyDay: Math.max(1, Math.floor(Number(e.target.value) || 1)) })}
-                    style={{ width: 72, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}
-                  />
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <Mono style={{ fontSize: 8, opacity: 0.5 }}>kind</Mono>
+                  <select value={ev.kind} onChange={(e) => patchEvent(ev.id, { kind: e.target.value as CalendarEventKind })} style={selectStyle}>
+                    {CALENDAR_EVENT_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
+                  </select>
                 </label>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <Mono style={{ fontSize: 8, opacity: 0.5 }}>scale</Mono>
+                  <select value={ev.scale} onChange={(e) => patchEvent(ev.id, { scale: e.target.value as CalendarEventScale })} style={selectStyle}>
+                    {CALENDAR_EVENT_SCALES.map((s) => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                </label>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <Mono style={{ fontSize: 8, opacity: 0.5 }}>visibility (lasting)</Mono>
+                  <select value={ev.visibility} onChange={(e) => patchEvent(ev.id, { visibility: e.target.value as CalendarEventVisibility })} style={selectStyle}>
+                    {CALENDAR_EVENT_VISIBILITIES.map((v) => <option key={v} value={v}>{v}</option>)}
+                  </select>
+                </label>
+                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  <Mono style={{ fontSize: 8, opacity: 0.5 }}>prompt policy</Mono>
+                  <select value={ev.promptPolicy} onChange={(e) => patchEvent(ev.id, { promptPolicy: e.target.value as 'soft' | 'hard' })} style={selectStyle}>
+                    <option value="soft">soft</option>
+                    <option value="hard">hard</option>
+                  </select>
+                </label>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {(['scheduled', 'due', 'played', 'cancelled'] as const).map((st) => (
+                    <button
+                      key={st}
+                      type="button"
+                      className="btn-quiet"
+                      style={{ fontSize: 11, opacity: ev.status === st ? 1 : 0.55, fontWeight: ev.status === st ? 600 : 500 }}
+                      onClick={() => patchEvent(ev.id, { status: st })}
+                    >
+                      {st}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+                    day
+                    <input
+                      type="number"
+                      min={1}
+                      value={ev.storyDay}
+                      onChange={(e) => patchEvent(ev.id, { storyDay: Math.max(1, Math.floor(Number(e.target.value) || 1)) })}
+                      style={{ width: 72, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}
+                    />
+                  </label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+                    end day
+                    <input
+                      type="number"
+                      min={ev.storyDay}
+                      value={ev.endDay ?? ''}
+                      placeholder="—"
+                      onChange={(e) => {
+                        const v = e.target.value.trim();
+                        if (!v) {
+                          patchEvent(ev.id, { endDay: undefined });
+                          return;
+                        }
+                        const n = Math.floor(Number(v));
+                        if (Number.isFinite(n) && n >= ev.storyDay) patchEvent(ev.id, { endDay: n });
+                      }}
+                      style={{ width: 72, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}
+                    />
+                  </label>
+                </div>
                 <button className="btn-quiet" style={{ fontSize: 11, alignSelf: 'flex-start' }}
-                  onClick={() => void safeWrite(() => db.calendarEvents.delete(ev.id), setErr)}>
+                  onClick={() => deleteEvent(ev)}>
                   Delete
                 </button>
               </div>
@@ -3550,7 +3676,6 @@ function CalendarSeasonEventsPanel({ world, season }: { world: World; season: Se
           </div>
         );
       })}
-      {err && <ErrorNote error={err} />}
     </div>
   );
 }
@@ -3569,6 +3694,7 @@ function CalendarTrackerPanel({
   const epDay = episode.storyDay && episode.storyDay > 0 ? episode.storyDay : cal.currentDay;
   const loc = episode.location.trim() || 'no location set';
   const [calError, setCalError] = useState('');
+  const [setupOpen, setSetupOpen] = useState(false);
   // Number fields draft locally; commit on blur/Enter (avoids intermediate DB writes).
   const [dayDraft, setDayDraft] = useState(String(today.dayOfMonth));
   const [yearDraft, setYearDraft] = useState(String(today.year));
@@ -3764,49 +3890,6 @@ function CalendarTrackerPanel({
         </label>
 
         <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <Mono style={{ fontSize: 8, opacity: 0.5 }}>weekday of day 1</Mono>
-          <select
-            value={cal.dayOneWeekday}
-            onChange={(e) => setDayOneWeekday(Number(e.target.value))}
-            style={{ ...inputStyle, width: '100%', fontSize: 13, padding: '8px 10px' }}
-          >
-            {cal.weekdays.map((name, i) => (
-              <option key={name + i} value={i}>
-                Day 1 = {name} → today {weekdayForDay({ ...cal, dayOneWeekday: i }, cal.currentDay)}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <div style={{ display: 'grid', gridTemplateColumns: day1Grid, gap: 8 }}>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <Mono style={{ fontSize: 8, opacity: 0.5 }}>month of day 1</Mono>
-            <select
-              value={cal.dayOneMonth}
-              onChange={(e) => patchCal({ dayOneMonth: Number(e.target.value) })}
-              style={{ ...inputStyle, width: '100%' }}
-            >
-              {cal.months.map((name, i) => (
-                <option key={name + i} value={i}>{name}</option>
-              ))}
-            </select>
-          </label>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <Mono style={{ fontSize: 8, opacity: 0.5 }}>date of day 1</Mono>
-            <input
-              type="number"
-              min={1}
-              max={cal.monthLengths[cal.dayOneMonth] ?? 30}
-              value={dayOneDateDraft}
-              onChange={(e) => setDayOneDateDraft(e.target.value)}
-              onBlur={commitDayOneDateDraft}
-              onKeyDown={onNumKeyDown}
-              style={inputStyle}
-            />
-          </label>
-        </div>
-
-        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           <Mono style={{ fontSize: 8, opacity: 0.5 }}>days to advance when episode ends</Mono>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
             {[0, 1, 2, 7, 14].map((n) => (
@@ -3828,81 +3911,137 @@ function CalendarTrackerPanel({
           </div>
         </label>
 
-        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <Mono style={{ fontSize: 8, opacity: 0.5 }}>calendar system (optional notes)</Mono>
-          <textarea
-            key={world.id + '-dir-cal-system'}
-            rows={2}
-            defaultValue={cal.system}
-            onBlur={(e) => patchCal({ system: e.target.value })}
-            placeholder="Feast days, era name — narrator follows this verbatim. Month lengths are fixed (no leap days)."
-            style={{ fontSize: 12.5, lineHeight: 1.45, color: '#eceae6' }}
-          />
-        </label>
-        <div style={{ fontSize: 11.5, opacity: 0.45, lineHeight: 1.4 }}>
-          Story day 1 is the earliest date ({cal.dayOneDate} {cal.months[cal.dayOneMonth]} Y{cal.yearOne}). Dates before that clamp to day 1.
-          Advancing today on an active episode also stamps the episode open day.
-        </div>
-
-        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <Mono style={{ fontSize: 8, opacity: 0.5 }}>months (comma-separated)</Mono>
-          <input
-            key={world.id + '-months'}
-            defaultValue={cal.months.join(', ')}
-            onBlur={(e) => {
-              const months = e.target.value.split(',').map((s) => s.trim()).filter(Boolean);
-              if (months.length === 0) return;
-              const monthLengths = months.map((_, i) => cal.monthLengths[i] ?? 30);
-              patchCal({
-                months,
-                monthLengths,
-                dayOneMonth: Math.min(cal.dayOneMonth, months.length - 1)
-              });
-            }}
-            style={{ fontSize: 12.5, color: '#eceae6' }}
-          />
-        </label>
-
-        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <Mono style={{ fontSize: 8, opacity: 0.5 }}>days per month (comma-separated, same order)</Mono>
-          <input
-            key={world.id + '-month-lengths'}
-            defaultValue={cal.monthLengths.join(', ')}
-            onBlur={(e) => {
-              const monthLengths = e.target.value.split(',').map((s) => Math.max(1, Math.min(90, Number(s.trim()) || 30)));
-              if (monthLengths.length === 0) return;
-              while (monthLengths.length < cal.months.length) monthLengths.push(30);
-              patchCal({ monthLengths: monthLengths.slice(0, cal.months.length) });
-            }}
-            style={{ fontSize: 12.5, color: '#eceae6' }}
-          />
-        </label>
-
-        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <Mono style={{ fontSize: 8, opacity: 0.5 }}>custom weekdays (comma-separated)</Mono>
-          <input
-            key={world.id + '-weekdays'}
-            defaultValue={cal.weekdays.join(', ')}
-            onBlur={(e) => {
-              const weekdays = e.target.value.split(',').map((s) => s.trim()).filter(Boolean);
-              if (weekdays.length === 0) return;
-              patchCal({
-                weekdays,
-                dayOneWeekday: Math.min(cal.dayOneWeekday, weekdays.length - 1)
-              });
-            }}
-            style={{ fontSize: 12.5, color: '#eceae6' }}
-          />
-        </label>
-
         {epDay !== cal.currentDay && (
           <button className="btn-ghost" style={{ fontSize: 11, alignSelf: 'flex-start' }} onClick={stampEpisodeDay}>
             Stamp episode open day → {formatStoryDateShort(cal, cal.currentDay)}
           </button>
         )}
 
-        <CalendarSeasonEventsPanel world={world} season={season} />
+        <button
+          type="button"
+          className="btn-quiet"
+          style={{ fontSize: 11, alignSelf: 'flex-start' }}
+          onClick={() => setSetupOpen((o) => !o)}
+        >
+          {setupOpen ? 'Hide calendar setup' : 'Calendar setup'}
+        </button>
+
+        {setupOpen && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingTop: 4 }}>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <Mono style={{ fontSize: 8, opacity: 0.5 }}>weekday of day 1</Mono>
+              <select
+                value={cal.dayOneWeekday}
+                onChange={(e) => setDayOneWeekday(Number(e.target.value))}
+                style={{ ...inputStyle, width: '100%', fontSize: 13, padding: '8px 10px' }}
+              >
+                {cal.weekdays.map((name, i) => (
+                  <option key={name + i} value={i}>
+                    Day 1 = {name} → today {weekdayForDay({ ...cal, dayOneWeekday: i }, cal.currentDay)}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div style={{ display: 'grid', gridTemplateColumns: day1Grid, gap: 8 }}>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <Mono style={{ fontSize: 8, opacity: 0.5 }}>month of day 1</Mono>
+                <select
+                  value={cal.dayOneMonth}
+                  onChange={(e) => patchCal({ dayOneMonth: Number(e.target.value) })}
+                  style={{ ...inputStyle, width: '100%' }}
+                >
+                  {cal.months.map((name, i) => (
+                    <option key={name + i} value={i}>{name}</option>
+                  ))}
+                </select>
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                <Mono style={{ fontSize: 8, opacity: 0.5 }}>date of day 1</Mono>
+                <input
+                  type="number"
+                  min={1}
+                  max={cal.monthLengths[cal.dayOneMonth] ?? 30}
+                  value={dayOneDateDraft}
+                  onChange={(e) => setDayOneDateDraft(e.target.value)}
+                  onBlur={commitDayOneDateDraft}
+                  onKeyDown={onNumKeyDown}
+                  style={inputStyle}
+                />
+              </label>
+            </div>
+
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <Mono style={{ fontSize: 8, opacity: 0.5 }}>calendar system (optional notes)</Mono>
+              <textarea
+                key={world.id + '-dir-cal-system'}
+                rows={2}
+                defaultValue={cal.system}
+                onBlur={(e) => patchCal({ system: e.target.value })}
+                placeholder="Feast days, era name — narrator follows this verbatim. Month lengths are fixed (no leap days)."
+                style={{ fontSize: 12.5, lineHeight: 1.45, color: '#eceae6' }}
+              />
+            </label>
+            <div style={{ fontSize: 11.5, opacity: 0.45, lineHeight: 1.4 }}>
+              Story day 1 is the earliest date ({cal.dayOneDate} {cal.months[cal.dayOneMonth]} Y{cal.yearOne}). Dates before that clamp to day 1.
+              Advancing today on an active episode also stamps the episode open day.
+            </div>
+
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <Mono style={{ fontSize: 8, opacity: 0.5 }}>months (comma-separated)</Mono>
+              <input
+                key={world.id + '-months'}
+                defaultValue={cal.months.join(', ')}
+                onBlur={(e) => {
+                  const months = e.target.value.split(',').map((s) => s.trim()).filter(Boolean);
+                  if (months.length === 0) return;
+                  const monthLengths = months.map((_, i) => cal.monthLengths[i] ?? 30);
+                  patchCal({
+                    months,
+                    monthLengths,
+                    dayOneMonth: Math.min(cal.dayOneMonth, months.length - 1)
+                  });
+                }}
+                style={{ fontSize: 12.5, color: '#eceae6' }}
+              />
+            </label>
+
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <Mono style={{ fontSize: 8, opacity: 0.5 }}>days per month (comma-separated, same order)</Mono>
+              <input
+                key={world.id + '-month-lengths'}
+                defaultValue={cal.monthLengths.join(', ')}
+                onBlur={(e) => {
+                  const monthLengths = e.target.value.split(',').map((s) => Math.max(1, Math.min(90, Number(s.trim()) || 30)));
+                  if (monthLengths.length === 0) return;
+                  while (monthLengths.length < cal.months.length) monthLengths.push(30);
+                  patchCal({ monthLengths: monthLengths.slice(0, cal.months.length) });
+                }}
+                style={{ fontSize: 12.5, color: '#eceae6' }}
+              />
+            </label>
+
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <Mono style={{ fontSize: 8, opacity: 0.5 }}>custom weekdays (comma-separated)</Mono>
+              <input
+                key={world.id + '-weekdays'}
+                defaultValue={cal.weekdays.join(', ')}
+                onBlur={(e) => {
+                  const weekdays = e.target.value.split(',').map((s) => s.trim()).filter(Boolean);
+                  if (weekdays.length === 0) return;
+                  patchCal({
+                    weekdays,
+                    dayOneWeekday: Math.min(cal.dayOneWeekday, weekdays.length - 1)
+                  });
+                }}
+                style={{ fontSize: 12.5, color: '#eceae6' }}
+              />
+            </label>
+          </div>
+        )}
       </div>
+
+      <CalendarSeasonEventsPanel world={world} season={season} />
     </div>
   );
 }
@@ -4207,23 +4346,16 @@ function WrapReviewBody({
             Keep to mark these dated events as played (and file a continuity note). Drop to leave them due.
           </div>
           {draft.hitCalendarEvents.map((row, i) => (
-            <div key={i} style={{
+            <div key={row.id || i} style={{
               display: 'flex', flexDirection: 'column', gap: 10,
               border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '12px 14px',
               background: 'rgba(255,255,255,0.04)',
               opacity: row.keep ? 1 : 0.42
             }}>
-              <textarea
-                rows={2}
-                value={row.text}
-                onChange={(e) => {
-                  const hitCalendarEvents = draft.hitCalendarEvents.map((r, j) =>
-                    j === i ? { ...r, text: e.target.value } : r
-                  );
-                  onChange({ ...draft, hitCalendarEvents });
-                }}
-                style={{ fontSize: 13.5, lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, color: '#eceae6' }}
-              />
+              <div style={{ fontSize: 14, fontWeight: 600, color: '#eceae6' }}>{row.title}</div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.45 }}>
+                {[row.kind, row.storyDay != null ? `day ${row.storyDay}` : null].filter(Boolean).join(' · ')}
+              </div>
               <KeepDropChips
                 keep={row.keep}
                 onKeep={() => {

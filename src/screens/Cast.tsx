@@ -472,7 +472,7 @@ export function Cast() {
                   ))}
                 </div>
                 <div style={{ fontSize: 12, lineHeight: 1.5, color: 'rgba(236,234,230,0.5)' }}>
-                  Live state evolves with wraps and the story. Voice, anchors, and psyche stay who they are.
+                  Live state updates lightly mid-episode and fully at wrap. Voice, anchors, and psyche stay who they are.
                 </div>
               </div>
             </div>

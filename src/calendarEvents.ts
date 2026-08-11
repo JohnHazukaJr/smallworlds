@@ -20,7 +20,7 @@ export function eventWindow(ev: Pick<CalendarEvent, 'storyDay' | 'endDay'>): { s
   return { start, end };
 }
 
-/** True if [start, end] overlaps (fromDay, toDay] — half-open on the left like the plan. */
+/** True if [start, end] overlaps (fromDay, toDay] — half-open on the left (day advance). */
 export function windowIntersectsAdvance(
   start: number,
   end: number,
@@ -30,6 +30,18 @@ export function windowIntersectsAdvance(
   if (toDay <= fromDay) return false;
   // Overlap of [start, end] with (fromDay, toDay]
   return start <= toDay && end > fromDay;
+}
+
+/** True if [start, end] overlaps inclusive [fromDay, toDay] (episode wrap window). */
+export function windowIntersectsInclusive(
+  start: number,
+  end: number,
+  fromDay: number,
+  toDay: number
+): boolean {
+  const a = Math.min(fromDay, toDay);
+  const b = Math.max(fromDay, toDay);
+  return start <= b && end >= a;
 }
 
 /** True if absolute day falls inside the event window (inclusive). */
@@ -52,23 +64,44 @@ export function eventOverlapsRange(
 export type EvaluateCalendarMode = 'advance' | 'wrap';
 
 /**
- * Mark scheduled → due when the day advance enters their window.
- * On wrap only: due events whose end is past toDay by >1 day → missed.
+ * Mark scheduled → due when the day advance / wrap window hits them.
+ * On wrap: overdue scheduled past grace → missed; due past grace → missed.
+ * `excludeIds` are skipped (e.g. just marked played).
  */
 export function planCalendarEventStatusUpdates(
   events: CalendarEvent[],
   fromDay: number,
   toDay: number,
-  mode: EvaluateCalendarMode
+  mode: EvaluateCalendarMode,
+  opts?: { excludeIds?: Set<string> }
 ): Array<{ id: string; status: CalendarEventStatus }> {
+  const exclude = opts?.excludeIds ?? new Set<string>();
   const updates: Array<{ id: string; status: CalendarEventStatus }> = [];
   for (const ev of events) {
+    if (exclude.has(ev.id)) continue;
     if (ev.status === 'cancelled' || ev.status === 'played' || ev.status === 'missed') continue;
     const { start, end } = eventWindow(ev);
-    if (ev.status === 'scheduled' && windowIntersectsAdvance(start, end, fromDay, toDay)) {
-      updates.push({ id: ev.id, status: 'due' });
+
+    if (ev.status === 'scheduled') {
+      const enters = mode === 'wrap'
+        ? windowIntersectsInclusive(start, end, fromDay, toDay)
+        : windowIntersectsAdvance(start, end, fromDay, toDay);
+      if (enters) {
+        // Wrap: if already past grace, close as missed instead of sticky due.
+        if (mode === 'wrap' && toDay > end + 1) {
+          updates.push({ id: ev.id, status: 'missed' });
+        } else {
+          updates.push({ id: ev.id, status: 'due' });
+        }
+        continue;
+      }
+      // Scheduled that never entered the window but is overdue on wrap → missed.
+      if (mode === 'wrap' && toDay > end + 1) {
+        updates.push({ id: ev.id, status: 'missed' });
+      }
       continue;
     }
+
     if (mode === 'wrap' && ev.status === 'due' && toDay > end + 1) {
       updates.push({ id: ev.id, status: 'missed' });
     }
@@ -83,11 +116,14 @@ export async function evaluateCalendarEvents(opts: {
   toDay: number;
   mode: EvaluateCalendarMode;
   world?: Pick<World, 'calendarEventPrefs'> | null;
+  excludeIds?: Set<string>;
 }): Promise<number> {
   const prefs = worldCalendarEventPrefs(opts.world ?? await db.worlds.get(opts.worldId));
   if (!prefs.enabled) return 0;
   const events = await db.calendarEvents.where('seasonId').equals(opts.seasonId).toArray();
-  const updates = planCalendarEventStatusUpdates(events, opts.fromDay, opts.toDay, opts.mode);
+  const updates = planCalendarEventStatusUpdates(events, opts.fromDay, opts.toDay, opts.mode, {
+    excludeIds: opts.excludeIds
+  });
   if (updates.length === 0) return 0;
   const now = Date.now();
   await guardStorage(async () => {
@@ -101,10 +137,20 @@ export async function evaluateCalendarEvents(opts: {
 export function emptyCalendarEvent(
   worldId: string,
   seasonId: string,
-  patch: Partial<CalendarEvent> = {}
+  patch: Partial<CalendarEvent> = {},
+  opts?: { currentDay?: number }
 ): CalendarEvent {
   const now = Date.now();
   const kind: CalendarEventKind = patch.kind ?? 'custom';
+  const rawDay = Number(patch.storyDay);
+  const storyDay = Number.isFinite(rawDay) && rawDay >= 1 ? Math.floor(rawDay) : 1;
+  const rawEnd = patch.endDay != null ? Number(patch.endDay) : NaN;
+  const endDay = Number.isFinite(rawEnd) && rawEnd >= storyDay ? Math.floor(rawEnd) : undefined;
+  const currentDay = opts?.currentDay != null && Number.isFinite(opts.currentDay)
+    ? Math.max(1, Math.floor(opts.currentDay))
+    : undefined;
+  const status = patch.status
+    ?? (currentDay != null && storyDay <= currentDay ? 'due' : 'scheduled');
   return {
     id: patch.id ?? uid(),
     worldId,
@@ -113,11 +159,11 @@ export function emptyCalendarEvent(
     summary: patch.summary ?? '',
     kind,
     scale: patch.scale ?? 'small',
-    storyDay: Math.max(1, Math.floor(patch.storyDay ?? 1)),
-    endDay: patch.endDay,
+    storyDay,
+    endDay,
     visibility: patch.visibility ?? defaultVisibilityForKind(kind),
     promptPolicy: patch.promptPolicy ?? 'soft',
-    status: patch.status ?? 'scheduled',
+    status,
     characterIds: patch.characterIds,
     source: patch.source ?? 'manual',
     pinned: patch.pinned,
