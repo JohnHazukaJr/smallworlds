@@ -235,6 +235,8 @@ select { appearance: none; cursor: pointer; }
 @media (hover: none) {
   .turn-tools { opacity: 0.9; }
 }
+/* Read mode: stay inside the story — no edit chrome */
+.read-mode .turn-tools { opacity: 0 !important; pointer-events: none; }
 @media (max-width: 780px) {
   .mono { font-size: 11px !important; letter-spacing: 0.06em; }
 }

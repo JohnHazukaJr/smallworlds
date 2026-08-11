@@ -1,6 +1,8 @@
 import type {
-  Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, Location, OpenThread, Season, Turn, TurnLength, World
+  CalendarEvent, Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, Location, OpenThread, Season, Turn, TurnLength, World
 } from '../types';
+import { isPlayerAgencyMode, worldCalendarEventPrefs } from '../types';
+import { selectCalendarEventsForPrompt } from '../calendarEvents';
 import { formatEpisodeDateRange, formatStoryDate, PLOT_TARGET_CAP, worldCalendar } from '../worldOps';
 import type { ChatMessage } from './client';
 import { parseDeliveryTone } from './deliveryTone';
@@ -179,6 +181,8 @@ export interface PromptContext {
   continuity: ContinuityFact[];
   threads: OpenThread[];
   turns: Turn[];
+  /** Season calendar events (scheduled/due/played/…). */
+  calendarEvents?: CalendarEvent[];
   /** Immediately prior wrapped episode in this season (newest of priorEpisodes). */
   priorEpisode?: Episode | null;
   /** Up to 3 most recent wrapped episodes before the current one (oldest → newest). */
@@ -347,21 +351,54 @@ function threadBucket(t: OpenThread): string {
   return episodeNumFromOpenedLabel(t.openedLabel) || t.seasonId || 'legacy';
 }
 
+/** Pinned facts fill the cap first, then bucket-balanced rest. Used by director and all agents. */
+export function selectFactsPinnedFirst(
+  continuity: ContinuityFact[],
+  preferBuckets: string[] = [],
+  cap: number
+): ContinuityFact[] {
+  const pinned = continuity
+    .filter((f) => f.pinned)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, cap);
+  const pinnedIds = new Set(pinned.map((f) => f.id));
+  const restCap = Math.max(0, cap - pinned.length);
+  const rest = restCap > 0
+    ? pickAcrossBuckets(
+      continuity.filter((f) => !pinnedIds.has(f.id)),
+      factBucket,
+      restCap,
+      preferBuckets
+    )
+    : [];
+  return [...pinned, ...rest].sort((a, b) => b.createdAt - a.createdAt);
+}
+
 /** Same fact selection the director prompt uses. Pinned facts fill the cap first. */
 export function selectDirectorFacts(
   continuity: ContinuityFact[],
   preferBuckets: string[] = []
 ): ContinuityFact[] {
-  const pinned = continuity
-    .filter((f) => f.pinned)
+  return selectFactsPinnedFirst(continuity, preferBuckets, DIRECTOR_FACT_CAP);
+}
+
+/** Pinned open threads fill the cap first. */
+export function selectThreadsPinnedFirst(
+  threads: OpenThread[],
+  preferBuckets: string[] = [],
+  cap: number
+): OpenThread[] {
+  const open = threads.filter((t) => t.status === 'open');
+  const pinned = open
+    .filter((t) => t.pinned)
     .sort((a, b) => b.createdAt - a.createdAt)
-    .slice(0, DIRECTOR_FACT_CAP);
-  const pinnedIds = new Set(pinned.map((f) => f.id));
-  const restCap = Math.max(0, DIRECTOR_FACT_CAP - pinned.length);
+    .slice(0, cap);
+  const pinnedIds = new Set(pinned.map((t) => t.id));
+  const restCap = Math.max(0, cap - pinned.length);
   const rest = restCap > 0
     ? pickAcrossBuckets(
-      continuity.filter((f) => !pinnedIds.has(f.id)),
-      factBucket,
+      open.filter((t) => !pinnedIds.has(t.id)),
+      threadBucket,
       restCap,
       preferBuckets
     )
@@ -374,22 +411,7 @@ export function selectDirectorThreads(
   threads: OpenThread[],
   preferBuckets: string[] = []
 ): OpenThread[] {
-  const open = threads.filter((t) => t.status === 'open');
-  const pinned = open
-    .filter((t) => t.pinned)
-    .sort((a, b) => b.createdAt - a.createdAt)
-    .slice(0, DIRECTOR_THREAD_CAP);
-  const pinnedIds = new Set(pinned.map((t) => t.id));
-  const restCap = Math.max(0, DIRECTOR_THREAD_CAP - pinned.length);
-  const rest = restCap > 0
-    ? pickAcrossBuckets(
-      open.filter((t) => !pinnedIds.has(t.id)),
-      threadBucket,
-      restCap,
-      preferBuckets
-    )
-    : [];
-  return [...pinned, ...rest].sort((a, b) => b.createdAt - a.createdAt);
+  return selectThreadsPinnedFirst(threads, preferBuckets, DIRECTOR_THREAD_CAP);
 }
 
 /** Absolute day that counts as "now" in the active episode scene. */
@@ -463,7 +485,7 @@ function cappedThreadLines(
   preferBuckets: string[] = [],
   cap = THREAD_CAP
 ): string[] {
-  return pickAcrossBuckets(threads, threadBucket, cap, preferBuckets)
+  return selectThreadsPinnedFirst(threads, preferBuckets, cap)
     .map((t) => `- ${t.text} (${t.openedLabel})`);
 }
 
@@ -472,7 +494,7 @@ function cappedContinuityLines(
   preferBuckets: string[] = [],
   cap = CONTINUITY_FACT_CAP
 ): string[] {
-  return pickAcrossBuckets(continuity, factBucket, cap, preferBuckets)
+  return selectFactsPinnedFirst(continuity, preferBuckets, cap)
     .map((f) => `- ${f.text}`);
 }
 
@@ -673,6 +695,58 @@ function plotTargetsSection(episode: Episode, season: Season): string | null {
   return parts.join('\n');
 }
 
+function formatCalendarEventLine(ev: CalendarEvent, opts: { includeSummary: boolean }): string {
+  const scaleNote = ev.scale !== 'small' ? ` · ${ev.scale}` : '';
+  const policyNote = ev.promptPolicy === 'hard' ? ' · address while due' : '';
+  const head = `- [${ev.kind}${scaleNote}${policyNote}] ${ev.title.trim() || '(untitled)'}`;
+  if (!opts.includeSummary || !ev.summary.trim()) return head;
+  return `${head} — ${clipText(ev.summary.trim(), 180)}`;
+}
+
+/** Due / upcoming calendar texture for narrator (full) or director (compact). */
+function calendarEventsSection(
+  ctx: PromptContext,
+  mode: 'full' | 'compact'
+): string | null {
+  if (!worldCalendarEventPrefs(ctx.world).enabled) return null;
+  const events = ctx.calendarEvents ?? [];
+  if (events.length === 0) return null;
+  const cal = worldCalendar(ctx.world);
+  const scene = episodeSceneDay(ctx.episode, cal);
+  const { due, upcoming } = selectCalendarEventsForPrompt(events, { sceneDay: scene });
+  if (due.length === 0 && upcoming.length === 0) return null;
+
+  if (mode === 'compact') {
+    const lines: string[] = [];
+    if (due.length > 0) {
+      lines.push(
+        'Calendar due now (texture / pressure — hard+large should land; soft+small only if natural):'
+      );
+      for (const ev of due) lines.push(formatCalendarEventLine(ev, { includeSummary: true }));
+    }
+    if (upcoming.length > 0) {
+      lines.push('Calendar upcoming (~7 days):');
+      for (const ev of upcoming) lines.push(formatCalendarEventLine(ev, { includeSummary: false }));
+    }
+    return lines.join('\n') + '\n';
+  }
+
+  const parts: string[] = [
+    '## Calendar events — dated season texture (not plot targets)',
+    'Due events may color the scene; hard + large should be felt. Soft + small = ambient only — do not force every item.'
+  ];
+  if (due.length > 0) {
+    parts.push(`Due now:\n${due.map((ev) => formatCalendarEventLine(ev, { includeSummary: true })).join('\n')}`);
+  }
+  if (upcoming.length > 0) {
+    parts.push(
+      `Upcoming (next week of story days — foreshadow lightly if at all):\n` +
+      upcoming.map((ev) => formatCalendarEventLine(ev, { includeSummary: false })).join('\n')
+    );
+  }
+  return parts.join('\n');
+}
+
 function resolveCurrentLocations(episode: Episode, locations: Location[]): Location[] {
   if (locations.length === 0) return [];
   const byId = episode.locationId
@@ -709,6 +783,8 @@ function worldFrameSections(ctx: PromptContext): string[] {
   if (running) sections.push(running);
 
   sections.push(calendarBlock(world, episode, 'full'));
+  const calEvents = calendarEventsSection(ctx, 'full');
+  if (calEvents) sections.push(calEvents);
   sections.push(episodeHeader(episode));
 
   const guests = activeGuests(episode);
@@ -958,6 +1034,14 @@ export const MODE_PREFIX: Record<ComposeMode, (input: string) => string> = {
     const { tone, body } = parseDeliveryTone(input);
     const delivery = tone ? `, with a ${tone} manner` : '';
     return `(The player does the following${delivery}, without speaking — do not invent dialogue for them): ${body}`;
+  },
+  play: (input) => {
+    const { tone, body } = parseDeliveryTone(input);
+    const delivery = tone ? ` with a ${tone} manner` : '';
+    return (
+      `(The player both acts and speaks${delivery}. ` +
+      `Honor *actions* and "dialogue" exactly as written — do not invent extra spoken lines or strip the gestures): ${body}`
+    );
   }
 };
 
@@ -1206,7 +1290,7 @@ export function directorSystemPrompt(
   const { maxSpeak, maxTotal } = planCapsForLength(length);
   const sizeLabel = length === 'beat' ? 'Short' : length === 'scene' ? 'Medium' : 'Long';
   const engageReply =
-    hasSpeakers && (mode === 'speak' || mode === 'act')
+    hasSpeakers && isPlayerAgencyMode(mode)
       ? 'CRITICAL: The player just spoke or acted with at least one NPC/walk-on present. ' +
         'You MUST include at least one speak beat that responds directly to that move. ' +
         'Narration-only plans are forbidden in this case. '
@@ -1262,7 +1346,18 @@ export function directorUserPrompt(
   const offScene = ctx.characters.filter((c) => !ctx.episode.castIds.includes(c.id) && !c.isPlayer);
   const guests = activeGuests(ctx.episode);
   const castList = inScene.length > 0
-    ? inScene.map((c) => `- ${c.id} · ${c.name}${c.role ? ` (${c.role})` : ''}`).join('\n')
+    ? inScene.map((c) => {
+      const emotion = c.state?.emotion?.trim();
+      const goal = c.state?.goal?.trim();
+      const anchor = (c.anchors ?? []).map((a) => a.trim()).filter(Boolean)[0];
+      const bits = [
+        emotion ? `feeling ${clipText(emotion, 40)}` : '',
+        goal ? `wants ${clipText(goal, 48)}` : '',
+        anchor ? `anchor: ${clipText(anchor, 56)}` : ''
+      ].filter(Boolean);
+      const detail = bits.length ? ` — ${bits.join('; ')}` : '';
+      return `- ${c.id} · ${c.name}${c.role ? ` (${c.role})` : ''}${detail}`;
+    }).join('\n')
     : '(no NPCs in scene yet)';
   const offList = offScene.length > 0
     ? offScene.map((c) => `- ${c.id} · ${c.name}${c.role ? ` (${c.role})` : ''}`).join('\n')
@@ -1339,6 +1434,7 @@ export function directorUserPrompt(
         'Plot targets (work toward when natural; do not force all at once):\n'
       ) + '\n'
     : '';
+  const calEventsCompact = calendarEventsSection(ctx, 'compact') ?? '';
   const locBlocks = currentLocationBlock(ctx, { clipChars: 1200 });
   const locLine = locBlocks.length > 0
     ? locBlocks[0].replace(/^## /, '') + '\n'
@@ -1349,6 +1445,7 @@ export function directorUserPrompt(
     `${calendarBlock(ctx.world, ctx.episode, 'directorLine')}\n` +
     `Premise (current pressure): ${ctx.season.premise || '(unwritten)'}\n` +
     targetsCompact +
+    calEventsCompact +
     (seasonBibleClip ? `${seasonBibleClip}\n` : '') +
     (priorMemory ? `\nRecent episode memory:\n${priorMemory}\n` : '') +
     (runningLine ? `${runningLine}\n` : '') +

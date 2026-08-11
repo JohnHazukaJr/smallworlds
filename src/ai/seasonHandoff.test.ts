@@ -3,7 +3,8 @@ import {
   applySeasonRelationshipUpdates,
   clearMustNotKnowClauses,
   mergeSeasonOpenState,
-  mergeSeasonSheetPatch
+  mergeSeasonSheetPatch,
+  seasonOpenPlaceFromLastEpisode
 } from './engine';
 import { buildNextSeasonPlotTargets } from '../worldOps';
 import type { Character, CharacterState, WrapCharacterOutcome } from '../types';
@@ -170,5 +171,32 @@ describe('buildNextSeasonPlotTargets', () => {
     });
     expect(targets).toHaveLength(1);
     expect(targets[0].text.toLowerCase()).toContain('confront mira');
+  });
+});
+
+describe('seasonOpenPlaceFromLastEpisode', () => {
+  const places = new Map([
+    ['loc1', { id: 'loc1', name: 'Long room' }]
+  ]);
+
+  it('carries locationId when the place still exists', () => {
+    expect(seasonOpenPlaceFromLastEpisode(
+      { location: 'Long room', locationId: 'loc1' },
+      (id) => places.get(id)
+    )).toEqual({ location: 'Long room', locationId: 'loc1' });
+  });
+
+  it('falls back to free-text location when id is gone', () => {
+    expect(seasonOpenPlaceFromLastEpisode(
+      { location: 'The quay', locationId: 'missing' },
+      (id) => places.get(id)
+    )).toEqual({ location: 'The quay', locationId: null });
+  });
+
+  it('returns empty when prior episode had no place', () => {
+    expect(seasonOpenPlaceFromLastEpisode(
+      { location: '', locationId: null },
+      (id) => places.get(id)
+    )).toEqual({ location: '', locationId: null });
   });
 });

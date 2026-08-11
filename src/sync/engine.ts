@@ -13,7 +13,7 @@ import { formatUserError } from '../errors';
 import { decryptString, deriveKey, encryptString, randomSalt } from '../security/crypto';
 import { useSettings } from '../store/settings';
 import type {
-  Character, ContinuityFact, Episode, Location, OpenThread, Season, SeasonWrap, Turn, World
+  CalendarEvent, Character, ContinuityFact, Episode, Location, OpenThread, Season, SeasonWrap, Turn, World
 } from '../types';
 
 const SYNC_META_KEY = 'small-worlds-sync-meta';
@@ -185,11 +185,12 @@ export async function syncNow(): Promise<{ pulled: number; pushed: number }> {
     pulled += await pullTable<ContinuityFact>('continuity', userId, since, (p, d, m) => lwwPut(db.continuity, p, d, m));
     pulled += await pullTable<OpenThread>('threads', userId, since, (p, d, m) => lwwPut(db.threads, p, d, m));
     pulled += await pullTable<SeasonWrap>('wraps', userId, since, (p, d, m) => lwwPut(db.wraps, p, d, m));
+    pulled += await pullTable<CalendarEvent>('calendarEvents', userId, since, (p, d, m) => lwwPut(db.calendarEvents, p, d, m));
 
     const tombPushed = await pushTombstones(userId);
 
     // Push full local snapshot (LWW on server via upsert; remote older rows lose on next pull).
-    const [worlds, seasons, episodes, turns, characters, locations, continuity, threads, wraps] = await Promise.all([
+    const [worlds, seasons, episodes, turns, characters, locations, continuity, threads, wraps, calendarEvents] = await Promise.all([
       db.worlds.toArray(),
       db.seasons.toArray(),
       db.episodes.toArray(),
@@ -198,7 +199,8 @@ export async function syncNow(): Promise<{ pulled: number; pushed: number }> {
       db.locations.toArray(),
       db.continuity.toArray(),
       db.threads.toArray(),
-      db.wraps.toArray()
+      db.wraps.toArray(),
+      db.calendarEvents.toArray()
     ]);
 
     await pushRows('worlds', userId, worlds.map((w) => ({
@@ -228,11 +230,15 @@ export async function syncNow(): Promise<{ pulled: number; pushed: number }> {
     await pushRows('wraps', userId, wraps.map((w) => ({
       id: w.id, world_id: w.worldId, season_id: w.seasonId, payload: w, updated_at: isoFromEntity(w), deleted_at: null
     })));
+    await pushRows('calendarEvents', userId, calendarEvents.map((e) => ({
+      id: e.id, world_id: e.worldId, season_id: e.seasonId, payload: e, updated_at: isoFromEntity(e), deleted_at: null
+    })));
 
     const pushed =
       tombPushed +
       worlds.length + seasons.length + episodes.length + turns.length +
-      characters.length + locations.length + continuity.length + threads.length + wraps.length;
+      characters.length + locations.length + continuity.length + threads.length + wraps.length +
+      calendarEvents.length;
 
     const now = Date.now();
     useSyncMeta.setState({

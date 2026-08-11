@@ -3,8 +3,8 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties, type Keyboard
 import {
   analyzeEpisode, commitEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, draftColdOpenNarration, proseModelFor,
   clearEpisodeRunningSummary, regenerateBeat, rollbackTurnSnapshot,
-  snapshotTurnsAfter, snapshotTurnsFrom, writeTurn,
-  WriteAbortedError, type EpisodeWrapDraft, type StreamMeta
+  snapshotTurnsAfter, snapshotTurnsFrom, writeTurn, seedSeasonCalendarEvents,
+  WriteAbortedError, type EpisodeWrapDraft, type StreamMeta, type SeedCalendarEventDraft
 } from '../ai/engine';
 import {
   DELIVERY_TONES,
@@ -27,13 +27,21 @@ import {
 } from '../ai/prompts';
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
 import { db, guardStorage, recordTombstones, safeWrite, uid } from '../db';
+import {
+  CALENDAR_EVENT_KINDS, CALENDAR_EVENT_SCALES, CALENDAR_EVENT_VISIBILITIES,
+  emptyCalendarEvent, evaluateCalendarEvents
+} from '../calendarEvents';
 import { AVATAR_PX, DEFAULT_DISPLAY, moodFromHue, useApp, type AvatarSize, type StoryLayout } from '../store/app';
 import { useSettings } from '../store/settings';
 import type {
+  CalendarEvent, CalendarEventKind, CalendarEventScale, CalendarEventVisibility,
   Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, EpisodeWrap, EpisodeWrapBeat,
   Location, OpenThread, PlotTarget, PlotTargetStatus, Season, Turn, TurnLength, World
 } from '../types';
-import { TURN_LENGTH_LABELS } from '../types';
+import {
+  defaultVisibilityForKind, isPlayerAgencyMode, resolveComposeMode, TURN_LENGTH_LABELS,
+  worldCalendarEventPrefs
+} from '../types';
 import { AppError, classifyError, formatUserError } from '../errors';
 import { Chip, ErrorNote, Mono, Sheet, Spinner, Toggle, useVw } from '../ui/bits';
 import { fileToSceneImage } from '../ui/image';
@@ -53,6 +61,7 @@ interface WrapReviewDraft {
   guestEffects: Array<{ text: string; keep: boolean }>;
   resolvedThreads: Array<{ text: string; keep: boolean }>;
   hitTargets: Array<{ text: string; keep: boolean }>;
+  hitCalendarEvents: Array<{ text: string; keep: boolean }>;
   characterUpdates: Array<{
     name: string;
     goal: string;
@@ -91,6 +100,7 @@ function draftFromAnalysis(d: EpisodeWrapDraft): WrapReviewDraft {
     guestEffects: d.guestEffects.map((text) => ({ text, keep: true })),
     resolvedThreads: d.resolvedThreads.map((text) => ({ text, keep: true })),
     hitTargets: (d.hitTargets ?? []).map((text) => ({ text, keep: true })),
+    hitCalendarEvents: (d.hitCalendarEvents ?? []).map((text) => ({ text, keep: true })),
     characterUpdates: d.characterUpdates.map((u) => ({
       name: u.name,
       goal: u.goal ?? '',
@@ -156,7 +166,7 @@ function guestHue(guestId: string): number {
 function parseTurn(turn: Turn, characters: Character[], guests: EpisodeGuest[] = []): ProseBlock[] {
   if (turn.role === 'user') {
     const player = characters.find((c) => c.isPlayer);
-    if (turn.mode === 'speak') {
+    if (turn.mode === 'speak' || turn.mode === 'play') {
       const { tone, body } = parseDeliveryTone(turn.text);
       return [{
         text: body,
@@ -417,8 +427,12 @@ export function Story() {
     [season?.id]
   ) ?? [];
 
-  // writing state
-  const [composeMode, setComposeMode] = useState<ComposeMode>('continue');
+  // writing state — Continue/Steer exclusive; Speak/Act independent toggles → speak|act|play
+  const [composeBase, setComposeBase] = useState<'continue' | 'steer'>('continue');
+  const [speakOn, setSpeakOn] = useState(false);
+  const [actOn, setActOn] = useState(false);
+  const composeMode = resolveComposeMode(composeBase, speakOn, actOn);
+  const agencyOn = isPlayerAgencyMode(composeMode);
   const [deliveryTone, setDeliveryTone] = useState<DeliveryTone | null>(() => {
     try {
       const last = localStorage.getItem('sw-last-delivery-tone');
@@ -625,11 +639,11 @@ export function Story() {
         world, season, episode, mode, input: text, length: lengthOverride ?? length,
         resumeBeats,
         preferCharacterId:
-          (mode === 'speak' || mode === 'act') && preferSpeaker?.kind === 'cast'
+          isPlayerAgencyMode(mode) && preferSpeaker?.kind === 'cast'
             ? preferSpeaker.id
             : undefined,
         preferGuestId:
-          (mode === 'speak' || mode === 'act') && preferSpeaker?.kind === 'guest'
+          isPlayerAgencyMode(mode) && preferSpeaker?.kind === 'guest'
             ? preferSpeaker.id
             : undefined,
         signal: controller.signal,
@@ -679,11 +693,11 @@ export function Story() {
     const activeGuests = episode.activeGuestIds == null
       ? epGuests
       : epGuests.filter((g) => episode.activeGuestIds!.includes(g.id));
-    if ((composeMode === 'speak' || composeMode === 'act') && sceneNpcs.length === 0 && activeGuests.length === 0) {
+    if (agencyOn && sceneNpcs.length === 0 && activeGuests.length === 0) {
       setNotice('Add a cast member or walk-on in Direct before Speak or Act.');
       return;
     }
-    const tagged = (composeMode === 'speak' || composeMode === 'act')
+    const tagged = agencyOn
       ? applyDeliveryTone(input, deliveryTone)
       : input;
     const text = tagged;
@@ -751,11 +765,51 @@ export function Story() {
     }
   };
 
-  const setComposeModeSafe = (m: ComposeMode) => {
-    setComposeMode(m);
-    if (m !== 'speak' && m !== 'act') {
+  const pickBaseMode = (m: 'continue' | 'steer') => {
+    setComposeBase(m);
+    setSpeakOn(false);
+    setActOn(false);
+    setDeliveryTone(null);
+    setPreferSpeaker(null);
+  };
+
+  const toggleSpeak = () => {
+    const next = !speakOn;
+    setSpeakOn(next);
+    if (!next && !actOn) {
       setDeliveryTone(null);
       setPreferSpeaker(null);
+    }
+  };
+
+  const toggleAct = () => {
+    const next = !actOn;
+    setActOn(next);
+    if (!next && !speakOn) {
+      setDeliveryTone(null);
+      setPreferSpeaker(null);
+    }
+  };
+
+  /** Steer from Director nudge — exclusive base mode. */
+  const setComposeModeSafe = (m: ComposeMode) => {
+    if (m === 'steer' || m === 'continue') {
+      pickBaseMode(m);
+      return;
+    }
+    if (m === 'speak') {
+      setSpeakOn(true);
+      setActOn(false);
+      return;
+    }
+    if (m === 'act') {
+      setActOn(true);
+      setSpeakOn(false);
+      return;
+    }
+    if (m === 'play') {
+      setSpeakOn(true);
+      setActOn(true);
     }
   };
 
@@ -905,6 +959,7 @@ export function Story() {
           .filter((b) => b.keep && b.aim && b.text.trim())
           .map((b) => `${b.text.trim()}${b.consequence.trim() ? ` → ${b.consequence.trim()}` : ''}`),
         hitTargets: wrapDraft.hitTargets.filter((t) => t.keep).map((t) => t.text),
+        hitCalendarEvents: wrapDraft.hitCalendarEvents.filter((t) => t.keep).map((t) => t.text),
         facts: wrapDraft.facts.filter((f) => f.keep).map((f) => f.text),
         threads: wrapDraft.threads.filter((t) => t.keep).map((t) => t.text),
         guestEffects: wrapDraft.guestEffects.filter((g) => g.keep).map((g) => g.text),
@@ -974,9 +1029,16 @@ export function Story() {
     continue: 'Press write on — the narrator takes the next beat from here.',
     steer: 'Tell the narrator what should happen, in your words. Everyone stays in character while it happens.',
     speak: '*smiles* "Hello." — looks and gestures in *stars*, spoken words in quotes.',
-    act: 'You do something. No dialogue, no narration from you.'
+    act: 'You do something. No dialogue, no narration from you.',
+    play: '*opens the door* "Anyone home?" — gesture in *stars*, words in quotes.'
   };
-  const modeHint: Record<ComposeMode, string> = { continue: 'continue', steer: 'you direct', speak: 'you say', act: 'you do' };
+  const modeHint: Record<ComposeMode, string> = {
+    continue: 'continue',
+    steer: 'you direct',
+    speak: 'you say',
+    act: 'you do',
+    play: 'you say & do'
+  };
 
   const directorContent = (
     <DirectorContent
@@ -991,9 +1053,17 @@ export function Story() {
   const shellHeight = '100%';
   const locLabel = (activeLocation?.name || episode.location || '')
     .split(',')[0].split('.')[0].toLowerCase();
+  const climateLine = (episode.atmosphereNote || activeLocation?.atmosphere || '')
+    .split(/[.\n]/)[0].trim();
+  const stageCast = inScene;
+  const stageGuests = episode.activeGuestIds == null
+    ? guests
+    : guests.filter((g) => episode.activeGuestIds!.includes(g.id));
 
   return (
-    <div style={{
+    <div
+      className={readMode ? 'read-mode' : undefined}
+      style={{
       position: 'relative',
       flex: 1,
       minHeight: 0,
@@ -1040,6 +1110,15 @@ export function Story() {
           }} />
         </>
       )}
+      {/* Mood climate wash — paints the room, not just the text */}
+      <div
+        key={`tint-${mood}`}
+        style={{
+          position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none',
+          background: M.tint,
+          transition: 'background 0.45s ease'
+        }}
+      />
 
       {/* header — thin strip in Read mode */}
       {readMode ? (
@@ -1053,13 +1132,20 @@ export function Story() {
           borderBottom: '1px solid rgba(255,255,255,0.06)',
           background: 'rgba(12,14,16,0.45)', backdropFilter: 'blur(14px) saturate(110%)'
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
             <div style={{
               width: 3, height: 18, borderRadius: 1, flexShrink: 0,
               background: M.accent, opacity: 0.9
             }} />
-            <div className="label" style={{ fontSize: 12, color: 'rgba(230,233,235,0.72)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {world.title} · ep {episode.number}{locLabel ? ` · ${locLabel}` : ''}
+            <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
+              <div className="label" style={{ fontSize: 12, color: 'rgba(230,233,235,0.72)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {world.title} · ep {episode.number}{locLabel ? ` · ${locLabel}` : ''}
+              </div>
+              {(climateLine) && (
+                <div style={{ fontSize: 11, color: 'rgba(230,233,235,0.45)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {climateLine}
+                </div>
+              )}
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
@@ -1105,6 +1191,11 @@ export function Story() {
               <div className="label" style={{ fontSize: 11 }}>
                 Season {season.number} · episode {episode.number}{locLabel ? ` · ${locLabel}` : ''} · {formatStoryDate(worldCalendar(world), worldCalendar(world).currentDay)} · {M.label}
               </div>
+              {(climateLine) && (
+                <div style={{ fontSize: 11, color: 'rgba(230,233,235,0.48)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '52ch' }}>
+                  {climateLine}
+                </div>
+              )}
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -1123,24 +1214,32 @@ export function Story() {
               <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setMoreSheet(true)}>More</button>
             ) : (
               <>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 7, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px', background: 'rgba(255,255,255,0.05)' }}>
-                  <span className="label" style={{ fontSize: 11, opacity: 0.55 }}>Backdrop</span>
-                  {(Object.keys(BACKDROPS) as Array<keyof typeof BACKDROPS>).map((id) => (
-                    <Chip key={id} active={backdrop === id} onClick={() => setBackdrop(id)}>
-                      {id === 'none' ? 'Off' : id[0].toUpperCase() + id.slice(1)}
-                    </Chip>
-                  ))}
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px', background: 'rgba(255,255,255,0.05)' }}>
+                {!episode.image && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px', background: 'rgba(255,255,255,0.05)' }}>
+                    <span className="label" style={{ fontSize: 11, opacity: 0.55 }}>Backdrop</span>
+                    {(Object.keys(BACKDROPS) as Array<keyof typeof BACKDROPS>).map((id) => (
+                      <Chip key={id} active={backdrop === id} onClick={() => setBackdrop(id)}>
+                        {id === 'none' ? 'Off' : id[0].toUpperCase() + id.slice(1)}
+                      </Chip>
+                    ))}
+                  </div>
+                )}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px', background: 'rgba(255,255,255,0.05)', maxWidth: '100%' }}>
                   <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.45 }}>
                     mood{episode.moodPinned ? ' · pinned' : ''}
                   </span>
                   {(Object.entries(MOODS) as Array<[typeof mood, typeof M]>).map(([id, m]) => (
-                    <button key={id} title={m.label} onClick={() => pinMood(id)} style={{
-                      width: 22, height: 10, borderRadius: 1, cursor: 'pointer', background: m.accent,
-                      border: `1px solid ${mood === id ? 'rgba(255,255,255,0.75)' : 'rgba(255,255,255,0.12)'}`,
-                      opacity: mood === id ? 1 : 0.4, padding: 0
-                    }} />
+                    <button key={id} type="button" title={m.label} onClick={() => pinMood(id)} aria-label={m.label} style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                      height: 22, padding: '0 6px', borderRadius: 2, cursor: 'pointer',
+                      background: mood === id ? m.accent : 'transparent',
+                      border: `1px solid ${mood === id ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.14)'}`,
+                      opacity: mood === id ? 1 : 0.55, color: mood === id ? '#0a1416' : 'rgba(230,233,235,0.7)',
+                      fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.04em'
+                    }}>
+                      <span style={{ width: 8, height: 8, borderRadius: 1, background: m.accent, flexShrink: 0 }} />
+                      {m.label}
+                    </button>
                   ))}
                 </div>
                 <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setDisplayOpen(true)}>Display</button>
@@ -1157,11 +1256,54 @@ export function Story() {
         gridTemplateColumns: 'minmax(0, 1fr)'
       }}>
         <section ref={scrollRef} style={{ overflow: 'auto', display: 'flex', flexDirection: 'column', position: 'relative' }}>
+          {/* Cast stage — who’s here before they speak */}
+          <button
+            type="button"
+            onClick={() => setDirectorSheet(true)}
+            title="Open Direct — who’s in the scene"
+            style={{
+              maxWidth: 740, width: 'calc(100% - 24px)', margin: '14px auto 0',
+              display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 4,
+              padding: '10px 12px', cursor: 'pointer', textAlign: 'left',
+              background: 'rgba(8,10,12,0.45)', color: 'inherit',
+              boxShadow: `inset 2px 0 0 ${ACCENT_RGBA.a45}`
+            }}
+          >
+            <div className="label" style={{ opacity: 0.55, flexShrink: 0 }}>Here</div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', flex: 1, minWidth: 0 }}>
+              {stageCast.map((c) => (
+                <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                  <div style={portraitPlate(c.hue, 26, characterPortraits(c)[0])} />
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(236,234,230,0.9)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 110 }}>
+                      {c.name || 'unnamed'}{c.isPlayer ? ' · you' : ''}
+                    </span>
+                    {c.state?.emotion?.trim() && (
+                      <span style={{ fontSize: 10, color: 'rgba(230,233,235,0.45)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 110 }}>
+                        {c.state.emotion.trim()}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+              {stageGuests.map((g) => (
+                <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <div style={portraitPlate(guestHue(g.id), 26, null, 'rgba(255,255,255,0.14)')} />
+                  <span style={{ fontSize: 12, color: 'rgba(236,234,230,0.75)' }}>{g.name}</span>
+                </div>
+              ))}
+              {stageCast.length === 0 && stageGuests.length === 0 && (
+                <span style={{ fontSize: 12, color: 'rgba(230,233,235,0.45)' }}>No one staged — open Direct</span>
+              )}
+            </div>
+          </button>
+
           <div
             className="page-plane"
             style={{
               maxWidth: 740,
-              margin: '18px auto',
+              margin: '12px auto 18px',
               width: 'calc(100% - 24px)',
               padding: narrow ? '26px 18px 40px' : '44px 32px 68px',
               // Optional denser plate so prose stays readable over scene images.
@@ -1183,71 +1325,74 @@ export function Story() {
             )}
 
             {turns.length === 0 && !streaming && (
-              <div style={{ fontSize: 14, lineHeight: 1.7, display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 8 }}>
-                <p className="serif" style={{ fontSize: 18, opacity: 0.78, margin: 0, fontWeight: 300 }}>
+              <div style={{ fontSize: 14, lineHeight: 1.7, display: 'flex', flexDirection: 'column', gap: 16, marginBottom: 8 }}>
+                <p className="serif" style={{ fontSize: 20, opacity: 0.85, margin: 0, fontWeight: 300 }}>
                   {season.premise
-                    ? <>Current pressure: <em>{season.premise}</em></>
-                    : 'The world is ready — step in. Steer, speak, act, or Write and see where it opens.'}
+                    ? <>The world holds: <em>{season.premise}</em></>
+                    : 'The world is ready — step in.'}
                 </p>
-                {(() => {
-                  const openLoc = episode.locationId
-                    ? locations.find((l) => l.id === episode.locationId)
-                    : undefined;
-                  const sceneCast = characters.filter((c) => episode.castIds.includes(c.id));
-                  return (
-                    <div className="craft-row" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-                      <div className="label" style={{ color: 'rgba(230,233,235,0.5)', display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <span className="seed-mark" />
-                        Scene
-                      </div>
-                      <div style={{ fontSize: 13, color: 'rgba(230,233,235,0.75)' }}>
-                        {openLoc?.name || episode.location || 'No opening place linked'}
-                        {continuity.length || threads.length
-                          ? ` · ${continuity.length} fact${continuity.length === 1 ? '' : 's'} · ${threads.length} thread${threads.length === 1 ? '' : 's'}`
-                          : ''}
-                      </div>
-                      {sceneCast.length > 0 && (
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                          {sceneCast.map((c) => (
-                            <Chip key={c.id} active={false}>{c.name || 'unnamed'}{c.isPlayer ? ' · you' : ''}</Chip>
-                          ))}
-                        </div>
-                      )}
-                      <div style={{ fontSize: 12.5, color: 'rgba(236,234,230,0.5)' }}>
-                        Open Direct anytime to edit cast, place, and continuity — then Write or Speak below.
-                      </div>
-                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                        <button className="btn-ghost" style={{ fontSize: 12, padding: '7px 12px' }} onClick={() => setDirectorSheet(true)}>
-                          Open Direct
-                        </button>
-                        {hasAI && world && season && episode && (
-                          <button
-                            className="btn-ghost"
-                            style={{ fontSize: 12, padding: '7px 12px' }}
-                            disabled={!!streaming}
-                            onClick={() => {
-                              void (async () => {
-                                setError('');
-                                setProgressLabel('drafting cold open…');
-                                setStreaming(true);
-                                try {
-                                  await draftColdOpenNarration(world, season, episode);
-                                } catch (e) {
-                                  setError(formatUserError(e));
-                                } finally {
-                                  setStreaming(false);
-                                  setProgressLabel('writing…');
-                                }
-                              })();
-                            }}
-                          >
-                            ✦ Draft cold open
-                          </button>
-                        )}
-                      </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <div className="label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span className="seed-mark" />
+                    {activeLocation?.name || episode.location || 'No place linked yet'}
+                  </div>
+                  {climateLine && (
+                    <div style={{ fontSize: 13.5, color: 'rgba(230,233,235,0.62)', fontStyle: 'italic' }}>
+                      {climateLine}
                     </div>
-                  );
-                })()}
+                  )}
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
+                    {stageCast.map((c) => (
+                      <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <div style={portraitPlate(c.hue, 24, characterPortraits(c)[0])} />
+                        <span style={{ fontSize: 12, color: 'rgba(236,234,230,0.8)' }}>
+                          {c.name || 'unnamed'}{c.isPlayer ? ' · you' : ''}
+                          {c.state?.emotion?.trim() ? ` · ${c.state.emotion.trim()}` : ''}
+                        </span>
+                      </div>
+                    ))}
+                    {stageGuests.map((g) => (
+                      <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <div style={portraitPlate(guestHue(g.id), 24, null, 'rgba(255,255,255,0.14)')} />
+                        <span style={{ fontSize: 12, color: 'rgba(236,234,230,0.7)' }}>{g.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                  {hasAI && world && season && episode && (
+                    <button
+                      className="btn-primary"
+                      style={{ fontSize: 12, padding: '8px 14px' }}
+                      disabled={!!streaming}
+                      onClick={() => {
+                        void (async () => {
+                          setError('');
+                          setProgressLabel('drafting cold open…');
+                          setStreaming(true);
+                          try {
+                            await draftColdOpenNarration(world, season, episode);
+                          } catch (e) {
+                            setError(formatUserError(e));
+                          } finally {
+                            setStreaming(false);
+                            setProgressLabel('writing…');
+                          }
+                        })();
+                      }}
+                    >
+                      ✦ Draft cold open
+                    </button>
+                  )}
+                  <button className="btn-ghost" style={{ fontSize: 12, padding: '7px 12px' }} onClick={() => setDirectorSheet(true)}>
+                    Open Direct
+                  </button>
+                  {(continuity.length > 0 || threads.length > 0) && (
+                    <span className="label" style={{ opacity: 0.5 }}>
+                      {continuity.length} fact{continuity.length === 1 ? '' : 's'} · {threads.length} thread{threads.length === 1 ? '' : 's'}
+                    </span>
+                  )}
+                </div>
               </div>
             )}
 
@@ -1341,50 +1486,33 @@ export function Story() {
           <button
             type="button"
             onClick={() => setDirectorSheet(true)}
-            title="Open Direct to edit cast and location"
+            title="Open Direct to edit location"
             style={{
               display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
-              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12,
+              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 4,
               padding: '8px 10px', cursor: 'pointer', textAlign: 'left',
-              background: 'rgba(255,255,255,0.04)', color: 'inherit', width: '100%'
+              background: 'rgba(255,255,255,0.04)', color: 'inherit', width: '100%',
+              boxShadow: `inset 2px 0 0 ${ACCENT_RGBA.a35}`
             }}
           >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1 }}>
-              <Mono style={{ fontSize: 9, opacity: 0.5, flexShrink: 0 }}>scene</Mono>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
+              <span className="label" style={{ opacity: 0.5, flexShrink: 0 }}>Place</span>
               <span style={{
                 fontSize: 12.5, color: 'rgba(236,234,230,0.85)',
                 whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
               }}>
                 {activeLocation?.name || episode.location || 'No location set'}
               </span>
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
-              {inScene.filter((c) => !c.isPlayer).slice(0, 5).map((c) => (
-                <div
-                  key={c.id}
-                  title={c.name}
-                  style={portraitPlate(c.hue, 22, characterPortraits(c)[0])}
-                />
-              ))}
-              {(episode.activeGuestIds == null
-                ? guests
-                : guests.filter((g) => episode.activeGuestIds!.includes(g.id))
-              ).slice(0, 3).map((g) => (
-                <div
-                  key={g.id}
-                  title={`${g.name} (walk-on)`}
-                  style={portraitPlate(guestHue(g.id), 22, null, 'rgba(255,255,255,0.14)')}
-                />
-              ))}
-              {inScene.filter((c) => !c.isPlayer).length === 0
-                && (episode.activeGuestIds == null ? guests : guests.filter((g) => episode.activeGuestIds!.includes(g.id))).length === 0 && (
-                <span style={{ fontSize: 11, opacity: 0.45 }}>no cast</span>
+              {climateLine && (
+                <span style={{
+                  fontSize: 11, color: 'rgba(230,233,235,0.42)',
+                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '28ch'
+                }}>
+                  · {climateLine}
+                </span>
               )}
-              <span style={{
-                fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5,
-                letterSpacing: '0.08em', textTransform: 'uppercase', opacity: 0.4, marginLeft: 4
-              }}>Direct</span>
             </div>
+            <span className="label" style={{ opacity: 0.4, flexShrink: 0 }}>Direct</span>
           </button>
           {showWrapNudge && (
             <div style={{
@@ -1443,29 +1571,34 @@ export function Story() {
             overflow: 'hidden',
             background: 'rgba(255,255,255,0.03)'
           }}>
-            {(['continue', 'steer', 'speak', 'act'] as const).map((m) => (
+            {([
+              { id: 'continue' as const, label: 'Continue', active: !agencyOn && composeBase === 'continue', onClick: () => pickBaseMode('continue') },
+              { id: 'steer' as const, label: 'Steer', active: !agencyOn && composeBase === 'steer', onClick: () => pickBaseMode('steer') },
+              { id: 'speak' as const, label: 'Speak', active: speakOn, onClick: () => toggleSpeak() },
+              { id: 'act' as const, label: 'Act', active: actOn, onClick: () => toggleAct() }
+            ]).map((m, i, arr) => (
               <button
-                key={m}
+                key={m.id}
                 type="button"
-                onClick={() => setComposeModeSafe(m)}
+                onClick={m.onClick}
                 style={{
                   border: 0,
-                  borderRight: '1px solid rgba(255,255,255,0.08)',
+                  borderRight: i < arr.length - 1 ? '1px solid rgba(255,255,255,0.08)' : 0,
                   minHeight: 44,
                   padding: '8px 4px',
                   fontSize: narrow ? 12 : 13,
-                  fontWeight: composeMode === m ? 600 : 500,
+                  fontWeight: m.active ? 600 : 500,
                   cursor: 'pointer',
-                  color: composeMode === m ? '#0a1416' : 'rgba(230,233,235,0.65)',
-                  background: composeMode === m ? ACCENT : 'transparent',
-                  boxShadow: composeMode === m ? `inset 0 -2px 0 ${ACCENT_RGBA.a55}` : 'none'
+                  color: m.active ? '#0a1416' : 'rgba(230,233,235,0.65)',
+                  background: m.active ? ACCENT : 'transparent',
+                  boxShadow: m.active ? `inset 0 -2px 0 ${ACCENT_RGBA.a55}` : 'none'
                 }}
               >
-                {m[0].toUpperCase() + m.slice(1)}
+                {m.label}
               </button>
             ))}
           </div>
-          {(composeMode === 'speak' || composeMode === 'act') && (
+          {agencyOn && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.45 }}>
                 delivery
@@ -1492,7 +1625,7 @@ export function Story() {
               </div>
             </div>
           )}
-          {(composeMode === 'speak' || composeMode === 'act') && (
+          {agencyOn && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
               <span
                 style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.45 }}
@@ -1592,7 +1725,7 @@ export function Story() {
                 className="btn-primary"
                 style={{ alignSelf: 'flex-end', padding: '10px 19px', minHeight: 44 }}
                 disabled={
-                  (composeMode === 'speak' || composeMode === 'act')
+                  agencyOn
                   && inScene.filter((c) => !c.isPlayer).length === 0
                   && (episode.activeGuestIds == null
                     ? guests.length === 0
@@ -1817,13 +1950,19 @@ export function Story() {
             Season wrap
           </button>
           <Mono style={{ fontSize: 11 }}>mood{episode.moodPinned ? ' · pinned' : ''}</Mono>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
             {(Object.entries(MOODS) as Array<[typeof mood, typeof M]>).map(([id, m]) => (
-              <button key={id} title={m.label} onClick={() => pinMood(id)} style={{
-                width: 36, height: 12, borderRadius: 1, cursor: 'pointer', background: m.accent,
-                border: `1px solid ${mood === id ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.12)'}`,
-                opacity: mood === id ? 1 : 0.45, padding: 0
-              }} />
+              <button key={id} type="button" title={m.label} onClick={() => pinMood(id)} aria-label={m.label} style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                height: 28, padding: '0 10px', borderRadius: 2, cursor: 'pointer',
+                background: mood === id ? m.accent : 'rgba(255,255,255,0.04)',
+                border: `1px solid ${mood === id ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.12)'}`,
+                opacity: mood === id ? 1 : 0.55, color: mood === id ? '#0a1416' : 'rgba(230,233,235,0.75)',
+                fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.04em'
+              }}>
+                <span style={{ width: 10, height: 10, borderRadius: 1, background: m.accent, flexShrink: 0 }} />
+                {m.label}
+              </button>
             ))}
           </div>
         </div>
@@ -1976,17 +2115,23 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
               }}
             />
             {(Object.entries(MOODS) as Array<[typeof mood, (typeof MOODS)[typeof mood]]>).map(([id, m]) => (
-              <button key={id} title={m.label} onClick={() => {
+              <button key={id} type="button" title={m.label} onClick={() => {
                 setMood(id);
                 void safeWrite(
                   () => db.episodes.update(episode.id, { moodPinned: true, updatedAt: Date.now() }),
                   setImgError
                 );
-              }} style={{
-                width: 13, height: 13, borderRadius: '50%', cursor: 'pointer', background: m.accent,
-                border: `1px solid ${mood === id ? 'rgba(255,255,255,0.85)' : 'transparent'}`,
-                opacity: mood === id ? 1 : 0.45, padding: 0
-              }} />
+              }} aria-label={m.label} style={{
+                display: 'inline-flex', alignItems: 'center', gap: 5,
+                height: 24, padding: '0 8px', borderRadius: 2, cursor: 'pointer',
+                background: mood === id ? m.accent : 'transparent',
+                border: `1px solid ${mood === id ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.14)'}`,
+                opacity: mood === id ? 1 : 0.5, color: mood === id ? '#0a1416' : 'rgba(230,233,235,0.7)',
+                fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.04em'
+              }}>
+                <span style={{ width: 8, height: 8, borderRadius: 1, background: m.accent, flexShrink: 0 }} />
+                {m.label}
+              </button>
             ))}
           </div>
         </div>
@@ -2423,9 +2568,15 @@ function SceneLocationsPanel({ episode, locations, accent, world, onGoLocations 
       return;
     }
     const patch: Partial<Episode> = {
-      locationId: l.id, location: l.name, updatedAt: Date.now()
+      locationId: l.id,
+      location: l.name,
+      updatedAt: Date.now(),
+      // Keep place and picture honest — portrait if any, else clear stale image.
+      image: l.portrait || null
     };
-    if (l.portrait) patch.image = l.portrait;
+    if (!(episode.atmosphereNote ?? '').trim() && l.atmosphere.trim()) {
+      patch.atmosphereNote = l.atmosphere.trim();
+    }
     await safeWrite(() => db.episodes.update(episode.id, patch), setGenError);
     if (!episode.moodPinned) setMood(moodFromHue(l.hue));
   };
@@ -3159,6 +3310,251 @@ function DirectorContent(props: {
   );
 }
 
+/** Season calendar events — dated texture with spoil/hide + optional AI seed. */
+function CalendarSeasonEventsPanel({ world, season }: { world: World; season: Season }) {
+  const prefs = worldCalendarEventPrefs(world);
+  const events = useLiveQuery(
+    () => db.calendarEvents.where('seasonId').equals(season.id).toArray(),
+    [season.id]
+  ) ?? [];
+  const cal = worldCalendar(world);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [editId, setEditId] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<Array<SeedCalendarEventDraft & { keep: boolean }>>([]);
+  const sorted = useMemo(
+    () => [...events].sort((a, b) => a.storyDay - b.storyDay || a.title.localeCompare(b.title)),
+    [events]
+  );
+
+  const patchPrefs = (patch: Partial<typeof prefs>) => {
+    void safeWrite(
+      () => db.worlds.update(world.id, {
+        calendarEventPrefs: { ...prefs, ...patch },
+        updatedAt: Date.now()
+      }),
+      setErr
+    );
+  };
+
+  const addManual = () => {
+    const ev = emptyCalendarEvent(world.id, season.id, {
+      title: 'New beat',
+      summary: '',
+      kind: 'mundane',
+      storyDay: cal.currentDay,
+      visibility: prefs.defaultVisibility,
+      source: 'manual',
+      status: 'scheduled'
+    });
+    void safeWrite(async () => {
+      await db.calendarEvents.add(ev);
+      setEditId(ev.id);
+    }, setErr);
+  };
+
+  const generate = async () => {
+    setBusy(true);
+    setErr('');
+    try {
+      const proposed = await seedSeasonCalendarEvents(world, season, { autoCommit: false });
+      setDrafts(proposed.map((d) => ({ ...d, keep: true })));
+      if (proposed.length === 0) setErr('No room or no proposals — cancel some events first.');
+    } catch (e) {
+      setErr(formatUserError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const commitDrafts = () => {
+    const kept = drafts.filter((d) => d.keep);
+    if (kept.length === 0) {
+      setDrafts([]);
+      return;
+    }
+    void safeWrite(async () => {
+      const now = Date.now();
+      await db.calendarEvents.bulkAdd(
+        kept.map((d) => emptyCalendarEvent(world.id, season.id, {
+          ...d,
+          visibility: defaultVisibilityForKind(d.kind),
+          source: 'ai-seed',
+          status: d.storyDay <= cal.currentDay ? 'due' : 'scheduled',
+          createdAt: now,
+          updatedAt: now
+        }))
+      );
+      setDrafts([]);
+    }, setErr);
+  };
+
+  const patchEvent = (id: string, patch: Partial<CalendarEvent>) => {
+    void safeWrite(
+      () => db.calendarEvents.update(id, { ...patch, updatedAt: Date.now() }),
+      setErr
+    );
+  };
+
+  return (
+    <div style={{
+      marginTop: 8, paddingTop: 14, borderTop: '1px solid rgba(255,255,255,0.1)',
+      display: 'flex', flexDirection: 'column', gap: 12
+    }}>
+      <Mono style={{ fontSize: 9 }}>season calendar events</Mono>
+      <div style={{ fontSize: 12, lineHeight: 1.45, color: 'rgba(236,234,230,0.5)' }}>
+        Dated texture as the calendar ticks — festivals, gatherings, small beats, the occasional shock.
+        Visibility controls what you see; the narrator always gets the full beat when due.
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}>
+          <Toggle on={prefs.enabled} onClick={() => patchPrefs({ enabled: !prefs.enabled })} />
+          enable calendar events
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}>
+          <Toggle on={prefs.aiSeedOnSeasonStart} onClick={() => patchPrefs({ aiSeedOnSeasonStart: !prefs.aiSeedOnSeasonStart })} />
+          AI-seed on season start
+        </label>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+          <span style={{ fontSize: 11, opacity: 0.45 }}>default visibility</span>
+          {CALENDAR_EVENT_VISIBILITIES.map((v) => (
+            <Chip key={v} active={prefs.defaultVisibility === v} onClick={() => patchPrefs({ defaultVisibility: v })}>
+              {v}
+            </Chip>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+        <button className="btn-ghost" style={{ fontSize: 12, minHeight: 36 }} onClick={addManual} disabled={!prefs.enabled}>
+          Add event
+        </button>
+        <button className="btn-ghost" style={{ fontSize: 12, minHeight: 36 }} onClick={() => void generate()} disabled={!prefs.enabled || busy}>
+          {busy ? 'Generating…' : 'Generate season texture'}
+        </button>
+      </div>
+
+      {drafts.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, padding: 10, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 4 }}>
+          <Mono style={{ fontSize: 9 }}>review generated</Mono>
+          {drafts.map((d, i) => (
+            <div key={i} style={{ opacity: d.keep ? 1 : 0.4, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>{d.title} · day {d.storyDay} · {d.kind}</div>
+              <div style={{ fontSize: 12, opacity: 0.65 }}>{d.summary}</div>
+              <KeepDropChips
+                keep={d.keep}
+                onKeep={() => setDrafts((rows) => rows.map((r, j) => j === i ? { ...r, keep: true } : r))}
+                onDrop={() => setDrafts((rows) => rows.map((r, j) => j === i ? { ...r, keep: false } : r))}
+              />
+            </div>
+          ))}
+          <button className="btn-primary" style={{ minHeight: 40 }} onClick={commitDrafts}>Commit kept</button>
+          <button className="btn-quiet" style={{ fontSize: 12 }} onClick={() => setDrafts([])}>Discard</button>
+        </div>
+      )}
+
+      {sorted.length === 0 && (
+        <div style={{ fontSize: 12, opacity: 0.45 }}>No events yet this season.</div>
+      )}
+      {sorted.map((ev) => {
+        const open = editId === ev.id;
+        const showSummary = ev.visibility === 'spoiler';
+        const title = ev.visibility === 'hidden' && !showSummary ? 'Hidden beat' : (ev.title || '(untitled)');
+        return (
+          <div key={ev.id} style={{
+            border: '1px solid rgba(255,255,255,0.1)', borderRadius: 4, padding: '10px 12px',
+            background: 'rgba(255,255,255,0.03)', display: 'flex', flexDirection: 'column', gap: 8
+          }}>
+            <button
+              type="button"
+              onClick={() => setEditId(open ? null : ev.id)}
+              style={{
+                border: 0, background: 'transparent', color: 'inherit', textAlign: 'left',
+                cursor: 'pointer', padding: 0, display: 'flex', flexDirection: 'column', gap: 2
+              }}
+            >
+              <span style={{ fontSize: 13, fontWeight: 600 }}>
+                {formatStoryDateShort(cal, ev.storyDay)} · {title}
+              </span>
+              <span style={{ fontSize: 11, opacity: 0.5 }}>
+                {ev.kind} · {ev.scale} · {ev.status} · {ev.visibility}
+              </span>
+              {showSummary && ev.summary.trim() && (
+                <span style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>{ev.summary}</span>
+              )}
+            </button>
+            {!showSummary && (
+              <button className="btn-quiet" style={{ fontSize: 11, alignSelf: 'flex-start' }}
+                onClick={() => patchEvent(ev.id, { visibility: 'spoiler' })}>
+                Reveal
+              </button>
+            )}
+            {open && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <input
+                  value={ev.title}
+                  onChange={(e) => patchEvent(ev.id, { title: e.target.value })}
+                  placeholder="Title"
+                  style={{ fontSize: 13 }}
+                />
+                <textarea
+                  rows={3}
+                  value={ev.summary}
+                  onChange={(e) => patchEvent(ev.id, { summary: e.target.value })}
+                  placeholder="Full beat (model always sees this when due)"
+                  style={{ fontSize: 12.5, lineHeight: 1.45 }}
+                />
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {CALENDAR_EVENT_KINDS.map((k) => (
+                    <Chip key={k} active={ev.kind === k} onClick={() => patchEvent(ev.id, {
+                      kind: k as CalendarEventKind,
+                      visibility: ev.source === 'manual' ? ev.visibility : defaultVisibilityForKind(k as CalendarEventKind)
+                    })}>{k}</Chip>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {CALENDAR_EVENT_SCALES.map((s) => (
+                    <Chip key={s} active={ev.scale === s} onClick={() => patchEvent(ev.id, { scale: s as CalendarEventScale })}>{s}</Chip>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  {CALENDAR_EVENT_VISIBILITIES.map((v) => (
+                    <Chip key={v} active={ev.visibility === v} onClick={() => patchEvent(ev.id, { visibility: v as CalendarEventVisibility })}>{v}</Chip>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                  <Chip active={ev.promptPolicy === 'soft'} onClick={() => patchEvent(ev.id, { promptPolicy: 'soft' })}>soft</Chip>
+                  <Chip active={ev.promptPolicy === 'hard'} onClick={() => patchEvent(ev.id, { promptPolicy: 'hard' })}>hard</Chip>
+                  <Chip active={ev.status === 'cancelled'} onClick={() => patchEvent(ev.id, { status: 'cancelled' })}>cancel</Chip>
+                  <Chip active={ev.status === 'played'} onClick={() => patchEvent(ev.id, { status: 'played' })}>played</Chip>
+                  <Chip active={ev.status === 'due'} onClick={() => patchEvent(ev.id, { status: 'due' })}>due</Chip>
+                  <Chip active={ev.status === 'scheduled'} onClick={() => patchEvent(ev.id, { status: 'scheduled' })}>scheduled</Chip>
+                </div>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+                  day
+                  <input
+                    type="number"
+                    min={1}
+                    value={ev.storyDay}
+                    onChange={(e) => patchEvent(ev.id, { storyDay: Math.max(1, Math.floor(Number(e.target.value) || 1)) })}
+                    style={{ width: 72, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}
+                  />
+                </label>
+                <button className="btn-quiet" style={{ fontSize: 11, alignSelf: 'flex-start' }}
+                  onClick={() => void safeWrite(() => db.calendarEvents.delete(ev.id), setErr)}>
+                  Delete
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {err && <ErrorNote error={err} />}
+    </div>
+  );
+}
+
 /** Controllable in-fiction calendar: day / month / year, weekday, episode stamp. */
 function CalendarTrackerPanel({
   world, season, episode, narrow
@@ -3214,6 +3610,7 @@ function CalendarTrackerPanel({
 
   const setDay = (day: number) => {
     const next = Math.max(1, Math.floor(day));
+    const fromDay = cal.currentDay;
     setCalError('');
     void safeWrite(async () => {
       await db.worlds.update(world.id, {
@@ -3223,6 +3620,16 @@ function CalendarTrackerPanel({
       // Keep active episode scene day in sync when the author advances "today".
       if (episode.status === 'active') {
         await db.episodes.update(episode.id, { storyDay: next, updatedAt: Date.now() });
+      }
+      if (next > fromDay) {
+        await evaluateCalendarEvents({
+          worldId: world.id,
+          seasonId: season.id,
+          fromDay,
+          toDay: next,
+          mode: 'advance',
+          world
+        });
       }
     }, setCalError);
   };
@@ -3493,6 +3900,8 @@ function CalendarTrackerPanel({
             Stamp episode open day → {formatStoryDateShort(cal, cal.currentDay)}
           </button>
         )}
+
+        <CalendarSeasonEventsPanel world={world} season={season} />
       </div>
     </div>
   );
@@ -3784,6 +4193,50 @@ function WrapReviewBody({
                     j === i ? { ...r, keep: false } : r
                   );
                   onChange({ ...draft, hitTargets });
+                }}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {draft.hitCalendarEvents.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <Mono style={{ fontSize: 9 }}>calendar events played this episode</Mono>
+          <div style={{ fontSize: 12, lineHeight: 1.45, opacity: 0.5 }}>
+            Keep to mark these dated events as played (and file a continuity note). Drop to leave them due.
+          </div>
+          {draft.hitCalendarEvents.map((row, i) => (
+            <div key={i} style={{
+              display: 'flex', flexDirection: 'column', gap: 10,
+              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '12px 14px',
+              background: 'rgba(255,255,255,0.04)',
+              opacity: row.keep ? 1 : 0.42
+            }}>
+              <textarea
+                rows={2}
+                value={row.text}
+                onChange={(e) => {
+                  const hitCalendarEvents = draft.hitCalendarEvents.map((r, j) =>
+                    j === i ? { ...r, text: e.target.value } : r
+                  );
+                  onChange({ ...draft, hitCalendarEvents });
+                }}
+                style={{ fontSize: 13.5, lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, color: '#eceae6' }}
+              />
+              <KeepDropChips
+                keep={row.keep}
+                onKeep={() => {
+                  const hitCalendarEvents = draft.hitCalendarEvents.map((r, j) =>
+                    j === i ? { ...r, keep: true } : r
+                  );
+                  onChange({ ...draft, hitCalendarEvents });
+                }}
+                onDrop={() => {
+                  const hitCalendarEvents = draft.hitCalendarEvents.map((r, j) =>
+                    j === i ? { ...r, keep: false } : r
+                  );
+                  onChange({ ...draft, hitCalendarEvents });
                 }}
               />
             </div>

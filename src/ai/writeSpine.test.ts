@@ -6,7 +6,9 @@ import {
   HISTORY_CHAR_BUDGET,
   packTurnsDetailed,
   selectDirectorFacts,
-  selectDirectorThreads
+  selectDirectorThreads,
+  selectFactsPinnedFirst,
+  selectThreadsPinnedFirst
 } from './prompts';
 import type { Character, ContinuityFact, EpisodeGuest, OpenThread, PlotTarget, Turn } from '../types';
 
@@ -54,6 +56,19 @@ describe('normalizeBeats', () => {
       new Map(),
       'speak',
       'Hello?'
+    );
+    expect(beats.some((b) => b.type === 'speak')).toBe(true);
+    expect(beats[0].type).toBe('speak');
+  });
+
+  it('injects a speak reply when player used play (speak+act)', () => {
+    const beats = normalizeBeats(
+      { beats: [{ type: 'narration', brief: 'She stares.' }] },
+      cast,
+      guests,
+      new Map(),
+      'play',
+      '*leans in* "Hello?"'
     );
     expect(beats.some((b) => b.type === 'speak')).toBe(true);
     expect(beats[0].type).toBe('speak');
@@ -181,5 +196,28 @@ describe('selectDirectorFacts / Threads pin', () => {
     const selected = selectDirectorThreads(threads, ['E1']);
     expect(selected[0]?.id === 't0' || selected.some((t) => t.id === 't0')).toBe(true);
     expect(selected.every((t) => t.status === 'open')).toBe(true);
+  });
+
+  it('agent fact selection honors pins at narrator cap', () => {
+    const facts: ContinuityFact[] = Array.from({ length: 30 }, (_, i) => ({
+      id: `f${i}`, worldId: 'w', seasonId: 's', episodeId: 'e',
+      text: `Fact ${i}`, source: 'manual' as const,
+      pinned: i === 27,
+      createdAt: i, updatedAt: i
+    }));
+    const selected = selectFactsPinnedFirst(facts, ['e'], 24);
+    expect(selected.some((f) => f.id === 'f27')).toBe(true);
+    expect(selected.length).toBeLessThanOrEqual(24);
+  });
+
+  it('agent thread selection honors pins', () => {
+    const threads: OpenThread[] = Array.from({ length: 20 }, (_, i) => ({
+      id: `t${i}`, worldId: 'w', seasonId: 's',
+      text: `Thread ${i}`, openedLabel: 'S1 · E2', status: 'open' as const,
+      pinned: i === 15,
+      createdAt: i, updatedAt: i
+    }));
+    const selected = selectThreadsPinnedFirst(threads, ['E2'], 12);
+    expect(selected.some((t) => t.id === 't15')).toBe(true);
   });
 });

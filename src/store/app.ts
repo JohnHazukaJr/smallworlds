@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
 export type Screen = 'library' | 'story' | 'cast' | 'locations' | 'sequel' | 'profile' | 'settings' | 'onboard';
-export type MoodId = 'ember' | 'ash' | 'frost' | 'rot';
+export type MoodId = 'ember' | 'ash' | 'frost' | 'rot' | 'dusk' | 'bloom' | 'storm' | 'brine';
 export type BackdropId = 'scene' | 'moment' | 'character' | 'none';
 export type AvatarSize = 'S' | 'M' | 'L';
 
@@ -38,13 +38,17 @@ export function normalizeStoryLayout(raw: unknown): StoryLayout {
   return 'write'; // immersive, director, write, or anything else
 }
 
-/** Map a location plate hue to the closest story mood. */
+/** Map a location plate hue to the closest story mood (8 climates). */
 export function moodFromHue(hue: number): MoodId {
   const h = ((hue % 360) + 360) % 360;
-  if (h < 45 || h >= 330) return 'ember';
-  if (h < 100) return 'rot';
+  if (h < 30 || h >= 345) return 'ember';
+  if (h < 70) return 'bloom';
+  if (h < 115) return 'rot';
+  if (h < 160) return 'brine';
   if (h < 200) return 'frost';
-  return 'ash';
+  if (h < 245) return 'storm';
+  if (h < 295) return 'ash';
+  return 'dusk';
 }
 
 interface AppStore {

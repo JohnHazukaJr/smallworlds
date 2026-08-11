@@ -19,4 +19,13 @@ describe('deliveryTone', () => {
     expect(MODE_PREFIX.act('[mad] slam the door')).toContain('with a mad manner');
     expect(MODE_PREFIX.act('[mad] slam the door')).toContain('slam the door');
   });
+
+  it('frames play as speak+act without stripping gestures', () => {
+    const framed = MODE_PREFIX.play('[quietly] *opens the door* "Anyone home?"');
+    expect(framed).toContain('with a quietly manner');
+    expect(framed).toContain('*opens the door*');
+    expect(framed).toContain('"Anyone home?"');
+    expect(framed).not.toContain('[quietly]');
+    expect(framed).toMatch(/acts and speaks/i);
+  });
 });

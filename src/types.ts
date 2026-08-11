@@ -65,6 +65,11 @@ export interface World {
   activeSeasonId: string | null;
   /** in-fiction date tracker — worlds created before this field existed may lack it; read via worldCalendar() */
   calendar: WorldCalendar;
+  /**
+   * Calendar-tied season events prefs.
+   * Omitted on older worlds → defaults via worldCalendarEventPrefs().
+   */
+  calendarEventPrefs?: WorldCalendarEventPrefs;
   createdAt: number;
   updatedAt: number;
 }
@@ -193,7 +198,24 @@ export interface Episode {
 }
 
 export type TurnRole = 'user' | 'narrator' | 'character';
-export type ComposeMode = 'continue' | 'steer' | 'speak' | 'act';
+export type ComposeMode = 'continue' | 'steer' | 'speak' | 'act' | 'play';
+
+/** Speak, Act, or combined Speak+Act — player agency turns that expect a reply. */
+export function isPlayerAgencyMode(mode: ComposeMode): boolean {
+  return mode === 'speak' || mode === 'act' || mode === 'play';
+}
+
+/** Resolve Continue/Steer base + Speak/Act toggles into a single compose mode. */
+export function resolveComposeMode(
+  base: 'continue' | 'steer',
+  speakOn: boolean,
+  actOn: boolean
+): ComposeMode {
+  if (speakOn && actOn) return 'play';
+  if (speakOn) return 'speak';
+  if (actOn) return 'act';
+  return base;
+}
 /**
  * Reply-size preset for a Write-on (not story structure).
  * Story units remain Season → Episode → Turns; director plans micro-beats inside a turn.
@@ -348,6 +370,93 @@ export interface OpenThread {
   pinned?: boolean;
   createdAt: number;
   updatedAt?: number;
+}
+
+// ---------- Calendar-tied season events ----------
+
+export type CalendarEventKind =
+  | 'holiday'
+  | 'festival'
+  | 'ceremony'
+  | 'gathering'
+  | 'sport'
+  | 'disaster'
+  | 'personal'
+  | 'mundane'
+  | 'custom';
+
+export type CalendarEventScale = 'small' | 'medium' | 'large';
+
+/** UI spoil policy — model always receives full summary for due events. */
+export type CalendarEventVisibility = 'spoiler' | 'title' | 'hidden';
+
+export type CalendarEventPromptPolicy = 'soft' | 'hard';
+
+export type CalendarEventStatus =
+  | 'scheduled'
+  | 'due'
+  | 'played'
+  | 'missed'
+  | 'cancelled';
+
+export type CalendarEventSource = 'manual' | 'ai-seed' | 'ai-suggest';
+
+/** Dated season texture / pressure — separate from undated PlotTarget. */
+export interface CalendarEvent {
+  id: string;
+  worldId: string;
+  seasonId: string;
+  title: string;
+  /** Full beat for the model; may be hidden in UI when visibility ≠ spoiler. */
+  summary: string;
+  kind: CalendarEventKind;
+  scale: CalendarEventScale;
+  /** Absolute story day the event becomes due. */
+  storyDay: number;
+  /** Optional multi-day window end (inclusive). */
+  endDay?: number;
+  visibility: CalendarEventVisibility;
+  promptPolicy: CalendarEventPromptPolicy;
+  status: CalendarEventStatus;
+  characterIds?: string[];
+  source: CalendarEventSource;
+  pinned?: boolean;
+  createdAt: number;
+  updatedAt?: number;
+}
+
+export interface WorldCalendarEventPrefs {
+  /** Master switch — when false, events are ignored in prompts/evaluation. */
+  enabled: boolean;
+  /** Opt-in: seed AI texture when a new season begins. */
+  aiSeedOnSeasonStart: boolean;
+  /** Default visibility for newly created manual events. */
+  defaultVisibility: CalendarEventVisibility;
+}
+
+export const DEFAULT_CALENDAR_EVENT_PREFS: WorldCalendarEventPrefs = {
+  enabled: true,
+  aiSeedOnSeasonStart: false,
+  defaultVisibility: 'title'
+};
+
+export const CALENDAR_EVENT_CAP = 12;
+
+export function worldCalendarEventPrefs(
+  world: Pick<World, 'calendarEventPrefs'> | null | undefined
+): WorldCalendarEventPrefs {
+  const p = world?.calendarEventPrefs;
+  return {
+    enabled: p?.enabled ?? DEFAULT_CALENDAR_EVENT_PREFS.enabled,
+    aiSeedOnSeasonStart: p?.aiSeedOnSeasonStart ?? DEFAULT_CALENDAR_EVENT_PREFS.aiSeedOnSeasonStart,
+    defaultVisibility: p?.defaultVisibility ?? DEFAULT_CALENDAR_EVENT_PREFS.defaultVisibility
+  };
+}
+
+/** Default UI visibility for AI-seeded kinds. */
+export function defaultVisibilityForKind(kind: CalendarEventKind): CalendarEventVisibility {
+  if (kind === 'personal' || kind === 'disaster') return 'hidden';
+  return 'title';
 }
 
 // ---------- Season wrap / sequel ----------

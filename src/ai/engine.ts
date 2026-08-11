@@ -1,11 +1,16 @@
 import { db, guardStorage, recordTombstones, uid } from '../db';
+import { emptyCalendarEvent, evaluateCalendarEvents } from '../calendarEvents';
 import { logAppError } from '../errors';
 import { resolveModel, useSettings } from '../store/settings';
 import { GAP_DAYS, GAP_LABELS } from '../ui/theme';
 import type {
+  CalendarEvent, CalendarEventKind, CalendarEventPromptPolicy, CalendarEventScale,
   Character, CharacterState, ComposeMode, Episode, EpisodeGuest, EpisodeWrap, EpisodeWrapBeat, Location, ModelRef,
   OpenThread, PlotTarget, Relationship, Season, SeasonWrap, SeasonWrapPlotArc, SeasonWrapRelationshipUpdate,
   Turn, TurnLength, TurnRole, World, WrapBeat, WrapCharacterOutcome
+} from '../types';
+import {
+  CALENDAR_EVENT_CAP, defaultVisibilityForKind, isPlayerAgencyMode, worldCalendarEventPrefs
 } from '../types';
 import { normalizeRelationships } from '../relationships';
 import {
@@ -198,13 +203,14 @@ async function streamNarrationComplete(opts: {
 }
 
 async function loadContext(world: World, season: Season, episode: Episode) {
-  const [characters, locations, continuity, threads, turns, seasonEpisodes] = await Promise.all([
+  const [characters, locations, continuity, threads, turns, seasonEpisodes, calendarEvents] = await Promise.all([
     db.characters.where('worldId').equals(world.id).toArray(),
     db.locations.where('worldId').equals(world.id).toArray(),
     db.continuity.where('seasonId').equals(season.id).toArray(),
     db.threads.where('seasonId').equals(season.id).filter((t) => t.status === 'open').toArray(),
     db.turns.where('episodeId').equals(episode.id).sortBy('createdAt'),
-    db.episodes.where('seasonId').equals(season.id).sortBy('number')
+    db.episodes.where('seasonId').equals(season.id).sortBy('number'),
+    db.calendarEvents.where('seasonId').equals(season.id).toArray()
   ]);
   const endedPriors = seasonEpisodes.filter(
     (e) => e.number < episode.number && e.status === 'ended' && !!e.wrap?.recap?.trim()
@@ -214,7 +220,7 @@ async function loadContext(world: World, season: Season, episode: Episode) {
   const priorEpisode = priorEpisodes.at(-1) ?? null;
   return {
     world, season, episode, characters, locations, continuity, threads, turns,
-    priorEpisode, priorEpisodes
+    calendarEvents, priorEpisode, priorEpisodes
   };
 }
 
@@ -330,7 +336,7 @@ function ensurePlayerReplySpeak(
   caps: { maxSpeak: number; maxTotal: number } = { maxSpeak: MAX_SPEAK_BEATS, maxTotal: MAX_TOTAL_BEATS },
   prefer?: { characterId?: string; guestId?: string }
 ): DirectorBeat[] {
-  const needsReply = (mode === 'speak' || mode === 'act') && (inScene.length > 0 || guests.length > 0);
+  const needsReply = isPlayerAgencyMode(mode) && (inScene.length > 0 || guests.length > 0);
   if (!needsReply) return beats;
 
   const isPinnedSpeak = (b: DirectorBeat): boolean => {
@@ -621,8 +627,8 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
 
   if (opts.mode !== 'continue' && opts.input.trim()) {
     const { tone, body } = parseDeliveryTone(opts.input.trim());
-    const normalized = opts.mode === 'speak' ? normalizeSpeakText(body) : body;
-    const userText = (opts.mode === 'speak' || opts.mode === 'act')
+    const normalized = (opts.mode === 'speak' || opts.mode === 'play') ? normalizeSpeakText(body) : body;
+    const userText = isPlayerAgencyMode(opts.mode)
       ? applyDeliveryTone(normalized, tone)
       : opts.input.trim();
     const userTurn: Turn = {
@@ -637,7 +643,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
   const progress = opts.onProgress ?? (() => {});
 
   const playerText = opts.input.trim();
-  const requireDialogue = opts.mode === 'speak' || opts.mode === 'act';
+  const requireDialogue = isPlayerAgencyMode(opts.mode);
 
   // Director plans cast/guest changes + ordered narration / speak beats (utility model).
   // Resume path skips planning and runs leftover beats from a prior Stop/error.
@@ -1348,6 +1354,8 @@ export interface EpisodeWrapDraft {
   dateNote: string;
   /** Pending plot targets this episode appears to have hit (near-exact to current list). */
   hitTargets: string[];
+  /** Due calendar events this episode appears to have played (near-exact titles). */
+  hitCalendarEvents: string[];
 }
 
 /** Season-like episode analysis for the wrap review UI. */
@@ -1386,7 +1394,8 @@ export async function analyzeEpisode(
     storyDayEnd: Math.max(dayStart, dayNow),
     nextStoryDay: Math.max(dayStart, dayNow) + cal.episodeAdvanceDays,
     dateNote: '',
-    hitTargets: []
+    hitTargets: [],
+    hitCalendarEvents: []
   };
   if (!text.trim()) return empty;
 
@@ -1440,6 +1449,17 @@ export async function analyzeEpisode(
     ? pendingTargets.map((t) => `- [${t.scope}] ${t.text}`).join('\n')
     : '(none)';
 
+  const dueCalendarEvents = (await db.calendarEvents.where('seasonId').equals(season.id).toArray())
+    .filter((e) => e.status === 'due' || e.status === 'scheduled')
+    .filter((e) => {
+      const start = Math.max(1, e.storyDay);
+      const end = e.endDay != null && e.endDay >= start ? e.endDay : start;
+      return start <= Math.max(dayStart, dayNow) && end >= dayStart;
+    });
+  const dueCalendarBlock = dueCalendarEvents.length > 0
+    ? dueCalendarEvents.map((e) => `- ${e.title}: ${e.summary}`).join('\n')
+    : '(none)';
+
   const dateBlock =
     `Calendar system: ${cal.system || '(day count only)'}\n` +
     `Weekdays: ${cal.weekdays.join(', ')} (story day 1 = ${cal.weekdays[cal.dayOneWeekday]})\n` +
@@ -1476,6 +1496,7 @@ export async function analyzeEpisode(
     nextStoryDay?: number;
     dateNote?: string;
     hitTargets?: string[];
+    hitCalendarEvents?: string[];
   }>(
     world,
     'You are a continuity editor closing an interactive fiction episode. ' +
@@ -1487,6 +1508,7 @@ export async function analyzeEpisode(
     '"threads":["<NEW unresolved tensions raised this episode>"],' +
     '"resolvedThreads":["<exact or near-exact text of prior open threads this episode settled — omit if none>"],' +
     '"hitTargets":["<exact or near-exact text of pending plot targets this episode meaningfully advanced or fulfilled — omit if none>"],' +
+    '"hitCalendarEvents":["<exact or near-exact titles of due calendar events this episode played out or clearly addressed — omit if none>"],' +
     '"guestEffects":["<how walk-ons changed the story, if any>"],' +
     '"characterUpdates":[{"name":"<exact cast name>","goal":"<current goal or empty>","emotion":"<emotional state>","location":"<where they are>","condition":"<injuries/status>"}],' +
     '"knowledgeUpdates":[{"name":"<exact cast name>","nowKnows":"<what they learned>","clearMustNotKnow":"<clause from MUST NOT KNOW that is no longer secret to them>"}],' +
@@ -1500,6 +1522,7 @@ export async function analyzeEpisode(
     '- Facts: 4–12 new durable facts; do NOT repeat Known facts; each fact stands alone with names; date when relevant.\n' +
     '- Threads: only NEW open tensions (0–8). Put settled prior threads in resolvedThreads.\n' +
     '- hitTargets: only from the Pending plot targets list; copy text near-exactly; omit if the target was not advanced.\n' +
+    '- hitCalendarEvents: only from Due calendar events; copy titles near-exactly; omit if the event was not addressed in play.\n' +
     '- characterUpdates: every non-player cast member who appeared or was meaningfully affected; omit empties.\n' +
     '- knowledgeUpdates: only when someone learned something that was blocked or newly revealed; clearMustNotKnow should match their wall when possible.\n' +
     '- relationshipUpdates: only real shifts (trust, debt, romance, enmity); use exact cast names.\n' +
@@ -1520,6 +1543,7 @@ export async function analyzeEpisode(
     `Known facts (do not repeat):\n${knownFacts || '(none)'}\n\n` +
     `Open threads already on file (resolve via resolvedThreads if settled):\n${openThreadBlock}\n\n` +
     `Pending plot targets (report hits via hitTargets):\n${pendingTargetBlock}\n\n` +
+    `Due calendar events (report played via hitCalendarEvents):\n${dueCalendarBlock}\n\n` +
     `Episode material:\n${corpus.slice(0, 60000)}`,
     4000,
     signal,
@@ -1584,7 +1608,8 @@ export async function analyzeEpisode(
     storyDayEnd,
     nextStoryDay,
     dateNote: (result.dateNote ?? '').trim(),
-    hitTargets: (result.hitTargets ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 10)
+    hitTargets: (result.hitTargets ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 10),
+    hitCalendarEvents: (result.hitCalendarEvents ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 10)
   };
 
   try {
@@ -1623,6 +1648,8 @@ export interface CommitEpisodeWrapInput {
   aimedBeatTexts?: string[];
   /** Pending plot target texts the author confirmed as hit this episode. */
   hitTargets?: string[];
+  /** Calendar event titles the author confirmed as played this episode. */
+  hitCalendarEvents?: string[];
 }
 
 /**
@@ -1712,6 +1739,32 @@ export function matchPlotTargets(
       hit = pending.find((t) => {
         if (used.has(t.id)) return false;
         const tKey = t.text.trim().toLowerCase();
+        return tKey.includes(key) || key.includes(tKey);
+      });
+    }
+    if (hit) {
+      used.add(hit.id);
+      matched.push(hit);
+    }
+  }
+  return matched;
+}
+
+/** Match wrap hit lines to calendar events by title (exact, then loose contains). */
+export function matchCalendarEventsByTitle(
+  events: CalendarEvent[],
+  hitLines: string[]
+): CalendarEvent[] {
+  const matched: CalendarEvent[] = [];
+  const used = new Set<string>();
+  for (const line of hitLines) {
+    const key = line.trim().toLowerCase();
+    if (!key) continue;
+    let hit = events.find((e) => !used.has(e.id) && e.title.trim().toLowerCase() === key);
+    if (!hit) {
+      hit = events.find((e) => {
+        if (used.has(e.id)) return false;
+        const tKey = e.title.trim().toLowerCase();
         return tKey.includes(key) || key.includes(tKey);
       });
     }
@@ -1922,6 +1975,41 @@ export async function commitEpisodeWrap(
       ? Math.floor(input.nextStoryDay)
       : dayEnd + cal.episodeAdvanceDays
   );
+
+  // Activate / miss calendar events across this episode's date span (wrap grace for misses).
+  await evaluateCalendarEvents({
+    worldId: world.id,
+    seasonId: season.id,
+    fromDay: dayStart,
+    toDay: dayEnd,
+    mode: 'wrap',
+    world
+  });
+
+  // Mark author-confirmed calendar events as played (+ optional continuity fact).
+  const hitCalLines = (input.hitCalendarEvents ?? []).map((t) => t.trim()).filter(Boolean);
+  if (hitCalLines.length > 0) {
+    const seasonEvents = await db.calendarEvents.where('seasonId').equals(season.id).toArray();
+    const matched = matchCalendarEventsByTitle(
+      seasonEvents.filter((e) => e.status === 'due' || e.status === 'scheduled'),
+      hitCalLines
+    );
+    const nowCal = Date.now();
+    for (const ev of matched) {
+      await db.calendarEvents.update(ev.id, { status: 'played', updatedAt: nowCal });
+      const factText = `Calendar: ${ev.title.trim()}${ev.summary.trim() ? ` — ${ev.summary.trim()}` : ''}`;
+      await db.continuity.add({
+        id: uid(),
+        worldId: world.id,
+        seasonId: season.id,
+        episodeId: episode.id,
+        text: factText.slice(0, 400),
+        source: 'auto',
+        createdAt: nowCal
+      });
+    }
+  }
+
   const aimedTexts = (input.aimedBeatTexts ?? []).map((t) => t.trim()).filter(Boolean);
   // Carry unfinished pending from the ending episode (after hit marks applied).
   const carriedPending = pendingPlotTargets(episodeTargetsNext ?? episode.plotTargets);
@@ -2288,6 +2376,24 @@ export async function draftPremise(world: World, season: Season, wrap: SeasonWra
   return premise.trim();
 }
 
+/** Resolve season-open place from the prior season's last episode (pure — easy to test). */
+export function seasonOpenPlaceFromLastEpisode(
+  lastEp: { location: string; locationId?: string | null } | undefined,
+  resolveLocation: (id: string) => { id: string; name: string } | undefined
+): { location: string; locationId: string | null } {
+  if (!lastEp) return { location: '', locationId: null };
+  if (lastEp.locationId) {
+    const loc = resolveLocation(lastEp.locationId);
+    if (loc) {
+      return { locationId: loc.id, location: loc.name || lastEp.location || '' };
+    }
+  }
+  if (lastEp.location.trim()) {
+    return { location: lastEp.location.trim(), locationId: null };
+  }
+  return { location: '', locationId: null };
+}
+
 /** Steps 4-5: build the season bible, create season N+1, evolve character sheets/state. */
 export async function beginNextSeason(world: World, season: Season, wrap: SeasonWrap, gapLabel: string): Promise<Season> {
   const { provider, model } = utilityModelFor(world);
@@ -2347,9 +2453,19 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
     ? [playerId, ...returningIds.filter((id) => id !== playerId)]
     : returningIds;
 
+  // Carry place into season-open E1 when the last episode still had a valid location.
+  const priorEps = await db.episodes.where('seasonId').equals(season.id).toArray();
+  const lastEp = [...priorEps].sort((a, b) => b.number - a.number)[0];
+  const worldPlaces = await db.locations.where('worldId').equals(world.id).toArray();
+  const placeById = new Map(worldPlaces.map((l) => [l.id, { id: l.id, name: l.name }]));
+  const { location: openLocation, locationId: openLocationId } = seasonOpenPlaceFromLastEpisode(
+    lastEp,
+    (id) => placeById.get(id)
+  );
+
   const firstEpisode: Episode = {
     id: uid(), seasonId: next.id, worldId: world.id, number: 1,
-    title: '', location: '', locationId: null,
+    title: '', location: openLocation, locationId: openLocationId,
     castIds,
     storyDay: Math.max(1, seasonOpenDay),
     storyDayEnd: null,
@@ -2495,7 +2611,154 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
     }
   );
 
+  // Close out overdue calendar texture on the wrapped season across the time gap.
+  await evaluateCalendarEvents({
+    worldId: world.id,
+    seasonId: season.id,
+    fromDay: calForSeason.currentDay,
+    toDay: Math.max(1, seasonOpenDay),
+    mode: 'wrap',
+    world
+  });
+
+  // Optional AI seed for the new season's calendar texture.
+  if (worldCalendarEventPrefs(world).aiSeedOnSeasonStart) {
+    try {
+      await seedSeasonCalendarEvents(world, next, { autoCommit: true });
+    } catch (e) {
+      logAppError(e, 'calendar seed on season start');
+    }
+  }
+
   return next;
+}
+
+export interface SeedCalendarEventDraft {
+  title: string;
+  summary: string;
+  kind: CalendarEventKind;
+  scale: CalendarEventScale;
+  storyDay: number;
+  endDay?: number;
+  promptPolicy: CalendarEventPromptPolicy;
+  characterIds?: string[];
+}
+
+/**
+ * Propose dated season calendar texture via the utility model.
+ * When autoCommit is true, writes scheduled events (capped) into Dexie.
+ */
+export async function seedSeasonCalendarEvents(
+  world: World,
+  season: Season,
+  opts?: { autoCommit?: boolean; signal?: AbortSignal; horizonDays?: number }
+): Promise<SeedCalendarEventDraft[]> {
+  const cal = worldCalendar(world);
+  const openDay = Math.max(1, cal.currentDay);
+  const horizon = Math.max(30, Math.min(180, opts?.horizonDays ?? 90));
+  const endDay = openDay + horizon;
+  const characters = await db.characters.where('worldId').equals(world.id).toArray();
+  const existing = await db.calendarEvents.where('seasonId').equals(season.id).toArray();
+  const activeCount = existing.filter((e) => e.status === 'scheduled' || e.status === 'due').length;
+  const room = Math.max(0, CALENDAR_EVENT_CAP - activeCount);
+  if (room === 0) return [];
+
+  const castLines = characters
+    .filter((c) => !c.isPlayer)
+    .slice(0, 12)
+    .map((c) => {
+      const rel = c.relationships.slice(0, 3).map((r) => {
+        const t = characters.find((x) => x.id === r.targetId)?.name;
+        return t ? `${r.kind}→${t}` : null;
+      }).filter(Boolean).join(', ');
+      return `- ${c.name}${c.role ? ` (${c.role})` : ''}${rel ? ` · ${rel}` : ''}`;
+    })
+    .join('\n');
+
+  const targets = pendingPlotTargets(season.plotTargets).map((t) => `- ${t.text}`).join('\n');
+  const months = cal.months.join(', ');
+
+  const result = await utilityJson<{
+    events?: Array<{
+      title?: string;
+      summary?: string;
+      kind?: string;
+      scale?: string;
+      storyDay?: number;
+      endDay?: number;
+      promptPolicy?: string;
+      characterNames?: string[];
+    }>;
+  }>(
+    world,
+    'You seed a season calendar of dated texture for longform interactive fiction. ' +
+    'Respond with JSON only: {"events":[{"title":"...","summary":"...","kind":"holiday|festival|ceremony|gathering|sport|disaster|personal|mundane|custom",' +
+    '"scale":"small|medium|large","storyDay":<int>,"endDay":<optional int>,"promptPolicy":"soft|hard","characterNames":["optional cast names"]}]}\n' +
+    'Rules:\n' +
+    '- Prefer mostly small/medium mundane, gathering, holiday, festival, ceremony, sport — keep the world feeling lived-in.\n' +
+    '- At most 1–2 personal or disaster events; never tragedy spam.\n' +
+    '- Spread storyDay across the given range; use the world month names when writing summaries.\n' +
+    '- Soft is default; hard only for events that should pressure the director while due.\n' +
+    `- Propose at most ${Math.min(room, 10)} events.`,
+    `World: ${world.title} — ${world.line}\n` +
+    `Bible excerpt: ${(world.bible || '').slice(0, 1200)}\n` +
+    `Season ${season.number} premise: ${season.premise || '(unwritten)'}\n` +
+    `Calendar: ${cal.system || '(unnamed)'} · months: ${months}\n` +
+    `Open day ${openDay} (${formatStoryDate(cal, openDay)}) through day ${endDay}.\n` +
+    `Cast:\n${castLines || '(none)'}\n` +
+    `Season plot targets:\n${targets || '(none)'}\n` +
+    `Existing event titles to avoid duplicating:\n${existing.map((e) => `- ${e.title}`).join('\n') || '(none)'}`,
+    2800,
+    opts?.signal
+  );
+
+  const kinds = new Set([
+    'holiday', 'festival', 'ceremony', 'gathering', 'sport', 'disaster', 'personal', 'mundane', 'custom'
+  ]);
+  const drafts: SeedCalendarEventDraft[] = (result.events ?? [])
+    .map((e) => {
+      const kind = kinds.has((e.kind ?? '').toLowerCase())
+        ? (e.kind!.toLowerCase() as CalendarEventKind)
+        : 'mundane';
+      const scale = e.scale === 'large' || e.scale === 'medium' ? e.scale : 'small';
+      const day = Math.max(openDay, Math.min(endDay, Math.floor(Number(e.storyDay) || openDay)));
+      const end = e.endDay != null && Number.isFinite(e.endDay)
+        ? Math.max(day, Math.min(endDay, Math.floor(e.endDay)))
+        : undefined;
+      const names = (e.characterNames ?? []).map((n) => n.trim().toLowerCase()).filter(Boolean);
+      const characterIds = characters
+        .filter((c) => names.includes(c.name.trim().toLowerCase()))
+        .map((c) => c.id)
+        .slice(0, 4);
+      return {
+        title: (e.title ?? '').trim(),
+        summary: (e.summary ?? '').trim(),
+        kind,
+        scale: scale as CalendarEventScale,
+        storyDay: day,
+        endDay: end,
+        promptPolicy: e.promptPolicy === 'hard' ? 'hard' as const : 'soft' as const,
+        characterIds: characterIds.length ? characterIds : undefined
+      };
+    })
+    .filter((e) => e.title && e.summary)
+    .slice(0, room);
+
+  if (opts?.autoCommit && drafts.length > 0) {
+    const now = Date.now();
+    await db.calendarEvents.bulkAdd(
+      drafts.map((d) => emptyCalendarEvent(world.id, season.id, {
+        ...d,
+        visibility: defaultVisibilityForKind(d.kind),
+        source: 'ai-seed',
+        status: d.storyDay <= openDay ? 'due' : 'scheduled',
+        createdAt: now,
+        updatedAt: now
+      }))
+    );
+  }
+
+  return drafts;
 }
 
 /** AI-assisted character draft from a one-line description. */

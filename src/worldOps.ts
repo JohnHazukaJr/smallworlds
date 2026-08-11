@@ -1,4 +1,5 @@
 import { db, uid } from './db';
+import { evaluateCalendarEvents } from './calendarEvents';
 import { useSettings } from './store/settings';
 import type {
   Character, Episode, Location, PlotTarget, Season, World, WorldAISettings, WorldCalendar
@@ -373,6 +374,11 @@ export async function createWorld(input: NewWorldInput): Promise<World> {
       dayOneMonth: 0,
       dayOneDate: 1
     },
+    calendarEventPrefs: {
+      enabled: true,
+      aiSeedOnSeasonStart: false,
+      defaultVisibility: 'title'
+    },
     createdAt: now,
     updatedAt: now
   };
@@ -621,6 +627,15 @@ export async function nextEpisode(current: Episode, opts: NextEpisodeOpts = {}):
         updatedAt: Date.now()
       });
     }
+  });
+  // Activate calendar events entered between episode end and next open.
+  await evaluateCalendarEvents({
+    worldId: current.worldId,
+    seasonId: current.seasonId,
+    fromDay: dayEnd,
+    toDay: nextDay,
+    mode: 'advance',
+    world
   });
   return next;
 }

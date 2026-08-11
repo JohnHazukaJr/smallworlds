@@ -3,13 +3,14 @@ import { formatUserError, logAppError } from './errors';
 import { decryptString, deriveKey, encryptString, randomSalt } from './security/crypto';
 import { isQuotaError, markStoragePressure } from './storage/quota';
 import type {
-  World, Season, Episode, Turn, Character, Location, ContinuityFact, OpenThread, SeasonWrap
+  World, Season, Episode, Turn, Character, Location, ContinuityFact, OpenThread, SeasonWrap,
+  CalendarEvent
 } from './types';
 
 /** Sync entity tables that support soft-delete tombstones. */
 export type SyncTableName =
   | 'worlds' | 'seasons' | 'episodes' | 'turns' | 'characters'
-  | 'locations' | 'continuity' | 'threads' | 'wraps';
+  | 'locations' | 'continuity' | 'threads' | 'wraps' | 'calendarEvents';
 
 export interface Tombstone {
   /** `${table}:${id}` */
@@ -33,6 +34,7 @@ export const db = new Dexie('small-worlds') as Dexie & {
   continuity: EntityTable<ContinuityFact, 'id'>;
   threads: EntityTable<OpenThread, 'id'>;
   wraps: EntityTable<SeasonWrap, 'id'>;
+  calendarEvents: EntityTable<CalendarEvent, 'id'>;
   tombstones: EntityTable<Tombstone, 'key'>;
 };
 
@@ -53,6 +55,10 @@ db.version(2).stores({
 
 db.version(3).stores({
   tombstones: 'key, table, deletedAt, worldId'
+});
+
+db.version(4).stores({
+  calendarEvents: 'id, worldId, seasonId, storyDay'
 });
 
 export const uid = () => crypto.randomUUID();
@@ -130,12 +136,13 @@ export interface WorldExport {
   continuity: ContinuityFact[];
   threads: OpenThread[];
   wraps: SeasonWrap[];
+  calendarEvents?: CalendarEvent[];
 }
 
 export async function exportWorld(worldId: string): Promise<WorldExport> {
   const world = await db.worlds.get(worldId);
   if (!world) throw new Error('World not found');
-  const [seasons, episodes, turns, characters, locations, continuity, threads, wraps] = await Promise.all([
+  const [seasons, episodes, turns, characters, locations, continuity, threads, wraps, calendarEvents] = await Promise.all([
     db.seasons.where('worldId').equals(worldId).toArray(),
     db.episodes.where('worldId').equals(worldId).toArray(),
     db.turns.where('worldId').equals(worldId).toArray(),
@@ -143,18 +150,19 @@ export async function exportWorld(worldId: string): Promise<WorldExport> {
     db.locations.where('worldId').equals(worldId).toArray(),
     db.continuity.where('worldId').equals(worldId).toArray(),
     db.threads.where('worldId').equals(worldId).toArray(),
-    db.wraps.where('worldId').equals(worldId).toArray()
+    db.wraps.where('worldId').equals(worldId).toArray(),
+    db.calendarEvents.where('worldId').equals(worldId).toArray()
   ]);
   return {
     format: 'small-worlds-world', version: 1, exportedAt: Date.now(),
-    world, seasons, episodes, turns, characters, locations, continuity, threads, wraps
+    world, seasons, episodes, turns, characters, locations, continuity, threads, wraps, calendarEvents
   };
 }
 
 export async function importWorld(data: WorldExport): Promise<string> {
   if (data.format !== 'small-worlds-world') throw new Error('Not a Small Worlds export file');
   await guardStorage(() => db.transaction('rw',
-    [db.worlds, db.seasons, db.episodes, db.turns, db.characters, db.locations, db.continuity, db.threads, db.wraps],
+    [db.worlds, db.seasons, db.episodes, db.turns, db.characters, db.locations, db.continuity, db.threads, db.wraps, db.calendarEvents],
     async () => {
       await db.worlds.put(data.world);
       await db.seasons.bulkPut(data.seasons);
@@ -165,6 +173,7 @@ export async function importWorld(data: WorldExport): Promise<string> {
       await db.continuity.bulkPut(data.continuity);
       await db.threads.bulkPut(data.threads);
       await db.wraps.bulkPut(data.wraps);
+      if (data.calendarEvents?.length) await db.calendarEvents.bulkPut(data.calendarEvents);
     }));
   return data.world.id;
 }
@@ -255,10 +264,10 @@ export async function deleteWorld(
 ): Promise<void> {
   await guardStorage(async () => {
     await db.transaction('rw',
-      [db.worlds, db.seasons, db.episodes, db.turns, db.characters, db.locations, db.continuity, db.threads, db.wraps, db.tombstones],
+      [db.worlds, db.seasons, db.episodes, db.turns, db.characters, db.locations, db.continuity, db.threads, db.wraps, db.calendarEvents, db.tombstones],
       async () => {
         if (!opts?.fromRemote) {
-          const [world, seasons, episodes, turns, characters, locations, continuity, threads, wraps] = await Promise.all([
+          const [world, seasons, episodes, turns, characters, locations, continuity, threads, wraps, calendarEvents] = await Promise.all([
             db.worlds.get(worldId),
             db.seasons.where('worldId').equals(worldId).toArray(),
             db.episodes.where('worldId').equals(worldId).toArray(),
@@ -267,7 +276,8 @@ export async function deleteWorld(
             db.locations.where('worldId').equals(worldId).toArray(),
             db.continuity.where('worldId').equals(worldId).toArray(),
             db.threads.where('worldId').equals(worldId).toArray(),
-            db.wraps.where('worldId').equals(worldId).toArray()
+            db.wraps.where('worldId').equals(worldId).toArray(),
+            db.calendarEvents.where('worldId').equals(worldId).toArray()
           ]);
           const now = Date.now();
           const tombs: Tombstone[] = [];
@@ -299,6 +309,7 @@ export async function deleteWorld(
           for (const c of continuity) add('continuity', c.id, c, { seasonId: c.seasonId });
           for (const t of threads) add('threads', t.id, t, { seasonId: t.seasonId });
           for (const w of wraps) add('wraps', w.id, w, { seasonId: w.seasonId });
+          for (const ev of calendarEvents) add('calendarEvents', ev.id, ev, { seasonId: ev.seasonId });
           if (tombs.length > 0) await db.tombstones.bulkPut(tombs);
         }
 
@@ -311,6 +322,7 @@ export async function deleteWorld(
         await db.continuity.where('worldId').equals(worldId).delete();
         await db.threads.where('worldId').equals(worldId).delete();
         await db.wraps.where('worldId').equals(worldId).delete();
+        await db.calendarEvents.where('worldId').equals(worldId).delete();
       });
   });
 }
