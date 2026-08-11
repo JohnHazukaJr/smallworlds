@@ -4,7 +4,9 @@ import { analyzeSeason, beginNextSeason, draftPremise, evolveCharacters } from '
 import { db, safeWrite } from '../db';
 import { formatUserError } from '../errors';
 import { useApp } from '../store/app';
-import type { BeatDisposition, SeasonWrap } from '../types';
+import type {
+  BeatDisposition, CharacterState, SeasonWrap, WrapCharacterOutcome
+} from '../types';
 import { Chip, ErrorNote, Mono, Spinner, useVw } from '../ui/bits';
 import { avatarStyle, GAP_EFFECTS, GAP_LABELS } from '../ui/theme';
 
@@ -14,6 +16,17 @@ const BEAT_OPTS: Array<[BeatDisposition, string]> = [
 
 /** Sticky bar + content spacer so the last card isn’t covered on portrait. */
 const STICKY_BAR_RESERVE = 132;
+
+const SHEET_FIELDS = ['role', 'summary', 'traits', 'desires', 'fears', 'flaws'] as const;
+const STATE_FIELDS = ['goal', 'emotion', 'location', 'condition'] as const;
+
+function patchCharacter(
+  draft: SeasonWrap,
+  index: number,
+  partial: Partial<WrapCharacterOutcome>
+): SeasonWrap['characters'] {
+  return draft.characters.map((x, j) => (j === index ? { ...x, ...partial } : x));
+}
 
 export function Sequel() {
   const vw = useVw();
@@ -53,9 +66,19 @@ export function Sequel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [storedWrap?.id]);
   const timer = useRef<number>(undefined);
+  const draftRef = useRef<SeasonWrap | null>(null);
+  draftRef.current = draft;
   const clearDebounce = () => {
     window.clearTimeout(timer.current);
     timer.current = undefined;
+  };
+  /** Persist the in-memory draft immediately so Begin/evolve cannot commit a stale wrap. */
+  const flushWrap = async (w: SeasonWrap) => {
+    clearDebounce();
+    const next = { ...w, updatedAt: Date.now() };
+    await safeWrite(() => db.wraps.put(next), setError);
+    setDraft(next);
+    return next;
   };
   const patch = (p: Partial<SeasonWrap>) => {
     setDraft((d) => {
@@ -76,6 +99,10 @@ export function Sequel() {
   ) => {
     // Flush pending local edits so AI writes cannot be overwritten by a stale put.
     clearDebounce();
+    const live = draftRef.current;
+    if (live && kind !== 'analyze') {
+      await safeWrite(() => db.wraps.put({ ...live, updatedAt: Date.now() }), setError);
+    }
     setBusy(kind);
     setError('');
     try {
@@ -139,12 +166,15 @@ export function Sequel() {
   const gapLabel = GAP_LABELS[draft.gap];
 
   const beginSeason = () => void run('begin', async () => {
-    await beginNextSeason(world, season, draft, gapLabel);
+    const live = draftRef.current ?? draft;
+    const flushed = await flushWrap(live);
+    await beginNextSeason(world, season, flushed, GAP_LABELS[flushed.gap]);
     go('story');
   });
 
   const redraftPremise = () => void run('premise', async () => {
-    const premise = await draftPremise(world, season, draft, gapLabel);
+    const live = draftRef.current ?? draft;
+    const premise = await draftPremise(world, season, live, GAP_LABELS[live.gap]);
     patch({ premise });
   });
 
@@ -274,8 +304,11 @@ export function Sequel() {
                 setDraft(updated);
               })}
             >
-              {busy === 'evolve' ? 'Evolving the cast…' : 'Propose what changed off-screen'}
+              {busy === 'evolve' ? 'Evolving cast, relationships, and plot…' : 'Propose what changed off-screen'}
             </button>
+            <div style={{ fontSize: 12, lineHeight: 1.5, color: 'rgba(236,234,230,0.45)' }}>
+              Begin applies only kept patches below. Voice and anchors stay identity.
+            </div>
           </div>
 
           <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 11, minWidth: 0 }}>
@@ -291,7 +324,7 @@ export function Sequel() {
                 }}>
                   <div
                     style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}
-                    onClick={() => patch({ characters: draft.characters.map((x, j) => (j === i ? { ...x, returning: !x.returning } : x)) })}
+                    onClick={() => patch({ characters: patchCharacter(draft, i, { returning: !c.returning }) })}
                   >
                     <div style={avatarStyle(ch?.hue ?? 200, 28)} />
                     <div style={{ fontSize: 13, fontWeight: 600, flex: 1 }}>{c.name}</div>
@@ -306,7 +339,7 @@ export function Sequel() {
                     value={c.evolution || c.outcome}
                     placeholder="where the season leaves them…"
                     onChange={(e) => patch({
-                      characters: draft.characters.map((x, j) => (j === i ? { ...x, evolution: e.target.value } : x))
+                      characters: patchCharacter(draft, i, { evolution: e.target.value })
                     })}
                     style={{ fontSize: 11.5, padding: '7px 9px' }}
                   />
@@ -315,6 +348,203 @@ export function Sequel() {
             })}
           </div>
         </div>
+
+        {/* Cast / relationship / plot handoff review */}
+        {(draft.characters.some((c) => c.returning && (c.sheetPatch || c.statePatch || c.knowledge))
+          || (draft.relationshipUpdates?.length ?? 0) > 0
+          || (draft.plotArc?.length ?? 0) > 0) && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 18, marginBottom: 30 }}>
+            <Mono style={{ fontSize: 9 }}>handoff review · keep what Begin should apply</Mono>
+
+            {draft.characters.filter((c) => c.returning).map((c) => {
+              const i = draft.characters.findIndex((x) => x.characterId === c.characterId);
+              if (i < 0) return null;
+              const hasSheet = !!c.sheetPatch && Object.values(c.sheetPatch).some(Boolean);
+              const hasState = !!c.statePatch && Object.values(c.statePatch).some(Boolean);
+              const hasKnow = !!(c.knowledge?.nowKnows || c.knowledge?.clearMustNotKnow);
+              if (!hasSheet && !hasState && !hasKnow) return null;
+              return (
+                <div key={c.characterId} className="glass" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: '#f0eee9', flex: 1 }}>{c.name}</div>
+                    {hasSheet && (
+                      <Chip
+                        active={c.keepSheet !== false}
+                        onClick={() => patch({
+                          characters: patchCharacter(draft, i, { keepSheet: c.keepSheet === false })
+                        })}
+                      >
+                        {c.keepSheet === false ? 'Sheet dropped' : 'Keep sheet'}
+                      </Chip>
+                    )}
+                    {hasState && (
+                      <Chip
+                        active={c.keepState !== false}
+                        onClick={() => patch({
+                          characters: patchCharacter(draft, i, { keepState: c.keepState === false })
+                        })}
+                      >
+                        {c.keepState === false ? 'State dropped' : 'Keep state'}
+                      </Chip>
+                    )}
+                    {hasKnow && (
+                      <Chip
+                        active={c.keepKnowledge !== false}
+                        onClick={() => patch({
+                          characters: patchCharacter(draft, i, { keepKnowledge: c.keepKnowledge === false })
+                        })}
+                      >
+                        {c.keepKnowledge === false ? 'Knowledge dropped' : 'Keep knowledge'}
+                      </Chip>
+                    )}
+                  </div>
+
+                  {hasState && c.keepState !== false && (
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8 }}>
+                      {STATE_FIELDS.map((field) => (
+                        <label key={field} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          <Mono style={{ fontSize: 8, opacity: 0.55 }}>{field}</Mono>
+                          <input
+                            value={c.statePatch?.[field] ?? ''}
+                            placeholder="—"
+                            onChange={(e) => {
+                              const statePatch: Partial<CharacterState> = {
+                                ...(c.statePatch ?? {}),
+                                [field]: e.target.value
+                              };
+                              patch({ characters: patchCharacter(draft, i, { statePatch }) });
+                            }}
+                            style={{ fontSize: 12.5, background: 'rgba(8,9,12,0.35)' }}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  )}
+
+                  {hasSheet && c.keepSheet !== false && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {SHEET_FIELDS.filter((f) => c.sheetPatch?.[f]).map((field) => (
+                        <label key={field} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          <Mono style={{ fontSize: 8, opacity: 0.55 }}>{field}</Mono>
+                          <textarea
+                            rows={field === 'summary' ? 2 : 1}
+                            value={c.sheetPatch?.[field] ?? ''}
+                            onChange={(e) => {
+                              const sheetPatch = { ...(c.sheetPatch ?? {}), [field]: e.target.value };
+                              patch({ characters: patchCharacter(draft, i, { sheetPatch }) });
+                            }}
+                            style={{ fontSize: 12.5, background: 'rgba(8,9,12,0.35)' }}
+                          />
+                        </label>
+                      ))}
+                    </div>
+                  )}
+
+                  {hasKnow && c.keepKnowledge !== false && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {c.knowledge?.nowKnows && (
+                        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          <Mono style={{ fontSize: 8, opacity: 0.55 }}>now knows</Mono>
+                          <input
+                            value={c.knowledge.nowKnows}
+                            onChange={(e) => patch({
+                              characters: patchCharacter(draft, i, {
+                                knowledge: { ...c.knowledge, nowKnows: e.target.value }
+                              })
+                            })}
+                            style={{ fontSize: 12.5, background: 'rgba(8,9,12,0.35)' }}
+                          />
+                        </label>
+                      )}
+                      {c.knowledge?.clearMustNotKnow && (
+                        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                          <Mono style={{ fontSize: 8, opacity: 0.55 }}>clear from must-not-know</Mono>
+                          <input
+                            value={c.knowledge.clearMustNotKnow}
+                            onChange={(e) => patch({
+                              characters: patchCharacter(draft, i, {
+                                knowledge: { ...c.knowledge, clearMustNotKnow: e.target.value }
+                              })
+                            })}
+                            style={{ fontSize: 12.5, background: 'rgba(8,9,12,0.35)' }}
+                          />
+                        </label>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            {(draft.relationshipUpdates?.length ?? 0) > 0 && (
+              <div className="glass" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <Mono style={{ fontSize: 9 }}>relationship shifts</Mono>
+                {draft.relationshipUpdates!.map((r, i) => (
+                  <div key={`${r.from}-${r.to}-${i}`} style={{
+                    display: 'flex', gap: 10, alignItems: 'flex-start', flexWrap: 'wrap',
+                    opacity: r.keep === false ? 0.42 : 1,
+                    padding: '8px 0',
+                    borderBottom: '1px solid rgba(255,255,255,0.06)'
+                  }}>
+                    <div style={{ flex: 1, minWidth: 160, fontSize: 13, color: '#eceae6' }}>
+                      <strong>{r.from}</strong>
+                      <span style={{ opacity: 0.45 }}> → </span>
+                      <strong>{r.to}</strong>
+                      <div style={{ fontSize: 12, opacity: 0.6, marginTop: 4 }}>
+                        {(r.kind || 'linked')}{r.note ? ` — ${r.note}` : ''}
+                      </div>
+                    </div>
+                    <Chip
+                      active={r.keep !== false}
+                      onClick={() => patch({
+                        relationshipUpdates: draft.relationshipUpdates!.map((x, j) =>
+                          j === i ? { ...x, keep: x.keep === false } : x
+                        )
+                      })}
+                    >
+                      {r.keep === false ? 'Dropped' : 'Keep'}
+                    </Chip>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {(draft.plotArc?.length ?? 0) > 0 && (
+              <div className="glass" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <Mono style={{ fontSize: 9 }}>extra plot pressures · Raise beats already seed targets</Mono>
+                {raised > 0 && (
+                  <div style={{ fontSize: 12, color: 'rgba(236,234,230,0.5)', lineHeight: 1.45 }}>
+                    {raised} Raise beat{raised === 1 ? '' : 's'} will become season plot targets automatically.
+                  </div>
+                )}
+                {draft.plotArc!.map((p, i) => (
+                  <div key={i} style={{
+                    display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
+                    opacity: p.keep === false ? 0.42 : 1
+                  }}>
+                    <input
+                      value={p.text}
+                      onChange={(e) => patch({
+                        plotArc: draft.plotArc!.map((x, j) => (j === i ? { ...x, text: e.target.value } : x))
+                      })}
+                      style={{ flex: 1, minWidth: 160, fontSize: 13, background: 'rgba(8,9,12,0.35)' }}
+                    />
+                    <Chip
+                      active={p.keep !== false}
+                      onClick={() => patch({
+                        plotArc: draft.plotArc!.map((x, j) =>
+                          j === i ? { ...x, keep: x.keep === false } : x
+                        )
+                      })}
+                    >
+                      {p.keep === false ? 'Dropped' : 'Keep'}
+                    </Chip>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* premise */}
         <div style={{
@@ -338,7 +568,7 @@ export function Sequel() {
                 disabled={busy !== null || !draft.premise.trim()}
                 onClick={beginSeason}
               >
-                {busy === 'begin' ? 'Building the season bible…' : `Begin season ${season.number + 1}`}
+                {busy === 'begin' ? 'Building season bible and applying handoff…' : `Begin season ${season.number + 1}`}
               </button>
               <button
                 className="btn-ghost"
@@ -352,7 +582,7 @@ export function Sequel() {
               </div>
             </div>
           )}
-          {busy === 'begin' && <Spinner label="writing the recap and evolving character states" />}
+          {busy === 'begin' && <Spinner label="writing the recap and applying cast handoff" />}
           {narrow && (
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)' }}>
               {raised} raised · {dropped} dropped · {draft.beats.length} beats reviewed
@@ -384,7 +614,7 @@ export function Sequel() {
             disabled={busy !== null || !draft.premise.trim()}
             onClick={beginSeason}
           >
-            {busy === 'begin' ? 'Building the season bible…' : `Begin season ${season.number + 1}`}
+            {busy === 'begin' ? 'Building season bible and applying handoff…' : `Begin season ${season.number + 1}`}
           </button>
           <button
             className="btn-ghost"

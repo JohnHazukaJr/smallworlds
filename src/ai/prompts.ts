@@ -18,9 +18,9 @@ const NARRATION_BEAT_TOKENS: Record<TurnLength, number> = {
  * Soft word hints in speak messages do the real anti-ramble work; tokens are a hard ceiling.
  */
 const CHARACTER_SPEAK_TOKENS: Record<TurnLength, number> = {
-  beat: 280,
-  scene: 420,
-  episode: 560
+  beat: 160,
+  scene: 280,
+  episode: 400
 };
 
 export function narrationBeatTokens(length: TurnLength): number {
@@ -932,6 +932,7 @@ export function buildGuestSystemPrompt(ctx: PromptContext, guest: EpisodeGuest):
   sections.push(
     `## How you respond\n` +
     `- Speak in a short, focused reply; one reaction for this beat — no monologue or scene-stealing speech.\n` +
+    (guest.voice ? `- Voice guide: ${guest.voice}\n` : '') +
     `- Optional short physical beat of your own body. Blank line only if tone truly shifts.\n` +
     `- Vocal stress: *word* or **word** inside quotes. Physical beats: *asterisks* outside quotes.\n` +
     `- Do not steal the scene from the main cast; add pressure or texture.\n` +
@@ -1190,13 +1191,33 @@ export type DirectorBeat =
   | { type: 'speak'; characterId: string; brief: string }
   | { type: 'speak'; guestId: string; brief: string };
 
-export function directorSystemPrompt(mode: ComposeMode, hasSpeakers: boolean): string {
+/** Hard caps on director plan shape by reply-size chip. */
+export function planCapsForLength(length: TurnLength): { maxSpeak: number; maxTotal: number } {
+  if (length === 'beat') return { maxSpeak: 1, maxTotal: 2 };
+  if (length === 'scene') return { maxSpeak: 2, maxTotal: 4 };
+  return { maxSpeak: 3, maxTotal: 5 };
+}
+
+export function directorSystemPrompt(
+  mode: ComposeMode,
+  hasSpeakers: boolean,
+  length: TurnLength = 'scene'
+): string {
+  const { maxSpeak, maxTotal } = planCapsForLength(length);
+  const sizeLabel = length === 'beat' ? 'Short' : length === 'scene' ? 'Medium' : 'Long';
   const engageReply =
     hasSpeakers && (mode === 'speak' || mode === 'act')
       ? 'CRITICAL: The player just spoke or acted with at least one NPC/walk-on present. ' +
         'You MUST include at least one speak beat that responds directly to that move. ' +
         'Narration-only plans are forbidden in this case. '
       : 'Not everyone must speak on every turn. ';
+
+  const sizeGuidance =
+    length === 'beat'
+      ? 'Reply size is Short: prefer 1 narration + 1 speak (or speak-only if an immediate reply is natural). No multi-character pile-on. '
+      : length === 'scene'
+        ? 'Reply size is Medium: a tight exchange — typically 1–2 narration and at most 2 speak beats. '
+        : 'Reply size is Long: room for a fuller beat sequence, still sharp — do not fill the cap without reason. ';
 
   return (
     'You are the scene director for an interactive story. ' +
@@ -1223,8 +1244,8 @@ export function directorSystemPrompt(mode: ComposeMode, hasSpeakers: boolean): s
     'Narration briefs describe atmosphere or physical action — never finished dialogue. ' +
     'Speak briefs are a single intent (tone/goal), never the finished line — and never "give a speech" or multi-point monologue. ' +
     engageReply +
-    'Typical: 1–2 narration beats and at most 3 speak beats. ' +
-    'Hard cap: at most 3 speak beats and at most 5 beats total. ' +
+    sizeGuidance +
+    `Hard cap for ${sizeLabel}: at most ${maxSpeak} speak beat${maxSpeak === 1 ? '' : 's'} and at most ${maxTotal} beats total. ` +
     'Prefer fewer, sharper speak beats over several characters holding the floor. ' +
     'Always include at least one narration beat unless the player just spoke and an immediate reply is natural — then you may open with speak. ' +
     'End the plan on tension or an opening for the player.'
@@ -1234,7 +1255,8 @@ export function directorSystemPrompt(mode: ComposeMode, hasSpeakers: boolean): s
 export function directorUserPrompt(
   ctx: PromptContext,
   mode: ComposeMode,
-  input: string
+  input: string,
+  opts?: { preferCharacterId?: string; preferGuestId?: string }
 ): string {
   const inScene = ctx.characters.filter((c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer);
   const offScene = ctx.characters.filter((c) => !ctx.episode.castIds.includes(c.id) && !c.isPlayer);
@@ -1248,6 +1270,18 @@ export function directorUserPrompt(
   const guestList = guests.length > 0
     ? guests.map((g) => `- ${g.id} · ${g.name}: ${g.brief}`).join('\n')
     : '(none yet — you may introduce walk-ons via castDelta.introduce)';
+
+  const preferCast = opts?.preferCharacterId
+    ? inScene.find((c) => c.id === opts.preferCharacterId)
+    : undefined;
+  const preferGuest = opts?.preferGuestId
+    ? guests.find((g) => g.id === opts.preferGuestId)
+    : undefined;
+  const preferLine = preferCast
+    ? `Player preference: the speak reply should be from ${preferCast.name} (${preferCast.id}) unless they have left the scene.\n`
+    : preferGuest
+      ? `Player preference: the speak reply should be from walk-on ${preferGuest.name} (${preferGuest.id}) unless they have left.\n`
+      : '';
 
   const recent = packTurns(ctx.turns).slice(-20);
   const allGuests = ctx.episode.guests ?? [];
@@ -1323,6 +1357,7 @@ export function directorUserPrompt(
     `In-scene cast:\n${castList}\n\n` +
     `Off-scene cast (may enter via castDelta.enter):\n${offList}\n\n` +
     `Active walk-ons (guest ids):\n${guestList}\n\n` +
+    preferLine +
     `Continuity (do not contradict):\n${factLines || '(none)'}\n\n` +
     `${threadSec ?? 'Open threads (draw on sparingly; soft tensions, not the plot-target hit-list):\n(none)'}\n\n` +
     `Knowledge walls:\n${knowledgeWalls || '(none)'}\n\n` +

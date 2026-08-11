@@ -423,7 +423,17 @@ export function Story() {
   const [deliveryTipSeen, setDeliveryTipSeen] = useState(() => {
     try { return localStorage.getItem('sw-delivery-tip-seen') === '1'; } catch { return false; }
   });
-  const [length, setLength] = useState<TurnLength>('scene');
+  const [length, setLength] = useState<TurnLength>(() => {
+    try {
+      const saved = localStorage.getItem('sw-reply-size');
+      if (saved === 'beat' || saved === 'scene' || saved === 'episode') return saved;
+    } catch { /* ignore */ }
+    return 'scene';
+  });
+  /** Pin who should answer on Speak/Act — null = director chooses. */
+  const [preferSpeaker, setPreferSpeaker] = useState<
+    null | { kind: 'cast'; id: string } | { kind: 'guest'; id: string }
+  >(null);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [partial, setPartial] = useState('');
@@ -452,6 +462,55 @@ export function Story() {
   const [nudgeDismissedLocId, setNudgeDismissedLocId] = useState<string | null | undefined>(undefined);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    try { localStorage.setItem('sw-reply-size', length); } catch { /* ignore */ }
+  }, [length]);
+
+  // Restore prefer-speaker pin per episode; clear when target leaves.
+  useEffect(() => {
+    if (!episode?.id) {
+      setPreferSpeaker(null);
+      return;
+    }
+    try {
+      const raw = localStorage.getItem(`sw-prefer-speaker:${episode.id}`);
+      if (!raw) {
+        setPreferSpeaker(null);
+        return;
+      }
+      const parsed = JSON.parse(raw) as { kind?: string; id?: string };
+      if ((parsed.kind === 'cast' || parsed.kind === 'guest') && typeof parsed.id === 'string') {
+        setPreferSpeaker({ kind: parsed.kind, id: parsed.id });
+      } else {
+        setPreferSpeaker(null);
+      }
+    } catch {
+      setPreferSpeaker(null);
+    }
+  }, [episode?.id]);
+
+  useEffect(() => {
+    if (!episode?.id) return;
+    try {
+      if (!preferSpeaker) localStorage.removeItem(`sw-prefer-speaker:${episode.id}`);
+      else localStorage.setItem(`sw-prefer-speaker:${episode.id}`, JSON.stringify(preferSpeaker));
+    } catch { /* ignore */ }
+  }, [episode?.id, preferSpeaker]);
+
+  // Drop pinned speaker when they leave the scene / episode.
+  useEffect(() => {
+    if (!preferSpeaker || !episode) return;
+    if (preferSpeaker.kind === 'cast') {
+      if (!episode.castIds.includes(preferSpeaker.id)) setPreferSpeaker(null);
+    } else {
+      const guests = episode.guests ?? [];
+      const active = episode.activeGuestIds;
+      const stillThere = guests.some((g) => g.id === preferSpeaker.id)
+        && (active == null || active.includes(preferSpeaker.id));
+      if (!stillThere) setPreferSpeaker(null);
+    }
+  }, [episode?.castIds, episode?.guests, episode?.activeGuestIds, preferSpeaker]);
 
   useEffect(() => {
     if (!narrow || !composerFocused) {
@@ -560,6 +619,14 @@ export function Story() {
       await writeTurn({
         world, season, episode, mode, input: text, length: lengthOverride ?? length,
         resumeBeats,
+        preferCharacterId:
+          (mode === 'speak' || mode === 'act') && preferSpeaker?.kind === 'cast'
+            ? preferSpeaker.id
+            : undefined,
+        preferGuestId:
+          (mode === 'speak' || mode === 'act') && preferSpeaker?.kind === 'guest'
+            ? preferSpeaker.id
+            : undefined,
         signal: controller.signal,
         onProgress: setProgressLabel,
         onNotice: setNotice,
@@ -579,8 +646,8 @@ export function Story() {
           n === 0
             ? 'Stopped before any reply — your line was not applied.'
             : left > 0
-              ? `Stopped after ${n} beat${n === 1 ? '' : 's'} — ${left} left in the plan. Use Continue plan to finish.`
-              : `Stopped after ${n} beat${n === 1 ? '' : 's'}; incomplete beat discarded.`
+              ? `Stopped after ${n} line${n === 1 ? '' : 's'} — ${left} left in the plan. Use Continue plan to finish.`
+              : `Stopped after ${n} line${n === 1 ? '' : 's'}; incomplete line discarded.`
         );
         return { status: 'aborted', beatsCompleted: n };
       }
@@ -589,7 +656,7 @@ export function Story() {
         : 0;
       setError(classifyError(e));
       if (n > 0) {
-        setNotice(`${n} beat${n === 1 ? '' : 's'} saved — Continue plan if beats remain, or retry from the last reply.`);
+        setNotice(`${n} line${n === 1 ? '' : 's'} saved — Continue plan if lines remain, or retry from the last reply.`);
       }
       return { status: 'error', beatsCompleted: n };
     } finally {
@@ -602,6 +669,15 @@ export function Story() {
   const write = async () => {
     if (!world || !season || !episode || streaming) return;
     if (composeMode !== 'continue' && !input.trim()) return;
+    const sceneNpcs = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
+    const epGuests = episode.guests ?? [];
+    const activeGuests = episode.activeGuestIds == null
+      ? epGuests
+      : epGuests.filter((g) => episode.activeGuestIds!.includes(g.id));
+    if ((composeMode === 'speak' || composeMode === 'act') && sceneNpcs.length === 0 && activeGuests.length === 0) {
+      setNotice('Add a cast member or walk-on in Direct before Speak or Act.');
+      return;
+    }
     const tagged = (composeMode === 'speak' || composeMode === 'act')
       ? applyDeliveryTone(input, deliveryTone)
       : input;
@@ -611,11 +687,10 @@ export function Story() {
     if (deliveryTone) {
       try { localStorage.setItem('sw-last-delivery-tone', deliveryTone); } catch { /* ignore */ }
     }
-    setDeliveryTone(null);
+    // Keep Speak/Act/Steer so back-and-forth RP does not need re-tapping mode.
+    // Delivery tone stays selected for the next line unless the player clears it.
     const result = await runNarration(composeMode, text);
-    if (result.status === 'ok') {
-      if (composeMode !== 'continue') setComposeMode('continue');
-    } else if (result.beatsCompleted === 0) {
+    if (result.status !== 'ok' && result.beatsCompleted === 0) {
       // Restore composer when nothing was applied (orphan user turn removed).
       setInput(parseDeliveryTone(text).body);
       setDeliveryTone(savedTone);
@@ -632,7 +707,7 @@ export function Story() {
   const rerollBeat = async (turn: Turn) => {
     if (!world || !season || !episode || streaming) return;
     if (turn.role !== 'narrator' && turn.role !== 'character') return;
-    if (!confirm('Re-roll this beat only? Later turns stay.')) return;
+    if (!confirm('Re-roll this line only? Later turns stay.')) return;
     setError('');
     setNotice('');
     setStreaming(true);
@@ -673,7 +748,10 @@ export function Story() {
 
   const setComposeModeSafe = (m: ComposeMode) => {
     setComposeMode(m);
-    if (m !== 'speak' && m !== 'act') setDeliveryTone(null);
+    if (m !== 'speak' && m !== 'act') {
+      setDeliveryTone(null);
+      setPreferSpeaker(null);
+    }
   };
 
   /**
@@ -1189,6 +1267,54 @@ export function Story() {
           display: 'flex', flexDirection: 'column', gap: 11,
           background: 'rgba(8,9,12,0.42)', backdropFilter: 'blur(24px) saturate(140%)'
         }}>
+          <button
+            type="button"
+            onClick={() => setDirectorSheet(true)}
+            title="Open Direct to edit cast and location"
+            style={{
+              display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12,
+              padding: '8px 10px', cursor: 'pointer', textAlign: 'left',
+              background: 'rgba(255,255,255,0.04)', color: 'inherit', width: '100%'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, flex: 1 }}>
+              <Mono style={{ fontSize: 9, opacity: 0.5, flexShrink: 0 }}>scene</Mono>
+              <span style={{
+                fontSize: 12.5, color: 'rgba(236,234,230,0.85)',
+                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
+              }}>
+                {activeLocation?.name || episode.location || 'No location set'}
+              </span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+              {inScene.filter((c) => !c.isPlayer).slice(0, 5).map((c) => (
+                <div
+                  key={c.id}
+                  title={c.name}
+                  style={portraitPlate(c.hue, 22, characterPortraits(c)[0])}
+                />
+              ))}
+              {(episode.activeGuestIds == null
+                ? guests
+                : guests.filter((g) => episode.activeGuestIds!.includes(g.id))
+              ).slice(0, 3).map((g) => (
+                <div
+                  key={g.id}
+                  title={`${g.name} (walk-on)`}
+                  style={portraitPlate(guestHue(g.id), 22, null, 'rgba(255,255,255,0.14)')}
+                />
+              ))}
+              {inScene.filter((c) => !c.isPlayer).length === 0
+                && (episode.activeGuestIds == null ? guests : guests.filter((g) => episode.activeGuestIds!.includes(g.id))).length === 0 && (
+                <span style={{ fontSize: 11, opacity: 0.45 }}>no cast</span>
+              )}
+              <span style={{
+                fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5,
+                letterSpacing: '0.08em', textTransform: 'uppercase', opacity: 0.4, marginLeft: 4
+              }}>Direct</span>
+            </div>
+          </button>
           {showWrapNudge && (
             <div style={{
               display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
@@ -1225,7 +1351,10 @@ export function Story() {
               background: 'rgba(255,255,255,0.05)', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap'
             }}>
               <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.8)', flex: 1, minWidth: 0 }}>
-                {episode.pendingPlan!.beats.length} beat{episode.pendingPlan!.beats.length === 1 ? '' : 's'} left in the last plan.
+                {episode.pendingPlan!.beats.length} line{episode.pendingPlan!.beats.length === 1 ? '' : 's'} left in the plan
+                {episode.pendingPlan!.length
+                  ? ` · resume as ${TURN_LENGTH_LABELS[episode.pendingPlan!.length]}`
+                  : ''}.
               </div>
               <button className="btn-primary" style={{ padding: '7px 12px', fontSize: 12, minHeight: 40 }}
                 onClick={() => void continuePlan()}>Continue plan</button>
@@ -1291,6 +1420,56 @@ export function Story() {
               </div>
             </div>
           )}
+          {(composeMode === 'speak' || composeMode === 'act') && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              <span
+                style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.45 }}
+                title="Who should answer your line"
+              >
+                reply from
+              </span>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <Chip
+                  active={preferSpeaker === null}
+                  accent={M.accent}
+                  onClick={() => setPreferSpeaker(null)}
+                >
+                  Anyone
+                </Chip>
+                {inScene.filter((c) => !c.isPlayer).map((c) => (
+                  <Chip
+                    key={c.id}
+                    active={preferSpeaker?.kind === 'cast' && preferSpeaker.id === c.id}
+                    accent={M.accent}
+                    onClick={() => setPreferSpeaker(
+                      preferSpeaker?.kind === 'cast' && preferSpeaker.id === c.id
+                        ? null
+                        : { kind: 'cast', id: c.id }
+                    )}
+                  >
+                    {c.name}
+                  </Chip>
+                ))}
+                {(episode.activeGuestIds == null
+                  ? guests
+                  : guests.filter((g) => episode.activeGuestIds!.includes(g.id))
+                ).map((g) => (
+                  <Chip
+                    key={g.id}
+                    active={preferSpeaker?.kind === 'guest' && preferSpeaker.id === g.id}
+                    accent={M.accent}
+                    onClick={() => setPreferSpeaker(
+                      preferSpeaker?.kind === 'guest' && preferSpeaker.id === g.id
+                        ? null
+                        : { kind: 'guest', id: g.id }
+                    )}
+                  >
+                    {g.name}
+                  </Chip>
+                ))}
+              </div>
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
               <span
@@ -1339,22 +1518,27 @@ export function Story() {
             {streaming ? (
               <button className="btn-ghost" style={{ alignSelf: 'flex-end', minHeight: 44 }} onClick={() => abortRef.current?.abort()}>Stop</button>
             ) : (
-              <button className="btn-primary" style={{ alignSelf: 'flex-end', padding: '10px 19px', minHeight: 44 }} onClick={() => void write()}>
+              <button
+                className="btn-primary"
+                style={{ alignSelf: 'flex-end', padding: '10px 19px', minHeight: 44 }}
+                disabled={
+                  (composeMode === 'speak' || composeMode === 'act')
+                  && inScene.filter((c) => !c.isPlayer).length === 0
+                  && (episode.activeGuestIds == null
+                    ? guests.length === 0
+                    : guests.filter((g) => episode.activeGuestIds!.includes(g.id)).length === 0)
+                }
+                onClick={() => void write()}
+              >
                 Write on
               </button>
             )}
           </div>
-          {!narrow && !readMode && (
+          {!readMode && (
             <div style={{ display: 'flex', gap: 16, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.4, flexWrap: 'wrap' }}>
-              <span>
-                {[
-                  ...inScene.filter((c) => !c.isPlayer).map((c) => c.name),
-                  ...guests.map((g) => `${g.name} (walk-on)`)
-                ].join(' · ') || 'no cast in scene'}
-              </span>
               <span>memory: {continuity.length} facts · {threads.length} open threads</span>
-              <span>{world.ai.mature ? 'adult world · unrestricted' : 'general audience'}</span>
-              <span>⌘↵ write on</span>
+              {!narrow && <span>{world.ai.mature ? 'adult world · unrestricted' : 'general audience'}</span>}
+              {!narrow && <span>⌘↵ write on</span>}
             </div>
           )}
         </div>
@@ -1378,7 +1562,7 @@ export function Story() {
                   'Filing continuity…'
                 ) : (
                   <span style={{ display: 'flex', flexDirection: 'column', gap: 2, lineHeight: 1.25 }}>
-                    <span>Confirm · episode {episode.number + 1}</span>
+                    <span>File wrap · open episode {episode.number + 1}</span>
                     <span style={{ fontSize: 11, fontWeight: 500, opacity: 0.8 }}>
                       {formatStoryDate(worldCalendar(world), wrapDraft?.nextStoryDay ?? worldCalendar(world).currentDay).toLowerCase()}
                     </span>
@@ -1833,7 +2017,8 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, st
     turn.role === 'narrator' ? 'the narrator'
     : turn.role === 'character' ? characterName!
     : `your ${turn.mode ?? 'turn'}`;
-  const retryLabel = turn.role === 'user' ? 'retry from here' : 'retry';
+  const retryLabel = 'Retry from here';
+  const retryTitle = 'Deletes this turn and everything below, then rewrites from here';
 
   const save = async () => {
     const text = draft.trim();
@@ -1877,10 +2062,11 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, st
         <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
           onClick={() => { setDraft(turn.text); setEditing(true); }}>Edit</button>
         <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
+          title={retryTitle}
           onClick={onRetry}>{retryLabel}</button>
         {onReroll && (
           <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
-            onClick={onReroll} title="Replace this beat only">Re-roll</button>
+            onClick={onReroll} title="Replace this line only — later turns stay">Re-roll line</button>
         )}
         {hasBelow && (
           <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
@@ -1907,6 +2093,15 @@ function SceneCastPanel({ episode, characters, accent }: { episode: Episode; cha
   const guests = episode.guests ?? [];
   const activeGuestIds = episode.activeGuestIds;
   const [castError, setCastError] = useState('');
+  const [addingWalkOn, setAddingWalkOn] = useState(false);
+  const [walkName, setWalkName] = useState('');
+  const [walkBrief, setWalkBrief] = useState('');
+  const [walkVoice, setWalkVoice] = useState('');
+  const [editGuestId, setEditGuestId] = useState<string | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editBrief, setEditBrief] = useState('');
+  const [editVoice, setEditVoice] = useState('');
+
   const toggleCast = async (id: string, isPlayer: boolean) => {
     if (isPlayer) return;
     const castIds = episode.castIds.includes(id)
@@ -1929,6 +2124,55 @@ function SceneCastPanel({ episode, characters, accent }: { episode: Episode; cha
       setCastError
     );
   };
+
+  const addWalkOn = async () => {
+    const name = walkName.trim();
+    if (!name) return;
+    const guest: EpisodeGuest = {
+      id: uid(),
+      name,
+      brief: walkBrief.trim() || 'A temporary walk-on in this episode.',
+      ...(walkVoice.trim() ? { voice: walkVoice.trim() } : {})
+    };
+    const nextGuests = [...guests, guest];
+    const nextActive = activeGuestIds == null
+      ? undefined
+      : [...activeGuestIds, guest.id];
+    await safeWrite(
+      () => db.episodes.update(episode.id, {
+        guests: nextGuests,
+        ...(nextActive ? { activeGuestIds: nextActive } : {}),
+        updatedAt: Date.now()
+      }),
+      setCastError
+    );
+    setWalkName('');
+    setWalkBrief('');
+    setWalkVoice('');
+    setAddingWalkOn(false);
+  };
+
+  const beginEditGuest = (g: EpisodeGuest) => {
+    setEditGuestId(g.id);
+    setEditName(g.name);
+    setEditBrief(g.brief);
+    setEditVoice(g.voice ?? '');
+  };
+
+  const saveGuestEdit = async (g: EpisodeGuest) => {
+    const next = guests.map((x) => (x.id === g.id ? {
+      ...x,
+      name: editName.trim() || g.name,
+      brief: editBrief.trim() || g.brief,
+      ...(editVoice.trim() ? { voice: editVoice.trim() } : { voice: undefined })
+    } : x));
+    await safeWrite(
+      () => db.episodes.update(episode.id, { guests: next, updatedAt: Date.now() }),
+      setCastError
+    );
+    setEditGuestId(null);
+  };
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
       <Mono style={{ fontSize: 9 }}>in the scene</Mono>
@@ -1965,23 +2209,24 @@ function SceneCastPanel({ episode, characters, accent }: { episode: Episode; cha
           </div>
         );
       })}
-      {guests.length > 0 && (
-        <>
-          <Mono style={{ fontSize: 9, marginTop: 8 }}>walk-ons · this episode only</Mono>
-          {guests.map((g) => {
-            // Omitted activeGuestIds ⇒ all guests; explicit [] ⇒ none (matches prompts).
-            const active = activeGuestIds == null || activeGuestIds.includes(g.id);
-            return (
+      <Mono style={{ fontSize: 9, marginTop: 8 }}>walk-ons · this episode only</Mono>
+      {guests.map((g) => {
+        // Omitted activeGuestIds ⇒ all guests; explicit [] ⇒ none (matches prompts).
+        const active = activeGuestIds == null || activeGuestIds.includes(g.id);
+        const editing = editGuestId === g.id;
+        return (
+          <div key={g.id} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div
+              style={{
+                display: 'flex', gap: 10, alignItems: 'center', padding: 8, borderRadius: 12,
+                background: active ? 'rgba(255,255,255,0.04)' : 'transparent',
+                border: `1px solid ${active ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.06)'}`,
+                opacity: active ? 1 : 0.4
+              }}
+            >
               <div
-                key={g.id}
                 onClick={() => void toggleGuest(g.id)}
-                style={{
-                  display: 'flex', gap: 10, alignItems: 'center', padding: 8, borderRadius: 12,
-                  cursor: 'pointer',
-                  background: active ? 'rgba(255,255,255,0.04)' : 'transparent',
-                  border: `1px solid ${active ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.06)'}`,
-                  opacity: active ? 1 : 0.4
-                }}
+                style={{ display: 'flex', gap: 10, alignItems: 'center', flex: 1, minWidth: 0, cursor: 'pointer' }}
               >
                 <div style={portraitPlate(guestHue(g.id), 30, null, 'rgba(255,255,255,0.14)')} />
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
@@ -1990,15 +2235,79 @@ function SceneCastPanel({ episode, characters, accent }: { episode: Episode; cha
                     {active ? (g.brief || 'walk-on') : 'off-page'}
                   </div>
                 </div>
-                <div style={{
-                  width: 14, height: 14, borderRadius: 5, flexShrink: 0,
+              </div>
+              <button
+                type="button"
+                className="btn-quiet"
+                style={{ fontSize: 10, padding: '4px 8px', minHeight: 32 }}
+                onClick={() => (editing ? setEditGuestId(null) : beginEditGuest(g))}
+              >
+                {editing ? 'close' : 'edit'}
+              </button>
+              <div
+                onClick={() => void toggleGuest(g.id)}
+                style={{
+                  width: 14, height: 14, borderRadius: 5, flexShrink: 0, cursor: 'pointer',
                   border: `1px solid ${active ? accent : 'rgba(255,255,255,0.18)'}`,
                   background: active ? accent : 'transparent'
-                }} />
+                }}
+              />
+            </div>
+            {editing && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '0 4px 8px' }}>
+                <input
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  placeholder="Name"
+                  style={{ fontSize: 13 }}
+                />
+                <textarea
+                  value={editBrief}
+                  onChange={(e) => setEditBrief(e.target.value)}
+                  placeholder="Who they are this episode"
+                  rows={2}
+                  style={{ fontSize: 12.5 }}
+                />
+                <input
+                  value={editVoice}
+                  onChange={(e) => setEditVoice(e.target.value)}
+                  placeholder="Voice note (optional)"
+                  style={{ fontSize: 12.5 }}
+                />
+                <button
+                  type="button"
+                  className="btn-primary"
+                  style={{ alignSelf: 'flex-start', padding: '6px 12px', fontSize: 12 }}
+                  onClick={() => void saveGuestEdit(g)}
+                >
+                  Save walk-on
+                </button>
               </div>
-            );
-          })}
-        </>
+            )}
+          </div>
+        );
+      })}
+      {addingWalkOn ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 8, borderRadius: 12, border: '1px solid rgba(255,255,255,0.1)' }}>
+          <input value={walkName} onChange={(e) => setWalkName(e.target.value)} placeholder="Walk-on name" style={{ fontSize: 13 }} />
+          <textarea value={walkBrief} onChange={(e) => setWalkBrief(e.target.value)} placeholder="Who they are (one sentence)" rows={2} style={{ fontSize: 12.5 }} />
+          <input value={walkVoice} onChange={(e) => setWalkVoice(e.target.value)} placeholder="Voice note (optional)" style={{ fontSize: 12.5 }} />
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button type="button" className="btn-primary" style={{ padding: '6px 12px', fontSize: 12 }} disabled={!walkName.trim()} onClick={() => void addWalkOn()}>
+              Add
+            </button>
+            <button type="button" className="btn-quiet" style={{ fontSize: 11 }} onClick={() => setAddingWalkOn(false)}>cancel</button>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="btn-ghost"
+          style={{ alignSelf: 'flex-start', fontSize: 12, minHeight: 40 }}
+          onClick={() => setAddingWalkOn(true)}
+        >
+          + Add walk-on
+        </button>
       )}
     </div>
   );
@@ -3449,7 +3758,7 @@ function WrapReviewBody({
 
       {draft.characterUpdates.length > 0 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <Mono style={{ fontSize: 9 }}>cast state → next episode</Mono>
+          <Mono style={{ fontSize: 9 }}>live state → next episode · voice & anchors unchanged</Mono>
           {draft.characterUpdates.map((u, i) => (
             <div key={i} style={{
               display: 'flex', flexDirection: 'column', gap: 8,

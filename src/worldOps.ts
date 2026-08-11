@@ -64,6 +64,48 @@ export function buildSeasonPlotTargets(raiseBeats: Array<{ text: string; consequ
   return out;
 }
 
+/**
+ * Merge Raise beats + kept plot-arc proposals + carried pending season targets.
+ * Dedupes by normalized text (strips trailing " → consequence"); Raise first, then arc, then carried.
+ */
+export function buildNextSeasonPlotTargets(opts: {
+  raiseBeats: Array<{ text: string; consequence?: string }>;
+  plotArc?: Array<{ text: string; keep?: boolean }> | null;
+  carried?: PlotTarget[] | null;
+  cap?: number;
+}): PlotTarget[] {
+  const cap = opts.cap ?? PLOT_TARGET_CAP;
+  const normalizeKey = (text: string) =>
+    text.trim().toLowerCase().replace(/\s*→\s*.*$/, '').trim();
+  const raised = buildSeasonPlotTargets(opts.raiseBeats);
+  const arc: PlotTarget[] = (opts.plotArc ?? [])
+    .filter((p) => p.keep !== false)
+    .map((p) => p.text.trim())
+    .filter(Boolean)
+    .map((text) => ({
+      id: uid(),
+      text,
+      status: 'pending' as const,
+      source: 'season-raise' as const
+    }));
+  const carried: PlotTarget[] = pendingPlotTargets(opts.carried).map((t) => ({
+    id: uid(),
+    text: t.text.trim(),
+    status: 'pending' as const,
+    source: 'carried' as const
+  }));
+  const seen = new Set<string>();
+  const out: PlotTarget[] = [];
+  for (const t of [...raised, ...arc, ...carried]) {
+    const key = normalizeKey(t.text);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(t);
+    if (out.length >= cap) break;
+  }
+  return out;
+}
+
 /** Default Earth-style week when the world hasn't defined its own. */
 export const DEFAULT_WEEKDAYS = [
   'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'

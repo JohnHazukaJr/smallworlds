@@ -38,7 +38,8 @@ describe('normalizeBeats', () => {
       guests,
       new Map(),
       'continue',
-      ''
+      '',
+      'episode'
     );
     expect(beats.map((b) => b.type)).toEqual(['narration', 'speak', 'speak', 'narration']);
     expect(beats[1]).toMatchObject({ type: 'speak', characterId: 'c1' });
@@ -56,6 +57,64 @@ describe('normalizeBeats', () => {
     );
     expect(beats.some((b) => b.type === 'speak')).toBe(true);
     expect(beats[0].type).toBe('speak');
+  });
+
+  it('caps Short reply size to at most one speak and two total', () => {
+    const beats = normalizeBeats(
+      {
+        beats: [
+          { type: 'narration', brief: 'Rain.' },
+          { type: 'speak', characterId: 'Ada', brief: 'a' },
+          { type: 'speak', characterId: 'Ben', brief: 'b' },
+          { type: 'narration', brief: 'More.' }
+        ]
+      },
+      cast,
+      guests,
+      new Map(),
+      'continue',
+      '',
+      'beat'
+    );
+    expect(beats.length).toBeLessThanOrEqual(2);
+    expect(beats.filter((b) => b.type === 'speak').length).toBeLessThanOrEqual(1);
+  });
+
+  it('honours preferred speaker when injecting a reply', () => {
+    const beats = normalizeBeats(
+      { beats: [{ type: 'narration', brief: 'Silence.' }] },
+      cast,
+      guests,
+      new Map(),
+      'speak',
+      'Hey',
+      'scene',
+      { characterId: 'c2' }
+    );
+    expect(beats[0]).toMatchObject({ type: 'speak', characterId: 'c2' });
+  });
+
+  it('hard-pins preferred speaker and drops other speak beats', () => {
+    const beats = normalizeBeats(
+      {
+        beats: [
+          { type: 'speak', characterId: 'Ada', brief: 'not her' },
+          { type: 'speak', characterId: 'Ben', brief: 'him' },
+          { type: 'narration', brief: 'Rain.' }
+        ]
+      },
+      cast,
+      guests,
+      new Map(),
+      'speak',
+      'Hello',
+      'episode',
+      { characterId: 'c2' }
+    );
+    const speak = beats.filter((b) => b.type === 'speak');
+    expect(speak).toHaveLength(1);
+    expect(speak[0]).toMatchObject({ type: 'speak', characterId: 'c2' });
+    expect(beats.some((b) => b.type === 'narration')).toBe(true);
   });
 });
 

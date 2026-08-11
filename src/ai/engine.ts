@@ -3,12 +3,13 @@ import { logAppError } from '../errors';
 import { resolveModel, useSettings } from '../store/settings';
 import { GAP_DAYS, GAP_LABELS } from '../ui/theme';
 import type {
-  Character, ComposeMode, Episode, EpisodeGuest, EpisodeWrap, EpisodeWrapBeat, Location, ModelRef,
-  OpenThread, PlotTarget, Relationship, Season, SeasonWrap, Turn, TurnLength, TurnRole, World, WrapBeat
+  Character, CharacterState, ComposeMode, Episode, EpisodeGuest, EpisodeWrap, EpisodeWrapBeat, Location, ModelRef,
+  OpenThread, PlotTarget, Relationship, Season, SeasonWrap, SeasonWrapPlotArc, SeasonWrapRelationshipUpdate,
+  Turn, TurnLength, TurnRole, World, WrapBeat, WrapCharacterOutcome
 } from '../types';
 import { normalizeRelationships } from '../relationships';
 import {
-  buildEpisodePlotTargets, buildSeasonPlotTargets, calendarPatch, emptyCharacter, emptyLocation,
+  buildEpisodePlotTargets, buildNextSeasonPlotTargets, calendarPatch, emptyCharacter, emptyLocation,
   formatEpisodeDateRange, formatStoryDate, nextEpisode, pendingPlotTargets, worldCalendar
 } from '../worldOps';
 import { AIError, streamChat, type ChatMessage, type StreamRequest } from './client';
@@ -31,7 +32,8 @@ import {
   HISTORY_CHAR_BUDGET,
   packTurnsDetailed,
   type DirectorBeat,
-  narrationBeatTokens
+  narrationBeatTokens,
+  planCapsForLength
 } from './prompts';
 
 // ---------- Model resolution ----------
@@ -230,6 +232,10 @@ export interface WriteOptions {
   input: string;
   length: TurnLength;
   signal?: AbortSignal;
+  /** Prefer this Cast NPC for the speak reply (Speak/Act). */
+  preferCharacterId?: string;
+  /** Prefer this walk-on for the speak reply (Speak/Act). */
+  preferGuestId?: string;
   /** Skip director planning and run these leftover beats (Continue plan). */
   resumeBeats?: DirectorBeat[];
   /** Partial text of the beat currently streaming. */
@@ -285,38 +291,32 @@ function resolveGuestSpeakerId(
 function pickReplySpeaker(
   inScene: Character[],
   guests: EpisodeGuest[],
-  playerText: string
+  playerText: string,
+  prefer?: { characterId?: string; guestId?: string }
 ): DirectorBeat | null {
+  const brief = 'Respond directly to the player\'s last move — answer aloud.';
+  if (prefer?.characterId) {
+    const pinned = inScene.find((c) => c.id === prefer.characterId);
+    if (pinned) return { type: 'speak', characterId: pinned.id, brief };
+  }
+  if (prefer?.guestId) {
+    const pinned = guests.find((g) => g.id === prefer.guestId);
+    if (pinned) return { type: 'speak', guestId: pinned.id, brief };
+  }
   const lower = playerText.toLowerCase();
   const mentionedCast = inScene.find((c) => lower.includes(c.name.toLowerCase()));
   if (mentionedCast) {
-    return {
-      type: 'speak',
-      characterId: mentionedCast.id,
-      brief: 'Respond directly to the player\'s last move — answer aloud.'
-    };
+    return { type: 'speak', characterId: mentionedCast.id, brief };
   }
   const mentionedGuest = guests.find((g) => lower.includes(g.name.toLowerCase()));
   if (mentionedGuest) {
-    return {
-      type: 'speak',
-      guestId: mentionedGuest.id,
-      brief: 'Respond directly to the player\'s last move — answer aloud.'
-    };
+    return { type: 'speak', guestId: mentionedGuest.id, brief };
   }
   if (inScene[0]) {
-    return {
-      type: 'speak',
-      characterId: inScene[0].id,
-      brief: 'Respond directly to the player\'s last move — answer aloud.'
-    };
+    return { type: 'speak', characterId: inScene[0].id, brief };
   }
   if (guests[0]) {
-    return {
-      type: 'speak',
-      guestId: guests[0].id,
-      brief: 'Respond directly to the player\'s last move — answer aloud.'
-    };
+    return { type: 'speak', guestId: guests[0].id, brief };
   }
   return null;
 }
@@ -326,16 +326,45 @@ function ensurePlayerReplySpeak(
   mode: ComposeMode,
   playerText: string,
   inScene: Character[],
-  guests: EpisodeGuest[]
+  guests: EpisodeGuest[],
+  caps: { maxSpeak: number; maxTotal: number } = { maxSpeak: MAX_SPEAK_BEATS, maxTotal: MAX_TOTAL_BEATS },
+  prefer?: { characterId?: string; guestId?: string }
 ): DirectorBeat[] {
   const needsReply = (mode === 'speak' || mode === 'act') && (inScene.length > 0 || guests.length > 0);
   if (!needsReply) return beats;
-  if (beats.some((b) => b.type === 'speak')) return beats;
-  const injected = pickReplySpeaker(inScene, guests, playerText);
+
+  const isPinnedSpeak = (b: DirectorBeat): boolean => {
+    if (b.type !== 'speak') return false;
+    if (prefer?.characterId && 'characterId' in b && b.characterId === prefer.characterId) return true;
+    if (prefer?.guestId && 'guestId' in b && b.guestId === prefer.guestId) return true;
+    return false;
+  };
+
+  // Hard pin: when the player picked a speaker, only that NPC/walk-on may speak.
+  if (prefer?.characterId || prefer?.guestId) {
+    const narration = beats.filter((b) => b.type === 'narration');
+    let pinned = beats.find(isPinnedSpeak) ?? null;
+    if (!pinned) {
+      pinned = pickReplySpeaker(inScene, guests, playerText, prefer);
+    }
+    const next: DirectorBeat[] = [];
+    if (pinned) next.push(pinned);
+    for (const b of narration) {
+      if (next.length >= caps.maxTotal) break;
+      next.push(b);
+    }
+    if (!next.some((b) => b.type === 'speak') && pinned) {
+      return [pinned, ...narration].slice(0, caps.maxTotal);
+    }
+    return next.length > 0 ? next.slice(0, caps.maxTotal) : beats.slice(0, caps.maxTotal);
+  }
+
+  if (beats.some((b) => b.type === 'speak')) {
+    return beats.slice(0, caps.maxTotal);
+  }
+  const injected = pickReplySpeaker(inScene, guests, playerText, prefer);
   if (!injected) return beats;
-  // Prefer reply first when the player just engaged; keep room under the hard cap.
-  const next = [injected, ...beats];
-  return next.slice(0, MAX_TOTAL_BEATS);
+  return [injected, ...beats].slice(0, caps.maxTotal);
 }
 
 /** Normalize raw director JSON into executable beats (exported for tests). */
@@ -346,17 +375,20 @@ export function normalizeBeats(
   /** Map introduce-name → guest id for newly created walk-ons */
   introduceNameToId: Map<string, string>,
   mode: ComposeMode,
-  playerText: string
+  playerText: string,
+  length: TurnLength = 'scene',
+  prefer?: { characterId?: string; guestId?: string }
 ): DirectorBeat[] {
+  const caps = planCapsForLength(length);
   const allowedGuests = new Set(guests.map((g) => g.id));
   const beats: DirectorBeat[] = [];
   let speakCount = 0;
   for (const b of raw.beats ?? []) {
-    if (beats.length >= MAX_TOTAL_BEATS) break;
+    if (beats.length >= caps.maxTotal) break;
     const brief = (b.brief ?? '').trim();
     if (!brief) continue;
     if (b.type === 'speak') {
-      if (speakCount >= MAX_SPEAK_BEATS) continue;
+      if (speakCount >= caps.maxSpeak) continue;
       const guestRaw = (b.guestId ?? '').trim();
       const castRaw = (b.characterId ?? '').trim();
       if (guestRaw) {
@@ -380,7 +412,7 @@ export function normalizeBeats(
       brief: 'Continue the scene with atmosphere and physical action; leave space for the player.'
     });
   }
-  return ensurePlayerReplySpeak(beats, mode, playerText, inScene, guests);
+  return ensurePlayerReplySpeak(beats, mode, playerText, inScene, guests, caps, prefer);
 }
 
 /** Race a utility call against a timeout; merges with an optional outer AbortSignal. */
@@ -412,7 +444,8 @@ function resolveNpcId(raw: string, characters: Character[]): string | null {
 function applyCastDelta(
   castIds: string[],
   characters: Character[],
-  delta?: { enter?: string[]; leave?: string[] }
+  delta?: { enter?: string[]; leave?: string[] },
+  protectId?: string
 ): string[] {
   const npcIds = new Set(characters.filter((c) => !c.isPlayer).map((c) => c.id));
   const playerId = characters.find((c) => c.isPlayer)?.id;
@@ -422,11 +455,12 @@ function applyCastDelta(
   const leave = new Set(
     (delta?.leave ?? [])
       .map((raw) => resolveNpcId(raw, characters))
-      .filter((id): id is string => !!id && npcIds.has(id))
+      .filter((id): id is string => !!id && npcIds.has(id) && id !== protectId)
   );
   const known = (id: string) => id === playerId || npcIds.has(id);
   const next = [...new Set([...castIds.filter(known), ...enter])].filter((id) => !leave.has(id));
   if (playerId && castIds.includes(playerId) && !next.includes(playerId)) next.unshift(playerId);
+  if (protectId && npcIds.has(protectId) && !next.includes(protectId)) next.push(protectId);
   return next;
 }
 
@@ -442,7 +476,8 @@ interface IntroduceSpec {
 function applyGuestDelta(
   episode: Episode,
   introduce: IntroduceSpec[] | undefined,
-  leaveIds: string[] | undefined
+  leaveIds: string[] | undefined,
+  protectGuestId?: string
 ): {
   guests: EpisodeGuest[];
   activeGuestIds: string[];
@@ -485,9 +520,12 @@ function applyGuestDelta(
   const leaveResolved = new Set<string>();
   for (const raw of leaveIds ?? []) {
     const id = resolveGuestSpeakerId(raw, guests, nameToId);
-    if (id) leaveResolved.add(id);
+    if (id && id !== protectGuestId) leaveResolved.add(id);
   }
   active = active.filter((id) => !leaveResolved.has(id));
+  if (protectGuestId && guests.some((g) => g.id === protectGuestId) && !active.includes(protectGuestId)) {
+    active.push(protectGuestId);
+  }
 
   return { guests, activeGuestIds: active, nameToId };
 }
@@ -612,13 +650,20 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
     try {
       progress('planning…');
       const speakersPresent = inScene.length > 0 || activeGuests(ctx.episode).length > 0;
+      const prefer = {
+        characterId: opts.preferCharacterId,
+        guestId: opts.preferGuestId
+      };
       const planDirector = () => utilityJson<{
         castDelta?: { enter?: string[]; leave?: string[]; introduce?: IntroduceSpec[] };
         beats: Array<{ type?: string; brief?: string; characterId?: string; guestId?: string }>;
       }>(
         opts.world,
-        directorSystemPrompt(opts.mode, speakersPresent),
-        directorUserPrompt(ctx, opts.mode, playerText),
+        directorSystemPrompt(opts.mode, speakersPresent, opts.length),
+        directorUserPrompt(ctx, opts.mode, playerText, {
+          preferCharacterId: opts.preferCharacterId,
+          preferGuestId: opts.preferGuestId
+        }),
         1400,
         opts.signal
       );
@@ -630,11 +675,14 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         logAppError(first, 'director plan (retrying)');
         plan = await planDirector();
       }
-      const nextCast = applyCastDelta(castIds, ctx.characters, plan.castDelta);
+      const nextCast = applyCastDelta(
+        castIds, ctx.characters, plan.castDelta, opts.preferCharacterId
+      );
       const guestDelta = applyGuestDelta(
         { ...ctx.episode, castIds, guests, activeGuestIds },
         plan.castDelta?.introduce,
-        plan.castDelta?.leave
+        plan.castDelta?.leave,
+        opts.preferGuestId
       );
       guests = guestDelta.guests;
       activeGuestIds = guestDelta.activeGuestIds;
@@ -663,7 +711,8 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         inScene = ctx.characters.filter((c) => castIds.includes(c.id) && !c.isPlayer);
       }
       beats = normalizeBeats(
-        plan, inScene, activeGuests(ctx.episode), guestDelta.nameToId, opts.mode, playerText
+        plan, inScene, activeGuests(ctx.episode), guestDelta.nameToId, opts.mode, playerText,
+        opts.length, prefer
       );
       await clearPendingPlan(opts.episode.id);
     } catch (e) {
@@ -682,7 +731,9 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         brief: 'Continue the scene with atmosphere and physical action; leave space for the player.'
       }];
       beats = ensurePlayerReplySpeak(
-        fallback, opts.mode, playerText, inScene, activeGuests(ctx.episode)
+        fallback, opts.mode, playerText, inScene, activeGuests(ctx.episode),
+        planCapsForLength(opts.length),
+        { characterId: opts.preferCharacterId, guestId: opts.preferGuestId }
       );
     }
   }
@@ -692,6 +743,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
   const remainingFrom = (completed: number) => beats.slice(completed);
 
   let lastId = '';
+  let speakTurnsSaved = 0;
   try {
     for (const beat of beats) {
       throwIfAborted(opts.signal, beatsCompleted, remainingFrom(beatsCompleted));
@@ -761,6 +813,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         ctx.turns.push(guestTurn);
         lastId = guestTurn.id;
         beatsCompleted++;
+        speakTurnsSaved++;
         opts.onDelta('', meta);
         continue;
       }
@@ -798,6 +851,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       ctx.turns.push(characterTurn);
       lastId = characterTurn.id;
       beatsCompleted++;
+      speakTurnsSaved++;
       opts.onDelta('', meta);
     }
   } catch (e) {
@@ -836,6 +890,16 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
     throw new AIError(
       'The model produced no usable narration or dialogue. Try again, or choose a shorter reply size.'
     );
+  }
+
+  // Speak/Act must land at least one spoken reply — narration-only is not enough.
+  if (requireDialogue && speakTurnsSaved === 0) {
+    await clearPendingPlan(opts.episode.id);
+    const err = new AIError(
+      'No character replied aloud. Try again, pin who should answer, or add cast to the scene.'
+    ) as AIError & { beatsCompleted?: number };
+    err.beatsCompleted = beatsCompleted;
+    throw err;
   }
 
   await clearPendingPlan(opts.episode.id);
@@ -1925,7 +1989,7 @@ export async function analyzeSeason(world: World, season: Season): Promise<Seaso
   const wrap: SeasonWrap = {
     id: uid(), seasonId: season.id, worldId: world.id,
     beats: result.beats.map((b) => ({ ...b, disposition: 'keep' as const })),
-    characters: characters.filter((c) => !c.isPlayer).map((c) => ({
+    characters: characters.map((c) => ({
       characterId: c.id,
       name: c.name,
       outcome: result.characters.find((r) => r.name.toLowerCase() === c.name.toLowerCase())?.outcome ?? '',
@@ -1946,45 +2010,285 @@ export async function analyzeSeason(world: World, season: Season): Promise<Seaso
   return wrap;
 }
 
-/** Step 3: propose what changed off-screen for each returning character. */
+/** Step 3: propose cast / relationship / plot evolution across the time gap. */
 export async function evolveCharacters(world: World, wrap: SeasonWrap, gapLabel: string): Promise<SeasonWrap> {
   const returning = wrap.characters.filter((c) => c.returning);
   if (returning.length === 0) return wrap;
-  const result = await utilityJson<{ name: string; evolution: string }[]>(
+
+  const cast = await db.characters.where('worldId').equals(world.id).toArray();
+  const byId = new Map(cast.map((c) => [c.id, c]));
+  const season = await db.seasons.get(wrap.seasonId);
+
+  const sheetBrief = (c: Character) => {
+    const rels = c.relationships
+      .map((r) => {
+        const t = cast.find((x) => x.id === r.targetId);
+        return t ? `${r.kind} of ${t.name}${r.note ? ` (${r.note})` : ''}` : null;
+      })
+      .filter(Boolean)
+      .slice(0, 6)
+      .join('; ');
+    return [
+      `Name: ${c.name}${c.isPlayer ? ' (PLAYER)' : ''}`,
+      c.role && `Role: ${c.role}`,
+      c.summary && `Summary: ${c.summary.slice(0, 280)}`,
+      c.traits && `Traits: ${c.traits.slice(0, 160)}`,
+      c.desires && `Desires: ${c.desires.slice(0, 160)}`,
+      c.fears && `Fears: ${c.fears.slice(0, 160)}`,
+      c.flaws && `Flaws: ${c.flaws.slice(0, 120)}`,
+      c.mustNotKnow && `Must not know: ${c.mustNotKnow.slice(0, 200)}`,
+      rels && `Relationships: ${rels}`,
+      (c.state.goal || c.state.emotion || c.state.location || c.state.condition) &&
+        `Live state: goal=${c.state.goal || '—'}; emotion=${c.state.emotion || '—'}; location=${c.state.location || '—'}; condition=${c.state.condition || '—'}`
+    ].filter(Boolean).join('\n');
+  };
+
+  const pendingSeason = pendingPlotTargets(season?.plotTargets)
+    .map((t) => `- ${t.text}`)
+    .join('\n');
+
+  type EvolveResult = {
+    characters?: Array<{
+      name: string;
+      evolution?: string;
+      statePatch?: Partial<CharacterState>;
+      sheetPatch?: WrapCharacterOutcome['sheetPatch'];
+      knowledge?: WrapCharacterOutcome['knowledge'];
+    }>;
+    relationshipUpdates?: Array<{ from: string; to: string; kind?: string; note?: string }>;
+    plotArc?: Array<{ text: string }>;
+  };
+
+  const result = await utilityJson<EvolveResult>(
     world,
-    'You evolve story characters across a time gap. For each character, given where the season left them, propose what changed off-screen during the gap: circumstances, relationships, hardening or healing. 1-2 sentences each, concrete, no purple prose. Respond with JSON only: [{"name": string, "evolution": string}]',
-    `World: ${world.title}\nTime gap before next season: ${gapLabel}\n\nBeats carried forward:\n${wrap.beats.filter((b) => b.disposition !== 'drop').map((b) => `- [${b.disposition}] ${b.text} → ${b.consequence}`).join('\n')}\n\nCharacters:\n${returning.map((c) => `- ${c.name}: ${c.outcome || 'unknown outcome'}`).join('\n')}`
+    'You are a senior story editor handing a cast from one finished season into the next. ' +
+    'Propose only earned changes across the time gap. Respond with JSON only:\n' +
+    '{"characters":[{' +
+    '"name":string,' +
+    '"evolution":"<1-2 sentences of what changed off-screen>",' +
+    '"statePatch":{"goal"?:string,"emotion"?:string,"location"?:string,"condition"?:string},' +
+    '"sheetPatch":{"role"?:string,"summary"?:string,"traits"?:string,"desires"?:string,"fears"?:string,"flaws"?:string},' +
+    '"knowledge":{"nowKnows"?:string,"clearMustNotKnow"?:string}' +
+    '}],' +
+    '"relationshipUpdates":[{"from":"<exact name>","to":"<exact name>","kind":string,"note":string}],' +
+    '"plotArc":[{"text":"<season-arc pressure for next season>"}]}' +
+    '\nRules:\n' +
+    '- Prefer omission over noise — omit unchanged fields entirely.\n' +
+    '- Never rewrite speechStyle, example lines, anchors, or customInstructions.\n' +
+    '- sheetPatch: only for non-player NPCs; concrete earned shifts (1-2 sentences max per field).\n' +
+    '- PLAYER characters: evolution + light statePatch only — no sheetPatch.\n' +
+    '- statePatch: how they OPEN the next season, not a recap dump.\n' +
+    '- relationshipUpdates: only edges that shifted; use exact cast names.\n' +
+    '- plotArc: 2-5 distinct arc pressures for season N+1; do not duplicate Raise beats already listed.\n' +
+    '- knowledge.clearMustNotKnow: substring of their wall they can now safely lose; nowKnows: what they learned.',
+    `World: ${world.title}\nTime gap before next season: ${gapLabel}\n\n` +
+    `Beats carried forward:\n${wrap.beats.filter((b) => b.disposition !== 'drop').map((b) => `- [${b.disposition}] ${b.text} → ${b.consequence}`).join('\n') || '(none)'}\n\n` +
+    `Raise beats (already become season plot targets — do not restate in plotArc):\n${wrap.beats.filter((b) => b.disposition === 'raise').map((b) => `- ${b.text} → ${b.consequence}`).join('\n') || '(none raised)'}\n\n` +
+    `Pending season plot targets still open:\n${pendingSeason || '(none)'}\n\n` +
+    `Returning cast sheets:\n${returning.map((w) => {
+      const c = byId.get(w.characterId);
+      const head = `- ${w.name}: season outcome — ${w.outcome || 'unknown'}`;
+      return c ? `${head}\n${sheetBrief(c)}` : head;
+    }).join('\n\n')}`,
+    4500
   );
+
+  const charResults = result.characters ?? [];
+  const relUpdates: SeasonWrapRelationshipUpdate[] = (result.relationshipUpdates ?? [])
+    .map((r) => ({
+      from: (r.from ?? '').trim(),
+      to: (r.to ?? '').trim(),
+      kind: (r.kind ?? '').trim() || undefined,
+      note: (r.note ?? '').trim() || undefined,
+      keep: true
+    }))
+    .filter((r) => r.from && r.to && r.from.toLowerCase() !== r.to.toLowerCase());
+
+  const plotArc: SeasonWrapPlotArc[] = (result.plotArc ?? [])
+    .map((p) => ({ text: (p.text ?? '').trim(), keep: true }))
+    .filter((p) => p.text);
+
+  const cleanState = (raw?: Partial<CharacterState>): Partial<CharacterState> | undefined => {
+    if (!raw || typeof raw !== 'object') return undefined;
+    const next: Partial<CharacterState> = {};
+    for (const key of ['goal', 'emotion', 'location', 'condition'] as const) {
+      const v = raw[key];
+      if (typeof v === 'string' && v.trim()) next[key] = v.trim();
+    }
+    return Object.keys(next).length > 0 ? next : undefined;
+  };
+
+  const cleanSheet = (
+    raw?: WrapCharacterOutcome['sheetPatch'],
+    isPlayer?: boolean
+  ): WrapCharacterOutcome['sheetPatch'] | undefined => {
+    if (isPlayer || !raw || typeof raw !== 'object') return undefined;
+    const next: NonNullable<WrapCharacterOutcome['sheetPatch']> = {};
+    for (const key of ['role', 'summary', 'traits', 'desires', 'fears', 'flaws'] as const) {
+      const v = raw[key];
+      if (typeof v === 'string' && v.trim()) next[key] = v.trim();
+    }
+    return Object.keys(next).length > 0 ? next : undefined;
+  };
+
+  const cleanKnowledge = (
+    raw?: WrapCharacterOutcome['knowledge']
+  ): WrapCharacterOutcome['knowledge'] | undefined => {
+    if (!raw || typeof raw !== 'object') return undefined;
+    const nowKnows = raw.nowKnows?.trim() || undefined;
+    const clearMustNotKnow = raw.clearMustNotKnow?.trim() || undefined;
+    if (!nowKnows && !clearMustNotKnow) return undefined;
+    return { nowKnows, clearMustNotKnow };
+  };
+
   const updated: SeasonWrap = {
     ...wrap,
-    characters: wrap.characters.map((c) => ({
-      ...c,
-      evolution: c.returning
-        ? result.find((r) => r.name.toLowerCase() === c.name.toLowerCase())?.evolution ?? c.evolution
-        : c.evolution
-    })),
+    characters: wrap.characters.map((c) => {
+      if (!c.returning) return c;
+      const hit = charResults.find((r) => r.name.toLowerCase() === c.name.toLowerCase());
+      if (!hit) return c;
+      const sheet = byId.get(c.characterId);
+      const sheetPatch = cleanSheet(hit.sheetPatch, sheet?.isPlayer);
+      const statePatch = cleanState(hit.statePatch);
+      const knowledge = cleanKnowledge(hit.knowledge);
+      return {
+        ...c,
+        evolution: hit.evolution?.trim() || c.evolution,
+        sheetPatch,
+        statePatch,
+        knowledge,
+        keepSheet: sheetPatch ? true : undefined,
+        keepState: statePatch ? true : undefined,
+        keepKnowledge: knowledge ? true : undefined
+      };
+    }),
+    relationshipUpdates: relUpdates,
+    plotArc,
     updatedAt: Date.now()
   };
   await db.wraps.put(updated);
   return updated;
 }
 
+/** Merge season-open state from wrap outcome (exported for tests). */
+export function mergeSeasonOpenState(
+  prior: CharacterState,
+  outcome: Pick<WrapCharacterOutcome, 'evolution' | 'outcome' | 'statePatch' | 'keepState'>
+): CharacterState {
+  if (outcome.keepState === false) {
+    return { ...prior };
+  }
+  const patch = outcome.statePatch;
+  const conditionFallback = (outcome.evolution || outcome.outcome || prior.condition).trim();
+  // Only replace goal/emotion when statePatch explicitly provides them.
+  // Without a statePatch, keep prior goal/emotion and only refresh condition from evolution.
+  if (!patch) {
+    return {
+      goal: prior.goal,
+      emotion: prior.emotion,
+      location: prior.location,
+      condition: conditionFallback || prior.condition
+    };
+  }
+  return {
+    goal: patch.goal !== undefined ? patch.goal.trim() : prior.goal,
+    emotion: patch.emotion !== undefined ? patch.emotion.trim() : prior.emotion,
+    location: patch.location !== undefined ? patch.location.trim() : prior.location,
+    condition: patch.condition !== undefined
+      ? patch.condition.trim()
+      : (conditionFallback || prior.condition)
+  };
+}
+
+/** Merge earned sheet fields; never touches voice/anchors (exported for tests). */
+export function mergeSeasonSheetPatch(
+  character: Character,
+  outcome: Pick<WrapCharacterOutcome, 'sheetPatch' | 'keepSheet'>
+): Partial<Character> | null {
+  if (character.isPlayer || outcome.keepSheet === false || !outcome.sheetPatch) return null;
+  const patch: Partial<Character> = {};
+  const src = outcome.sheetPatch;
+  for (const key of ['role', 'summary', 'traits', 'desires', 'fears', 'flaws'] as const) {
+    const v = src[key]?.trim();
+    if (v) patch[key] = v;
+  }
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
+/** Strip matching clauses from mustNotKnow (exported for tests). */
+export function clearMustNotKnowClauses(mustNotKnow: string, clear?: string): string {
+  const needle = (clear ?? '').trim();
+  if (!needle || !mustNotKnow.trim()) return mustNotKnow;
+  const parts = mustNotKnow
+    .split(/[.;\n]+/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .filter((p) => {
+      const pl = p.toLowerCase();
+      const cl = needle.toLowerCase();
+      return !(pl.includes(cl) || cl.includes(pl));
+    });
+  return parts.join('; ');
+}
+
+/** Apply relationship name-pairs onto an in-memory cast list (exported for tests). */
+export function applySeasonRelationshipUpdates(
+  cast: Character[],
+  updates: SeasonWrapRelationshipUpdate[] | undefined
+): Character[] {
+  if (!updates?.length) return cast;
+  const next = cast.map((c) => ({ ...c, relationships: [...c.relationships] }));
+  const byName = (name: string) =>
+    next.find((x) => x.name.toLowerCase() === name.trim().toLowerCase());
+  const ids = next.map((c) => c.id);
+  for (const r of updates) {
+    if (r.keep === false) continue;
+    const from = byName(r.from);
+    const to = byName(r.to);
+    if (!from || !to || from.id === to.id) continue;
+    from.relationships = normalizeRelationships(
+      [
+        ...from.relationships.filter((edge) => edge.targetId !== to.id),
+        {
+          targetId: to.id,
+          kind: (r.kind ?? '').trim() || 'linked',
+          note: (r.note ?? '').trim()
+        }
+      ],
+      ids,
+      from.id
+    );
+  }
+  return next;
+}
+
 /** Draft (or redraft) the next-season premise from the wrap sheet. */
 export async function draftPremise(world: World, season: Season, wrap: SeasonWrap, gapLabel: string): Promise<string> {
   const { provider, model } = utilityModelFor(world);
+  const keptArc = (wrap.plotArc ?? []).filter((p) => p.keep !== false && p.text.trim());
+  const keptRels = (wrap.relationshipUpdates ?? []).filter((r) => r.keep !== false);
   const { text: premise } = await streamChat({
     provider, model,
     system: 'You write season premises for longform interactive fiction. One paragraph, 2-4 sentences, present tense, concrete and pressurized. Open on the raised beats. No preamble — return only the premise.',
     messages: [{
       role: 'user',
-      content: `World: ${world.title} — ${world.line}\nSeason ${season.number} just ended. Season ${season.number + 1} opens ${gapLabel.toLowerCase()} later.\n\nBeats:\n${wrap.beats.map((b) => `- [${b.disposition}] ${b.text} → ${b.consequence}`).join('\n')}\n\nReturning cast:\n${wrap.characters.filter((c) => c.returning).map((c) => `- ${c.name}: ${c.evolution || c.outcome}`).join('\n')}`
+      content:
+        `World: ${world.title} — ${world.line}\nSeason ${season.number} just ended. Season ${season.number + 1} opens ${gapLabel.toLowerCase()} later.\n\n` +
+        `Beats:\n${wrap.beats.filter((b) => b.disposition !== 'drop').map((b) => `- [${b.disposition}] ${b.text} → ${b.consequence}`).join('\n') || '(none carried)'}\n\n` +
+        `Returning cast:\n${wrap.characters.filter((c) => c.returning).map((c) => `- ${c.name}: ${c.evolution || c.outcome}`).join('\n')}` +
+        (keptRels.length
+          ? `\n\nRelationship shifts:\n${keptRels.map((r) => `- ${r.from} → ${r.to}: ${r.kind || 'linked'}${r.note ? ` — ${r.note}` : ''}`).join('\n')}`
+          : '') +
+        (keptArc.length
+          ? `\n\nExtra plot pressures:\n${keptArc.map((p) => `- ${p.text}`).join('\n')}`
+          : '')
     }],
     maxTokens: 500, temperature: 0.9
   });
   return premise.trim();
 }
 
-/** Steps 4-5: build the season bible, create season N+1, evolve character states. */
+/** Steps 4-5: build the season bible, create season N+1, evolve character sheets/state. */
 export async function beginNextSeason(world: World, season: Season, wrap: SeasonWrap, gapLabel: string): Promise<Season> {
   const { provider, model } = utilityModelFor(world);
 
@@ -1999,12 +2303,27 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
     maxTokens: 700, temperature: 0.6
   });
 
-  const offscreen = wrap.characters
+  const offscreenLines: string[] = wrap.characters
     .filter((c) => c.returning && c.evolution)
-    .map((c) => `- ${c.name}: ${c.evolution}`)
-    .join('\n');
+    .map((c) => `- ${c.name}: ${c.evolution}`);
+  for (const c of wrap.characters) {
+    if (!c.returning || c.keepSheet === false || !c.sheetPatch) continue;
+    const bits = (['role', 'summary', 'desires', 'fears'] as const)
+      .map((k) => c.sheetPatch?.[k]?.trim())
+      .filter(Boolean);
+    if (bits.length > 0) {
+      offscreenLines.push(`- ${c.name} (sheet): ${bits[0]}`);
+    }
+  }
+  const offscreen = offscreenLines.join('\n');
 
   const raised = wrap.beats.filter((b) => b.disposition === 'raise');
+  const plotTargets = buildNextSeasonPlotTargets({
+    raiseBeats: raised,
+    plotArc: wrap.plotArc,
+    carried: season.plotTargets
+  });
+
   const next: Season = {
     id: uid(), worldId: world.id, number: season.number + 1,
     title: '', premise: wrap.premise, timeGap: gapLabel,
@@ -2013,7 +2332,7 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
       carriedBeats: kept.map(({ where: _where, ...b }): { text: string; consequence: string; disposition: WrapBeat['disposition'] } => b),
       offscreenChanges: offscreen
     },
-    plotTargets: buildSeasonPlotTargets(raised),
+    plotTargets: plotTargets.length > 0 ? plotTargets : undefined,
     status: 'active', createdAt: Date.now(), updatedAt: Date.now()
   };
 
@@ -2052,17 +2371,71 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
         updatedAt: Date.now()
       });
       await db.wraps.update(wrap.id, { status: 'committed', updatedAt: Date.now() });
-      // Rewrite character current-state snapshots for the new season.
-      for (const c of wrap.characters) {
-        const patch = c.returning
-          ? {
-              'state.goal': '',
-              'state.condition': c.evolution || c.outcome,
-              'state.emotion': '',
-              updatedAt: Date.now()
-            }
-          : { 'state.location': 'departed — not in this season', updatedAt: Date.now() };
-        await db.characters.update(c.characterId, patch as never);
+
+      const now = Date.now();
+      const castLive = await db.characters.where('worldId').equals(world.id).toArray();
+      const byId = new Map(castLive.map((c) => [c.id, c]));
+
+      // Character state + sheet + knowledge for returning / departed.
+      for (const outcome of wrap.characters) {
+        const c = byId.get(outcome.characterId);
+        if (!c) continue;
+        // Player always returns; never stamp them as departed.
+        const returning = c.isPlayer ? true : outcome.returning;
+        if (!returning) {
+          await db.characters.update(c.id, {
+            state: { ...c.state, location: 'departed — not in this season' },
+            updatedAt: now
+          });
+          continue;
+        }
+
+        const state = mergeSeasonOpenState(c.state, outcome);
+        const sheet = mergeSeasonSheetPatch(c, outcome);
+        let mustNotKnow = c.mustNotKnow;
+        if (outcome.keepKnowledge !== false && outcome.knowledge) {
+          mustNotKnow = clearMustNotKnowClauses(mustNotKnow, outcome.knowledge.clearMustNotKnow);
+          if (outcome.knowledge.nowKnows?.trim()) {
+            await db.continuity.add({
+              id: uid(),
+              worldId: world.id,
+              seasonId: next.id,
+              episodeId: firstEpisode.id,
+              text: `${c.name} now knows: ${outcome.knowledge.nowKnows.trim()}`,
+              source: 'auto',
+              createdAt: now
+            });
+          }
+        }
+        const patch: Partial<Character> = {
+          state,
+          updatedAt: now,
+          ...(sheet ?? {}),
+          ...(mustNotKnow !== c.mustNotKnow ? { mustNotKnow } : {})
+        };
+        await db.characters.update(c.id, patch);
+        // Keep in-memory list fresh for relationship apply.
+        Object.assign(c, patch);
+      }
+
+      // Relationships after sheet updates so name resolution uses current cast.
+      const relTouched = applySeasonRelationshipUpdates(
+        [...byId.values()],
+        wrap.relationshipUpdates
+      );
+      for (const c of relTouched) {
+        const prior = byId.get(c.id);
+        if (!prior) continue;
+        const same =
+          prior.relationships.length === c.relationships.length &&
+          prior.relationships.every((r, i) =>
+            r.targetId === c.relationships[i]?.targetId &&
+            r.kind === c.relationships[i]?.kind &&
+            r.note === c.relationships[i]?.note
+          );
+        if (!same) {
+          await db.characters.update(c.id, { relationships: c.relationships, updatedAt: now });
+        }
       }
 
       // Carry durable facts into the new season (prompts load by seasonId).
@@ -2070,7 +2443,6 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
       const carriedFacts = [...priorFacts]
         .sort((a, b) => b.createdAt - a.createdAt)
         .slice(0, 24);
-      const now = Date.now();
       const beatFacts = kept
         .filter((b) => b.disposition === 'raise' || b.disposition === 'keep')
         .slice(0, 8)

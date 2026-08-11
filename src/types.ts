@@ -369,6 +369,43 @@ export interface WrapCharacterOutcome {
   /** what changed off-screen during the time gap (filled in step 3) */
   evolution: string;
   returning: boolean;
+  /**
+   * Earned psychology / role shifts proposed at season handoff.
+   * Never includes voice, anchors, or customInstructions.
+   */
+  sheetPatch?: {
+    role?: string;
+    summary?: string;
+    traits?: string;
+    desires?: string;
+    fears?: string;
+    flaws?: string;
+  };
+  /** How they open season N+1 (live state). */
+  statePatch?: Partial<CharacterState>;
+  knowledge?: {
+    nowKnows?: string;
+    clearMustNotKnow?: string;
+  };
+  /** Author Keep flags — default true when patches are present. */
+  keepSheet?: boolean;
+  keepState?: boolean;
+  keepKnowledge?: boolean;
+}
+
+export interface SeasonWrapRelationshipUpdate {
+  from: string;
+  to: string;
+  kind?: string;
+  note?: string;
+  /** Author Keep — default true. */
+  keep?: boolean;
+}
+
+export interface SeasonWrapPlotArc {
+  text: string;
+  /** Author Keep — default true. */
+  keep?: boolean;
 }
 
 export interface SeasonWrap {
@@ -377,6 +414,10 @@ export interface SeasonWrap {
   worldId: string;
   beats: WrapBeat[];
   characters: WrapCharacterOutcome[];
+  /** Relationship edges that shifted over the gap — staged until Begin. */
+  relationshipUpdates?: SeasonWrapRelationshipUpdate[];
+  /** Extra season-arc pressures beyond Raise beats — staged until Begin. */
+  plotArc?: SeasonWrapPlotArc[];
   /** index into GAP_LABELS */
   gap: number;
   premise: string;
