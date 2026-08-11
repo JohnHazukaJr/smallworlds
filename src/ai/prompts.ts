@@ -844,7 +844,7 @@ function speakSituationPressure(ctx: PromptContext): string | null {
     const scene = episodeSceneDay(ctx.episode, cal);
     const { due } = selectCalendarEventsForPrompt(ctx.calendarEvents ?? [], { sceneDay: scene });
     for (const ev of due.slice(0, 6)) {
-      const hard = ev.promptPolicy === 'hard' || ev.scale === 'large' || ev.scale === 'season';
+      const hard = ev.promptPolicy === 'hard' || ev.scale === 'large';
       lines.push(
         `- Calendar${hard ? ' (should be felt)' : ''}: ${ev.title.trim() || '(untitled)'}` +
         (ev.summary.trim() ? ` — ${clipText(ev.summary.trim(), 120)}` : '')
