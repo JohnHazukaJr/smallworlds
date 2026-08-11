@@ -204,12 +204,13 @@ export function Sequel() {
           {['What mattered', 'How it continues', 'Who returns'].map((label, i) => (
             <div key={label} style={{
               display: 'flex', alignItems: 'center', gap: 8,
-              border: `1px solid rgba(255,255,255,${i === 0 ? '0.2' : '0.09'})`,
-              background: i === 0 ? 'linear-gradient(150deg, rgba(224,165,95,0.14), rgba(255,255,255,0.05))' : 'rgba(255,255,255,0.03)',
-              backdropFilter: 'blur(16px)', color: i === 0 ? '#f4f2ee' : 'rgba(236,234,230,0.5)',
-              borderRadius: 20, padding: '8px 16px', fontSize: 12.5, fontWeight: 600
+              border: `1px solid rgba(255,255,255,${i === 0 ? '0.18' : '0.09'})`,
+              background: i === 0 ? 'oklch(0.72 0.06 195 / 0.12)' : 'rgba(255,255,255,0.03)',
+              color: i === 0 ? '#f2f4f5' : 'rgba(230,233,235,0.5)',
+              borderRadius: 4, padding: '8px 14px', fontSize: 12.5, fontWeight: 600,
+              boxShadow: i === 0 ? 'inset 0 -2px 0 oklch(0.72 0.06 195)' : 'none'
             }}>
-              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.55 }}>0{i + 1}</span>
+              <span className="mono meta" style={{ opacity: 0.55 }}>0{i + 1}</span>
               <span>{label}</span>
             </div>
           ))}
@@ -236,10 +237,10 @@ export function Sequel() {
             const hot = b.disposition === 'raise';
             return (
               <div key={i} style={{
-                border: `1px solid rgba(255,255,255,${hot ? '0.2' : '0.09'})`,
-                borderRadius: 16,
-                background: hot ? 'linear-gradient(150deg, rgba(224,165,95,0.14), rgba(255,255,255,0.05))' : 'rgba(255,255,255,0.045)',
-                backdropFilter: 'blur(20px) saturate(140%)',
+                border: `1px solid rgba(255,255,255,${hot ? '0.18' : '0.09'})`,
+                borderRadius: 4,
+                background: hot ? 'oklch(0.72 0.06 195 / 0.1)' : 'rgba(255,255,255,0.03)',
+                boxShadow: hot ? 'inset 3px 0 0 oklch(0.72 0.06 195 / 0.7)' : 'none',
                 padding: '16px 18px',
                 display: 'flex',
                 flexDirection: narrow ? 'column' : 'row',
@@ -284,7 +285,7 @@ export function Sequel() {
 
         {/* gap + returning */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 282px), 1fr))', gap: 15, marginBottom: 30 }}>
-          <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 15, minWidth: 0 }}>
+          <div className="craft-row" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 15, minWidth: 0 }}>
             <Mono style={{ fontSize: 9 }}>time between</Mono>
             <div className="serif" style={{ fontWeight: 300, fontSize: 27, color: '#f8f6f2' }}>{gapLabel}</div>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
@@ -311,7 +312,7 @@ export function Sequel() {
             </div>
           </div>
 
-          <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 11, minWidth: 0 }}>
+          <div className="craft-row" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 11, minWidth: 0 }}>
             <Mono style={{ fontSize: 9 }}>who returns</Mono>
             {draft.characters.map((c, i) => {
               const ch = characters.find((x) => x.id === c.characterId);
@@ -330,8 +331,8 @@ export function Sequel() {
                     <div style={{ fontSize: 13, fontWeight: 600, flex: 1 }}>{c.name}</div>
                     <div style={{
                       width: 16, height: 16, borderRadius: 6, flexShrink: 0,
-                      border: `1px solid ${c.returning ? 'oklch(0.85 0.1 62)' : 'rgba(255,255,255,0.18)'}`,
-                      background: c.returning ? 'oklch(0.85 0.1 62)' : 'transparent'
+                      border: `1px solid ${c.returning ? 'oklch(0.72 0.06 195)' : 'rgba(255,255,255,0.18)'}`,
+                      background: c.returning ? 'oklch(0.72 0.06 195)' : 'transparent'
                     }} />
                   </div>
                   <textarea
@@ -364,7 +365,7 @@ export function Sequel() {
               const hasKnow = !!(c.knowledge?.nowKnows || c.knowledge?.clearMustNotKnow);
               if (!hasSheet && !hasState && !hasKnow) return null;
               return (
-                <div key={c.characterId} className="glass" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <div key={c.characterId} className="craft-row" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                     <div style={{ fontSize: 14, fontWeight: 600, color: '#f0eee9', flex: 1 }}>{c.name}</div>
                     {hasSheet && (
@@ -477,7 +478,7 @@ export function Sequel() {
             })}
 
             {(draft.relationshipUpdates?.length ?? 0) > 0 && (
-              <div className="glass" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div className="craft-row" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <Mono style={{ fontSize: 9 }}>relationship shifts</Mono>
                 {draft.relationshipUpdates!.map((r, i) => (
                   <div key={`${r.from}-${r.to}-${i}`} style={{
@@ -510,7 +511,7 @@ export function Sequel() {
             )}
 
             {(draft.plotArc?.length ?? 0) > 0 && (
-              <div className="glass" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div className="craft-row" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <Mono style={{ fontSize: 9 }}>extra plot pressures · Raise beats already seed targets</Mono>
                 {raised > 0 && (
                   <div style={{ fontSize: 12, color: 'rgba(236,234,230,0.5)', lineHeight: 1.45 }}>
@@ -547,12 +548,11 @@ export function Sequel() {
         )}
 
         {/* premise */}
-        <div style={{
-          border: '1px solid rgba(255,255,255,0.13)', borderRadius: 18, padding: narrow ? '18px 18px' : '24px 26px',
-          background: 'linear-gradient(150deg, rgba(224,165,95,0.12), rgba(255,255,255,0.04))',
-          backdropFilter: 'blur(22px)', display: 'flex', flexDirection: 'column', gap: 14
+        <div className="craft-row" style={{
+          padding: narrow ? '18px 18px' : '24px 26px',
+          display: 'flex', flexDirection: 'column', gap: 14
         }}>
-          <Mono style={{ fontSize: 9 }}>the premise season {season.number + 1} opens on</Mono>
+          <div className="label">The premise season {season.number + 1} opens on</div>
           <textarea
             rows={3}
             className="serif"

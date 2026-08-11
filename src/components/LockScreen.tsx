@@ -32,22 +32,19 @@ export function LockScreen() {
 
   return (
     <div style={{
-      position: 'relative', minHeight: '100vh', background: '#08090c', color: '#eceae6',
+      position: 'relative', minHeight: '100vh', background: 'var(--ink)', color: 'var(--paper)',
       display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20
     }}>
-      <div style={{
-        position: 'fixed', inset: 0, pointerEvents: 'none',
-        background:
-          'radial-gradient(900px 700px at 12% -5%, rgba(224,165,95,0.14), transparent 65%), radial-gradient(800px 620px at 88% 8%, rgba(120,150,200,0.12), transparent 62%)',
-        animation: 'wr-drift 34s ease-in-out infinite'
+      <div className="horizon-wash" style={{
+        position: 'fixed', inset: 0, pointerEvents: 'none'
       }} />
-      <div className="glass fade-in" style={{ position: 'relative', width: 400, maxWidth: '100%', padding: '30px 28px', display: 'flex', flexDirection: 'column', gap: 18 }}>
+      <div className="craft-row fade-in" style={{ position: 'relative', width: 400, maxWidth: '100%', padding: '30px 28px', display: 'flex', flexDirection: 'column', gap: 18 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <div className="serif" style={{ fontSize: 24, letterSpacing: '0.02em', color: '#f6f4f0' }}>
+          <div className="serif" style={{ fontSize: 26, letterSpacing: '0.01em', color: '#f2f4f5', fontWeight: 300 }}>
             Small Worlds
-            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.14em', opacity: 0.5, paddingLeft: 6 }}>AI</span>
           </div>
-          <Mono>locked · API keys encrypted · stories stay in IndexedDB</Mono>
+          <div className="label">Make a world. Live in it.</div>
+          <Mono style={{ marginTop: 6 }}>locked · API keys encrypted · stories stay in IndexedDB</Mono>
         </div>
         <input
           type="password"

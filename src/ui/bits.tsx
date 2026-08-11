@@ -1,6 +1,6 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 import { AppError, classifyError } from '../errors';
-import { ACCENT } from './theme';
+import { ACCENT, ACCENT_RGBA } from './theme';
 
 export function useVw(): number {
   const [vw, setVw] = useState(typeof window !== 'undefined' ? window.innerWidth : 1440);
@@ -26,10 +26,10 @@ export function Chip({
       onClick={onClick}
       disabled={disabled}
       style={{
-        border: `1px solid ${active ? 'oklch(0.72 0.06 195 / 0.55)' : 'rgba(255,255,255,0.12)'}`,
-        background: active ? 'oklch(0.72 0.06 195 / 0.14)' : 'transparent',
+        border: `1px solid ${active ? ACCENT_RGBA.a55 : 'rgba(255,255,255,0.12)'}`,
+        background: active ? ACCENT_RGBA.a14 : 'transparent',
         color: active ? '#e8f2f4' : 'rgba(230,233,235,0.62)',
-        borderRadius: 6,
+        borderRadius: 4,
         padding: '8px 12px',
         minHeight: 36,
         fontSize: 12,
@@ -50,7 +50,7 @@ export function Toggle({ on, onClick, accent = ACCENT }: { on: boolean; onClick:
     <button
       onClick={onClick}
       style={{
-        width: 44, height: 24, borderRadius: 6, flexShrink: 0,
+        width: 44, height: 24, borderRadius: 4, flexShrink: 0,
         border: `1px solid rgba(255,255,255,${on ? '0.22' : '0.12'})`,
         background: on ? accent : 'rgba(255,255,255,0.05)',
         cursor: 'pointer', padding: 3, display: 'flex',
@@ -58,7 +58,7 @@ export function Toggle({ on, onClick, accent = ACCENT }: { on: boolean; onClick:
       }}
     >
       <div style={{
-        width: 16, height: 16, borderRadius: 3,
+        width: 16, height: 16, borderRadius: 2,
         background: on ? '#0a1416' : 'rgba(230,233,235,0.55)'
       }} />
     </button>
@@ -115,9 +115,9 @@ export function ErrorNote({
   const warn = tone === 'warn';
   return (
     <div style={{
-      border: warn ? '1px solid oklch(0.72 0.06 195 / 0.45)' : '1px solid rgba(200,100,90,0.4)',
-      borderRadius: 8, padding: '11px 14px',
-      background: warn ? 'oklch(0.72 0.06 195 / 0.08)' : 'rgba(200,100,90,0.08)',
+      border: warn ? `1px solid ${ACCENT_RGBA.a45}` : '1px solid rgba(200,100,90,0.4)',
+      borderRadius: 6, padding: '11px 14px',
+      background: warn ? ACCENT_RGBA.a08 : 'rgba(200,100,90,0.08)',
       display: 'flex', gap: 12, alignItems: 'flex-start'
     }}>
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -191,12 +191,12 @@ export function Sheet({
       <aside style={{
         position: 'fixed', zIndex: 51,
         ...(narrow
-          ? { left: 0, right: 0, bottom: 0, top: '8vh', borderTop: '1px solid rgba(255,255,255,0.12)', borderRadius: '14px 14px 0 0', animation: 'wr-slide-up 0.25s ease both' }
+          ? { left: 0, right: 0, bottom: 0, top: '8vh', borderTop: '1px solid rgba(255,255,255,0.12)', borderRadius: '10px 10px 0 0', animation: 'wr-slide-up 0.25s ease both' }
           : { top: 0, right: 0, bottom: 0, width, borderLeft: '1px solid rgba(255,255,255,0.12)', animation: 'wr-fade 0.25s ease both' }),
         display: 'flex', flexDirection: 'column', gap: 0,
         padding: 0,
-        background: 'rgba(12,14,16,0.94)', backdropFilter: 'blur(18px) saturate(120%)',
-        boxShadow: '-16px 0 40px rgba(0,0,0,0.4)',
+        background: 'rgba(12,14,16,0.96)', backdropFilter: 'blur(14px) saturate(110%)',
+        boxShadow: '-12px 0 32px rgba(0,0,0,0.4)',
         overflow: 'hidden',
         minHeight: 0
       }}>
@@ -214,7 +214,7 @@ export function Sheet({
             padding: narrow
               ? '12px 16px calc(12px + env(safe-area-inset-bottom))'
               : '14px 22px 18px',
-            background: 'rgba(10,12,14,0.96)',
+            background: 'rgba(10,12,14,0.98)',
             display: 'flex', flexDirection: 'column', gap: 10
           }}>
             {footer}

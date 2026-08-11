@@ -194,7 +194,7 @@ export function Cast() {
     return (
       <div className="fade-in" style={{ padding: narrow ? '40px 20px' : '80px 60px', display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 560 }}>
         <Mono>no world open</Mono>
-        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: '#f8f6f2' }}>Open a world to meet its cast.</div>
+        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: '#f8f6f2' }}>Open a world to meet its inhabitants.</div>
         <div><button className="btn-primary" onClick={() => go('library')}>Go to Worlds</button></div>
       </div>
     );
@@ -216,7 +216,10 @@ export function Cast() {
       }}>
         {!narrow && (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <Mono style={{ letterSpacing: '0.16em' }}>cast · {world.title.toLowerCase()}</Mono>
+            <div className="label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="seed-mark" />
+              Inhabitants · {world.title}
+            </div>
             <button className="btn-ghost" style={{ padding: '5px 11px', fontSize: 11 }} onClick={() => setCreating(true)}>+ new</button>
           </div>
         )}
@@ -315,7 +318,7 @@ export function Cast() {
                         {d.selfTag && (
                           <span style={{
                             position: 'absolute', top: 10, right: 10, fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5,
-                            letterSpacing: '0.08em', color: '#181307', background: 'oklch(0.85 0.1 62)', padding: '4px 8px', borderRadius: 6
+                            letterSpacing: '0.06em', color: '#0a1416', background: 'oklch(0.72 0.06 195)', padding: '4px 8px', borderRadius: 4
                           }}>this is me</span>
                         )}
                       </div>
@@ -329,7 +332,7 @@ export function Cast() {
                                 onClick={() => void setPrimaryPortrait(i)}
                                 style={{
                                   width: 52, height: 52, borderRadius: 10, padding: 0, cursor: 'pointer',
-                                  border: i === 0 ? '2px solid oklch(0.85 0.1 62)' : '1px solid rgba(255,255,255,0.16)',
+                                  border: i === 0 ? '2px solid oklch(0.72 0.06 195)' : '1px solid rgba(255,255,255,0.16)',
                                   backgroundImage: `url(${url})`, backgroundSize: 'cover', backgroundPosition: 'center'
                                 }}
                               />
@@ -447,7 +450,7 @@ export function Cast() {
                     ['location', d.state.location, (v: string) => patch({ state: { ...d.state, location: v } })],
                     ['condition', d.state.condition, (v: string) => patch({ state: { ...d.state, condition: v } })]
                   ] as Array<[string, string, (v: string) => void]>).map(([k, v, set]) => (
-                    <div key={k} className="glass" style={{ borderRadius: 13, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div key={k} className="craft-row" style={{ borderRadius: 13, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <Mono style={{ fontSize: 9, letterSpacing: '0.12em' }}>{k}</Mono>
                       <input
                         value={v} onChange={(e) => set(e.target.value)} placeholder="—"
@@ -467,7 +470,7 @@ export function Cast() {
                 <button key={id} onClick={() => setTab(id)} style={{
                   border: 0, background: 'transparent',
                   color: tab === id ? '#f8f6f2' : 'rgba(236,234,230,0.45)',
-                  borderBottom: `2px solid ${tab === id ? 'oklch(0.85 0.1 62)' : 'transparent'}`,
+                  borderBottom: `2px solid ${tab === id ? 'oklch(0.72 0.06 195)' : 'transparent'}`,
                   padding: '10px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap'
                 }}>{label}</button>
               ))}
@@ -576,7 +579,7 @@ export function Cast() {
               {tab === 'anchors' && (
                 <div className="glass-hot" style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'oklch(0.85 0.1 62)' }} />
+                    <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'oklch(0.72 0.06 195)' }} />
                     <div style={{ fontSize: 13, fontWeight: 600, color: '#f6f4f0' }}>Behaviour anchors</div>
                     <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)', marginLeft: 'auto' }}>
                       what keeps them human
@@ -598,7 +601,7 @@ export function Cast() {
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     {d.anchors.filter((a) => a.trim()).map((a, i) => (
                       <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, lineHeight: 1.5, color: 'rgba(236,234,230,0.9)' }}>
-                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'oklch(0.85 0.1 62)', paddingTop: 3 }}>
+                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'oklch(0.72 0.06 195)', paddingTop: 3 }}>
                           {String(i + 1).padStart(2, '0')}
                         </span>
                         <span>{a}</span>
@@ -744,9 +747,9 @@ function RelationsEditor({
 
       {notice && (
         <div style={{
-          fontSize: 12.5, color: 'rgba(236,220,190,0.95)',
-          border: '1px solid rgba(224,165,95,0.3)', borderRadius: 10, padding: '10px 12px',
-          background: 'rgba(224,165,95,0.08)', display: 'flex', gap: 10
+          fontSize: 12.5, color: 'rgba(200,230,235,0.95)',
+          border: '1px solid oklch(0.72 0.06 195 / 0.3)', borderRadius: 6, padding: '10px 12px',
+          background: 'oklch(0.72 0.06 195 / 0.08)', display: 'flex', gap: 10
         }}>
           <span style={{ flex: 1 }}>{notice}</span>
           <button className="btn-quiet" style={{ fontSize: 12, minHeight: 40 }} onClick={() => setNotice('')}>×</button>
@@ -785,10 +788,10 @@ function RelationsEditor({
               <div
                 key={r.targetId}
                 ref={(el) => { cardRefs.current[r.targetId] = el; }}
-                className="glass"
+                className="craft-row"
                 style={{
                   padding: narrow ? 14 : 14, display: 'flex', flexDirection: 'column', gap: 10,
-                  border: hot ? '1px solid rgba(224,165,95,0.45)' : undefined
+                  border: hot ? '1px solid oklch(0.72 0.06 195 / 0.45)' : undefined
                 }}
               >
                 <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -889,7 +892,7 @@ function RelationsEditor({
           <div style={{ fontSize: 12.5, opacity: 0.45 }}>No one links here yet.</div>
         )}
         {inbound.map(({ from, rel }) => (
-          <div key={from.id} className="glass" style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div key={from.id} className="craft-row" style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div style={{ fontSize: 13, color: '#f0eee9' }}>
               <strong>{from.name || 'unnamed'}</strong>
               <span style={{ opacity: 0.55 }}> · {rel.kind}</span>

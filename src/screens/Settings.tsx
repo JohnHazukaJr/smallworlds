@@ -61,14 +61,14 @@ export function Settings() {
       {/* default models */}
       <Section title="Default models" note="per-world overrides live below">
         <div style={{ display: 'grid', gridTemplateColumns: narrow ? '1fr' : '1fr 1fr', gap: 14 }}>
-          <div className="glass" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div className="craft-row" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>Prose model</div>
             <div style={{ fontSize: 12, lineHeight: 1.55, color: 'rgba(236,234,230,0.5)' }}>
               Writes the story. Spend your best model here.
             </div>
             <ModelPicker value={s.proseModel} onChange={s.setProseModel} />
           </div>
-          <div className="glass" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div className="craft-row" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>Utility model</div>
             <div style={{ fontSize: 12, lineHeight: 1.55, color: 'rgba(236,234,230,0.5)' }}>
               Background work: continuity extraction, season analysis, character drafts. A cheap, fast model is ideal.
@@ -84,7 +84,7 @@ export function Settings() {
 
       {/* content defaults */}
       <Section title="Content defaults">
-        <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
+        <div className="craft-row" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap' }}>
             <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 5 }}>
               <div style={{ fontSize: 13.5, fontWeight: 600, color: 'rgba(236,234,230,0.92)' }}>Mature content on new worlds</div>
@@ -132,7 +132,7 @@ function SecuritySection() {
           onDismiss={() => setVaultCorruptDismissed(true)}
         />
       )}
-      <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
+      <div className="craft-row" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap' }}>
           <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 5 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: 'rgba(236,234,230,0.92)' }}>
@@ -330,13 +330,13 @@ function ProviderCard({ config }: { config: ProviderConfig }) {
   };
 
   return (
-    <div className="glass" style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div className="craft-row" style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         <div style={{ fontSize: 14.5, fontWeight: 600, color: '#f0eee9' }}>{config.label}</div>
         <div style={{
           fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: '0.1em', textTransform: 'uppercase',
           borderRadius: 6, padding: '3px 8px', border: '1px solid rgba(255,255,255,0.16)',
-          color: testState === 'ok' ? 'oklch(0.85 0.09 140)' : testState === 'fail' ? 'oklch(0.75 0.12 25)' : 'oklch(0.85 0.1 62)'
+          color: testState === 'ok' ? 'oklch(0.85 0.09 140)' : testState === 'fail' ? 'oklch(0.75 0.12 25)' : 'oklch(0.72 0.06 195)'
         }}>
           {testState === 'ok' ? 'connected' : testState === 'fail' ? 'failed' : testState === 'busy' ? 'testing…' : 'not verified'}
         </div>
@@ -475,7 +475,7 @@ function WorldSettings({ world }: { world: World }) {
   return (
     <Section title={`This world — ${world.title}`} note="instructions the narrator follows in this world only">
       {saveError && <ErrorNote error={saveError} onDismiss={() => setSaveError('')} />}
-      <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div className="craft-row" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 20 }}>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 200px), 1fr))', gap: 14 }}>
           <Field label="Point of view">
             <div style={{ display: 'flex', gap: 6 }}>
@@ -578,10 +578,10 @@ function SliderCard({ label, value, onChange, note, valueLabel }: {
   label: string; value: number; onChange: (v: number) => void; note: string; valueLabel: string;
 }) {
   return (
-    <div className="glass" style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div className="craft-row" style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: 'rgba(236,234,230,0.92)' }}>{label}</div>
-        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: 'oklch(0.85 0.1 62)' }}>{valueLabel}</div>
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: 'oklch(0.72 0.06 195)' }}>{valueLabel}</div>
       </div>
       <Bar pct={value} />
       <input
@@ -596,7 +596,7 @@ function SliderCard({ label, value, onChange, note, valueLabel }: {
 
 function WorldBibleEditor({ world, onError }: { world: World; onError: (msg: string) => void }) {
   return (
-    <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <div className="craft-row" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
       <Field label="World bible" note="setting, rules, pressures — packed into narrator, character, and guest prompts">
         <textarea
           rows={6}

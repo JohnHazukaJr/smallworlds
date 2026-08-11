@@ -462,7 +462,7 @@ export function Onboard() {
   };
 
   const checklistPanel = (compact: boolean) => (
-    <div className="glass" style={{ padding: compact ? '12px 14px' : '14px 16px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+    <div className="craft-row" style={{ padding: compact ? '12px 14px' : '14px 16px', display: 'flex', flexDirection: 'column', gap: 8 }}>
       <div style={{ fontSize: compact ? 12.5 : 13.5, fontWeight: 600, color: '#f0eee9' }}>
         {compact ? 'Write-ready' : 'Write-ready checklist'}
       </div>
@@ -761,7 +761,7 @@ export function Onboard() {
   };
 
   const fleshEverythingPanel = worldId && hasAI ? (
-    <div className="glass" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <div className="craft-row" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>Flesh out everything</div>
       <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
         Fills bible, premise, narrator rules, you, cast to roster targets, places, relationships, and opening memory.
@@ -1197,7 +1197,7 @@ export function Onboard() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           {checklistPanel(false)}
 
-          <div className="glass" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div className="craft-row" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>Opening continuity</div>
             <div style={{ fontSize: 12.5, color: 'rgba(236,234,230,0.55)' }}>
               {continuity.length} fact{continuity.length === 1 ? '' : 's'} · {threads.length} open thread{threads.length === 1 ? '' : 's'}
@@ -1223,7 +1223,7 @@ export function Onboard() {
             </div>
           </div>
 
-          <div className="glass" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div className="craft-row" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>Relationships</div>
             {relationshipLines.length === 0 ? (
               <div style={{ fontSize: 12.5, color: 'rgba(236,234,230,0.5)' }}>
@@ -1336,13 +1336,13 @@ export function Onboard() {
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           {steps.map((_, i) => (
             <div key={i} style={{
-              width: i === step ? 26 : 9, height: 4, borderRadius: 2,
-              background: i <= step ? 'oklch(0.72 0.06 195)' : 'rgba(255,255,255,0.14)',
+              width: i === step ? 22 : 8, height: 8, borderRadius: 1,
+              background: i <= step ? 'oklch(0.72 0.06 195)' : 'rgba(255,255,255,0.12)',
               transition: 'all 0.3s ease'
             }} />
           ))}
           <div className="label" style={{ marginLeft: 8 }}>
-            Step {step + 1} of {steps.length}
+            Making · step {step + 1} of {steps.length}
           </div>
         </div>
 
@@ -1350,7 +1350,7 @@ export function Onboard() {
           <h1 className="serif" style={{ fontWeight: 300, fontSize: narrow ? 32 : 42, lineHeight: 1.1, margin: 0, color: '#f8f6f2' }}>{ob.title}</h1>
           <div style={{ fontSize: 15, lineHeight: 1.7, color: 'rgba(236,234,230,0.58)', maxWidth: '54ch' }}>{ob.body}</div>
           {reviewBanner && step >= 3 && (
-            <div className="glass" style={{ padding: '12px 14px', fontSize: 12.5, lineHeight: 1.55, color: 'oklch(0.78 0.06 195)' }}>
+            <div className="craft-row" style={{ padding: '12px 14px', fontSize: 12.5, lineHeight: 1.55, color: 'oklch(0.78 0.06 195)' }}>
               {reviewBanner}
             </div>
           )}
@@ -1381,16 +1381,16 @@ export function Onboard() {
           borderLeft: '1px solid rgba(255,255,255,0.08)', padding: '46px 40px', display: 'flex',
           flexDirection: 'column', gap: 20, justifyContent: 'center', background: 'rgba(12,14,16,0.35)'
         }}>
-          <div className="label">What onboard delivers</div>
+          <div className="label">What you are making</div>
           <div style={{
-            height: 200, borderRadius: 10, border: '1px solid rgba(255,255,255,0.1)',
+            height: 200, borderRadius: 4, border: '1px solid rgba(255,255,255,0.1)',
             display: 'flex', alignItems: 'flex-end', padding: 14,
-            background: `linear-gradient(155deg, oklch(0.72 0.06 195 / 0.12), rgba(10,12,14,0.92)), ${STRIPE('rgba(255,255,255,0.05)', 'rgba(255,255,255,0.012)')}`
+            background: `linear-gradient(165deg, oklch(0.72 0.06 195 / 0.14), rgba(10,12,14,0.92)), ${STRIPE('rgba(255,255,255,0.04)', 'rgba(255,255,255,0.01)')}`
           }}>
             <span className="mono meta" style={{
-              color: 'rgba(230,233,235,0.65)', background: 'rgba(10,12,14,0.55)', padding: '5px 9px', borderRadius: 4
+              color: 'rgba(230,233,235,0.65)', background: 'rgba(10,12,14,0.55)', padding: '5px 9px', borderRadius: 2
             }}>
-              World plate
+              Endpaper
             </span>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -1414,7 +1414,7 @@ function SliderCard({ label, value, onChange, note, valueLabel }: {
   label: string; value: number; onChange: (v: number) => void; note: string; valueLabel: string;
 }) {
   return (
-    <div className="glass" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <div className="craft-row" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: 'rgba(236,234,230,0.92)' }}>{label}</div>
         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: 'oklch(0.72 0.06 195)' }}>{valueLabel}</div>
@@ -1460,7 +1460,7 @@ function CastCard({ c, expanded, hasAI, fleshBusy, onToggle, onRemove, onPatch, 
   };
 
   return (
-    <div className="glass" style={{ borderRadius: 12, overflow: 'hidden' }}>
+    <div className="craft-row" style={{ borderRadius: 12, overflow: 'hidden' }}>
       <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }} onClick={onToggle}>
         <div style={{
           ...avatarStyle(c.hue, 34), flexShrink: 0,
@@ -1600,7 +1600,7 @@ function PlaceCard({ l, expanded, isOpening, hasAI, fleshBusy, onToggle, onRemov
   };
 
   return (
-    <div className="glass" style={{ borderRadius: 12, overflow: 'hidden', outline: isOpening ? '1px solid oklch(0.72 0.06 195)' : undefined }}>
+    <div className="craft-row" style={{ borderRadius: 12, overflow: 'hidden', outline: isOpening ? '1px solid oklch(0.72 0.06 195)' : undefined }}>
       <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }} onClick={onToggle}>
         <div style={{ ...avatarStyle(l.hue, 34), flexShrink: 0, ...(l.portrait ? { backgroundImage: `url(${l.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}) }} />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>

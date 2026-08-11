@@ -44,26 +44,23 @@ export default function App() {
 
   return (
     <div className="app-shell" style={{
-      position: 'relative', background: '#0c0e10',
-      color: '#e6e9eb', overflowX: 'hidden'
+      position: 'relative', background: 'var(--ink)',
+      color: 'var(--paper)', overflowX: 'hidden'
     }}>
       {!readMode && (
-        <div style={{
-          position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 0,
-          background:
-            'radial-gradient(1000px 720px at 18% -8%, rgba(90,140,155,0.1), transparent 62%), radial-gradient(900px 700px at 92% 12%, rgba(70,90,110,0.08), transparent 60%), radial-gradient(ellipse 80% 50% at 50% 100%, rgba(0,0,0,0.45), transparent 70%)',
-          animation: 'wr-drift 48s ease-in-out infinite'
+        <div className="horizon-wash" style={{
+          position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 0
         }} />
       )}
 
       {storagePressure && screen !== 'profile' && (
         <div style={{
           position: 'sticky', top: 0, zIndex: 40,
-          borderBottom: '1px solid oklch(0.72 0.06 195 / 0.4)',
-          background: 'rgba(16, 28, 32, 0.92)', backdropFilter: 'blur(14px)',
+          borderBottom: '1px solid var(--focus)',
+          background: 'rgba(14, 24, 28, 0.94)', backdropFilter: 'blur(12px)',
           padding: '10px 16px', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap'
         }}>
-          <Mono style={{ fontSize: 10, color: 'oklch(0.78 0.06 195)' }}>Storage pressure</Mono>
+          <Mono style={{ fontSize: 10, color: 'var(--accent-strong)' }}>Storage pressure</Mono>
           <div style={{ flex: 1, minWidth: 180, fontSize: 12.5, lineHeight: 1.45, color: 'rgba(230,233,235,0.8)' }}>
             This browser is low on space. Back up now — worlds or keys can fail to save.
           </div>

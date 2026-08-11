@@ -1135,9 +1135,9 @@ export function Story() {
                   </span>
                   {(Object.entries(MOODS) as Array<[typeof mood, typeof M]>).map(([id, m]) => (
                     <button key={id} title={m.label} onClick={() => pinMood(id)} style={{
-                      width: 28, height: 28, borderRadius: '50%', cursor: 'pointer', background: m.accent,
-                      border: `2px solid ${mood === id ? 'rgba(255,255,255,0.85)' : 'transparent'}`,
-                      opacity: mood === id ? 1 : 0.45, padding: 0
+                      width: 22, height: 10, borderRadius: 1, cursor: 'pointer', background: m.accent,
+                      border: `1px solid ${mood === id ? 'rgba(255,255,255,0.75)' : 'rgba(255,255,255,0.12)'}`,
+                      opacity: mood === id ? 1 : 0.4, padding: 0
                     }} />
                   ))}
                 </div>
@@ -1155,24 +1155,26 @@ export function Story() {
         gridTemplateColumns: 'minmax(0, 1fr)'
       }}>
         <section ref={scrollRef} style={{ overflow: 'auto', display: 'flex', flexDirection: 'column', position: 'relative' }}>
-          <div style={{
-            maxWidth: 740,
-            margin: display.textScrim > 0 ? '18px auto' : '0 auto',
-            width: display.textScrim > 0 ? 'calc(100% - 24px)' : '100%',
-            padding: narrow ? '26px 18px 40px' : '52px 28px 76px',
-            // Optional plate behind the text so prose stays readable over scene images.
-            ...(display.textScrim > 0 ? {
-              background: `rgba(8,9,12,${(display.textScrim / 100).toFixed(2)})`,
-              borderRadius: 20,
-              backdropFilter: 'blur(10px)'
-            } : {})
-          }}>
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.06em', opacity: 0.42, marginBottom: 24 }}>
-              season {numberWord(season.number)}, episode {numberWord(episode.number)}{episode.title ? ` — ${episode.title.toLowerCase()}` : ''}
+          <div
+            className="page-plane"
+            style={{
+              maxWidth: 740,
+              margin: '18px auto',
+              width: 'calc(100% - 24px)',
+              padding: narrow ? '26px 18px 40px' : '44px 32px 68px',
+              // Optional denser plate so prose stays readable over scene images.
+              ...(display.textScrim > 0 ? {
+                background: `linear-gradient(180deg, rgba(232,226,214,0.06), rgba(8,9,12,${(display.textScrim / 100).toFixed(2)}))`,
+                backdropFilter: 'blur(10px)'
+              } : {})
+            }}
+          >
+            <div className="label" style={{ marginBottom: 22, opacity: 0.7 }}>
+              Season {numberWord(season.number)} · episode {numberWord(episode.number)}{episode.title ? ` — ${episode.title}` : ''}
             </div>
 
             {season.bible && turns.length === 0 && (
-              <div className="glass" style={{ padding: '16px 18px', marginBottom: 26 }}>
+              <div className="craft-row" style={{ padding: '16px 18px', marginBottom: 26 }}>
                 <Mono style={{ marginBottom: 8 }}>previously</Mono>
                 <p className="serif" style={{ fontSize: 15.5, lineHeight: 1.7, margin: 0, color: 'rgba(236,234,230,0.75)' }}>{season.bible.recap}</p>
               </div>
@@ -1180,10 +1182,10 @@ export function Story() {
 
             {turns.length === 0 && !streaming && (
               <div style={{ fontSize: 14, lineHeight: 1.7, display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 8 }}>
-                <p className="serif" style={{ fontSize: 17, opacity: 0.7, margin: 0 }}>
+                <p className="serif" style={{ fontSize: 18, opacity: 0.78, margin: 0, fontWeight: 300 }}>
                   {season.premise
                     ? <>Current pressure: <em>{season.premise}</em></>
-                    : 'A blank page. Steer, speak, act — or just press Write and see where the story opens.'}
+                    : 'The world is ready — step in. Steer, speak, act, or Write and see where it opens.'}
                 </p>
                 {(() => {
                   const openLoc = episode.locationId
@@ -1191,8 +1193,9 @@ export function Story() {
                     : undefined;
                   const sceneCast = characters.filter((c) => episode.castIds.includes(c.id));
                   return (
-                    <div className="glass" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10, opacity: 0.95 }}>
-                      <div className="label" style={{ color: 'rgba(230,233,235,0.5)' }}>
+                    <div className="craft-row" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      <div className="label" style={{ color: 'rgba(230,233,235,0.5)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span className="seed-mark" />
                         Scene
                       </div>
                       <div style={{ fontSize: 13, color: 'rgba(230,233,235,0.75)' }}>
@@ -1316,9 +1319,8 @@ export function Story() {
             onClick={() => setComposerOpen(true)}
             style={{
               border: '1px solid rgba(255,255,255,0.16)', background: 'rgba(8,9,12,0.55)',
-              color: 'inherit', borderRadius: 999, padding: '10px 22px', cursor: 'pointer',
-              fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.12em',
-              textTransform: 'uppercase', opacity: 0.85, backdropFilter: 'blur(16px)'
+              color: 'inherit', borderRadius: 4, padding: '10px 22px', cursor: 'pointer',
+              fontSize: 12, fontWeight: 600, opacity: 0.85
             }}
           >
             Write · continue
@@ -1385,8 +1387,8 @@ export function Story() {
           {showWrapNudge && (
             <div style={{
               display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
-              border: '1px solid rgba(255,255,255,0.14)', borderRadius: 14, padding: '12px 14px',
-              background: pressure === 'escalate' ? 'rgba(224,165,95,0.12)' : 'rgba(255,255,255,0.05)'
+              border: '1px solid rgba(255,255,255,0.12)', borderRadius: 6, padding: '12px 14px',
+              background: pressure === 'escalate' ? 'oklch(0.72 0.06 195 / 0.12)' : 'rgba(255,255,255,0.04)'
             }}>
               <div style={{ flex: 1, minWidth: narrow ? 0 : 200, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.78)' }}>
                 {pressure === 'escalate'
@@ -1405,10 +1407,10 @@ export function Story() {
           {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
           {notice && (
             <div style={{
-              border: '1px solid rgba(224,165,95,0.35)', borderRadius: 12, padding: '11px 14px',
-              background: 'rgba(224,165,95,0.08)', display: 'flex', gap: 12, alignItems: 'flex-start'
+              border: '1px solid oklch(0.72 0.06 195 / 0.35)', borderRadius: 6, padding: '11px 14px',
+              background: 'oklch(0.72 0.06 195 / 0.08)', display: 'flex', gap: 12, alignItems: 'flex-start'
             }}>
-              <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,220,190,0.95)', flex: 1 }}>{notice}</div>
+              <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(200,230,235,0.95)', flex: 1 }}>{notice}</div>
               <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 14 }} onClick={() => setNotice('')}>×</button>
             </div>
           )}
@@ -1433,11 +1435,11 @@ export function Story() {
           <div style={{
             display: 'grid',
             gridTemplateColumns: narrow ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))',
-            gap: 4,
+            gap: 0,
             border: '1px solid rgba(255,255,255,0.12)',
-            borderRadius: 12,
+            borderRadius: 4,
             overflow: 'hidden',
-            background: 'rgba(255,255,255,0.04)'
+            background: 'rgba(255,255,255,0.03)'
           }}>
             {(['continue', 'steer', 'speak', 'act'] as const).map((m) => (
               <button
@@ -1446,13 +1448,15 @@ export function Story() {
                 onClick={() => setComposeModeSafe(m)}
                 style={{
                   border: 0,
+                  borderRight: '1px solid rgba(255,255,255,0.08)',
                   minHeight: 44,
                   padding: '8px 4px',
                   fontSize: narrow ? 12 : 13,
                   fontWeight: composeMode === m ? 600 : 500,
                   cursor: 'pointer',
-                  color: composeMode === m ? '#181307' : 'rgba(236,234,230,0.7)',
-                  background: composeMode === m ? M.accent : 'transparent'
+                  color: composeMode === m ? '#0a1416' : 'rgba(230,233,235,0.65)',
+                  background: composeMode === m ? 'oklch(0.72 0.06 195)' : 'transparent',
+                  boxShadow: composeMode === m ? 'inset 0 -2px 0 oklch(0.85 0.04 195)' : 'none'
                 }}
               >
                 {m[0].toUpperCase() + m.slice(1)}
@@ -1556,12 +1560,13 @@ export function Story() {
             )}
           </div>
           <div style={{
-            display: 'flex', gap: 13, alignItems: 'flex-end', border: '1px solid rgba(255,255,255,0.14)',
-            borderRadius: 16, padding: narrow ? '10px 12px' : '14px 16px',
-            background: 'rgba(255,255,255,0.06)', backdropFilter: 'blur(20px) saturate(140%)'
+            display: 'flex', gap: 13, alignItems: 'flex-end', border: '1px solid rgba(255,255,255,0.12)',
+            borderRadius: 4, padding: narrow ? '10px 12px' : '14px 16px',
+            background: 'rgba(255,255,255,0.035)',
+            boxShadow: 'inset 2px 0 0 oklch(0.72 0.06 195 / 0.45)'
           }}>
             {!narrow && (
-              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.42, paddingBottom: 8, whiteSpace: 'nowrap' }}>
+              <div className="label" style={{ paddingBottom: 8, whiteSpace: 'nowrap', opacity: 0.65 }}>
                 {modeHint[composeMode]}
               </div>
             )}
@@ -1740,7 +1745,7 @@ export function Story() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
               <Mono style={{ fontSize: 9 }}>already held in continuity</Mono>
               {continuity.slice(-6).map((f) => (
-                <div key={f.id} className="glass" style={{ borderRadius: 13, padding: '12px 14px', fontSize: 13, lineHeight: 1.5, color: 'rgba(236,234,230,0.8)' }}>
+                <div key={f.id} className="craft-row" style={{ borderRadius: 13, padding: '12px 14px', fontSize: 13, lineHeight: 1.5, color: 'rgba(236,234,230,0.8)' }}>
                   {f.text}
                 </div>
               ))}
@@ -1817,9 +1822,9 @@ export function Story() {
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
             {(Object.entries(MOODS) as Array<[typeof mood, typeof M]>).map(([id, m]) => (
               <button key={id} title={m.label} onClick={() => pinMood(id)} style={{
-                width: 36, height: 36, borderRadius: '50%', cursor: 'pointer', background: m.accent,
-                border: `2px solid ${mood === id ? 'rgba(255,255,255,0.9)' : 'transparent'}`,
-                opacity: mood === id ? 1 : 0.5, padding: 0
+                width: 36, height: 12, borderRadius: 1, cursor: 'pointer', background: m.accent,
+                border: `1px solid ${mood === id ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.12)'}`,
+                opacity: mood === id ? 1 : 0.45, padding: 0
               }} />
             ))}
           </div>
@@ -1856,7 +1861,7 @@ function SliderRow({ label, value, min, max, unit, onChange }: {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
         <Mono style={{ fontSize: 9 }}>{label}</Mono>
-        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: 'oklch(0.85 0.1 62)' }}>
+        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: 'oklch(0.72 0.06 195)' }}>
           {value}{unit ?? ''}
         </span>
       </div>
@@ -2679,7 +2684,7 @@ function PriorWrapMemoryPanel({ priorEpisodes }: { priorEpisodes: Episode[] }) {
                   <div key={`g${i}`} style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
                     <div style={{
                       fontSize: 12, lineHeight: 1.4, flex: 1, color: '#eceae6', opacity: 0.75,
-                      paddingLeft: 10, borderLeft: '1px solid rgba(224,165,95,0.28)'
+                      paddingLeft: 10, borderLeft: '1px solid oklch(0.72 0.06 195 / 0.28)'
                     }}>
                       <span style={{
                         fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, opacity: 0.6,
@@ -3504,15 +3509,12 @@ function KeepDropChips({
         flex: 1,
         minHeight: 44,
         border: `1px solid ${active ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.11)'}`,
-        background: active ? 'rgba(224,165,95,0.85)' : 'rgba(255,255,255,0.05)',
-        color: active ? '#181307' : 'rgba(236,234,230,0.62)',
-        borderRadius: 10,
+        background: active ? 'oklch(0.72 0.06 195 / 0.85)' : 'rgba(255,255,255,0.05)',
+        color: active ? '#0a1416' : 'rgba(230,233,235,0.62)',
+        borderRadius: 4,
         fontSize: 13,
         fontWeight: active ? 600 : 500,
-        cursor: 'pointer',
-        fontFamily: "'IBM Plex Mono', monospace",
-        letterSpacing: '0.06em',
-        textTransform: 'uppercase'
+        cursor: 'pointer'
       }}
     >
       {label}

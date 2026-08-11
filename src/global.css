@@ -1,14 +1,21 @@
 :root {
-  --ink: #0c0e10;
-  --ink-warm: #121410;
+  --ink: #0a0c0e;
+  --ink-warm: #10120e;
+  --desk: #0e1012;
   --paper: #e6e9eb;
   --paper-muted: rgba(230, 233, 235, 0.55);
+  --page: #e8e2d6;
+  --page-ink: #1a1814;
+  --seed: oklch(0.72 0.06 195);
   --accent: oklch(0.72 0.06 195);
   --accent-strong: oklch(0.78 0.07 195);
   --accent-ink: #0a1416;
-  --glass-bg: rgba(255, 255, 255, 0.035);
+  --horizon: radial-gradient(1100px 780px at 20% -12%, rgba(70, 130, 145, 0.14), transparent 58%),
+    radial-gradient(900px 640px at 90% 8%, rgba(55, 75, 95, 0.1), transparent 55%),
+    linear-gradient(180deg, transparent 55%, rgba(8, 10, 8, 0.55) 100%);
+  --glass-bg: rgba(255, 255, 255, 0.028);
   --glass-border: rgba(255, 255, 255, 0.1);
-  --rule: rgba(255, 255, 255, 0.12);
+  --rule: rgba(255, 255, 255, 0.11);
   --focus: oklch(0.72 0.06 195 / 0.55);
 }
 
@@ -19,7 +26,7 @@ a { color: var(--accent-strong); text-decoration: none; }
 a:hover { color: oklch(0.86 0.05 195); }
 ::selection { background: oklch(0.55 0.06 195 / 0.35); }
 ::-webkit-scrollbar { width: 9px; height: 9px; }
-::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 4px; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 2px; }
 ::-webkit-scrollbar-track { background: transparent; }
 
 @keyframes wr-fade { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
@@ -27,6 +34,7 @@ a:hover { color: oklch(0.86 0.05 195); }
 @keyframes wr-slide-up { from { transform: translateY(24px); opacity: 0; } to { transform: none; opacity: 1; } }
 @keyframes wr-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
 @keyframes wr-scene-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes wr-horizon { 0%, 100% { opacity: 0.85; } 50% { opacity: 1; } }
 
 .scene-crossfade {
   animation: wr-scene-in 0.45s ease both;
@@ -43,7 +51,7 @@ input, textarea, select {
   color: var(--paper);
   background: rgba(8, 10, 12, 0.55);
   border: 1px solid var(--glass-border);
-  border-radius: 8px;
+  border-radius: 6px;
   padding: 11px 13px;
   font-size: 13px;
   outline: none;
@@ -75,27 +83,59 @@ select { appearance: none; cursor: pointer; }
   letter-spacing: 0.01em;
 }
 
+/* Thin scene scrim — not frosted chat glass */
 .glass {
   border: 1px solid var(--glass-border);
-  border-radius: 12px;
+  border-radius: 8px;
   background: var(--glass-bg);
-  backdrop-filter: blur(14px) saturate(120%);
+  backdrop-filter: blur(10px) saturate(110%);
 }
 .glass-hot {
-  border: 1px solid oklch(0.72 0.06 195 / 0.35);
-  border-radius: 12px;
-  background: linear-gradient(155deg, oklch(0.72 0.06 195 / 0.1), rgba(255,255,255,0.04));
-  backdrop-filter: blur(14px) saturate(120%);
+  border: 1px solid oklch(0.72 0.06 195 / 0.4);
+  border-radius: 8px;
+  background: linear-gradient(155deg, oklch(0.72 0.06 195 / 0.1), rgba(255,255,255,0.03));
+  backdrop-filter: blur(10px) saturate(110%);
+}
+
+/* Story / manuscript plane */
+.page-plane {
+  background:
+    linear-gradient(180deg, rgba(232, 226, 214, 0.07), rgba(232, 226, 214, 0.03)),
+    rgba(12, 14, 16, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  box-shadow: inset 3px 0 0 oklch(0.72 0.06 195 / 0.35);
+}
+
+/* Workshop list row */
+.craft-row {
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.025);
+  border-left: 3px solid oklch(0.72 0.06 195 / 0.55);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.craft-row:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
+.seed-mark {
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+  background: var(--seed);
+  flex-shrink: 0;
 }
 
 .btn-primary {
-  border: 1px solid oklch(0.72 0.06 195 / 0.45);
-  border-radius: 8px;
+  border: 1px solid oklch(0.72 0.06 195 / 0.5);
+  border-radius: 6px;
   padding: 11px 19px;
   font-size: 13px;
   font-weight: 600;
   color: var(--accent-ink);
-  background: linear-gradient(165deg, oklch(0.8 0.055 195), oklch(0.68 0.07 195));
+  background: oklch(0.74 0.06 195);
   cursor: pointer;
   box-shadow: none;
 }
@@ -104,9 +144,9 @@ select { appearance: none; cursor: pointer; }
 
 .btn-ghost {
   border: 1px solid var(--rule);
-  background: rgba(255,255,255,0.04);
+  background: rgba(255,255,255,0.03);
   color: rgba(230,233,235,0.9);
-  border-radius: 8px;
+  border-radius: 6px;
   padding: 9px 16px;
   font-size: 12px;
   font-weight: 600;
@@ -131,27 +171,31 @@ select { appearance: none; cursor: pointer; }
   gap: 10px;
   text-align: left;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 4px;
   padding: 9px 11px;
   font-size: 13.5px;
   cursor: pointer;
   background: transparent;
   color: rgba(230,233,235,0.55);
 }
-.nav-btn:hover { background: rgba(255,255,255,0.06); color: #f2f4f5; }
+.nav-btn:hover { background: rgba(255,255,255,0.05); color: #f2f4f5; }
 .nav-btn.active {
-  border-color: var(--rule);
-  background: rgba(255,255,255,0.06);
-  backdrop-filter: blur(12px);
+  border-color: transparent;
+  background: rgba(255,255,255,0.04);
   color: #f4f6f7;
   font-weight: 600;
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
-.hover-bright:hover { border-color: rgba(255,255,255,0.22) !important; background: rgba(255,255,255,0.06) !important; }
+.hover-bright:hover { border-color: rgba(255,255,255,0.22) !important; background: rgba(255,255,255,0.05) !important; }
 .hover-border:hover { border-color: rgba(255,255,255,0.3) !important; }
 
 .fade-in { animation: wr-fade 0.45s ease both; }
+
+.horizon-wash {
+  background: var(--horizon);
+  animation: wr-horizon 48s ease-in-out infinite;
+}
 
 /* Mobile bottom tab bar */
 .tabbar {
@@ -160,8 +204,8 @@ select { appearance: none; cursor: pointer; }
   z-index: 40;
   display: flex;
   border-top: 1px solid var(--rule);
-  background: rgba(10, 12, 14, 0.88);
-  backdrop-filter: blur(18px) saturate(120%);
+  background: rgba(10, 12, 14, 0.92);
+  backdrop-filter: blur(16px) saturate(110%);
   padding-bottom: env(safe-area-inset-bottom);
 }
 .tabbar button {
@@ -182,6 +226,7 @@ select { appearance: none; cursor: pointer; }
   font-weight: 500;
 }
 .tabbar button.active { color: var(--paper); }
+.tabbar button.active span:first-child { color: var(--seed); }
 
 /* Per-turn tools in the story: hidden until hover on desktop, clearer on touch */
 .turn-tools { opacity: 0; transition: opacity 0.15s ease; }

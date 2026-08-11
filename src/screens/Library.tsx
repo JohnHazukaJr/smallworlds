@@ -100,19 +100,19 @@ export function Library() {
     <div className="fade-in" style={{
       padding: narrow ? '26px 18px 60px' : '42px 46px 70px',
       paddingTop: narrow ? 'calc(26px + env(safe-area-inset-top))' : 42,
-      maxWidth: 1260
+      maxWidth: 920
     }}>
-      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 24, flexWrap: 'wrap', marginBottom: 36 }}>
-        <div style={{ maxWidth: 520 }}>
-          <h1 className="serif" style={{ fontWeight: 300, fontSize: narrow ? 38 : 52, lineHeight: 1.05, margin: 0, color: '#f2f4f5' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 24, flexWrap: 'wrap', marginBottom: 40 }}>
+        <div style={{ maxWidth: 480 }}>
+          <h1 className="serif" style={{ fontWeight: 300, fontSize: narrow ? 40 : 56, lineHeight: 1.02, margin: 0, color: '#f2f4f5' }}>
             Small Worlds
           </h1>
-          <p style={{ margin: '12px 0 0', fontSize: 15, lineHeight: 1.55, color: 'rgba(230,233,235,0.58)', maxWidth: '42ch' }}>
-            Nothing here you didn’t make — seasons, cast, and a desk for the story that stays.
+          <p style={{ margin: '14px 0 0', fontSize: 15, lineHeight: 1.55, color: 'rgba(230,233,235,0.58)', maxWidth: '38ch' }}>
+            Make a world. Live in it.
           </p>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-          <button className="btn-ghost" onClick={() => fileRef.current?.click()}>Import world</button>
+          <button className="btn-ghost" onClick={() => fileRef.current?.click()}>Import</button>
           <input
             ref={fileRef} type="file" accept=".json,application/json" style={{ display: 'none' }}
             onChange={(e) => { const f = e.target.files?.[0]; if (f) void onImportFile(f); e.target.value = ''; }}
@@ -124,61 +124,66 @@ export function Library() {
       {error && <div style={{ marginBottom: 18 }}><ErrorNote error={error} onDismiss={() => setError('')} /></div>}
 
       {worlds && worlds.length === 0 && (
-        <div className="glass" style={{ padding: narrow ? 22 : 34, display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 620 }}>
-          <div className="serif" style={{ fontWeight: 300, fontSize: 26, color: '#f2f4f5' }}>Start from nothing — or almost nothing.</div>
-          <div style={{ fontSize: 13.5, lineHeight: 1.65, color: 'rgba(230,233,235,0.6)' }}>
-            Create a world of your own, or open the starter world — a harbour city, a false name, a debt in the public
-            record — to see how cast, continuity and seasons work. Everything in it is editable.
+        <div className="craft-row" style={{ padding: narrow ? 24 : 36, display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 560 }}>
+          <div className="serif" style={{ fontWeight: 300, fontSize: 28, color: '#f2f4f5', lineHeight: 1.15 }}>
+            An empty workbench.
           </div>
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <div style={{ fontSize: 14, lineHeight: 1.65, color: 'rgba(230,233,235,0.58)', maxWidth: '42ch' }}>
+            Create a world of your own, or open the starter — a harbour city, a false name, a debt in the public record —
+            to see how cast, continuity and seasons work. Everything in it is editable.
+          </div>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 4 }}>
             <button className="btn-primary" onClick={() => go('onboard')}>Create my world</button>
             <button className="btn-ghost" disabled={seeding} onClick={() => void onSeed()}>
-              {seeding ? 'Setting up…' : 'Open the starter world'}
+              {seeding ? 'Setting up…' : 'Open the starter'}
             </button>
           </div>
         </div>
       )}
 
       {worlds && worlds.length > 0 && (
-        <div className="label" style={{ marginBottom: 14 }}>Your worlds</div>
+        <div className="label" style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span className="seed-mark" />
+          Worlds you have made
+        </div>
       )}
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 272px), 1fr))', gap: 18 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {(worlds ?? []).map((w) => {
           const st = stats?.[w.id];
           return (
             <div
               key={w.id}
-              className="hover-bright"
+              className="craft-row hover-bright"
               onClick={() => openWorld(w.id)}
               style={{
-                border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, overflow: 'hidden',
-                background: 'rgba(255,255,255,0.03)', backdropFilter: 'blur(12px) saturate(110%)',
-                cursor: 'pointer', display: 'flex', flexDirection: 'column'
+                overflow: 'hidden', cursor: 'pointer',
+                display: 'grid',
+                gridTemplateColumns: narrow ? '1fr' : '148px minmax(0, 1fr)',
+                borderLeftColor: `oklch(0.55 0.06 ${w.hue} / 0.75)`
               }}
             >
-              <div style={plateStyle(w.hue, 138)}>
+              <div style={{ ...plateStyle(w.hue, narrow ? 88 : '100%'), minHeight: narrow ? 88 : 112, borderRadius: 0 }}>
                 <span className="mono meta" style={{
-                  color: 'rgba(230,233,235,0.7)', background: 'rgba(10,12,14,0.55)',
-                  padding: '5px 8px', borderRadius: 4
+                  color: 'rgba(230,233,235,0.75)', background: 'rgba(10,12,14,0.5)',
+                  padding: '4px 7px', borderRadius: 2
                 }}>
                   {st ? `S${st.seasons} · E${st.episodes}` : '—'}
                 </span>
                 <span className="label" style={{
-                  color: 'rgba(230,233,235,0.55)', background: 'rgba(10,12,14,0.55)',
-                  border: '1px solid rgba(255,255,255,0.1)', padding: '4px 8px', borderRadius: 4
+                  color: 'rgba(230,233,235,0.5)', background: 'rgba(10,12,14,0.5)',
+                  border: '1px solid rgba(255,255,255,0.08)', padding: '3px 7px', borderRadius: 2
                 }}>
                   {VIS[w.visibility].label}
                 </span>
               </div>
-              <div style={{ padding: '16px 17px 18px', display: 'flex', flexDirection: 'column', gap: 10, flex: 1 }}>
-                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 10 }}>
-                  <div className="serif" style={{ fontSize: 19, color: '#f2f4f5' }}>{w.title}</div>
-                </div>
-                <div style={{ fontSize: 13, lineHeight: 1.55, color: 'rgba(230,233,235,0.58)', flex: 1 }}>{w.line}</div>
+              <div style={{ padding: narrow ? '14px 16px 16px' : '16px 20px', display: 'flex', flexDirection: 'column', gap: 8, justifyContent: 'center' }}>
+                <div className="serif" style={{ fontSize: 20, color: '#f2f4f5', lineHeight: 1.2 }}>{w.title}</div>
+                <div style={{ fontSize: 13, lineHeight: 1.55, color: 'rgba(230,233,235,0.55)' }}>{w.line}</div>
                 <div style={{
                   display: 'flex', gap: 14, fontSize: 11,
-                  color: 'rgba(230,233,235,0.4)', paddingTop: 4, borderTop: '1px solid rgba(255,255,255,0.08)',
+                  color: 'rgba(230,233,235,0.4)', paddingTop: 6, marginTop: 2,
+                  borderTop: '1px solid rgba(255,255,255,0.06)',
                   alignItems: 'center'
                 }}>
                   <span>{st ? `${st.cast} cast` : '…'}</span>

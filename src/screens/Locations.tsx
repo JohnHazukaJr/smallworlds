@@ -159,7 +159,7 @@ export function Locations() {
     return (
       <div className="fade-in" style={{ padding: narrow ? '40px 20px' : '80px 60px', display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 560 }}>
         <Mono>no world open</Mono>
-        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: '#f8f6f2' }}>Open a world to see its locations.</div>
+        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: '#f8f6f2' }}>Open a world to walk its terrain.</div>
         <div><button className="btn-primary" onClick={() => go('library')}>Go to Worlds</button></div>
       </div>
     );
@@ -181,7 +181,10 @@ export function Locations() {
       }}>
         {!narrow && (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <Mono style={{ letterSpacing: '0.16em' }}>locations · {world.title.toLowerCase()}</Mono>
+            <div className="label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span className="seed-mark" />
+              Terrain · {world.title}
+            </div>
             <button className="btn-ghost" style={{ padding: '5px 11px', fontSize: 11 }} onClick={() => setCreating(true)}>+ new</button>
           </div>
         )}
@@ -326,7 +329,7 @@ export function Locations() {
                     ['current state', d.currentState, (v: string) => patch({ currentState: v })],
                     ['typically found here', d.inhabitants, (v: string) => patch({ inhabitants: v })]
                   ] as Array<[string, string, (v: string) => void]>).map(([k, v, set]) => (
-                    <div key={k} className="glass" style={{ borderRadius: 13, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div key={k} className="craft-row" style={{ borderRadius: 13, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <Mono style={{ fontSize: 9, letterSpacing: '0.12em' }}>{k}</Mono>
                       <input
                         value={v} onChange={(e) => set(e.target.value)} placeholder="—"
@@ -343,7 +346,7 @@ export function Locations() {
                 <button key={id} onClick={() => setTab(id)} style={{
                   border: 0, background: 'transparent',
                   color: tab === id ? '#f8f6f2' : 'rgba(236,234,230,0.45)',
-                  borderBottom: `2px solid ${tab === id ? 'oklch(0.85 0.1 62)' : 'transparent'}`,
+                  borderBottom: `2px solid ${tab === id ? 'oklch(0.72 0.06 195)' : 'transparent'}`,
                   padding: '10px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap'
                 }}>{label}</button>
               ))}
@@ -380,7 +383,7 @@ export function Locations() {
                 <>
                   <div className="glass-hot" style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'oklch(0.85 0.1 62)' }} />
+                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'oklch(0.72 0.06 195)' }} />
                       <div style={{ fontSize: 13, fontWeight: 600, color: '#f6f4f0' }}>Hard rules</div>
                       <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)', marginLeft: 'auto' }}>
                         hazards & laws, never broken
@@ -398,7 +401,7 @@ export function Locations() {
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                       {d.rules.filter((r) => r.trim()).map((r, i) => (
                         <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, lineHeight: 1.5, color: 'rgba(236,234,230,0.9)' }}>
-                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'oklch(0.85 0.1 62)', paddingTop: 3 }}>
+                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'oklch(0.72 0.06 195)', paddingTop: 3 }}>
                             {String(i + 1).padStart(2, '0')}
                           </span>
                           <span>{r}</span>

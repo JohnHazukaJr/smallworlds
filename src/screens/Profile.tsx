@@ -126,11 +126,11 @@ export function Profile() {
       )}
 
       {storageWarn && (
-        <div className="glass" style={{
-          padding: '14px 16px', marginBottom: 22, borderColor: 'rgba(224,165,95,0.35)',
+        <div className="craft-row" style={{
+          padding: '14px 16px', marginBottom: 22, borderColor: 'oklch(0.72 0.06 195 / 0.35)',
           display: 'flex', flexDirection: 'column', gap: 8
         }}>
-          <Mono style={{ fontSize: 9, color: 'rgba(224,165,95,0.9)' }}>storage pressure</Mono>
+          <Mono style={{ fontSize: 9, color: 'oklch(0.72 0.06 195 / 0.9)' }}>storage pressure</Mono>
           <div style={{ fontSize: 13, lineHeight: 1.55, color: 'rgba(236,234,230,0.75)' }}>
             This browser is running low on space{storage ? ` (${storage.label})` : ''}. Export a device backup now —
             if storage fills up, worlds or keys can fail to save.
@@ -166,7 +166,7 @@ export function Profile() {
           </div>
         </div>
         {worlds.map((w) => (
-          <div key={w.id} className="glass" style={{ padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
+          <div key={w.id} className="craft-row" style={{ padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
             <div style={{ ...plateStyle(w.hue, 46), width: 46, borderRadius: 12, border: '1px solid rgba(255,255,255,0.12)', padding: 0 }} />
             <div style={{ flex: 1, minWidth: 180, display: 'flex', flexDirection: 'column', gap: 3 }}>
               <div className="serif" style={{ fontSize: 17, color: '#f0eee9' }}>{w.title}</div>
@@ -193,17 +193,18 @@ export function Profile() {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 300px), 1fr))', gap: 15 }}>
-        <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 13 }}>
+        <div className="craft-row" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 13 }}>
           <Mono style={{ fontSize: 9 }}>default for new worlds</Mono>
           {(Object.entries(VIS) as Array<[Visibility, typeof VIS[Visibility]]>).map(([id, v]) => {
             const active = s.defaultVisibility === id;
             return (
               <button key={id} onClick={() => s.setDefaultVisibility(id)} style={{
                 textAlign: 'left', display: 'flex', flexDirection: 'column', gap: 5,
-                border: `1px solid rgba(255,255,255,${active ? '0.2' : '0.09'})`,
-                background: active ? 'linear-gradient(150deg, rgba(224,165,95,0.13), rgba(255,255,255,0.05))' : 'rgba(255,255,255,0.03)',
-                color: active ? '#f6f4f0' : 'rgba(236,234,230,0.62)',
-                borderRadius: 13, padding: '13px 15px', cursor: 'pointer', backdropFilter: 'blur(14px)'
+                border: `1px solid rgba(255,255,255,${active ? '0.18' : '0.09'})`,
+                background: active ? 'oklch(0.72 0.06 195 / 0.1)' : 'rgba(255,255,255,0.03)',
+                color: active ? '#f2f4f5' : 'rgba(230,233,235,0.62)',
+                borderRadius: 4, padding: '13px 15px', cursor: 'pointer',
+                boxShadow: active ? 'inset 0 -2px 0 oklch(0.72 0.06 195)' : 'none'
               }}>
                 <div style={{ fontSize: 13.5, fontWeight: 600 }}>{v.label}</div>
                 <div style={{ fontSize: 12, lineHeight: 1.5, opacity: 0.68 }}>{v.line}</div>
@@ -212,7 +213,7 @@ export function Profile() {
           })}
         </div>
 
-        <div className="glass" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div className="craft-row" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
           <Mono style={{ fontSize: 9 }}>your data</Mono>
           {[
             ['All stories & cast', 'IndexedDB, this device'],
@@ -303,7 +304,7 @@ function AccountSection({
 
   if (!auth.configured) {
     return (
-      <div className="glass" style={{ padding: 20, marginBottom: 28, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div className="craft-row" style={{ padding: 20, marginBottom: 28, display: 'flex', flexDirection: 'column', gap: 10 }}>
         <Mono style={{ fontSize: 9 }}>account · cloud sync</Mono>
         <div style={{ fontSize: 13.5, lineHeight: 1.6, color: 'rgba(236,234,230,0.65)' }}>
           Cloud sync is off. Copy <code style={{ fontFamily: 'IBM Plex Mono, monospace', fontSize: 11 }}>.env.example</code> to
@@ -331,7 +332,7 @@ function AccountSection({
 
   if (!auth.user) {
     return (
-      <div className="glass" style={{ padding: 20, marginBottom: 28, display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div className="craft-row" style={{ padding: 20, marginBottom: 28, display: 'flex', flexDirection: 'column', gap: 14 }}>
         <Mono style={{ fontSize: 9 }}>sign in · equal options</Mono>
         <div style={{ fontSize: 13, lineHeight: 1.55, color: 'rgba(236,234,230,0.6)' }}>
           Phone, email, or Google — pick whichever you prefer. None is required to play locally.
@@ -396,7 +397,7 @@ function AccountSection({
     : 'never';
 
   return (
-    <div className="glass" style={{ padding: 20, marginBottom: 28, display: 'flex', flexDirection: 'column', gap: 14 }}>
+    <div className="craft-row" style={{ padding: 20, marginBottom: 28, display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
         <Mono style={{ fontSize: 9 }}>signed in</Mono>
         <button className="btn-quiet" style={{ fontSize: 11 }} disabled={busy} onClick={() => void run(() => auth.signOut())}>Sign out</button>

@@ -1,14 +1,31 @@
 import type { CSSProperties } from 'react';
 import type { MoodId, BackdropId } from '../store/app';
 
-/** Interactive chrome accent — ink teal (not amber gold). */
+/** Seed accent — growth / craft chrome (single source of truth). */
 export const ACCENT = 'oklch(0.72 0.06 195)';
 
+/** Soft rgba forms of ACCENT for inline styles that need alpha. */
+export const ACCENT_RGBA = {
+  a08: 'oklch(0.72 0.06 195 / 0.08)',
+  a10: 'oklch(0.72 0.06 195 / 0.1)',
+  a12: 'oklch(0.72 0.06 195 / 0.12)',
+  a14: 'oklch(0.72 0.06 195 / 0.14)',
+  a25: 'oklch(0.72 0.06 195 / 0.25)',
+  a28: 'oklch(0.72 0.06 195 / 0.28)',
+  a35: 'oklch(0.72 0.06 195 / 0.35)',
+  a45: 'oklch(0.72 0.06 195 / 0.45)',
+  a55: 'oklch(0.72 0.06 195 / 0.55)',
+  a70: 'oklch(0.72 0.06 195 / 0.7)',
+  a85: 'oklch(0.72 0.06 195 / 0.85)',
+  solid: ACCENT
+};
+
+/** Moods = weather of the world (washes), not glowing orbs. */
 export const MOODS: Record<MoodId, { label: string; tint: string; text: string; accent: string; prose: string }> = {
-  ember: { label: 'Ember', tint: 'rgba(196,150,110,0.12)', text: '#f0ebe4', accent: 'oklch(0.72 0.05 55)', prose: '#ebe2d6' },
-  ash:   { label: 'Ash',   tint: 'rgba(150,165,185,0.11)', text: '#eef0f3', accent: 'oklch(0.74 0.03 250)', prose: '#e2e5ea' },
-  frost: { label: 'Frost', tint: 'rgba(120,170,195,0.12)', text: '#e8f1f5', accent: 'oklch(0.74 0.05 210)', prose: '#dae7ee' },
-  rot:   { label: 'Rot',   tint: 'rgba(140,175,130,0.11)', text: '#eaf0e4', accent: 'oklch(0.72 0.06 140)', prose: '#dfe7d4' }
+  ember: { label: 'Ember', tint: 'rgba(196,150,110,0.1)', text: '#f0ebe4', accent: 'oklch(0.72 0.05 55)', prose: '#ebe2d6' },
+  ash:   { label: 'Ash',   tint: 'rgba(150,165,185,0.1)', text: '#eef0f3', accent: 'oklch(0.74 0.03 250)', prose: '#e2e5ea' },
+  frost: { label: 'Frost', tint: 'rgba(120,170,195,0.1)', text: '#e8f1f5', accent: 'oklch(0.74 0.05 210)', prose: '#dae7ee' },
+  rot:   { label: 'Rot',   tint: 'rgba(140,175,130,0.1)', text: '#eaf0e4', accent: 'oklch(0.72 0.06 140)', prose: '#dfe7d4' }
 };
 
 export const STRIPE = (a: string, b: string) =>
@@ -39,18 +56,20 @@ export const GAP_EFFECTS = [
 ];
 
 export function avatarStyle(hue: number, size: number, ring?: string): CSSProperties {
+  const r = size > 30 ? 6 : 4;
   return {
     width: size,
     height: size,
-    borderRadius: size > 30 ? 10 : '50%',
+    borderRadius: r,
     flexShrink: 0,
     border: `1px solid ${ring || 'rgba(255,255,255,0.14)'}`,
-    backgroundImage: `linear-gradient(150deg, oklch(0.52 0.05 ${hue}), rgba(255,255,255,0.05)), ${STRIPE('rgba(255,255,255,0.08)', 'rgba(255,255,255,0.015)')}`,
-    boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.12)'
+    backgroundImage: `linear-gradient(150deg, oklch(0.5 0.045 ${hue}), rgba(255,255,255,0.04)), ${STRIPE('rgba(255,255,255,0.07)', 'rgba(255,255,255,0.012)')}`,
+    boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.1)'
   };
 }
 
-export function plateStyle(hue: number, height: number): CSSProperties {
+/** Endpaper climate plate — hue = weather of the world. */
+export function plateStyle(hue: number, height: number | string): CSSProperties {
   return {
     height,
     display: 'flex',
@@ -58,6 +77,6 @@ export function plateStyle(hue: number, height: number): CSSProperties {
     justifyContent: 'space-between',
     gap: 8,
     padding: 12,
-    background: `linear-gradient(155deg, oklch(0.42 0.04 ${hue} / 0.7), rgba(10,12,14,0.88)), ${STRIPE('rgba(255,255,255,0.05)', 'rgba(255,255,255,0.012)')}`
+    background: `linear-gradient(165deg, oklch(0.4 0.045 ${hue} / 0.75), rgba(10,12,14,0.9)), ${STRIPE('rgba(255,255,255,0.04)', 'rgba(255,255,255,0.01)')}`
   };
 }
