@@ -276,7 +276,7 @@ function AddProvider({ onDone }: { onDone: () => void }) {
   };
 
   return (
-    <div className="glass-hot" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 14 }}>
+    <div className="craft-row" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div style={{ fontSize: 14, fontWeight: 600, color: '#f6f4f0' }}>Add a provider</div>
         <button className="btn-quiet" onClick={onDone}>cancel</button>

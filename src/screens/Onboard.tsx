@@ -13,7 +13,7 @@ import { useSettings } from '../store/settings';
 import type { Character, Location, Season, World, WorldAISettings } from '../types';
 import { Bar, Chip, ErrorNote, Field, Spinner, Toggle, useVw } from '../ui/bits';
 import { fileToPortraitImage } from '../ui/image';
-import { avatarStyle, STRIPE } from '../ui/theme';
+import { avatarStyle, STRIPE, ACCENT } from '../ui/theme';
 import {
   characterPortraits, createWorld, DEFAULT_AI, emptyCharacter, emptyLocation,
   evaluateWorldWriteReady, MAX_CHARACTER_PORTRAITS, portraitsPatch, worldWriteReady
@@ -1329,7 +1329,7 @@ export function Onboard() {
   };
 
   return (
-    <div className="fade-in" style={{ minHeight: '100vh', display: 'grid', gridTemplateColumns: narrow ? 'minmax(0, 1fr)' : '1.05fr 1fr' }}>
+    <div className="fade-in" style={{ minHeight: 0, height: '100%', flex: 1, display: 'grid', gridTemplateColumns: narrow ? 'minmax(0, 1fr)' : '1.05fr 1fr' }}>
       <div style={{ padding: narrow ? '30px 20px 46px' : '52px 44px 56px', display: 'flex', flexDirection: 'column', gap: 28, maxWidth: 660 }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           {steps.map((_, i) => (
@@ -1458,7 +1458,7 @@ function CastCard({ c, expanded, hasAI, fleshBusy, onToggle, onRemove, onPatch, 
   };
 
   return (
-    <div className="craft-row" style={{ borderRadius: 12, overflow: 'hidden' }}>
+    <div className="craft-row" style={{ borderRadius: 4, overflow: 'hidden' }}>
       <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }} onClick={onToggle}>
         <div style={{
           ...avatarStyle(c.hue, 34), flexShrink: 0,
@@ -1598,7 +1598,7 @@ function PlaceCard({ l, expanded, isOpening, hasAI, fleshBusy, onToggle, onRemov
   };
 
   return (
-    <div className="craft-row" style={{ borderRadius: 12, overflow: 'hidden', outline: isOpening ? '1px solid oklch(0.72 0.06 195)' : undefined }}>
+    <div className="craft-row" style={{ borderRadius: 4, overflow: 'hidden', outline: isOpening ? `1px solid ${ACCENT}` : undefined }}>
       <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }} onClick={onToggle}>
         <div style={{ ...avatarStyle(l.hue, 34), flexShrink: 0, ...(l.portrait ? { backgroundImage: `url(${l.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}) }} />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>

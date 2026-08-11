@@ -8,7 +8,7 @@ import type {
   BeatDisposition, CharacterState, SeasonWrap, WrapCharacterOutcome
 } from '../types';
 import { Chip, ErrorNote, Mono, Spinner, useVw } from '../ui/bits';
-import { avatarStyle, GAP_EFFECTS, GAP_LABELS } from '../ui/theme';
+import { avatarStyle, GAP_EFFECTS, GAP_LABELS, ACCENT, ACCENT_RGBA } from '../ui/theme';
 
 const BEAT_OPTS: Array<[BeatDisposition, string]> = [
   ['drop', 'Drop'], ['soften', 'Soften'], ['keep', 'Keep'], ['raise', 'Raise']
@@ -205,10 +205,10 @@ export function Sequel() {
             <div key={label} style={{
               display: 'flex', alignItems: 'center', gap: 8,
               border: `1px solid rgba(255,255,255,${i === 0 ? '0.18' : '0.09'})`,
-              background: i === 0 ? 'oklch(0.72 0.06 195 / 0.12)' : 'rgba(255,255,255,0.03)',
+              background: i === 0 ? ACCENT_RGBA.a12 : 'rgba(255,255,255,0.03)',
               color: i === 0 ? '#f2f4f5' : 'rgba(230,233,235,0.5)',
               borderRadius: 4, padding: '8px 14px', fontSize: 12.5, fontWeight: 600,
-              boxShadow: i === 0 ? 'inset 0 -2px 0 oklch(0.72 0.06 195)' : 'none'
+              boxShadow: i === 0 ? `inset 0 -2px 0 ${ACCENT}` : 'none'
             }}>
               <span className="mono meta" style={{ opacity: 0.55 }}>0{i + 1}</span>
               <span>{label}</span>
@@ -239,8 +239,8 @@ export function Sequel() {
               <div key={i} style={{
                 border: `1px solid rgba(255,255,255,${hot ? '0.18' : '0.09'})`,
                 borderRadius: 4,
-                background: hot ? 'oklch(0.72 0.06 195 / 0.1)' : 'rgba(255,255,255,0.03)',
-                boxShadow: hot ? 'inset 3px 0 0 oklch(0.72 0.06 195 / 0.7)' : 'none',
+                background: hot ? ACCENT_RGBA.a10 : 'rgba(255,255,255,0.03)',
+                boxShadow: hot ? `inset 3px 0 0 ${ACCENT_RGBA.a70}` : 'none',
                 padding: '16px 18px',
                 display: 'flex',
                 flexDirection: narrow ? 'column' : 'row',
@@ -331,8 +331,8 @@ export function Sequel() {
                     <div style={{ fontSize: 13, fontWeight: 600, flex: 1 }}>{c.name}</div>
                     <div style={{
                       width: 16, height: 16, borderRadius: 6, flexShrink: 0,
-                      border: `1px solid ${c.returning ? 'oklch(0.72 0.06 195)' : 'rgba(255,255,255,0.18)'}`,
-                      background: c.returning ? 'oklch(0.72 0.06 195)' : 'transparent'
+                      border: `1px solid ${c.returning ? ACCENT : 'rgba(255,255,255,0.18)'}`,
+                      background: c.returning ? ACCENT : 'transparent'
                     }} />
                   </div>
                   <textarea

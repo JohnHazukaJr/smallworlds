@@ -37,7 +37,7 @@ import { TURN_LENGTH_LABELS } from '../types';
 import { AppError, classifyError, formatUserError } from '../errors';
 import { Chip, ErrorNote, Mono, Sheet, Spinner, Toggle, useVw } from '../ui/bits';
 import { fileToSceneImage } from '../ui/image';
-import { avatarStyle, BACKDROPS, MOODS, STRIPE } from '../ui/theme';
+import { avatarStyle, BACKDROPS, MOODS, STRIPE, ACCENT, ACCENT_RGBA } from '../ui/theme';
 import {
   calendarPatch, characterPortraits, dayFromParts, emptyLocation, formatStoryDate,
   advanceMonths, formatStoryDateShort, nextEpisode, partsForDay, PLOT_TARGET_CAP,
@@ -371,7 +371,7 @@ function ProseBlockView({ b, accent, prose, fontPx, avatarPx }: {
 export function Story() {
   const vw = useVw();
   const narrow = vw < 780;
-  const { currentWorldId, layout, setLayout, mood, setMood, backdrop, setBackdrop, go, display, goLocations: openLocations } = useApp();
+  const { currentWorldId, layout, setLayout, mood, setMood, backdrop, setBackdrop, go, display, goLocations: openLocations, goCast: openCast } = useApp();
   const providers = useSettings((s) => s.providers);
   const hasAI = providers.length > 0;
   const M = MOODS[mood];
@@ -395,6 +395,7 @@ export function Story() {
     [season?.id]
   );
   const goLocations = () => openLocations(episode?.locationId ?? null);
+  const goCast = () => openCast(null);
   const turns = useLiveQuery(
     async () => (episode ? db.turns.where('episodeId').equals(episode.id).sortBy('createdAt') : []),
     [episode?.id]
@@ -980,22 +981,22 @@ export function Story() {
   const directorContent = (
     <DirectorContent
       world={world} season={season} episode={episode} characters={characters} locations={locations}
-      continuity={continuity} threads={threads} accent={M.accent} narrow={narrow}
+      continuity={continuity} threads={threads} accent={ACCENT} narrow={narrow}
       onGoLocations={goLocations}
+      onGoCast={goCast}
       onNudge={(text) => { setComposeModeSafe('steer'); setInput(text); setDirectorSheet(false); }}
     />
   );
 
-  const shellHeight = narrow && !readMode
-    ? 'calc(100dvh - 58px - env(safe-area-inset-bottom))'
-    : '100dvh';
+  const shellHeight = '100%';
   const locLabel = (activeLocation?.name || episode.location || '')
     .split(',')[0].split('.')[0].toLowerCase();
 
   return (
     <div style={{
       position: 'relative',
-      minHeight: narrow && !readMode ? 'auto' : '100dvh',
+      flex: 1,
+      minHeight: 0,
       height: shellHeight,
       display: 'flex',
       flexDirection: 'column',
@@ -1125,7 +1126,7 @@ export function Story() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 7, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px', background: 'rgba(255,255,255,0.05)' }}>
                   <span className="label" style={{ fontSize: 11, opacity: 0.55 }}>Backdrop</span>
                   {(Object.keys(BACKDROPS) as Array<keyof typeof BACKDROPS>).map((id) => (
-                    <Chip key={id} active={backdrop === id} accent={M.accent} onClick={() => setBackdrop(id)}>
+                    <Chip key={id} active={backdrop === id} onClick={() => setBackdrop(id)}>
                       {id === 'none' ? 'Off' : id[0].toUpperCase() + id.slice(1)}
                     </Chip>
                   ))}
@@ -1301,7 +1302,7 @@ export function Story() {
 
             {streaming && (
               <div style={{ marginTop: 22 }}>
-                <Spinner accent={M.accent} label={progressLabel || 'writing…'} />
+                <Spinner accent={ACCENT} label={progressLabel || 'writing…'} />
               </div>
             )}
 
@@ -1389,7 +1390,7 @@ export function Story() {
             <div style={{
               display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
               border: '1px solid rgba(255,255,255,0.12)', borderRadius: 6, padding: '12px 14px',
-              background: pressure === 'escalate' ? 'oklch(0.72 0.06 195 / 0.12)' : 'rgba(255,255,255,0.04)'
+              background: pressure === 'escalate' ? ACCENT_RGBA.a12 : 'rgba(255,255,255,0.04)'
             }}>
               <div style={{ flex: 1, minWidth: narrow ? 0 : 200, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.78)' }}>
                 {pressure === 'escalate'
@@ -1408,8 +1409,8 @@ export function Story() {
           {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
           {notice && (
             <div style={{
-              border: '1px solid oklch(0.72 0.06 195 / 0.35)', borderRadius: 6, padding: '11px 14px',
-              background: 'oklch(0.72 0.06 195 / 0.08)', display: 'flex', gap: 12, alignItems: 'flex-start'
+              border: `1px solid ${ACCENT_RGBA.a35}`, borderRadius: 6, padding: '11px 14px',
+              background: ACCENT_RGBA.a08, display: 'flex', gap: 12, alignItems: 'flex-start'
             }}>
               <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(200,230,235,0.95)', flex: 1 }}>{notice}</div>
               <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 14 }} onClick={() => setNotice('')}>×</button>
@@ -1456,8 +1457,8 @@ export function Story() {
                   fontWeight: composeMode === m ? 600 : 500,
                   cursor: 'pointer',
                   color: composeMode === m ? '#0a1416' : 'rgba(230,233,235,0.65)',
-                  background: composeMode === m ? 'oklch(0.72 0.06 195)' : 'transparent',
-                  boxShadow: composeMode === m ? 'inset 0 -2px 0 oklch(0.85 0.04 195)' : 'none'
+                  background: composeMode === m ? ACCENT : 'transparent',
+                  boxShadow: composeMode === m ? `inset 0 -2px 0 ${ACCENT_RGBA.a55}` : 'none'
                 }}
               >
                 {m[0].toUpperCase() + m.slice(1)}
@@ -1483,7 +1484,6 @@ export function Story() {
                   <Chip
                     key={tone}
                     active={deliveryTone === tone}
-                    accent={M.accent}
                     onClick={() => setDeliveryTone((cur) => (cur === tone ? null : tone))}
                   >
                     {tone}
@@ -1503,7 +1503,6 @@ export function Story() {
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                 <Chip
                   active={preferSpeaker === null}
-                  accent={M.accent}
                   onClick={() => setPreferSpeaker(null)}
                 >
                   Anyone
@@ -1512,7 +1511,6 @@ export function Story() {
                   <Chip
                     key={c.id}
                     active={preferSpeaker?.kind === 'cast' && preferSpeaker.id === c.id}
-                    accent={M.accent}
                     onClick={() => setPreferSpeaker(
                       preferSpeaker?.kind === 'cast' && preferSpeaker.id === c.id
                         ? null
@@ -1529,7 +1527,6 @@ export function Story() {
                   <Chip
                     key={g.id}
                     active={preferSpeaker?.kind === 'guest' && preferSpeaker.id === g.id}
-                    accent={M.accent}
                     onClick={() => setPreferSpeaker(
                       preferSpeaker?.kind === 'guest' && preferSpeaker.id === g.id
                         ? null
@@ -1551,7 +1548,7 @@ export function Story() {
                 reply size
               </span>
               {(['beat', 'scene', 'episode'] as const).map((l) => (
-                <Chip key={l} active={length === l} accent={M.accent} onClick={() => setLength(l)}>
+                <Chip key={l} active={length === l} onClick={() => setLength(l)}>
                   {TURN_LENGTH_LABELS[l]}
                 </Chip>
               ))}
@@ -1564,7 +1561,7 @@ export function Story() {
             display: 'flex', gap: 13, alignItems: 'flex-end', border: '1px solid rgba(255,255,255,0.12)',
             borderRadius: 4, padding: narrow ? '10px 12px' : '14px 16px',
             background: 'rgba(255,255,255,0.035)',
-            boxShadow: 'inset 2px 0 0 oklch(0.72 0.06 195 / 0.45)'
+            boxShadow: `inset 2px 0 0 ${ACCENT_RGBA.a45}`
           }}>
             {!narrow && (
               <div className="label" style={{ paddingBottom: 8, whiteSpace: 'nowrap', opacity: 0.65 }}>
@@ -1746,7 +1743,7 @@ export function Story() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
               <Mono style={{ fontSize: 9 }}>already held in continuity</Mono>
               {continuity.slice(-6).map((f) => (
-                <div key={f.id} className="craft-row" style={{ borderRadius: 13, padding: '12px 14px', fontSize: 13, lineHeight: 1.5, color: 'rgba(236,234,230,0.8)' }}>
+                <div key={f.id} className="craft-row" style={{ borderRadius: 4, padding: '12px 14px', fontSize: 13, lineHeight: 1.5, color: 'rgba(236,234,230,0.8)' }}>
                   {f.text}
                 </div>
               ))}
@@ -1862,7 +1859,7 @@ function SliderRow({ label, value, min, max, unit, onChange }: {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
         <Mono style={{ fontSize: 9 }}>{label}</Mono>
-        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: 'oklch(0.72 0.06 195)' }}>
+        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: ACCENT }}>
           {value}{unit ?? ''}
         </span>
       </div>
@@ -2162,7 +2159,9 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, st
 
 // ---------- director sub-panels ----------
 
-function SceneCastPanel({ episode, characters, accent }: { episode: Episode; characters: Character[]; accent: string }) {
+function SceneCastPanel({ episode, characters, accent, onGoCast }: {
+  episode: Episode; characters: Character[]; accent: string; onGoCast: () => void;
+}) {
   const guests = episode.guests ?? [];
   const activeGuestIds = episode.activeGuestIds;
   const [castError, setCastError] = useState('');
@@ -2248,7 +2247,10 @@ function SceneCastPanel({ episode, characters, accent }: { episode: Episode; cha
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-      <Mono style={{ fontSize: 9 }}>in the scene</Mono>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <Mono style={{ fontSize: 9 }}>in the scene</Mono>
+        <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} onClick={onGoCast}>full editor → Cast</button>
+      </div>
       {castError && <ErrorNote error={castError} onDismiss={() => setCastError('')} />}
       {characters.map((c) => {
         const active = c.isPlayer || episode.castIds.includes(c.id);
@@ -2685,7 +2687,7 @@ function PriorWrapMemoryPanel({ priorEpisodes }: { priorEpisodes: Episode[] }) {
                   <div key={`g${i}`} style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
                     <div style={{
                       fontSize: 12, lineHeight: 1.4, flex: 1, color: '#eceae6', opacity: 0.75,
-                      paddingLeft: 10, borderLeft: '1px solid oklch(0.72 0.06 195 / 0.28)'
+                      paddingLeft: 10, borderLeft: `1px solid ${ACCENT_RGBA.a28}`
                     }}>
                       <span style={{
                         fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, opacity: 0.6,
@@ -3062,6 +3064,7 @@ function DirectorContent(props: {
   continuity: ContinuityFact[]; threads: OpenThread[]; accent: string;
   narrow?: boolean;
   onGoLocations: () => void;
+  onGoCast: () => void;
   onNudge: (t: string) => void;
 }) {
   const inScene = props.characters.filter((c) => props.episode.castIds.includes(c.id));
@@ -3120,7 +3123,7 @@ function DirectorContent(props: {
       </DirectorAccordion>
       <DirectorAccordion title="scene" open={open.scene} onToggle={() => toggle('scene')} labelSize={labelSize}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-          <SceneCastPanel episode={props.episode} characters={props.characters} accent={props.accent} />
+          <SceneCastPanel episode={props.episode} characters={props.characters} accent={props.accent} onGoCast={props.onGoCast} />
           <SceneLocationsPanel
             episode={props.episode} locations={props.locations} accent={props.accent}
             world={props.world} onGoLocations={props.onGoLocations}
@@ -3510,7 +3513,7 @@ function KeepDropChips({
         flex: 1,
         minHeight: 44,
         border: `1px solid ${active ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.11)'}`,
-        background: active ? 'oklch(0.72 0.06 195 / 0.85)' : 'rgba(255,255,255,0.05)',
+        background: active ? ACCENT_RGBA.a85 : 'rgba(255,255,255,0.05)',
         color: active ? '#0a1416' : 'rgba(230,233,235,0.62)',
         borderRadius: 4,
         fontSize: 13,

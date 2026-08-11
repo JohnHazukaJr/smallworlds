@@ -45,7 +45,8 @@ export default function App() {
   return (
     <div className="app-shell" style={{
       position: 'relative', background: 'var(--ink)',
-      color: 'var(--paper)', overflowX: 'hidden'
+      color: 'var(--paper)', overflowX: 'hidden',
+      display: 'flex', flexDirection: 'column'
     }}>
       {!readMode && (
         <div className="horizon-wash" style={{
@@ -55,7 +56,7 @@ export default function App() {
 
       {storagePressure && screen !== 'profile' && (
         <div style={{
-          position: 'sticky', top: 0, zIndex: 40,
+          flexShrink: 0, position: 'relative', zIndex: 40,
           borderBottom: '1px solid var(--focus)',
           background: 'rgba(14, 24, 28, 0.94)', backdropFilter: 'blur(12px)',
           padding: '10px 16px', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap'
@@ -70,14 +71,18 @@ export default function App() {
         </div>
       )}
 
-      <div className="app-shell" style={{
-        position: 'relative', zIndex: 1,
-        display: narrow || readMode ? 'block' : 'grid',
+      <div style={{
+        position: 'relative', zIndex: 1, flex: 1, minHeight: 0,
+        display: narrow || readMode ? 'flex' : 'grid',
+        flexDirection: narrow || readMode ? 'column' : undefined,
         gridTemplateColumns: narrow || readMode ? undefined : '226px minmax(0, 1fr)',
         paddingBottom: narrow && !readMode ? 'calc(58px + env(safe-area-inset-bottom))' : 0
       }}>
         {!narrow && !readMode && <Rail />}
-        <main style={{ minWidth: 0, position: 'relative', zIndex: 1 }}>
+        <main style={{
+          minWidth: 0, minHeight: 0, flex: 1, position: 'relative', zIndex: 1,
+          display: 'flex', flexDirection: 'column'
+        }}>
           {screen === 'library' && <Library />}
           {screen === 'story' && <Story />}
           {screen === 'cast' && <Cast />}

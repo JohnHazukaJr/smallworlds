@@ -2,7 +2,7 @@ import type { CSSProperties } from 'react';
 import type { Character } from '../types';
 import { hasLink } from '../relationships';
 import { useVw } from '../ui/bits';
-import { avatarStyle } from '../ui/theme';
+import { avatarStyle, ACCENT, ACCENT_RGBA } from '../ui/theme';
 import { characterPortraits } from '../worldOps';
 
 export type RelationshipMapMode = 'map' | 'web';
@@ -139,9 +139,9 @@ function HtmlNode({
         <div style={{
           ...portraitFill(pos.c, size),
           boxSizing: 'border-box',
-          outline: selected ? '2px solid oklch(0.72 0.06 195)' : undefined,
+          outline: selected ? `2px solid ${ACCENT}` : undefined,
           outlineOffset: 2,
-          boxShadow: selected ? '0 0 0 4px oklch(0.72 0.06 195 / 0.25)' : undefined
+          boxShadow: selected ? `0 0 0 4px ${ACCENT_RGBA.a25}` : undefined
         }} />
       </div>
       {nameBelow && (
@@ -202,7 +202,7 @@ export function RelationshipMap({
     }
 
     return (
-      <div className="craft-row" style={{ borderRadius: 16, padding: narrow ? 8 : 10, overflow: 'hidden' }}>
+      <div className="craft-row" style={{ borderRadius: 4, padding: narrow ? 8 : 10, overflow: 'hidden' }}>
         <svg
           width="100%"
           viewBox={`0 0 ${size} ${size}`}
@@ -210,7 +210,7 @@ export function RelationshipMap({
         >
           <defs>
             <marker id="rel-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
-              <path d="M0,0 L6,3 L0,6 Z" fill="oklch(0.72 0.06 195 / 0.7)" />
+              <path d="M0,0 L6,3 L0,6 Z" fill={ACCENT_RGBA.a70} />
             </marker>
           </defs>
           {edges.map((e) => {
@@ -219,7 +219,7 @@ export function RelationshipMap({
               <g key={e.key}>
                 <line
                   x1={e.from.x} y1={e.from.y} x2={e.to.x} y2={e.to.y}
-                  stroke="oklch(0.72 0.06 195 / 0.45)" strokeWidth={narrow ? 2 : 1.5}
+                  stroke={ACCENT_RGBA.a45} strokeWidth={narrow ? 2 : 1.5}
                   markerEnd="url(#rel-arrow)"
                 />
                 {showEdgeLabels && (
@@ -297,7 +297,7 @@ export function RelationshipMap({
   }
 
   return (
-    <div className="craft-row" style={{ borderRadius: 16, padding: narrow ? 8 : 10, overflow: 'hidden' }}>
+    <div className="craft-row" style={{ borderRadius: 4, padding: narrow ? 8 : 10, overflow: 'hidden' }}>
       <svg
         width="100%"
         viewBox={`0 0 ${size} ${size}`}
@@ -305,7 +305,7 @@ export function RelationshipMap({
       >
         <defs>
           <marker id="rel-arrow-map" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
-            <path d="M0,0 L6,3 L0,6 Z" fill="oklch(0.72 0.06 195 / 0.75)" />
+            <path d="M0,0 L6,3 L0,6 Z" fill={ACCENT_RGBA.a70} />
           </marker>
         </defs>
         {edges.map((e) => {
@@ -318,7 +318,7 @@ export function RelationshipMap({
             >
               <line
                 x1={e.x1} y1={e.y1} x2={e.x2} y2={e.y2}
-                stroke={e.dashed ? 'rgba(160,175,200,0.45)' : 'oklch(0.72 0.06 195 / 0.55)'}
+                stroke={e.dashed ? 'rgba(160,175,200,0.45)' : ACCENT_RGBA.a55}
                 strokeWidth={e.dashed ? (narrow ? 1.75 : 1.25) : (narrow ? 2.25 : 1.75)}
                 strokeDasharray={e.dashed ? '5 4' : undefined}
                 markerEnd={e.dashed ? undefined : 'url(#rel-arrow-map)'}

@@ -12,7 +12,7 @@ import { useApp } from '../store/app';
 import type { Character, Relationship } from '../types';
 import { Chip, ErrorNote, Field, Mono, Spinner, useVw } from '../ui/bits';
 import { fileToPortraitImage } from '../ui/image';
-import { avatarStyle, STRIPE } from '../ui/theme';
+import { avatarStyle, STRIPE, ACCENT, ACCENT_RGBA } from '../ui/theme';
 import { characterPortraits, emptyCharacter, MAX_CHARACTER_PORTRAITS, portraitsPatch } from '../worldOps';
 
 type Tab = 'persona' | 'voice' | 'psyche' | 'secrets' | 'relations' | 'anchors' | 'ai';
@@ -24,20 +24,32 @@ const TABS: Array<[Tab, string]> = [
 /** Debounced autosave of a character draft back to the DB. */
 function useAutosave(draft: Character | null, onError: (msg: string) => void) {
   const timer = useRef<number>(undefined);
+  const pending = useRef<Character | null>(null);
   const first = useRef(true);
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
   useEffect(() => {
     if (!draft) return;
     if (first.current) { first.current = false; return; }
+    pending.current = draft;
     window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => {
+    const flush = (d: Character) => {
       void safeWrite(
-        () => db.characters.put({ ...draft, updatedAt: Date.now() }),
+        () => db.characters.put({ ...d, updatedAt: Date.now() }),
         (msg) => onErrorRef.current(msg)
       );
+    };
+    timer.current = window.setTimeout(() => {
+      const d = pending.current;
+      pending.current = null;
+      if (d) flush(d);
     }, 500);
-    return () => window.clearTimeout(timer.current);
+    return () => {
+      window.clearTimeout(timer.current);
+      const d = pending.current;
+      pending.current = null;
+      if (d) flush(d);
+    };
   }, [draft]);
   useEffect(() => { first.current = true; }, [draft?.id]);
 }
@@ -263,7 +275,7 @@ export function Cast() {
       {/* editor */}
       <div style={{ padding: narrow ? '22px 18px 60px' : '34px 40px 60px', maxWidth: 1000 }}>
         {creating && (
-          <div className="glass-hot" style={{ padding: 20, marginBottom: 28, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div className="craft-row" style={{ padding: 20, marginBottom: 28, display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: '#f6f4f0' }}>New character</div>
               <button className="btn-quiet" onClick={() => setCreating(false)}>cancel</button>
@@ -318,7 +330,7 @@ export function Cast() {
                         {d.selfTag && (
                           <span style={{
                             position: 'absolute', top: 10, right: 10, fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5,
-                            letterSpacing: '0.06em', color: '#0a1416', background: 'oklch(0.72 0.06 195)', padding: '4px 8px', borderRadius: 4
+                            letterSpacing: '0.06em', color: '#0a1416', background: ACCENT, padding: '4px 8px', borderRadius: 4
                           }}>this is me</span>
                         )}
                       </div>
@@ -332,7 +344,7 @@ export function Cast() {
                                 onClick={() => void setPrimaryPortrait(i)}
                                 style={{
                                   width: 52, height: 52, borderRadius: 10, padding: 0, cursor: 'pointer',
-                                  border: i === 0 ? '2px solid oklch(0.72 0.06 195)' : '1px solid rgba(255,255,255,0.16)',
+                                  border: i === 0 ? `2px solid ${ACCENT}` : '1px solid rgba(255,255,255,0.16)',
                                   backgroundImage: `url(${url})`, backgroundSize: 'cover', backgroundPosition: 'center'
                                 }}
                               />
@@ -450,7 +462,7 @@ export function Cast() {
                     ['location', d.state.location, (v: string) => patch({ state: { ...d.state, location: v } })],
                     ['condition', d.state.condition, (v: string) => patch({ state: { ...d.state, condition: v } })]
                   ] as Array<[string, string, (v: string) => void]>).map(([k, v, set]) => (
-                    <div key={k} className="craft-row" style={{ borderRadius: 13, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div key={k} className="craft-row" style={{ borderRadius: 4, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <Mono style={{ fontSize: 9, letterSpacing: '0.12em' }}>{k}</Mono>
                       <input
                         value={v} onChange={(e) => set(e.target.value)} placeholder="—"
@@ -470,7 +482,7 @@ export function Cast() {
                 <button key={id} onClick={() => setTab(id)} style={{
                   border: 0, background: 'transparent',
                   color: tab === id ? '#f8f6f2' : 'rgba(236,234,230,0.45)',
-                  borderBottom: `2px solid ${tab === id ? 'oklch(0.72 0.06 195)' : 'transparent'}`,
+                  borderBottom: `2px solid ${tab === id ? ACCENT : 'transparent'}`,
                   padding: '10px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap'
                 }}>{label}</button>
               ))}
@@ -536,7 +548,7 @@ export function Cast() {
                   <Field label="Secrets they carry" note="they may act on these; they never announce them">
                     <textarea rows={3} value={d.secrets} onChange={(e) => patch({ secrets: e.target.value })} />
                   </Field>
-                  <div className="glass-hot" style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <div className="craft-row" style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 10 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: '#f6f4f0' }}>Must not know yet</div>
                     <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'rgba(236,234,230,0.6)' }}>
                       Plot knowledge this character is walled off from. The narrator will never let them learn,
@@ -577,9 +589,9 @@ export function Cast() {
               )}
 
               {tab === 'anchors' && (
-                <div className="glass-hot" style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div className="craft-row" style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'oklch(0.72 0.06 195)' }} />
+                    <div style={{ width: 6, height: 6, borderRadius: '50%', background: ACCENT }} />
                     <div style={{ fontSize: 13, fontWeight: 600, color: '#f6f4f0' }}>Behaviour anchors</div>
                     <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)', marginLeft: 'auto' }}>
                       what keeps them human
@@ -601,7 +613,7 @@ export function Cast() {
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     {d.anchors.filter((a) => a.trim()).map((a, i) => (
                       <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, lineHeight: 1.5, color: 'rgba(236,234,230,0.9)' }}>
-                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'oklch(0.72 0.06 195)', paddingTop: 3 }}>
+                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: ACCENT, paddingTop: 3 }}>
                           {String(i + 1).padStart(2, '0')}
                         </span>
                         <span>{a}</span>
@@ -748,8 +760,8 @@ function RelationsEditor({
       {notice && (
         <div style={{
           fontSize: 12.5, color: 'rgba(200,230,235,0.95)',
-          border: '1px solid oklch(0.72 0.06 195 / 0.3)', borderRadius: 6, padding: '10px 12px',
-          background: 'oklch(0.72 0.06 195 / 0.08)', display: 'flex', gap: 10
+          border: `1px solid ${ACCENT_RGBA.a35}`, borderRadius: 6, padding: '10px 12px',
+          background: ACCENT_RGBA.a08, display: 'flex', gap: 10
         }}>
           <span style={{ flex: 1 }}>{notice}</span>
           <button className="btn-quiet" style={{ fontSize: 12, minHeight: 40 }} onClick={() => setNotice('')}>×</button>
@@ -767,7 +779,7 @@ function RelationsEditor({
             onSelectCharacter(id);
           }}
           onFocusEdge={(targetId) => {
-            setMode(narrow ? 'map' : 'map');
+            setMode('map');
             setFocusTargetId(targetId);
           }}
         />
@@ -791,7 +803,7 @@ function RelationsEditor({
                 className="craft-row"
                 style={{
                   padding: narrow ? 14 : 14, display: 'flex', flexDirection: 'column', gap: 10,
-                  border: hot ? '1px solid oklch(0.72 0.06 195 / 0.45)' : undefined
+                  border: hot ? `1px solid ${ACCENT_RGBA.a45}` : undefined
                 }}
               >
                 <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>

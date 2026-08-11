@@ -7,7 +7,7 @@ import { useApp } from '../store/app';
 import type { Location } from '../types';
 import { ErrorNote, Field, Mono, Spinner, useVw } from '../ui/bits';
 import { fileToPortraitImage } from '../ui/image';
-import { avatarStyle, STRIPE } from '../ui/theme';
+import { avatarStyle, STRIPE, ACCENT } from '../ui/theme';
 import { emptyLocation } from '../worldOps';
 
 type Tab = 'overview' | 'atmosphere' | 'history' | 'rules' | 'ai';
@@ -19,20 +19,32 @@ const TABS: Array<[Tab, string]> = [
 /** Debounced autosave of a location draft back to the DB. */
 function useAutosave(draft: Location | null, onError: (msg: string) => void) {
   const timer = useRef<number>(undefined);
+  const pending = useRef<Location | null>(null);
   const first = useRef(true);
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
   useEffect(() => {
     if (!draft) return;
     if (first.current) { first.current = false; return; }
+    pending.current = draft;
     window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => {
+    const flush = (d: Location) => {
       void safeWrite(
-        () => db.locations.put({ ...draft, updatedAt: Date.now() }),
+        () => db.locations.put({ ...d, updatedAt: Date.now() }),
         (msg) => onErrorRef.current(msg)
       );
+    };
+    timer.current = window.setTimeout(() => {
+      const d = pending.current;
+      pending.current = null;
+      if (d) flush(d);
     }, 500);
-    return () => window.clearTimeout(timer.current);
+    return () => {
+      window.clearTimeout(timer.current);
+      const d = pending.current;
+      pending.current = null;
+      if (d) flush(d);
+    };
   }, [draft]);
   useEffect(() => { first.current = true; }, [draft?.id]);
 }
@@ -218,7 +230,7 @@ export function Locations() {
       {/* editor */}
       <div style={{ padding: narrow ? '22px 18px 60px' : '34px 40px 60px', maxWidth: 1000 }}>
         {creating && (
-          <div className="glass-hot" style={{ padding: 20, marginBottom: 28, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div className="craft-row" style={{ padding: 20, marginBottom: 28, display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: '#f6f4f0' }}>New location</div>
               <button className="btn-quiet" onClick={() => setCreating(false)}>cancel</button>
@@ -329,7 +341,7 @@ export function Locations() {
                     ['current state', d.currentState, (v: string) => patch({ currentState: v })],
                     ['typically found here', d.inhabitants, (v: string) => patch({ inhabitants: v })]
                   ] as Array<[string, string, (v: string) => void]>).map(([k, v, set]) => (
-                    <div key={k} className="craft-row" style={{ borderRadius: 13, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div key={k} className="craft-row" style={{ borderRadius: 4, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <Mono style={{ fontSize: 9, letterSpacing: '0.12em' }}>{k}</Mono>
                       <input
                         value={v} onChange={(e) => set(e.target.value)} placeholder="—"
@@ -346,7 +358,7 @@ export function Locations() {
                 <button key={id} onClick={() => setTab(id)} style={{
                   border: 0, background: 'transparent',
                   color: tab === id ? '#f8f6f2' : 'rgba(236,234,230,0.45)',
-                  borderBottom: `2px solid ${tab === id ? 'oklch(0.72 0.06 195)' : 'transparent'}`,
+                  borderBottom: `2px solid ${tab === id ? ACCENT : 'transparent'}`,
                   padding: '10px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap'
                 }}>{label}</button>
               ))}
@@ -381,9 +393,9 @@ export function Locations() {
 
               {tab === 'rules' && (
                 <>
-                  <div className="glass-hot" style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  <div className="craft-row" style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'oklch(0.72 0.06 195)' }} />
+                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: ACCENT }} />
                       <div style={{ fontSize: 13, fontWeight: 600, color: '#f6f4f0' }}>Hard rules</div>
                       <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)', marginLeft: 'auto' }}>
                         hazards & laws, never broken
@@ -401,7 +413,7 @@ export function Locations() {
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                       {d.rules.filter((r) => r.trim()).map((r, i) => (
                         <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, lineHeight: 1.5, color: 'rgba(236,234,230,0.9)' }}>
-                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'oklch(0.72 0.06 195)', paddingTop: 3 }}>
+                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: ACCENT, paddingTop: 3 }}>
                             {String(i + 1).padStart(2, '0')}
                           </span>
                           <span>{r}</span>

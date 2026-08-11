@@ -21,13 +21,19 @@ export function Chip({
 }: {
   active?: boolean; onClick?: () => void; children: ReactNode; accent?: string; disabled?: boolean;
 }) {
+  const tint = (a: number) =>
+    accent === ACCENT
+      ? (a === 0.55 ? ACCENT_RGBA.a55 : a === 0.14 ? ACCENT_RGBA.a14 : `${ACCENT} / ${a}`)
+      : accent.startsWith('oklch(')
+        ? accent.replace(/\)$/, ` / ${a})`)
+        : accent;
   return (
     <button
       onClick={onClick}
       disabled={disabled}
       style={{
-        border: `1px solid ${active ? ACCENT_RGBA.a55 : 'rgba(255,255,255,0.12)'}`,
-        background: active ? ACCENT_RGBA.a14 : 'transparent',
+        border: `1px solid ${active ? tint(0.55) : 'rgba(255,255,255,0.12)'}`,
+        background: active ? tint(0.14) : 'transparent',
         color: active ? '#e8f2f4' : 'rgba(230,233,235,0.62)',
         borderRadius: 4,
         padding: '8px 12px',

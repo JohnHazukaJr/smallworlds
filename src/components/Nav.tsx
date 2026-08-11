@@ -8,8 +8,9 @@ const ITEMS: Array<[string, string, Screen]> = [
   ['01', 'Worlds', 'library'],
   ['02', 'Story', 'story'],
   ['03', 'Cast', 'cast'],
-  ['04', 'Settings', 'settings'],
-  ['05', 'New world', 'onboard']
+  ['04', 'Locations', 'locations'],
+  ['05', 'Settings', 'settings'],
+  ['06', 'New world', 'onboard']
 ];
 
 const TABS: Array<[string, Screen]> = [
