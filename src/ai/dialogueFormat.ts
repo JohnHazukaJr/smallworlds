@@ -1,6 +1,6 @@
 /**
  * Canonical character/guest speak format:
- *   *she smiled, showing her dimples* "It's good to see you."
+ *   *action outside quotes* "spoken words"
  * Actions in *asterisks* outside quotes; spoken words in "double quotes".
  * Inside quotes, *stress* or **stress** = vocal emphasis (rendered bold).
  */
@@ -204,7 +204,8 @@ export const SPEAK_FORMAT_RULES =
   '- Vocal stress on a word: wrap it in *asterisks* or **double asterisks** inside the quotes (shown bold). Example: "I *said* leave."\n' +
   '- Prefer one tight reply: a short *action* plus one or two spoken lines. Do not monologue or lecture.\n' +
   '- Use a blank line only when tone truly shifts mid-reply; most replies need none.\n' +
-  '- Example:\n' +
-  '  *she smiled shyly, showing her dimples* "It\'s good to see you."\n' +
+  '- Examples (match the speaker\'s own voice — these are format only):\n' +
+  '  *doesn\'t look up from the ledger* "Say it again. Slower."\n' +
+  '  *wipes salt off his mouth with the back of his hand* "You\'re early. That\'s either brave or stupid."\n' +
   '- You may use dialogue-only. Action-only (*gestures* with no quotes) is allowed only when the beat brief says so; otherwise prefer at least one spoken line. ' +
   'Do NOT prefix with your name. Do NOT wrap the whole reply in one outer quote.';

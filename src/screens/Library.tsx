@@ -5,6 +5,7 @@ import {
   db, deleteWorld, encryptExport, exportWorld, importAnyFile, isEncryptedExport,
   type EncryptedExport
 } from '../db';
+import { compactWorldToVolume } from '../ai/compactWorld';
 import { formatUserError } from '../errors';
 import { decryptDeviceExport } from '../sync/serialize';
 import { seedStarterWorld } from '../data/seed';
@@ -68,6 +69,8 @@ export function Library() {
   const [pendingImport, setPendingImport] = useState<EncryptedExport | null>(null);
   const [dialogBusy, setDialogBusy] = useState(false);
   const [dialogError, setDialogError] = useState('');
+  const [compactingId, setCompactingId] = useState<string | null>(null);
+  const [compactProgress, setCompactProgress] = useState('');
 
   const finishImport = async (data: unknown) => {
     const ids = await importAnyFile(data);
@@ -93,6 +96,28 @@ export function Library() {
       download(await encryptExport(data, passphrase), `${slug(title)}.smallworlds.enc.json`);
     } else {
       download(data, `${slug(title)}.smallworlds.json`);
+    }
+  };
+
+  const runCompact = async (worldId: string, title: string) => {
+    if (compactingId) return;
+    const ok = confirm(
+      `Mint a new volume from "${title}"?\n\n` +
+      'The original stays in your library. The copy starts at Season 1 with rewritten lore, sheets, and a new opening. ' +
+      'This uses your utility model and can take a few minutes.'
+    );
+    if (!ok) return;
+    setCompactingId(worldId);
+    setCompactProgress('Starting…');
+    setError('');
+    try {
+      const id = await compactWorldToVolume(worldId, { onProgress: setCompactProgress });
+      openWorld(id);
+    } catch (e) {
+      setError(formatUserError(e));
+    } finally {
+      setCompactingId(null);
+      setCompactProgress('');
     }
   };
 
@@ -151,13 +176,14 @@ export function Library() {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {(worlds ?? []).map((w) => {
           const st = stats?.[w.id];
+          const busy = compactingId === w.id;
           return (
             <div
               key={w.id}
               className="craft-row hover-bright"
-              onClick={() => openWorld(w.id)}
+              onClick={() => { if (!compactingId) openWorld(w.id); }}
               style={{
-                overflow: 'hidden', cursor: 'pointer',
+                overflow: 'hidden', cursor: compactingId ? 'default' : 'pointer',
                 display: 'grid',
                 gridTemplateColumns: narrow ? '1fr' : '148px minmax(0, 1fr)',
                 borderLeftColor: `oklch(0.55 0.06 ${w.hue} / 0.75)`
@@ -179,7 +205,9 @@ export function Library() {
               </div>
               <div style={{ padding: narrow ? '14px 16px 16px' : '16px 20px', display: 'flex', flexDirection: 'column', gap: 8, justifyContent: 'center' }}>
                 <div className="serif" style={{ fontSize: 20, color: '#f2f4f5', lineHeight: 1.2 }}>{w.title}</div>
-                <div style={{ fontSize: 13, lineHeight: 1.55, color: 'rgba(230,233,235,0.55)' }}>{w.line}</div>
+                <div style={{ fontSize: 13, lineHeight: 1.55, color: 'rgba(230,233,235,0.55)' }}>
+                  {busy ? (compactProgress || 'Compacting…') : w.line}
+                </div>
                 <div style={{
                   display: 'flex', gap: 14, fontSize: 11,
                   color: 'rgba(230,233,235,0.4)', paddingTop: 6, marginTop: 2,
@@ -191,10 +219,17 @@ export function Library() {
                   <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
                     <button
                       className="btn-quiet" style={{ padding: '2px 4px', fontSize: 10 }}
+                      disabled={!!compactingId}
+                      onClick={(e) => { e.stopPropagation(); void runCompact(w.id, w.title); }}
+                    >compact</button>
+                    <button
+                      className="btn-quiet" style={{ padding: '2px 4px', fontSize: 10 }}
+                      disabled={!!compactingId}
                       onClick={(e) => { e.stopPropagation(); setPendingExport({ worldId: w.id, title: w.title }); }}
                     >export</button>
                     <button
                       className="btn-quiet" style={{ padding: '2px 4px', fontSize: 10 }}
+                      disabled={!!compactingId}
                       onClick={(e) => {
                         e.stopPropagation();
                         if (confirm(`Delete "${w.title}" and everything in it? This cannot be undone.`)) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { evaluateWorldWriteReady, emptyCharacter, emptyLocation } from './worldOps';
+import { evaluateWorldWriteReady, emptyCharacter, emptyLocation, latestEndedEpisode, preferExistingActiveEpisode, isVagueSpeechStyle } from './worldOps';
 import type { Episode, Season, World, WorldAISettings } from './types';
 
 const ai: WorldAISettings = {
@@ -37,6 +37,7 @@ describe('evaluateWorldWriteReady', () => {
     const npc = emptyCharacter('w1', {
       id: 'n1', name: 'Marisol', summary: 'Harbour registrar.',
       speechStyle: 'Clipped.', exampleLines: ['Then write it again.'],
+      mannerisms: 'Taps the stamp twice before sealing.',
       anchors: ['Never lies in writing']
     });
     const loc = emptyLocation('w1', {
@@ -103,5 +104,63 @@ describe('evaluateWorldWriteReady', () => {
     expect(result.warnings.some((w) => /atmosphere/i.test(w))).toBe(true);
     expect(result.warnings.some((w) => /generic place rule/i.test(w))).toBe(true);
     expect(result.warnings.some((w) => /appearance or desires/i.test(w))).toBe(true);
+    expect(result.warnings.some((w) => /mannerisms/i.test(w))).toBe(true);
+  });
+});
+
+describe('isVagueSpeechStyle', () => {
+  it('flags empty and stock styles', () => {
+    expect(isVagueSpeechStyle('')).toBe(true);
+    expect(isVagueSpeechStyle('normal')).toBe(true);
+    expect(isVagueSpeechStyle('Speaks normally.')).toBe(true);
+    expect(isVagueSpeechStyle('Clipped harbour clerk cadence')).toBe(false);
+  });
+});
+
+describe('latestEndedEpisode', () => {
+  const ep = (n: number, status: 'active' | 'ended', createdAt = 0): Episode => ({
+    ...episode(['p1'], 'loc1'), id: `e${n}-${createdAt}`, number: n, status, createdAt
+  });
+
+  it('picks the highest-numbered ended episode', () => {
+    expect(latestEndedEpisode([ep(1, 'ended'), ep(2, 'active'), ep(3, 'ended')])?.number).toBe(3);
+    expect(latestEndedEpisode([ep(1, 'active')])).toBeUndefined();
+    expect(latestEndedEpisode([])).toBeUndefined();
+  });
+
+  it('breaks ties on number with createdAt', () => {
+    expect(latestEndedEpisode([ep(2, 'ended', 10), ep(2, 'ended', 99)])?.createdAt).toBe(99);
+  });
+});
+
+describe('preferExistingActiveEpisode', () => {
+  const ep = (id: string, status: 'active' | 'ended'): Episode => ({
+    ...episode(['p1'], 'loc1'), id, status
+  });
+
+  it('returns another active episode and ignores the ending id', () => {
+    expect(preferExistingActiveEpisode([ep('a', 'ended'), ep('b', 'active')], 'a')?.id).toBe('b');
+    expect(preferExistingActiveEpisode([ep('a', 'active')], 'a')).toBeUndefined();
+  });
+});
+
+describe('evaluateWorldWriteReady episode copy', () => {
+  it('uses later-episode location wording', () => {
+    const result = evaluateWorldWriteReady({
+      world: world(),
+      season: season(),
+      episode: { ...episode(['p1'], null), number: 3 },
+      characters: [
+        emptyCharacter('w1', {
+          id: 'p1', isPlayer: true, name: 'you', summary: 'A smuggler.',
+          appearance: 'Steady', desires: 'Survive',
+          state: { goal: 'Clear the debt', emotion: 'wary', location: 'Quay', condition: '' }
+        })
+      ],
+      locations: [],
+      continuityCount: 2
+    });
+    expect(result.missing.some((m) => /episode 3/i.test(m))).toBe(true);
+    expect(result.missing.some((m) => /episode 1/i.test(m))).toBe(false);
   });
 });

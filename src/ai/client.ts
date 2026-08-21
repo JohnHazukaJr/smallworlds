@@ -29,6 +29,20 @@ export class AIError extends Error {
   }
 }
 
+export function isContextOverflowError(e: unknown): boolean {
+  const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
+  if (msg.includes('context_length_exceeded')) return true;
+  if (msg.includes('context length')) return true;
+  if (msg.includes('maximum context')) return true;
+  if (msg.includes('prompt is too long')) return true;
+  if (msg.includes('too many tokens')) return true;
+  if (msg.includes('token limit')) return true;
+  if (msg.includes('too long') && (msg.includes('context') || msg.includes('prompt') || msg.includes('request'))) {
+    return true;
+  }
+  return false;
+}
+
 /** Empty stream — usually context overflow, refusal, or a reasoning model spending all tokens. */
 function throwEmptyResponse(finishReason: string, sawReasoning: boolean): never {
   const reason = finishReason ? ` (stop: ${finishReason})` : '';

@@ -473,6 +473,13 @@ export function isGenericLocationRule(rule: string): boolean {
     || t.startsWith('respect the place');
 }
 
+/** Empty or stock speechStyle that will not distinguish an NPC. */
+export function isVagueSpeechStyle(style: string): boolean {
+  const t = style.trim().toLowerCase().replace(/[.!]+$/, '');
+  if (!t) return true;
+  return /^(normal|casual|speaks?\s+normally|ordinary|average|typical|friendly|polite|regular|default)$/.test(t);
+}
+
 /**
  * Checklist for an onboard / day-0 world before Story.
  * Pure evaluation of loaded rows — no AI.
@@ -500,7 +507,7 @@ export function evaluateWorldWriteReady(opts: {
   if (world.bible.trim().length < BIBLE_MIN_CHARS) {
     missing.push(`Expand the world bible (at least ${BIBLE_MIN_CHARS} characters)`);
   }
-  if (!season?.premise?.trim()) missing.push('Write a season 1 premise');
+  if (!season?.premise?.trim()) missing.push('Write a season premise');
 
   const player = characters.find((c) => c.isPlayer);
   if (!player) missing.push('Player character is missing');
@@ -517,20 +524,41 @@ export function evaluateWorldWriteReady(opts: {
   );
   if (!readyNpc) {
     missing.push('Add at least one NPC in the scene with voice, summary, and an anchor');
-  } else if (!readyNpc.exampleLines.some((l) => l.trim())) {
-    warnings.push('Scene NPC has no example lines — voice lands cleaner with 1–2 samples');
+  } else {
+    if (!readyNpc.exampleLines.some((l) => l.trim())) {
+      warnings.push('Scene NPC has no example lines — voice lands cleaner with 1–2 samples');
+    }
+    if (isVagueSpeechStyle(readyNpc.speechStyle)) {
+      warnings.push('Scene NPC voice is vague — replace “normal/casual” with rhythm, diction, or tic');
+    }
+    if (!readyNpc.mannerisms.trim()) {
+      warnings.push('Scene NPC has no mannerisms — one recurring tic makes bodies feel real');
+    }
   }
 
+  const epNum = episode?.number ?? 1;
   const openLoc = episode?.locationId
     ? locations.find((l) => l.id === episode.locationId)
     : undefined;
   if (!openLoc) {
-    missing.push('Link an opening location to episode 1');
+    missing.push(
+      epNum <= 1
+        ? 'Link an opening location to episode 1'
+        : `Link a location to episode ${epNum}`
+    );
   } else if (openLoc.rules.filter((r) => r.trim()).length === 0) {
-    missing.push('Give the opening location at least one hard rule');
+    missing.push(
+      epNum <= 1
+        ? 'Give the opening location at least one hard rule'
+        : 'Give this episode’s location at least one hard rule'
+    );
   } else {
     if (!openLoc.atmosphere.trim()) {
-      warnings.push('Opening place has no atmosphere — sensory detail helps the narrator');
+      warnings.push(
+        epNum <= 1
+          ? 'Opening place has no atmosphere — sensory detail helps the narrator'
+          : 'Place has no atmosphere — sensory detail helps the narrator'
+      );
     }
     if (openLoc.rules.some(isGenericLocationRule)) {
       warnings.push('Replace the generic place rule with something specific to this location');
@@ -538,7 +566,11 @@ export function evaluateWorldWriteReady(opts: {
   }
 
   if ((opts.continuityCount ?? 0) === 0) {
-    warnings.push('No opening continuity facts yet — seed memory before entering if you can');
+    warnings.push(
+      epNum <= 1
+        ? 'No opening continuity facts yet — seed memory before entering if you can'
+        : 'No continuity facts yet — seed memory if the narrator needs prior beats'
+    );
   }
 
   return { ok: missing.length === 0, missing, warnings };
@@ -565,6 +597,26 @@ export async function worldWriteReady(worldId: string): Promise<WorldWriteReadyR
   });
 }
 
+/** Highest-numbered ended episode in a season (wrap recovery when none is active). */
+export function latestEndedEpisode(episodes: Episode[]): Episode | undefined {
+  let best: Episode | undefined;
+  for (const e of episodes) {
+    if (e.status !== 'ended') continue;
+    if (!best || e.number > best.number || (e.number === best.number && e.createdAt > best.createdAt)) {
+      best = e;
+    }
+  }
+  return best;
+}
+
+/** Prefer an already-open active episode over opening a duplicate (double-click recover). */
+export function preferExistingActiveEpisode(
+  seasonEpisodes: Episode[],
+  endingId: string
+): Episode | undefined {
+  return seasonEpisodes.find((e) => e.status === 'active' && e.id !== endingId);
+}
+
 export interface NextEpisodeOpts {
   /** Story day the ending episode closed on; defaults to world.currentDay */
   storyDayEnd?: number;
@@ -579,7 +631,11 @@ export interface NextEpisodeOpts {
   plotTargets?: PlotTarget[];
 }
 
-/** End the current episode and open the next one, carrying the scene cast forward. */
+/**
+ * End the current episode and open the next one, carrying the scene cast forward.
+ * If the season already has another active episode, ends `current` (when still active)
+ * and returns that existing row instead of creating a second active episode.
+ */
 export async function nextEpisode(current: Episode, opts: NextEpisodeOpts = {}): Promise<Episode> {
   const world = await db.worlds.get(current.worldId);
   const cal = worldCalendar(world);
@@ -593,30 +649,54 @@ export async function nextEpisode(current: Episode, opts: NextEpisodeOpts = {}):
       ? Math.floor(opts.nextStoryDay)
       : dayEnd + cal.episodeAdvanceDays
   );
-  const next: Episode = {
-    id: uid(), seasonId: current.seasonId, worldId: current.worldId,
-    number: current.number + 1, title: '', location: current.location,
-    locationId: current.locationId ?? null,
-    castIds: current.castIds,
-    guests: [],
-    // Omit activeGuestIds — empty guests; prompts treat omitted as "all" when guests exist.
-    wrap: null,
-    runningSummary: null,
-    runningSummaryAtChars: 0,
-    liveStateAtChars: 0,
-    storyDay: nextDay,
-    storyDayEnd: null,
-    dateNote: null,
-    plotTargets: opts.plotTargets?.length ? opts.plotTargets : undefined,
-    status: 'active',
-    createdAt: Date.now(),
-    updatedAt: Date.now()
-  };
+
+  let created: Episode | null = null;
+  let reused: Episode | null = null;
+
   await db.transaction('rw', [db.episodes, db.worlds], async () => {
+    const siblings = await db.episodes.where('seasonId').equals(current.seasonId).toArray();
+    const existing = preferExistingActiveEpisode(siblings, current.id);
+    if (existing) {
+      const liveCurrent = siblings.find((e) => e.id === current.id) ?? current;
+      if (liveCurrent.status === 'active') {
+        await db.episodes.update(current.id, {
+          status: 'ended',
+          storyDay: current.storyDay ?? dayEnd,
+          storyDayEnd: dayEnd,
+          pendingPlan: null,
+          ...(opts.dateNote != null ? { dateNote: opts.dateNote } : {}),
+          updatedAt: Date.now()
+        });
+      }
+      reused = existing;
+      return;
+    }
+
+    const next: Episode = {
+      id: uid(), seasonId: current.seasonId, worldId: current.worldId,
+      number: current.number + 1, title: '', location: current.location,
+      locationId: current.locationId ?? null,
+      castIds: current.castIds,
+      guests: [],
+      // Omit activeGuestIds — empty guests; prompts treat omitted as "all" when guests exist.
+      wrap: null,
+      runningSummary: null,
+      runningSummaryAtChars: 0,
+      liveStateAtChars: 0,
+      storyDay: nextDay,
+      storyDayEnd: null,
+      dateNote: null,
+      plotTargets: opts.plotTargets?.length ? opts.plotTargets : undefined,
+      pendingPlan: null,
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
     await db.episodes.update(current.id, {
       status: 'ended',
       storyDay: current.storyDay ?? dayEnd,
       storyDayEnd: dayEnd,
+      pendingPlan: null,
       ...(opts.dateNote != null ? { dateNote: opts.dateNote } : {}),
       updatedAt: Date.now()
     });
@@ -628,7 +708,11 @@ export async function nextEpisode(current: Episode, opts: NextEpisodeOpts = {}):
         updatedAt: Date.now()
       });
     }
+    created = next;
   });
+
+  if (reused) return reused;
+
   // Activate calendar events entered between episode end and next open.
   await evaluateCalendarEvents({
     worldId: current.worldId,
@@ -638,5 +722,5 @@ export async function nextEpisode(current: Episode, opts: NextEpisodeOpts = {}):
     mode: 'advance',
     world
   });
-  return next;
+  return created!;
 }

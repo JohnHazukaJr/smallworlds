@@ -22,7 +22,7 @@ import {
 import { generateSceneImage } from '../ai/image';
 import {
   episodeContextPressure, episodeHistoryChars, HISTORY_CHAR_BUDGET,
-  preferBucketsForEpisodes, resolveSpeakerName, selectDirectorFacts, selectDirectorThreads,
+  pendingBeatLabel, preferBucketsForEpisodes, resolveSpeakerName, selectDirectorFacts, selectDirectorThreads,
   type DirectorBeat
 } from '../ai/prompts';
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
@@ -47,9 +47,9 @@ import { Chip, ErrorNote, Mono, Sheet, Spinner, Toggle, useVw } from '../ui/bits
 import { fileToSceneImage } from '../ui/image';
 import { avatarStyle, BACKDROPS, MOODS, STRIPE, ACCENT, ACCENT_RGBA } from '../ui/theme';
 import {
-  calendarPatch, characterPortraits, dayFromParts, emptyLocation, formatStoryDate,
-  advanceMonths, formatStoryDateShort, nextEpisode, partsForDay, PLOT_TARGET_CAP,
-  weekdayForDay, worldCalendar
+  calendarPatch, characterPortraits, dayFromParts, emptyLocation, evaluateWorldWriteReady, formatStoryDate,
+  advanceMonths, buildEpisodePlotTargets, formatStoryDateShort, latestEndedEpisode, nextEpisode, partsForDay,
+  PLOT_TARGET_CAP, weekdayForDay, worldCalendar
 } from '../worldOps';
 
 /** Editable wrap draft with Keep/Drop flags for the review UI. */
@@ -401,29 +401,40 @@ export function Story() {
     [currentWorldId]
   );
   const season = useLiveQuery(
-    async () => (world?.activeSeasonId ? db.seasons.get(world.activeSeasonId) : undefined),
-    [world?.activeSeasonId]
+    async () => {
+      if (!world) return undefined;
+      if (!world.activeSeasonId) return null;
+      return (await db.seasons.get(world.activeSeasonId)) ?? null;
+    },
+    [world?.id, world?.activeSeasonId]
   );
-  const episode = useLiveQuery(
-    async () => season
-      ? db.episodes.where('seasonId').equals(season.id).filter((e) => e.status === 'active').first()
-      : undefined,
-    [season?.id]
+  const seasonEpisodes = useLiveQuery(
+    async () => {
+      if (season === undefined) return undefined;
+      if (season === null) return [] as Episode[];
+      return db.episodes.where('seasonId').equals(season.id).toArray();
+    },
+    [season === null ? 'none' : season?.id]
   );
+  const episode = seasonEpisodes?.find((e) => e.status === 'active');
+  const lastEndedEpisode = seasonEpisodes ? latestEndedEpisode(seasonEpisodes) : undefined;
   const goLocations = () => openLocations(episode?.locationId ?? null);
   const goCast = () => openCast(null);
-  const turns = useLiveQuery(
+  const turnsLive = useLiveQuery(
     async () => (episode ? db.turns.where('episodeId').equals(episode.id).sortBy('createdAt') : []),
     [episode?.id]
-  ) ?? [];
-  const characters = useLiveQuery(
+  );
+  const turns = turnsLive ?? [];
+  const charactersLive = useLiveQuery(
     async () => (world ? db.characters.where('worldId').equals(world.id).toArray() : []),
     [world?.id]
-  ) ?? [];
-  const locations = useLiveQuery(
+  );
+  const characters = charactersLive ?? [];
+  const locationsLive = useLiveQuery(
     async () => (world ? db.locations.where('worldId').equals(world.id).toArray() : []),
     [world?.id]
-  ) ?? [];
+  );
+  const locations = locationsLive ?? [];
   const continuity = useLiveQuery(
     async () => (season ? db.continuity.where('seasonId').equals(season.id).toArray() : []),
     [season?.id]
@@ -432,6 +443,8 @@ export function Story() {
     async () => (season ? db.threads.where('seasonId').equals(season.id).filter((t) => t.status === 'open').toArray() : []),
     [season?.id]
   ) ?? [];
+  const storyRowsReady = !episode
+    || (turnsLive !== undefined && charactersLive !== undefined && locationsLive !== undefined);
 
   // writing state — Continue/Steer exclusive; Speak/Act independent toggles → speak|act|play
   const [composeBase, setComposeBase] = useState<'continue' | 'steer'>('continue');
@@ -466,10 +479,15 @@ export function Story() {
   const [progressLabel, setProgressLabel] = useState('writing…');
   const [error, setError] = useState<string | AppError>('');
   const [notice, setNotice] = useState('');
+  const [writeAnyway, setWriteAnyway] = useState(false);
+  const [recoverBusy, setRecoverBusy] = useState(false);
+  const recoverBusyRef = useRef(false);
+  const wrapBusyRef = useRef(false);
   const wrapAbortRef = useRef<AbortController | null>(null);
   /** How many turns from the end are mounted — keeps long episodes responsive. */
   const [turnWindow, setTurnWindow] = useState(60);
   useEffect(() => { setTurnWindow(60); }, [episode?.id]);
+  useEffect(() => { setWriteAnyway(false); }, [episode?.id, world?.id]);
   const [wrapOpen, setWrapOpen] = useState<null | 'episode'>(null);
   const [wrapBusy, setWrapBusy] = useState(false);
   const [wrapPhase, setWrapPhase] = useState<'ready' | 'analyzing' | 'review'>('ready');
@@ -938,16 +956,24 @@ export function Story() {
   /** End with a minimal recap so prior-episode memory survives (no full analyze review). */
   const skipWrapAndEnd = async () => {
     if (!world || !season || !episode) return;
+    if (wrapBusyRef.current) return;
+    wrapBusyRef.current = true;
     setWrapBusy(true);
     setError('');
+    let memoryNote = '';
     try {
-      await commitSoftEpisodeWrap(world, season, episode);
+      // Soft wrap does not advance; nextEpisode below opens the next active episode.
+      await commitSoftEpisodeWrap(world, season, episode, {
+        onNotice: (m) => { memoryNote = m; }
+      });
       await nextEpisode(episode);
       resetAfterEpisodeEnd();
-      setNotice('Episode ended with a short recap — full continuity review was skipped.');
+      const filed = 'Episode filed · next episode is open.';
+      setNotice(memoryNote ? `${memoryNote} ${filed}` : filed);
     } catch (e) {
       setError(classifyError(e));
     } finally {
+      wrapBusyRef.current = false;
       setWrapBusy(false);
     }
   };
@@ -955,9 +981,12 @@ export function Story() {
   /** Commit kept wrap items, file continuity, open the next episode. */
   const confirmEpisodeWrap = async () => {
     if (!world || !season || !episode || !wrapDraft) return;
+    if (wrapBusyRef.current) return;
+    wrapBusyRef.current = true;
     setWrapBusy(true);
     setError('');
     try {
+      // commitEpisodeWrap advances via nextEpisode; do not call nextEpisode again here.
       await commitEpisodeWrap(world, season, episode, {
         recap: wrapDraft.recap,
         beats: wrapDraft.beats
@@ -1004,9 +1033,11 @@ export function Story() {
         dateNote: wrapDraft.dateNote
       });
       resetAfterEpisodeEnd();
+      setNotice('Episode filed · next episode is open.');
     } catch (e) {
       setError(classifyError(e));
     } finally {
+      wrapBusyRef.current = false;
       setWrapBusy(false);
     }
   };
@@ -1018,6 +1049,45 @@ export function Story() {
     return out;
   }, [turns, characters, episode?.guests]);
 
+  const writeReady = useMemo(() => {
+    if (!storyRowsReady || turns.length > 0 || !world || !season || !episode) return null;
+    return evaluateWorldWriteReady({
+      world, season, episode, characters, locations, continuityCount: continuity.length
+    });
+  }, [storyRowsReady, turns.length, world, season, episode, characters, locations, continuity.length]);
+
+  const recoverPad: CSSProperties = {
+    padding: narrow ? '40px 20px' : '80px 60px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 16,
+    maxWidth: 560
+  };
+
+  const openNextFromEnded = async () => {
+    if (!lastEndedEpisode) return;
+    if (recoverBusyRef.current) return;
+    recoverBusyRef.current = true;
+    setRecoverBusy(true);
+    setError('');
+    try {
+      await nextEpisode(lastEndedEpisode, {
+        plotTargets: buildEpisodePlotTargets({
+          aimedTexts: [],
+          carried: lastEndedEpisode.plotTargets
+        })
+      });
+    } catch (e) {
+      setError(classifyError(e));
+    } finally {
+      recoverBusyRef.current = false;
+      setRecoverBusy(false);
+    }
+  };
+
+  if (currentWorldId && world === undefined) {
+    return <div style={{ padding: 60 }}><Spinner label="opening the world" /></div>;
+  }
   if (!world) {
     return (
       <div className="fade-in" style={{ padding: narrow ? '40px 20px' : '80px 60px', display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 560 }}>
@@ -1029,7 +1099,44 @@ export function Story() {
       </div>
     );
   }
-  if (!season || !episode) {
+  if (season === undefined || (season !== null && seasonEpisodes === undefined)) {
+    return <div style={{ padding: 60 }}><Spinner label="opening the world" /></div>;
+  }
+  if (season === null) {
+    return (
+      <div className="fade-in" style={recoverPad}>
+        <Mono>no season</Mono>
+        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: '#f8f6f2' }}>This world has no season open.</div>
+        {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <button className="btn-primary" onClick={() => go('library')}>Worlds</button>
+        </div>
+      </div>
+    );
+  }
+  if (!episode) {
+    return (
+      <div className="fade-in" style={recoverPad}>
+        <Mono>episode filed</Mono>
+        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: '#f8f6f2' }}>
+          {lastEndedEpisode
+            ? `Episode ${lastEndedEpisode.number} is filed. Open the next, or review the season.`
+            : 'No episodes in this season yet.'}
+        </div>
+        {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {lastEndedEpisode && (
+            <button className="btn-primary" disabled={recoverBusy} onClick={() => void openNextFromEnded()}>
+              {recoverBusy ? 'Opening…' : 'Open the next episode'}
+            </button>
+          )}
+          <button className="btn-ghost" onClick={() => go('sequel')}>Season review</button>
+          <button className="btn-quiet" onClick={() => go('library')}>Worlds</button>
+        </div>
+      </div>
+    );
+  }
+  if (!storyRowsReady) {
     return <div style={{ padding: 60 }}><Spinner label="opening the world" /></div>;
   }
 
@@ -1159,7 +1266,7 @@ export function Story() {
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-            {!narrow && showWrapNudge && (
+            {showWrapNudge && (!readMode || !composerOpen) && (
               <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11 }}
                 onClick={() => setWrapOpen('episode')}>File episode?</button>
             )}
@@ -1369,10 +1476,44 @@ export function Story() {
                     ))}
                   </div>
                 </div>
+                {writeReady && writeReady.missing.length > 0 && !writeAnyway && (
+                  <div style={{
+                    border: '1px solid rgba(255,255,255,0.12)', borderRadius: 6, padding: '12px 14px',
+                    background: 'rgba(255,255,255,0.04)', display: 'flex', flexDirection: 'column', gap: 10
+                  }}>
+                    <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.78)' }}>
+                      {writeReady.missing.map((m) => (
+                        <li key={m}>{m}</li>
+                      ))}
+                    </ul>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      <button className="btn-ghost" style={{ fontSize: 11, padding: '7px 12px' }}
+                        onClick={() => setWorldEditOpen(true)}>Edit world</button>
+                      <button className="btn-ghost" style={{ fontSize: 11, padding: '7px 12px' }}
+                        onClick={goCast}>Cast</button>
+                      <button className="btn-ghost" style={{ fontSize: 11, padding: '7px 12px' }}
+                        onClick={goLocations}>Locations</button>
+                      <button className="btn-quiet" style={{ fontSize: 11 }}
+                        onClick={() => setWriteAnyway(true)}>Write anyway</button>
+                    </div>
+                  </div>
+                )}
+                {writeReady && writeReady.warnings.length > 0 && (writeAnyway || writeReady.missing.length === 0) && (
+                  <div style={{ fontSize: 12, lineHeight: 1.5, color: 'rgba(200,230,235,0.75)' }}>
+                    {writeReady.warnings[0]}
+                  </div>
+                )}
+                <p style={{ fontSize: 14, margin: 0, color: 'rgba(236,234,230,0.78)' }}>
+                  {!hasAI
+                    ? 'Add a writing model in Settings before Write on.'
+                    : writeReady && writeReady.missing.length > 0 && !writeAnyway
+                      ? 'Fix the checklist above, or press Write anyway, then Write on.'
+                      : <>Press <strong>Write on</strong> — the narrator takes the first beat.</>}
+                </p>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                  {hasAI && world && season && episode && (
+                  {hasAI && (
                     <button
-                      className="btn-primary"
+                      className="btn-ghost"
                       style={{ fontSize: 12, padding: '8px 14px' }}
                       disabled={!!streaming}
                       onClick={() => {
@@ -1383,7 +1524,7 @@ export function Story() {
                           try {
                             await draftColdOpenNarration(world, season, episode);
                           } catch (e) {
-                            setError(formatUserError(e));
+                            setError(classifyError(e));
                           } finally {
                             setStreaming(false);
                             setProgressLabel('writing…');
@@ -1392,6 +1533,12 @@ export function Story() {
                       }}
                     >
                       ✦ Draft cold open
+                    </button>
+                  )}
+                  {!hasAI && (
+                    <button className="btn-ghost" style={{ fontSize: 12, padding: '7px 12px' }}
+                      onClick={() => go('settings')}>
+                      Add a writing model in Settings
                     </button>
                   )}
                   <button className="btn-ghost" style={{ fontSize: 12, padding: '7px 12px' }} onClick={() => setDirectorSheet(true)}>
@@ -1548,22 +1695,36 @@ export function Story() {
           {notice && (
             <div style={{
               border: `1px solid ${ACCENT_RGBA.a35}`, borderRadius: 6, padding: '11px 14px',
-              background: ACCENT_RGBA.a08, display: 'flex', gap: 12, alignItems: 'flex-start'
+              background: ACCENT_RGBA.a08, display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap'
             }}>
-              <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(200,230,235,0.95)', flex: 1 }}>{notice}</div>
+              <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(200,230,235,0.95)', flex: 1, minWidth: 0 }}>{notice}</div>
+              <button className="btn-quiet" style={{ fontSize: 11, minHeight: 28 }}
+                onClick={() => { setNotice(''); go('sequel'); }}>Season review</button>
               <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 14 }} onClick={() => setNotice('')}>×</button>
             </div>
           )}
           {(episode.pendingPlan?.beats?.length ?? 0) > 0 && !streaming && (
             <div style={{
               border: '1px solid rgba(255,255,255,0.16)', borderRadius: 12, padding: '11px 14px',
-              background: 'rgba(255,255,255,0.05)', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap'
+              background: 'rgba(255,255,255,0.05)', display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap'
             }}>
               <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.8)', flex: 1, minWidth: 0 }}>
-                {episode.pendingPlan!.beats.length} line{episode.pendingPlan!.beats.length === 1 ? '' : 's'} left in the plan
-                {episode.pendingPlan!.length
-                  ? ` · resume as ${TURN_LENGTH_LABELS[episode.pendingPlan!.length]}`
-                  : ''}.
+                <div>
+                  {episode.pendingPlan!.beats.length} line{episode.pendingPlan!.beats.length === 1 ? '' : 's'} left in the plan
+                  {episode.pendingPlan!.length
+                    ? ` · resume as ${TURN_LENGTH_LABELS[episode.pendingPlan!.length]}`
+                    : ''}.
+                </div>
+                <ul style={{ margin: '8px 0 0', paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {episode.pendingPlan!.beats.slice(0, 3).map((beat, i) => (
+                    <li key={i} style={{ opacity: 0.85 }}>{pendingBeatLabel(beat, characters, guests)}</li>
+                  ))}
+                  {episode.pendingPlan!.beats.length > 3 && (
+                    <li style={{ opacity: 0.55 }}>
+                      and {episode.pendingPlan!.beats.length - 3} more
+                    </li>
+                  )}
+                </ul>
               </div>
               <button className="btn-primary" style={{ padding: '7px 12px', fontSize: 12, minHeight: 40 }}
                 onClick={() => void continuePlan()}>Continue plan</button>
@@ -1957,7 +2118,7 @@ export function Story() {
             Profile
           </button>
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); go('sequel'); }}>
-            Season wrap
+            Season review
           </button>
           <Mono style={{ fontSize: 11 }}>mood{episode.moodPinned ? ' · pinned' : ''}</Mono>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>

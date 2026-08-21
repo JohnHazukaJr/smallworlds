@@ -2,15 +2,20 @@ import { describe, expect, it } from 'vitest';
 import { textMatchScore } from './engine';
 import {
   buildCharacterSystemPrompt,
+  buildNarrationBeatMessages,
+  buildNarratorSystemPrompt,
   compressOmittedTurns,
+  directorSystemPrompt,
   DIRECTOR_FACT_CAP,
   DIRECTOR_THREAD_CAP,
   DIRECTOR_TRANSCRIPT_TURNS,
   directorUserPrompt,
   type PromptContext
 } from './prompts';
+import { inferContextWindowTokens, promptCharBudget } from './contextBudget';
+import { isContextOverflowError } from './client';
 import { DEFAULT_AI } from '../worldOps';
-import type { CalendarEvent, Character, Episode, Season, Turn, World } from '../types';
+import type { CalendarEvent, Character, Episode, Location, Season, Turn, World } from '../types';
 
 const npc = (id: string, name: string, extras: Partial<Character> = {}): Character => ({
   id, worldId: 'w', name, role: 'registrar', age: '', appearance: '', mannerisms: '', summary: 'Keeps the books.',
@@ -28,7 +33,7 @@ const world = (): World => ({
   bible: 'A coastal city of ledgers.',
   hue: 200,
   visibility: 'private',
-  ai: { ...DEFAULT_AI },
+  ai: { ...DEFAULT_AI, narratorRules: ['Never describe the sea as wine-dark.'] },
   proseModel: null,
   utilityModel: null,
   activeSeasonId: 's',
@@ -57,8 +62,17 @@ const season = (): Season => ({
   updatedAt: 0
 });
 
+const loc = (): Location => ({
+  id: 'loc1', worldId: 'w', name: 'Harbour office', tagline: 'public desk', hue: 0,
+  summary: 'A cramped registrar.', atmosphere: 'salt-rot wood and wet wool',
+  features: '', history: 'LONG_HISTORY_SHOULD_DROP_ON_TIGHT', inhabitants: '', secrets: '',
+  currentState: 'Crowded.', rules: ['No blades past the rail.'], customInstructions: '',
+  createdAt: 0, updatedAt: 0
+});
+
 const episode = (): Episode => ({
   id: 'e', seasonId: 's', worldId: 'w', number: 2, title: '', location: 'Harbour office',
+  locationId: 'loc1',
   castIds: ['c1'], guests: [], wrap: null, storyDay: 12, status: 'active', createdAt: 0, updatedAt: 0
 });
 
@@ -75,7 +89,7 @@ function ctx(partial: Partial<PromptContext> = {}): PromptContext {
     season: season(),
     episode: episode(),
     characters: cast,
-    locations: [],
+    locations: [loc()],
     continuity: [],
     threads: [],
     turns: [],
@@ -150,5 +164,131 @@ describe('director prompt budgets', () => {
     expect(user).toMatch(/Harbour Feast|Calendar due/i);
     // Oldest packed turns beyond the director window should not all appear.
     expect(user.includes('unique-token-0')).toBe(false);
+  });
+
+  it('packs director transcript under a tight totalCap', () => {
+    const turns: Turn[] = Array.from({ length: 40 }, (_, i) => ({
+      id: `t${i}`,
+      episodeId: 'e',
+      worldId: 'w',
+      role: 'narrator' as const,
+      mode: null,
+      text: `Turn ${i} unique-token-${i} ` + 'y'.repeat(800),
+      createdAt: i
+    }));
+    const uncapped = directorUserPrompt(ctx({ turns }), 'speak', 'Hello?');
+    const capped = directorUserPrompt(ctx({ turns }), 'speak', 'Hello?', { totalCap: 14_000 });
+    expect(capped.length).toBeLessThan(uncapped.length);
+    expect(capped).toMatch(/unique-token-39/);
+  });
+});
+
+describe('beat-scoped character layers', () => {
+  const fat = (id: string, name: string): Character => npc(id, name, {
+    appearance: `${name} appearance mark`,
+    mannerisms: `${name} mannerism tic`,
+    backstory: `${name} UNIQUE_BACKSTORY never for narrator`,
+    exampleLines: [`"${name} UNIQUE_EXAMPLE"`],
+    desires: `${name} UNIQUE_DESIRE`,
+    fears: `${name} UNIQUE_FEAR`,
+    secrets: `${name} UNIQUE_SECRET`,
+    speechStyle: `${name} drawl`,
+    anchors: [`${name} never kneels`],
+    state: { goal: `${name} UNIQUE_GOAL`, emotion: 'wary', location: 'office', condition: '' }
+  });
+
+  it('gives narrator presence for the room and psyche only for focus', () => {
+    const names = ['Ada', 'Ben', 'Cora', 'Dax', 'Eve', 'Fay'] as const;
+    const characters = names.map((n, i) => fat(`c${i + 1}`, n));
+    const prompt = buildNarratorSystemPrompt(
+      ctx({
+        characters,
+        episode: { ...episode(), castIds: characters.map((c) => c.id) }
+      }),
+      { focusIds: ['c1'] }
+    );
+    for (const n of names) {
+      expect(prompt).toContain(`${n} appearance mark`);
+      expect(prompt).toContain(`${n} mannerism tic`);
+      expect(prompt).not.toContain(`${n} UNIQUE_BACKSTORY`);
+      expect(prompt).not.toContain(`${n} UNIQUE_EXAMPLE`);
+    }
+    expect(prompt).toContain('Ada UNIQUE_DESIRE');
+    expect(prompt).not.toContain('Ben UNIQUE_DESIRE');
+    expect(prompt).toContain('Ada UNIQUE_GOAL');
+    expect(prompt).toContain('Ben UNIQUE_GOAL');
+    expect(prompt).toContain('Never describe the sea as wine-dark.');
+    expect(prompt).toContain('salt-rot wood and wet wool');
+    expect(prompt).toContain('Against generic prose');
+    expect(prompt).toMatch(/named mannerism|physical tic/i);
+  });
+
+  it('gives speak agent voice for self and presence for others', () => {
+    const ada = fat('c1', 'Ada');
+    const ben = fat('c2', 'Ben');
+    const prompt = buildCharacterSystemPrompt(
+      ctx({
+        characters: [ada, ben],
+        episode: { ...episode(), castIds: ['c1', 'c2'] }
+      }),
+      ada
+    );
+    expect(prompt).toContain('Ada UNIQUE_EXAMPLE');
+    expect(prompt).toContain('Ada UNIQUE_BACKSTORY');
+    expect(prompt).toContain('Ben appearance mark');
+    expect(prompt).not.toContain('Ben UNIQUE_EXAMPLE');
+    expect(prompt).not.toContain('Ben UNIQUE_BACKSTORY');
+    expect(prompt).toContain('Against generic prose');
+  });
+
+  it('keeps atmosphere and rules on a tight pack', () => {
+    const prompt = buildNarratorSystemPrompt(ctx(), { pack: 'tight', focusIds: ['c1'] });
+    expect(prompt).toContain('salt-rot wood and wet wool');
+    expect(prompt).toContain('No blades past the rail.');
+    expect(prompt).toContain('Never describe the sea as wine-dark.');
+    expect(prompt).not.toContain('LONG_HISTORY_SHOULD_DROP_ON_TIGHT');
+  });
+});
+
+describe('context window heuristics', () => {
+  it('defaults unknown models to 32k', () => {
+    expect(inferContextWindowTokens('some-local-chat')).toBe(32_768);
+  });
+
+  it('recognizes gemini, claude, and suffix windows', () => {
+    expect(inferContextWindowTokens('gemini-2.5-flash')).toBe(1_048_576);
+    expect(inferContextWindowTokens('claude-haiku-4-5')).toBe(200_000);
+    expect(inferContextWindowTokens('my-model-8k')).toBe(8 * 1024);
+  });
+
+  it('does not shrink output maxTokens into the prompt budget math below the floor', () => {
+    expect(promptCharBudget('unknown', 1100)).toBeGreaterThanOrEqual(12_000);
+  });
+});
+
+describe('isContextOverflowError', () => {
+  it('detects common provider overflow copy', () => {
+    expect(isContextOverflowError(new Error('context_length_exceeded'))).toBe(true);
+    expect(isContextOverflowError(new Error('This model\'s maximum context length is 8192'))).toBe(true);
+    expect(isContextOverflowError(new Error('prompt is too long'))).toBe(true);
+    expect(isContextOverflowError(new Error('rate limited'))).toBe(false);
+  });
+});
+
+describe('narration brief contract', () => {
+  it('asks the director for named bodies and one sensory job', () => {
+    const sys = directorSystemPrompt('speak', true, 'scene');
+    expect(sys).toMatch(/who moves/i);
+    expect(sys).toMatch(/sensory job/i);
+    expect(sys).toMatch(/never a weather catalogue/i);
+    expect(sys).toMatch(/want or friction/i);
+  });
+
+  it('tells the narrator not to recap and to use named bodies', () => {
+    const msgs = buildNarrationBeatMessages([], [], 'Ada crosses to the desk.', 'scene');
+    const last = msgs.at(-1)?.content ?? '';
+    expect(last).toMatch(/named bodies/i);
+    expect(last).toMatch(/do not recap/i);
+    expect(last).toContain('Ada crosses to the desk.');
   });
 });

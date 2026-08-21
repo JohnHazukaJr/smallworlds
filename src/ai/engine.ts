@@ -17,7 +17,8 @@ import {
   buildEpisodePlotTargets, buildNextSeasonPlotTargets, calendarPatch, emptyCharacter, emptyLocation,
   formatEpisodeDateRange, formatStoryDate, nextEpisode, pendingPlotTargets, worldCalendar
 } from '../worldOps';
-import { AIError, streamChat, type ChatMessage, type StreamRequest } from './client';
+import { AIError, streamChat, isContextOverflowError, type ChatMessage, type StreamRequest } from './client';
+import { promptCharBudget } from './contextBudget';
 import { applyDeliveryTone, parseDeliveryTone } from './deliveryTone';
 import { hasSpokenDialogue, normalizeSpeakText } from './dialogueFormat';
 import {
@@ -34,10 +35,14 @@ import {
   directorUserPrompt,
   episodeContextPressure,
   episodeHistoryChars,
+  focusFromBeat,
   HISTORY_CHAR_BUDGET,
+  injectedSpeakBriefForCharacter,
+  injectedSpeakBriefForGuest,
   packTurnsDetailed,
   resolveSpeakerName,
   type DirectorBeat,
+  type PromptBuildOpts,
   narrationBeatTokens,
   planCapsForLength
 } from './prompts';
@@ -203,6 +208,21 @@ async function streamNarrationComplete(opts: {
   return acc.trim();
 }
 
+/** Retry once with a tight lore pack — never shortens the scene itself. */
+async function withOverflowRetry<T>(
+  run: (pack: PromptBuildOpts) => Promise<T>,
+  onNotice?: (message: string) => void
+): Promise<T> {
+  try {
+    return await run({ pack: 'normal' });
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') throw e;
+    if (!isContextOverflowError(e)) throw e;
+    onNotice?.('Prompt was too large for this model — sent a tighter pack of lore, not a shorter scene.');
+    return run({ pack: 'tight', skipOmittedDigest: true });
+  }
+}
+
 async function loadContext(world: World, season: Season, episode: Episode) {
   const [characters, locations, continuity, threads, turns, seasonEpisodes, calendarEvents] = await Promise.all([
     db.characters.where('worldId').equals(world.id).toArray(),
@@ -301,31 +321,57 @@ function pickReplySpeaker(
   playerText: string,
   prefer?: { characterId?: string; guestId?: string }
 ): DirectorBeat | null {
-  const brief = 'Respond directly to the player\'s last move — answer aloud.';
+  const briefForCast = (c: Character) => injectedSpeakBriefForCharacter(c);
+  const briefForGuest = (g: EpisodeGuest) => injectedSpeakBriefForGuest(g);
   if (prefer?.characterId) {
     const pinned = inScene.find((c) => c.id === prefer.characterId);
-    if (pinned) return { type: 'speak', characterId: pinned.id, brief };
+    if (pinned) return { type: 'speak', characterId: pinned.id, brief: briefForCast(pinned) };
   }
   if (prefer?.guestId) {
     const pinned = guests.find((g) => g.id === prefer.guestId);
-    if (pinned) return { type: 'speak', guestId: pinned.id, brief };
+    if (pinned) return { type: 'speak', guestId: pinned.id, brief: briefForGuest(pinned) };
   }
   const lower = playerText.toLowerCase();
   const mentionedCast = inScene.find((c) => lower.includes(c.name.toLowerCase()));
   if (mentionedCast) {
-    return { type: 'speak', characterId: mentionedCast.id, brief };
+    return { type: 'speak', characterId: mentionedCast.id, brief: briefForCast(mentionedCast) };
   }
   const mentionedGuest = guests.find((g) => lower.includes(g.name.toLowerCase()));
   if (mentionedGuest) {
-    return { type: 'speak', guestId: mentionedGuest.id, brief };
+    return { type: 'speak', guestId: mentionedGuest.id, brief: briefForGuest(mentionedGuest) };
   }
   if (inScene[0]) {
-    return { type: 'speak', characterId: inScene[0].id, brief };
+    return { type: 'speak', characterId: inScene[0].id, brief: briefForCast(inScene[0]) };
   }
   if (guests[0]) {
-    return { type: 'speak', guestId: guests[0].id, brief };
+    return { type: 'speak', guestId: guests[0].id, brief: briefForGuest(guests[0]) };
   }
   return null;
+}
+
+/** Fallback narration when the director fails — names the room, the move, and who is on stage. */
+export function directorFallbackNarrationBrief(opts: {
+  mode: ComposeMode;
+  playerText: string;
+  location: string;
+  inScene: Character[];
+}): string {
+  const move = opts.playerText.trim().replace(/\s+/g, ' ').slice(0, 160);
+  const loc = opts.location.trim() || 'the current room';
+  const onStage = opts.inScene.slice(0, 2).map((c) => {
+    const want = c.state?.goal?.trim();
+    const feel = c.state?.emotion?.trim();
+    const bits = [feel, want ? `wants ${want}` : ''].filter(Boolean).join(', ');
+    return bits ? `${c.name} (${bits})` : c.name;
+  });
+  const bodies = onStage.length > 0 ? ` On stage: ${onStage.join('; ')}.` : '';
+  const moveBit = move
+    ? ` Continue from the player's ${opts.mode}: "${move}".`
+    : ' Continue the scene.';
+  return (
+    `${moveBit} Location: ${loc}.${bodies} ` +
+    'Show named bodies and one sensory job; leave space for the player.'
+  ).trim();
 }
 
 function ensurePlayerReplySpeak(
@@ -649,6 +695,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
   // Director plans cast/guest changes + ordered narration / speak beats (utility model).
   // Resume path skips planning and runs leftover beats from a prior Stop/error.
   let beats: DirectorBeat[];
+  let enterIds: string[] = [];
   if (opts.resumeBeats && opts.resumeBeats.length > 0) {
     progress('continuing plan…');
     beats = opts.resumeBeats;
@@ -661,7 +708,8 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         characterId: opts.preferCharacterId,
         guestId: opts.preferGuestId
       };
-      const planDirector = () => utilityJson<{
+      const directorCap = promptCharBudget(utilityModelFor(opts.world).model, 1400);
+      const planDirector = (pack: PromptBuildOpts['pack'] = 'normal') => utilityJson<{
         castDelta?: { enter?: string[]; leave?: string[]; introduce?: IntroduceSpec[] };
         beats: Array<{ type?: string; brief?: string; characterId?: string; guestId?: string }>;
       }>(
@@ -669,18 +717,35 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         directorSystemPrompt(opts.mode, speakersPresent, opts.length),
         directorUserPrompt(ctx, opts.mode, playerText, {
           preferCharacterId: opts.preferCharacterId,
-          preferGuestId: opts.preferGuestId
+          preferGuestId: opts.preferGuestId,
+          pack,
+          totalCap: directorCap
         }),
         1400,
         opts.signal
       );
       let plan: Awaited<ReturnType<typeof planDirector>>;
       try {
-        plan = await planDirector();
+        plan = await planDirector('normal');
       } catch (first) {
         if ((first as Error).name === 'AbortError') asWriteAbort(first, beatsCompleted);
-        logAppError(first, 'director plan (retrying)');
-        plan = await planDirector();
+        if (isContextOverflowError(first)) {
+          opts.onNotice?.('Prompt was too large for this model — sent a tighter pack of lore, not a shorter scene.');
+          plan = await planDirector('tight');
+        } else {
+          logAppError(first, 'director plan (retrying)');
+          try {
+            plan = await planDirector('normal');
+          } catch (second) {
+            if ((second as Error).name === 'AbortError') asWriteAbort(second, beatsCompleted);
+            if (isContextOverflowError(second)) {
+              opts.onNotice?.('Prompt was too large for this model — sent a tighter pack of lore, not a shorter scene.');
+              plan = await planDirector('tight');
+            } else {
+              throw second;
+            }
+          }
+        }
       }
       const nextCast = applyCastDelta(
         castIds, ctx.characters, plan.castDelta, opts.preferCharacterId
@@ -721,6 +786,9 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         plan, inScene, activeGuests(ctx.episode), guestDelta.nameToId, opts.mode, playerText,
         opts.length, prefer
       );
+      enterIds = (plan.castDelta?.enter ?? [])
+        .map((raw) => resolveNpcId(raw, ctx.characters))
+        .filter((id): id is string => !!id);
       await clearPendingPlan(opts.episode.id);
     } catch (e) {
       if ((e as Error).name === 'AbortError') {
@@ -738,7 +806,12 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       );
       const fallback: DirectorBeat[] = [{
         type: 'narration',
-        brief: 'Continue the scene with atmosphere and physical action; leave space for the player.'
+        brief: directorFallbackNarrationBrief({
+          mode: opts.mode,
+          playerText,
+          location: ctx.episode.location,
+          inScene
+        })
       }];
       beats = ensurePlayerReplySpeak(
         fallback, opts.mode, playerText, inScene, activeGuests(ctx.episode),
@@ -762,18 +835,28 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         const meta: StreamMeta = { role: 'narrator' };
         progress('narrating…');
         opts.onDelta('', meta);
-        const narrSystem = buildNarratorSystemPrompt(ctx);
-        const narrText = await streamNarrationComplete({
-          provider, model,
-          system: narrSystem,
-          messages: buildNarrationBeatMessages(
-            ctx.turns, ctx.characters, beat.brief, opts.length, sceneGuests(), ctx.episode, narrSystem.length
-          ),
-          length: opts.length,
-          signal: opts.signal,
-          onProgress: progress,
-          onAccumulated: (acc) => opts.onDelta(acc, meta)
-        });
+        const narrCap = promptCharBudget(model, narrationBeatTokens(opts.length));
+        const narrText = await withOverflowRetry(async (pack) => {
+          const focus = focusFromBeat(beat, ctx.characters, sceneGuests(), enterIds);
+          const narrSystem = buildNarratorSystemPrompt(ctx, {
+            ...pack,
+            focusIds: focus.characterIds,
+            focusGuestIds: focus.guestIds
+          });
+          return streamNarrationComplete({
+            provider, model,
+            system: narrSystem,
+            messages: buildNarrationBeatMessages(
+              ctx.turns, ctx.characters, beat.brief, opts.length, sceneGuests(), ctx.episode,
+              narrSystem.length,
+              { totalCap: narrCap, skipOmittedDigest: pack.skipOmittedDigest || pack.pack === 'tight' }
+            ),
+            length: opts.length,
+            signal: opts.signal,
+            onProgress: progress,
+            onAccumulated: (acc) => opts.onDelta(acc, meta)
+          });
+        }, opts.onNotice);
         if (!narrText) {
           opts.onDelta('', meta);
           continue;
@@ -796,20 +879,34 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         const meta: StreamMeta = { role: 'character', guestId: guest.id };
         progress(`${guest.name} speaking…`);
         opts.onDelta('', meta);
-        const guestSystem = buildGuestSystemPrompt(ctx, guest);
-        const cleaned = await streamSpeakComplete({
-          provider, model,
-          system: guestSystem,
-          messages: buildGuestSpeakMessages(
-            ctx.turns, ctx.characters, guest, beat.brief, sceneGuests(),
-            { ...speakOpts, systemChars: guestSystem.length, length: opts.length }
-          ),
-          length: opts.length,
-          signal: opts.signal,
-          requireDialogue,
-          onProgress: progress,
-          onAccumulated: (acc) => opts.onDelta(acc, meta)
-        });
+        const speakCap = promptCharBudget(model, characterSpeakTokens(opts.length));
+        const cleaned = await withOverflowRetry(async (pack) => {
+          const focus = focusFromBeat(beat, ctx.characters, sceneGuests(), enterIds);
+          const guestSystem = buildGuestSystemPrompt(ctx, guest, {
+            ...pack,
+            focusIds: focus.characterIds,
+            focusGuestIds: focus.guestIds
+          });
+          return streamSpeakComplete({
+            provider, model,
+            system: guestSystem,
+            messages: buildGuestSpeakMessages(
+              ctx.turns, ctx.characters, guest, beat.brief, sceneGuests(),
+              {
+                ...speakOpts,
+                systemChars: guestSystem.length,
+                length: opts.length,
+                totalCap: speakCap,
+                skipOmittedDigest: pack.skipOmittedDigest || pack.pack === 'tight'
+              }
+            ),
+            length: opts.length,
+            signal: opts.signal,
+            requireDialogue,
+            onProgress: progress,
+            onAccumulated: (acc) => opts.onDelta(acc, meta)
+          });
+        }, opts.onNotice);
         if (!cleaned) {
           opts.onDelta('', meta);
           continue;
@@ -834,20 +931,34 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       const meta: StreamMeta = { role: 'character', characterId: speaking.id };
       progress(`${speaking.name} speaking…`);
       opts.onDelta('', meta);
-      const charSystem = buildCharacterSystemPrompt(ctx, speaking);
-      const cleaned = await streamSpeakComplete({
-        provider, model,
-        system: charSystem,
-        messages: buildCharacterSpeakMessages(
-          ctx.turns, ctx.characters, speaking, beat.brief, sceneGuests(),
-          { ...speakOpts, systemChars: charSystem.length, length: opts.length }
-        ),
-        length: opts.length,
-        signal: opts.signal,
-        requireDialogue,
-        onProgress: progress,
-        onAccumulated: (acc) => opts.onDelta(acc, meta)
-      });
+      const speakCap = promptCharBudget(model, characterSpeakTokens(opts.length));
+      const cleaned = await withOverflowRetry(async (pack) => {
+        const focus = focusFromBeat(beat, ctx.characters, sceneGuests(), enterIds);
+        const charSystem = buildCharacterSystemPrompt(ctx, speaking, {
+          ...pack,
+          focusIds: focus.characterIds,
+          focusGuestIds: focus.guestIds
+        });
+        return streamSpeakComplete({
+          provider, model,
+          system: charSystem,
+          messages: buildCharacterSpeakMessages(
+            ctx.turns, ctx.characters, speaking, beat.brief, sceneGuests(),
+            {
+              ...speakOpts,
+              systemChars: charSystem.length,
+              length: opts.length,
+              totalCap: speakCap,
+              skipOmittedDigest: pack.skipOmittedDigest || pack.pack === 'tight'
+            }
+          ),
+          length: opts.length,
+          signal: opts.signal,
+          requireDialogue,
+          onProgress: progress,
+          onAccumulated: (acc) => opts.onDelta(acc, meta)
+        });
+      }, opts.onNotice);
       if (!cleaned) {
         opts.onDelta('', meta);
         continue;
@@ -962,21 +1073,26 @@ export async function regenerateBeat(opts: {
     const meta: StreamMeta = { role: 'narrator' };
     progress('re-rolling narration…');
     opts.onDelta('', meta);
-    const narrSystem = buildNarratorSystemPrompt(ctx);
     const brief =
       'Rewrite this narration beat with fresh wording and the same dramatic function. ' +
       'Do not jump ahead of the scene. Prior wording for reference (do not copy):\n' +
       opts.turn.text.slice(0, 900);
-    const narrText = await streamNarrationComplete({
-      provider, model,
-      system: narrSystem,
-      messages: buildNarrationBeatMessages(
-        historyTurns, ctx.characters, brief, opts.length, sceneGuests(), ctx.episode, narrSystem.length
-      ),
-      length: opts.length,
-      signal: opts.signal,
-      onProgress: progress,
-      onAccumulated: (acc) => opts.onDelta(acc, meta)
+    const narrCap = promptCharBudget(model, narrationBeatTokens(opts.length));
+    const narrText = await withOverflowRetry(async (pack) => {
+      const narrSystem = buildNarratorSystemPrompt(ctx, pack);
+      return streamNarrationComplete({
+        provider, model,
+        system: narrSystem,
+        messages: buildNarrationBeatMessages(
+          historyTurns, ctx.characters, brief, opts.length, sceneGuests(), ctx.episode,
+          narrSystem.length,
+          { totalCap: narrCap, skipOmittedDigest: pack.skipOmittedDigest || pack.pack === 'tight' }
+        ),
+        length: opts.length,
+        signal: opts.signal,
+        onProgress: progress,
+        onAccumulated: (acc) => opts.onDelta(acc, meta)
+      });
     });
     if (!narrText) throw new AIError('Re-roll produced no narration. Try again.');
     await guardStorage(() => db.turns.update(opts.turn.id, { text: narrText, updatedAt: Date.now() }));
@@ -1004,26 +1120,45 @@ export async function regenerateBeat(opts: {
   progress(`${(guest?.name ?? speaking!.name)} re-rolling…`);
   opts.onDelta('', meta);
 
-  const cleaned = guest
-    ? await streamSpeakComplete({
+  const speakCap = promptCharBudget(model, characterSpeakTokens(opts.length));
+  const focusIds = speaking ? [speaking.id] : [];
+  const focusGuestIds = guest ? [guest.id] : [];
+  const cleaned = await withOverflowRetry(async (pack) => {
+    if (guest) {
+      const guestSystem = buildGuestSystemPrompt(ctx, guest, { ...pack, focusIds, focusGuestIds });
+      return streamSpeakComplete({
+        provider, model,
+        system: guestSystem,
+        messages: buildGuestSpeakMessages(
+          historyTurns, ctx.characters, guest, brief, sceneGuests(),
+          {
+            episode: ctx.episode,
+            systemChars: guestSystem.length,
+            length: opts.length,
+            totalCap: speakCap,
+            skipOmittedDigest: pack.skipOmittedDigest || pack.pack === 'tight'
+          }
+        ),
+        length: opts.length,
+        signal: opts.signal,
+        requireDialogue: true,
+        onProgress: progress,
+        onAccumulated: (acc) => opts.onDelta(acc, meta)
+      });
+    }
+    const charSystem = buildCharacterSystemPrompt(ctx, speaking!, { ...pack, focusIds, focusGuestIds });
+    return streamSpeakComplete({
       provider, model,
-      system: buildGuestSystemPrompt(ctx, guest),
-      messages: buildGuestSpeakMessages(
-        historyTurns, ctx.characters, guest, brief, sceneGuests(),
-        { episode: ctx.episode, systemChars: 0, length: opts.length }
-      ),
-      length: opts.length,
-      signal: opts.signal,
-      requireDialogue: true,
-      onProgress: progress,
-      onAccumulated: (acc) => opts.onDelta(acc, meta)
-    })
-    : await streamSpeakComplete({
-      provider, model,
-      system: buildCharacterSystemPrompt(ctx, speaking!),
+      system: charSystem,
       messages: buildCharacterSpeakMessages(
         historyTurns, ctx.characters, speaking!, brief, sceneGuests(),
-        { episode: ctx.episode, systemChars: 0, length: opts.length }
+        {
+          episode: ctx.episode,
+          systemChars: charSystem.length,
+          length: opts.length,
+          totalCap: speakCap,
+          skipOmittedDigest: pack.skipOmittedDigest || pack.pack === 'tight'
+        }
       ),
       length: opts.length,
       signal: opts.signal,
@@ -1031,6 +1166,7 @@ export async function regenerateBeat(opts: {
       onProgress: progress,
       onAccumulated: (acc) => opts.onDelta(acc, meta)
     });
+  });
 
   if (!cleaned) throw new AIError('Re-roll produced no dialogue. Try again.');
   await guardStorage(() => db.turns.update(opts.turn.id, { text: cleaned, updatedAt: Date.now() }));
@@ -1319,14 +1455,99 @@ export async function applyLiveCharacterStateUpdates(
 }
 
 /**
- * File a minimal previously-on wrap so skipped reviews still leave prior-episode memory.
- * Does not invent facts, threads, or relationship updates — only a recap (+ optional beats).
+ * File a previously-on wrap when the user skips full review.
+ * Recap always lands; a thin facts/threads/state pass runs after and fails open.
+ */
+export const SOFT_WRAP_FACT_CAP = 6;
+export const SOFT_WRAP_THREAD_CAP = 4;
+
+export interface SoftWrapExtract {
+  facts: string[];
+  threads: string[];
+  characterUpdates: EpisodeWrapCharacterUpdate[];
+}
+
+/** Cap extract rows and drop updates for people not in the scene. */
+export function capSoftWrapExtract(
+  raw: {
+    facts?: string[];
+    threads?: string[];
+    characterUpdates?: Array<{
+      name?: string;
+      goal?: string;
+      emotion?: string;
+      location?: string;
+      condition?: string;
+    }>;
+  },
+  inSceneNames: Set<string>
+): SoftWrapExtract {
+  const facts = (raw.facts ?? []).map((f) => f.trim()).filter(Boolean).slice(0, SOFT_WRAP_FACT_CAP);
+  const threads = (raw.threads ?? []).map((t) => t.trim()).filter(Boolean).slice(0, SOFT_WRAP_THREAD_CAP);
+  const characterUpdates: EpisodeWrapCharacterUpdate[] = [];
+  for (const u of raw.characterUpdates ?? []) {
+    const name = (u.name ?? '').trim();
+    if (!name || !inSceneNames.has(name.toLowerCase())) continue;
+    characterUpdates.push({
+      name,
+      goal: u.goal?.trim() || undefined,
+      emotion: u.emotion?.trim() || undefined,
+      location: u.location?.trim() || undefined,
+      condition: u.condition?.trim() || undefined
+    });
+  }
+  return { facts, threads, characterUpdates };
+}
+
+export async function fileSoftWrapContinuity(
+  world: World,
+  season: Season,
+  episode: Episode,
+  extract: SoftWrapExtract
+): Promise<void> {
+  const now = Date.now();
+  if (extract.facts.length > 0) {
+    await db.continuity.bulkAdd(
+      extract.facts.map((text) => ({
+        id: uid(), worldId: world.id, seasonId: season.id, episodeId: episode.id,
+        text, source: 'auto' as const, createdAt: now
+      }))
+    );
+  }
+  if (extract.threads.length > 0) {
+    await db.threads.bulkAdd(
+      extract.threads.map((text) => ({
+        id: uid(), worldId: world.id, seasonId: season.id, text,
+        openedLabel: `opened S${season.number} · E${episode.number}`,
+        status: 'open' as const, createdAt: now
+      }))
+    );
+  }
+  if (extract.characterUpdates.length === 0) return;
+  const cast = await db.characters.where('worldId').equals(world.id).toArray();
+  await applyLiveCharacterStateUpdates(world.id, cast, extract.characterUpdates);
+}
+
+/** True when Skip already wrote a recap — retry must not re-file continuity. */
+export function softWrapAlreadyFiled(episode: Pick<Episode, 'wrap'>): boolean {
+  return !!(episode.wrap?.recap?.trim());
+}
+
+/**
+ * Minimal wrap + optional continuity for Skip.
+ * Does not call nextEpisode — Story advances after this returns.
+ * Full analyze path uses commitEpisodeWrap, which advances itself.
+ * Idempotent: if wrap.recap is already filed, skips continuity re-file (safe retry after a failed advance).
  */
 export async function commitSoftEpisodeWrap(
   world: World,
   season: Season,
-  episode: Episode
+  episode: Episode,
+  opts?: { onNotice?: (message: string) => void }
 ): Promise<EpisodeWrap> {
+  if (softWrapAlreadyFiled(episode) && episode.wrap) {
+    return episode.wrap;
+  }
   const turns = await db.turns.where('episodeId').equals(episode.id).sortBy('createdAt');
   const characters = await db.characters.where('worldId').equals(world.id).toArray();
   const guests = episode.guests ?? [];
@@ -1380,6 +1601,45 @@ export async function commitSoftEpisodeWrap(
     wrap,
     updatedAt: Date.now()
   });
+
+  const inScene = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
+  const inSceneNames = new Set(inScene.map((c) => c.name.trim().toLowerCase()).filter(Boolean));
+  try {
+    const digest = compressOmittedTurns(
+      turns.length > 12 ? turns.slice(0, -4) : turns,
+      characters,
+      guests
+    );
+    const source = (digest.trim() || recap).slice(0, 14000);
+    const result = await utilityJson<{
+      facts?: string[];
+      threads?: string[];
+      characterUpdates?: Array<{
+        name?: string;
+        goal?: string;
+        emotion?: string;
+        location?: string;
+        condition?: string;
+      }>;
+    }>(
+      world,
+      'You are a continuity editor filing a skipped episode wrap. Respond with JSON only: ' +
+      '{"facts":["..."],"threads":["..."],"characterUpdates":[{"name":"<exact in-scene name>","goal":"","emotion":"","location":"","condition":""}]}. ' +
+      `At most ${SOFT_WRAP_FACT_CAP} durable facts and ${SOFT_WRAP_THREAD_CAP} unresolved threads. ` +
+      'Facts must still be true next episode (revelations, injuries, promises, debts). ' +
+      'characterUpdates: only named in-scene NPCs; omit empties. Do not invent people, relationships, or calendar hits.',
+      `World: ${world.title}. Season ${season.number}, episode ${episode.number}.\n` +
+      `In-scene cast: ${inScene.map((c) => c.name).join(', ') || '(none)'}\n\n` +
+      `Recap:\n${recap}\n\nEpisode material:\n${source}`,
+      1400
+    );
+    const capped = capSoftWrapExtract(result, inSceneNames);
+    await fileSoftWrapContinuity(world, season, episode, capped);
+  } catch (e) {
+    logAppError(e, 'soft wrap continuity');
+    opts?.onNotice?.('Couldn’t file extra memory on skip — recap was kept.');
+  }
+
   return wrap;
 }
 

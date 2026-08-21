@@ -1,15 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { matchPlotTargets, normalizeBeats } from './engine';
+import { matchPlotTargets, normalizeBeats, capSoftWrapExtract, directorFallbackNarrationBrief, softWrapAlreadyFiled } from './engine';
 import {
   episodeContextPressure,
   episodeHistoryChars,
   HISTORY_CHAR_BUDGET,
+  injectedSpeakBrief,
+  injectedSpeakBriefForCharacter,
   packTurnsDetailed,
+  pendingBeatLabel,
   selectDirectorFacts,
   selectDirectorThreads,
   selectFactsPinnedFirst,
   selectThreadsPinnedFirst
 } from './prompts';
+import { SPEAK_FORMAT_RULES } from './dialogueFormat';
 import type { Character, ContinuityFact, EpisodeGuest, OpenThread, PlotTarget, Turn } from '../types';
 
 const npc = (id: string, name: string): Character => ({
@@ -59,6 +63,10 @@ describe('normalizeBeats', () => {
     );
     expect(beats.some((b) => b.type === 'speak')).toBe(true);
     expect(beats[0].type).toBe('speak');
+    if (beats[0].type === 'speak' && 'characterId' in beats[0]) {
+      expect(beats[0].brief).toMatch(/Answer the player's last move as Ada/i);
+      expect(beats[0].brief).not.toBe("Answer the player's last move; stay in character.");
+    }
   });
 
   it('injects a speak reply when player used play (speak+act)', () => {
@@ -149,6 +157,14 @@ describe('packTurnsDetailed / pressure', () => {
     expect(episodeHistoryChars(kept)).toBeLessThanOrEqual(HISTORY_CHAR_BUDGET + 3000);
   });
 
+  it('drops the 20k history floor when the system frame ate the window', () => {
+    const turns = mk(20, 3000);
+    const { kept } = packTurnsDetailed(turns, 90_000, 100_000);
+    expect(episodeHistoryChars(kept)).toBeLessThan(20_000);
+    expect(kept.length).toBeGreaterThanOrEqual(4);
+    expect(kept.at(-1)?.id).toBe(turns.at(-1)?.id);
+  });
+
   it('escalates pressure near budget', () => {
     expect(episodeContextPressure(HISTORY_CHAR_BUDGET * 0.2)).toBe('ok');
     expect(episodeContextPressure(HISTORY_CHAR_BUDGET * 0.4)).toBe('warm');
@@ -227,5 +243,119 @@ describe('selectDirectorFacts / Threads pin', () => {
     }));
     const selected = selectThreadsPinnedFirst(threads, ['E2'], 12);
     expect(selected.some((t) => t.id === 't15')).toBe(true);
+  });
+});
+
+describe('directorFallbackNarrationBrief', () => {
+  it('names the player move, location, and an on-stage want', () => {
+    const brief = directorFallbackNarrationBrief({
+      mode: 'speak',
+      playerText: 'Where is the ledger?',
+      location: 'Harbour office',
+      inScene: [npc('c1', 'Ada')]
+    });
+    expect(brief).toContain('Where is the ledger?');
+    expect(brief).toContain('Harbour office');
+    expect(brief).toContain('Ada');
+    expect(brief).toMatch(/sensory job/i);
+  });
+});
+
+describe('capSoftWrapExtract', () => {
+  it('keeps in-scene facts and drops off-scene updates', () => {
+    const capped = capSoftWrapExtract({
+      facts: ['The ledger is forged.', 'Ada bought a bun.', 'x', 'y', 'z', 'a', 'b', 'too many'],
+      threads: ['Who paid Ivo?', 't2', 't3', 't4', 't5'],
+      characterUpdates: [
+        { name: 'Ada', goal: 'Hide the books', emotion: 'tight' },
+        { name: 'Offstage Mira', goal: 'should drop' }
+      ]
+    }, new Set(['ada']));
+    expect(capped.facts).toHaveLength(6);
+    expect(capped.facts[0]).toBe('The ledger is forged.');
+    expect(capped.threads).toHaveLength(4);
+    expect(capped.characterUpdates).toEqual([
+      { name: 'Ada', goal: 'Hide the books', emotion: 'tight', location: undefined, condition: undefined }
+    ]);
+  });
+});
+
+describe('injectedSpeakBrief', () => {
+  it('carries voice, mood, want, and a mannerism tic', () => {
+    const brief = injectedSpeakBrief({
+      name: 'Ada',
+      speechStyle: 'Clipped harbour clerk cadence',
+      mannerisms: 'Taps the ledger twice. Never sits fully.',
+      emotion: 'tight',
+      goal: 'Hide the forged entry',
+      anchor: 'Never lies in writing'
+    });
+    expect(brief).toContain('Ada');
+    expect(brief).toMatch(/voice:.*Clipped harbour/i);
+    expect(brief).toMatch(/mood:.*tight/i);
+    expect(brief).toMatch(/pushing:.*Hide the forged/i);
+    expect(brief).toMatch(/one tic:.*Taps the ledger/i);
+    expect(brief).toMatch(/hold:.*Never lies/i);
+    expect(brief).toMatch(/do not soften/i);
+  });
+
+  it('includes character live state via helper', () => {
+    const ada = npc('c1', 'Ada');
+    ada.speechStyle = 'Dry';
+    ada.state = { goal: 'Keep the books', emotion: 'cold', location: 'Quay', condition: '' };
+    ada.anchors = ['Never smiles for free'];
+    expect(injectedSpeakBriefForCharacter(ada)).toMatch(/Keep the books/);
+    expect(injectedSpeakBriefForCharacter(ada)).toMatch(/Never smiles/);
+  });
+});
+
+describe('SPEAK_FORMAT_RULES immersion', () => {
+  it('does not train a shy-dimples default register', () => {
+    expect(SPEAK_FORMAT_RULES).not.toMatch(/dimples/i);
+    expect(SPEAK_FORMAT_RULES).not.toMatch(/smiled shyly/i);
+    expect(SPEAK_FORMAT_RULES).toMatch(/ledger/i);
+  });
+});
+
+describe('softWrapAlreadyFiled', () => {
+  it('is true only when a recap is already on the episode', () => {
+    expect(softWrapAlreadyFiled({ wrap: null })).toBe(false);
+    expect(softWrapAlreadyFiled({ wrap: { recap: '', beats: [], guestEffects: [] } })).toBe(false);
+    expect(softWrapAlreadyFiled({
+      wrap: { recap: 'Previously on.', beats: [], guestEffects: [] }
+    })).toBe(true);
+  });
+});
+
+describe('pendingBeatLabel', () => {
+  const cast = [npc('c1', 'Ada')];
+  const guests: EpisodeGuest[] = [{ id: 'g1', name: 'Clerk', brief: 'tired', voice: '' }];
+
+  it('uses the narration brief and resolves speak names', () => {
+    expect(pendingBeatLabel({ type: 'narration', brief: 'Rain on glass.' }, cast, guests))
+      .toBe('Rain on glass.');
+    expect(pendingBeatLabel({ type: 'speak', characterId: 'c1', brief: 'greet coldly' }, cast, guests))
+      .toBe('Ada: greet coldly');
+    expect(pendingBeatLabel({ type: 'speak', guestId: 'g1', brief: 'interrupt' }, cast, guests))
+      .toBe('Clerk: interrupt');
+  });
+
+  it('falls back when ids are missing and clips the final label', () => {
+    expect(pendingBeatLabel({ type: 'speak', characterId: 'gone', brief: 'hello' }, cast, guests))
+      .toBe('Someone: hello');
+    expect(pendingBeatLabel({ type: 'speak', guestId: 'gone', brief: 'hello' }, cast, guests))
+      .toBe('Someone: hello');
+    const long = 'x'.repeat(90);
+    const narration = pendingBeatLabel({ type: 'narration', brief: long }, cast, guests);
+    expect(narration.endsWith('…')).toBe(true);
+    expect(narration.length).toBe(80);
+    const speak = pendingBeatLabel(
+      { type: 'speak', characterId: 'c1', brief: 'y'.repeat(90) },
+      cast,
+      guests
+    );
+    expect(speak.startsWith('Ada:')).toBe(true);
+    expect(speak.endsWith('…')).toBe(true);
+    expect(speak.length).toBe(80);
   });
 });

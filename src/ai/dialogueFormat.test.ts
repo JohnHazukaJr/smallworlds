@@ -3,8 +3,16 @@ import {
   groupSpeakParagraphs,
   parseInlineEmphasis,
   parseSpeakSegments,
-  previewSpeakText
+  previewSpeakText,
+  SPEAK_FORMAT_RULES
 } from './dialogueFormat';
+
+describe('SPEAK_FORMAT_RULES', () => {
+  it('uses contrasting concrete examples instead of soft RP stock', () => {
+    expect(SPEAK_FORMAT_RULES).not.toMatch(/dimples|shyly/i);
+    expect(SPEAK_FORMAT_RULES).toMatch(/ledger|salt/i);
+  });
+});
 
 describe('parseSpeakSegments', () => {
   it('keeps in-quote *stress* inside one speech segment', () => {
