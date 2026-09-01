@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { evaluateWorldWriteReady, emptyCharacter, emptyLocation, latestEndedEpisode, preferExistingActiveEpisode, isVagueSpeechStyle } from './worldOps';
+import { carryScenePresentation, openingScenePresentation, evaluateWorldWriteReady, emptyCharacter, emptyLocation, latestEndedEpisode, preferExistingActiveEpisode, isVagueSpeechStyle } from './worldOps';
 import type { Episode, Season, World, WorldAISettings } from './types';
 
 const ai: WorldAISettings = {
@@ -141,6 +141,57 @@ describe('preferExistingActiveEpisode', () => {
   it('returns another active episode and ignores the ending id', () => {
     expect(preferExistingActiveEpisode([ep('a', 'ended'), ep('b', 'active')], 'a')?.id).toBe('b');
     expect(preferExistingActiveEpisode([ep('a', 'active')], 'a')).toBeUndefined();
+  });
+});
+
+describe('carryScenePresentation', () => {
+  it('carries the backdrop, weather, and pinned mood into the next episode', () => {
+    const carried = carryScenePresentation({
+      ...episode(['p1'], 'loc1'),
+      image: 'data:image/png;base64,zz',
+      atmosphereNote: '  rain easing off the quay  ',
+      moodPinned: true
+    });
+    expect(carried).toEqual({
+      image: 'data:image/png;base64,zz',
+      atmosphereNote: 'rain easing off the quay',
+      moodPinned: true
+    });
+  });
+
+  it('leaves blank weather and unpinned mood out rather than writing empties', () => {
+    const carried = carryScenePresentation({ ...episode(['p1'], 'loc1'), atmosphereNote: '   ' });
+    expect(carried).toEqual({ image: null });
+    expect('atmosphereNote' in carried).toBe(false);
+    expect('moodPinned' in carried).toBe(false);
+  });
+});
+
+describe('openingScenePresentation', () => {
+  const rainy = {
+    ...episode(['p1'], 'loc1'),
+    image: 'data:image/png;base64,zz',
+    atmosphereNote: 'rain on the glass'
+  };
+
+  it('keeps weather on a same-day continuation', () => {
+    expect(openingScenePresentation(rainy, { gapDays: 0 }).atmosphereNote).toBe('rain on the glass');
+  });
+
+  it('drops stale weather after a gap', () => {
+    const next = openingScenePresentation(rainy, { gapDays: 2 });
+    expect(next.image).toBe('data:image/png;base64,zz');
+    expect('atmosphereNote' in next).toBe(false);
+  });
+
+  it('lets wrap supply a fresh note even after a gap', () => {
+    expect(openingScenePresentation(rainy, { gapDays: 7, atmosphereNote: 'fog at dawn' }).atmosphereNote)
+      .toBe('fog at dawn');
+  });
+
+  it('clears weather when wrap sends an empty override', () => {
+    expect('atmosphereNote' in openingScenePresentation(rainy, { gapDays: 0, atmosphereNote: '' }))
+      .toBe(false);
   });
 });
 

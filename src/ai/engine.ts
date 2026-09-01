@@ -46,6 +46,18 @@ import {
   narrationBeatTokens,
   planCapsForLength
 } from './prompts';
+import { rankReplySpeakers, speakerCandidates, type RankedSpeaker } from './roomDynamics';
+import {
+  clipMeanwhile,
+  gapDays,
+  matchLocationForPatch,
+  meanwhileFact,
+  mergeLocationPatch,
+  nextAtmosphereNote,
+  normalizePlacePatch,
+  normalizePlacePatches,
+  type PlacePatch
+} from './worldMemory';
 
 // ---------- Model resolution ----------
 
@@ -314,37 +326,66 @@ function resolveGuestSpeakerId(
   return byName?.id ?? null;
 }
 
-/** Prefer an NPC/guest whose name appears in the player text; else first cast, else first guest. */
+/** Where a fallback speaker stands in the room's turn-taking, phrased for their brief. */
+function situationHint(ranked: RankedSpeaker): string {
+  if (ranked.address === 'vocative' || ranked.address === 'directed') {
+    return 'the player is speaking straight at you — do not hand it off';
+  }
+  if (!Number.isFinite(ranked.turnsSince)) {
+    return 'you have not spoken yet — break your silence with something only you would say';
+  }
+  if (ranked.turnsSince >= 3) {
+    return 'you have been listening for a while — come in with what has been building';
+  }
+  if (ranked.turnsSince === 0) {
+    return 'you just spoke — push further or give ground, do not restate';
+  }
+  return '';
+}
+
+/**
+ * Choose who answers when the director gives no speak beat.
+ * A player pin wins outright; otherwise whoever the move is aimed at, then whoever
+ * has been quiet longest — so the first cast card does not answer every turn.
+ */
 function pickReplySpeaker(
   inScene: Character[],
   guests: EpisodeGuest[],
   playerText: string,
-  prefer?: { characterId?: string; guestId?: string }
+  prefer?: { characterId?: string; guestId?: string },
+  turns?: Turn[]
 ): DirectorBeat | null {
-  const briefForCast = (c: Character) => injectedSpeakBriefForCharacter(c);
-  const briefForGuest = (g: EpisodeGuest) => injectedSpeakBriefForGuest(g);
   if (prefer?.characterId) {
     const pinned = inScene.find((c) => c.id === prefer.characterId);
-    if (pinned) return { type: 'speak', characterId: pinned.id, brief: briefForCast(pinned) };
+    if (pinned) {
+      return {
+        type: 'speak',
+        characterId: pinned.id,
+        brief: injectedSpeakBriefForCharacter(pinned, 'the player picked you to answer')
+      };
+    }
   }
   if (prefer?.guestId) {
     const pinned = guests.find((g) => g.id === prefer.guestId);
-    if (pinned) return { type: 'speak', guestId: pinned.id, brief: briefForGuest(pinned) };
+    if (pinned) {
+      return {
+        type: 'speak',
+        guestId: pinned.id,
+        brief: injectedSpeakBriefForGuest(pinned, 'the player picked you to answer')
+      };
+    }
   }
-  const lower = playerText.toLowerCase();
-  const mentionedCast = inScene.find((c) => lower.includes(c.name.toLowerCase()));
-  if (mentionedCast) {
-    return { type: 'speak', characterId: mentionedCast.id, brief: briefForCast(mentionedCast) };
-  }
-  const mentionedGuest = guests.find((g) => lower.includes(g.name.toLowerCase()));
-  if (mentionedGuest) {
-    return { type: 'speak', guestId: mentionedGuest.id, brief: briefForGuest(mentionedGuest) };
-  }
-  if (inScene[0]) {
-    return { type: 'speak', characterId: inScene[0].id, brief: briefForCast(inScene[0]) };
-  }
-  if (guests[0]) {
-    return { type: 'speak', guestId: guests[0].id, brief: briefForGuest(guests[0]) };
+
+  const candidates = speakerCandidates(inScene, guests);
+  const [best] = rankReplySpeakers({ candidates, playerText, turns });
+  if (!best) return null;
+  const hint = situationHint(best);
+  if (best.kind === 'cast') {
+    const c = inScene.find((x) => x.id === best.id);
+    if (c) return { type: 'speak', characterId: c.id, brief: injectedSpeakBriefForCharacter(c, hint) };
+  } else {
+    const g = guests.find((x) => x.id === best.id);
+    if (g) return { type: 'speak', guestId: g.id, brief: injectedSpeakBriefForGuest(g, hint) };
   }
   return null;
 }
@@ -381,7 +422,8 @@ function ensurePlayerReplySpeak(
   inScene: Character[],
   guests: EpisodeGuest[],
   caps: { maxSpeak: number; maxTotal: number } = { maxSpeak: MAX_SPEAK_BEATS, maxTotal: MAX_TOTAL_BEATS },
-  prefer?: { characterId?: string; guestId?: string }
+  prefer?: { characterId?: string; guestId?: string },
+  turns?: Turn[]
 ): DirectorBeat[] {
   const needsReply = isPlayerAgencyMode(mode) && (inScene.length > 0 || guests.length > 0);
   if (!needsReply) return beats;
@@ -398,7 +440,7 @@ function ensurePlayerReplySpeak(
     const narration = beats.filter((b) => b.type === 'narration');
     let pinned = beats.find(isPinnedSpeak) ?? null;
     if (!pinned) {
-      pinned = pickReplySpeaker(inScene, guests, playerText, prefer);
+      pinned = pickReplySpeaker(inScene, guests, playerText, prefer, turns);
     }
     const next: DirectorBeat[] = [];
     if (pinned) next.push(pinned);
@@ -415,7 +457,7 @@ function ensurePlayerReplySpeak(
   if (beats.some((b) => b.type === 'speak')) {
     return beats.slice(0, caps.maxTotal);
   }
-  const injected = pickReplySpeaker(inScene, guests, playerText, prefer);
+  const injected = pickReplySpeaker(inScene, guests, playerText, prefer, turns);
   if (!injected) return beats;
   return [injected, ...beats].slice(0, caps.maxTotal);
 }
@@ -430,7 +472,9 @@ export function normalizeBeats(
   mode: ComposeMode,
   playerText: string,
   length: TurnLength = 'scene',
-  prefer?: { characterId?: string; guestId?: string }
+  prefer?: { characterId?: string; guestId?: string },
+  /** transcript so far — drives addressee detection and turn-taking fairness */
+  turns?: Turn[]
 ): DirectorBeat[] {
   const caps = planCapsForLength(length);
   const allowedGuests = new Set(guests.map((g) => g.id));
@@ -465,7 +509,7 @@ export function normalizeBeats(
       brief: 'Continue the scene with atmosphere and physical action; leave space for the player.'
     });
   }
-  return ensurePlayerReplySpeak(beats, mode, playerText, inScene, guests, caps, prefer);
+  return ensurePlayerReplySpeak(beats, mode, playerText, inScene, guests, caps, prefer, turns);
 }
 
 /** Race a utility call against a timeout; merges with an optional outer AbortSignal. */
@@ -784,7 +828,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       }
       beats = normalizeBeats(
         plan, inScene, activeGuests(ctx.episode), guestDelta.nameToId, opts.mode, playerText,
-        opts.length, prefer
+        opts.length, prefer, ctx.turns
       );
       enterIds = (plan.castDelta?.enter ?? [])
         .map((raw) => resolveNpcId(raw, ctx.characters))
@@ -1029,8 +1073,8 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
   // abort here must not look like a zero-beat stop.
   try {
     await maybeRefreshRunningSummary(opts.world, ctx, opts.signal, progress, opts.onNotice);
-    await maybeRefreshLiveCastState(
-      opts.world, ctx, speakTurnsSaved, opts.signal, progress, opts.onNotice
+    await maybeRefreshLiveSceneState(
+      opts.world, ctx, beatsCompleted, opts.signal, progress, opts.onNotice
     );
   } catch (e) {
     if ((e as Error).name === 'AbortError' || e instanceof WriteAbortedError) {
@@ -1315,31 +1359,32 @@ function matchByExactContainsOrTokens<T extends { id: string }>(
 }
 
 /**
- * Light mid-episode patch of in-scene cast goal/emotion/location/condition.
+ * Light mid-episode patch of in-scene cast state plus the scene's physical ledger.
  * Throttled so it does not run every Write — full relationship updates stay on wrap.
+ * Runs after any saved beat, not just spoken ones: narration is what establishes
+ * weather, damage, and props in the first place.
  */
-async function maybeRefreshLiveCastState(
+async function maybeRefreshLiveSceneState(
   world: World,
   ctx: Awaited<ReturnType<typeof loadContext>>,
-  speakTurnsSaved: number,
+  turnsSaved: number,
   signal: AbortSignal | undefined,
   progress: (label: string) => void,
   onNotice?: (message: string) => void
 ): Promise<void> {
-  if (speakTurnsSaved <= 0) return;
+  if (turnsSaved <= 0) return;
   const inScene = ctx.characters.filter(
     (c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer
   );
-  if (inScene.length === 0) return;
 
   const chars = episodeHistoryChars(ctx.turns);
   const pressure = episodeContextPressure(chars);
   const lastAt = ctx.episode.liveStateAtChars ?? 0;
   const growthNeeded = pressure === 'ok' || pressure === 'warm'
-    ? HISTORY_CHAR_BUDGET * 0.18
+    ? HISTORY_CHAR_BUDGET * 0.14
     : HISTORY_CHAR_BUDGET * 0.1;
   // First patch once the scene has some meat; then throttle by transcript growth.
-  if (lastAt === 0 && ctx.turns.length < 6) return;
+  if (lastAt === 0 && ctx.turns.length < 4) return;
   if (lastAt > 0 && chars < lastAt + growthNeeded) return;
 
   const recent = ctx.turns.slice(-14);
@@ -1366,8 +1411,10 @@ async function maybeRefreshLiveCastState(
     })
     .join('\n');
 
+  const priorLedger = (ctx.episode.sceneLedger ?? []).map((d) => `- ${d}`).join('\n');
+
   try {
-    progress('updating cast state…');
+    progress('reading the room…');
     const result = await utilityJson<{
       updates?: Array<{
         name?: string;
@@ -1376,14 +1423,25 @@ async function maybeRefreshLiveCastState(
         location?: string;
         condition?: string;
       }>;
+      scene?: string[];
     }>(
       world,
-      'You track live character state in an interactive story. ' +
-        'Return JSON only: {"updates":[{"name":"<exact cast name>","goal":"...","emotion":"...","location":"...","condition":"..."}]}. ' +
-        'Only include characters whose state clearly shifted in the recent beats. ' +
-        'Omit unchanged fields. Keep each field under 120 characters. No relationships.',
+      'You track live state in an interactive story. ' +
+        'Return JSON only: {"updates":[{"name":"<exact cast name>","goal":"...","emotion":"...","location":"...","condition":"..."}],' +
+        '"scene":["<physical detail now true in this room>"]}. ' +
+        'updates: only characters whose state clearly shifted in the recent beats. ' +
+        'Omit unchanged fields. Use "none" for a field that no longer applies — a mood that ' +
+        'has passed, a goal that was met or abandoned, an injury that healed. ' +
+        'Keep each field under 120 characters. No relationships.\n' +
+        'scene: 3–6 short phrases naming physical facts the prose has established and that later ' +
+        'paragraphs must stay consistent with — weather and light, damage, objects in play, ' +
+        'doors open or shut, what someone is holding or wearing. ' +
+        'Rewrite the whole list each time: carry forward what still holds, drop what has stopped ' +
+        'being true, add what the latest beats established. Concrete nouns, no plot summary, no feelings.',
       `World: ${world.title}. Episode ${ctx.episode.number}.\n` +
-        `In-scene cast (current state):\n${castLines}\n\n` +
+        `Place: ${ctx.episode.location || '(unnamed)'}\n` +
+        `In-scene cast (current state):\n${castLines || '(nobody on stage)'}\n\n` +
+        `Already established in this scene:\n${priorLedger || '(nothing yet)'}\n\n` +
         `Recent beats:\n${digest.slice(0, 10000)}\n\n` +
         `Return updates JSON.`,
       900,
@@ -1391,16 +1449,20 @@ async function maybeRefreshLiveCastState(
       25_000
     );
 
-    const applied = await applyLiveCharacterStateUpdates(
-      world.id,
-      inScene,
-      result.updates ?? []
-    );
+    const applied = inScene.length > 0
+      ? await applyLiveCharacterStateUpdates(world.id, inScene, result.updates ?? [])
+      : 0;
+    const sceneLedger = capSceneLedger(result.scene);
     await db.episodes.update(ctx.episode.id, {
       liveStateAtChars: chars,
+      ...(sceneLedger ? { sceneLedger } : {}),
       updatedAt: Date.now()
     });
-    ctx.episode = { ...ctx.episode, liveStateAtChars: chars };
+    ctx.episode = {
+      ...ctx.episode,
+      liveStateAtChars: chars,
+      ...(sceneLedger ? { sceneLedger } : {})
+    };
     if (applied > 0) {
       // Refresh local character sheets for any follow-on work in this write.
       const refreshed = await db.characters.where('worldId').equals(world.id).toArray();
@@ -1408,12 +1470,53 @@ async function maybeRefreshLiveCastState(
     }
   } catch (e) {
     if ((e as Error).name === 'AbortError') throw e;
-    logAppError(e, 'live cast state');
+    logAppError(e, 'live scene state');
     onNotice?.('Couldn’t refresh live cast state — sheets will catch up at episode wrap.');
   }
 }
 
-/** OR-merge live state patches onto cast cards (exported for tests). */
+/** Longest scene ledger we will carry into a prompt. */
+export const SCENE_LEDGER_CAP = 8;
+
+/**
+ * Clean a scene ledger from the tracker.
+ * Returns null when the model gave nothing usable, so the prior ledger survives
+ * rather than being wiped by a bad parse.
+ */
+export function capSceneLedger(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) return null;
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of raw) {
+    if (typeof item !== 'string') continue;
+    const text = item.trim().replace(/\s+/g, ' ').slice(0, 120);
+    if (!text) continue;
+    const key = text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+    if (out.length >= SCENE_LEDGER_CAP) break;
+  }
+  return out.length > 0 ? out : null;
+}
+
+/** Values the state tracker may return to mean "this no longer applies". */
+const STATE_CLEAR_WORDS = new Set(['none', 'clear', 'n/a', 'na', '-', '—', 'nothing', 'resolved']);
+
+/**
+ * Resolve one patched state field.
+ * Omitted keeps the prior value; an explicit clear word empties it, so a mood or
+ * injury does not follow a character for the rest of the episode.
+ */
+export function mergeStateField(patch: string | undefined, prior: string): string {
+  if (patch === undefined) return prior;
+  const next = patch.trim();
+  if (!next) return prior;
+  if (STATE_CLEAR_WORDS.has(next.toLowerCase().replace(/[.!]$/, ''))) return '';
+  return next;
+}
+
+/** Merge live state patches onto cast cards (exported for tests). */
 export async function applyLiveCharacterStateUpdates(
   worldId: string,
   cast: Character[],
@@ -1433,10 +1536,10 @@ export async function applyLiveCharacterStateUpdates(
     const c = cast.find((x) => x.name.toLowerCase() === name);
     if (!c || c.isPlayer) continue;
     const state: CharacterState = {
-      goal: u.goal?.trim() || c.state.goal,
-      emotion: u.emotion?.trim() || c.state.emotion,
-      location: u.location?.trim() || c.state.location,
-      condition: u.condition?.trim() || c.state.condition
+      goal: mergeStateField(u.goal, c.state.goal),
+      emotion: mergeStateField(u.emotion, c.state.emotion),
+      location: mergeStateField(u.location, c.state.location),
+      condition: mergeStateField(u.condition, c.state.condition)
     };
     if (
       state.goal === c.state.goal &&
@@ -1454,6 +1557,34 @@ export async function applyLiveCharacterStateUpdates(
   return applied;
 }
 
+/** Write wrap place patches onto location cards. Scene location matches by id first. */
+export async function applyPlacePatches(
+  locations: Location[],
+  patches: PlacePatch[],
+  sceneLocationId?: string | null
+): Promise<number> {
+  let applied = 0;
+  const now = Date.now();
+  const used = new Set<string>();
+  for (let i = 0; i < patches.length; i++) {
+    const patch = patches[i];
+    if (!patch.currentState?.trim()) continue;
+    const loc = matchLocationForPatch(
+      locations,
+      patch,
+      i === 0 ? sceneLocationId : undefined
+    );
+    if (!loc || used.has(loc.id)) continue;
+    const next = mergeLocationPatch(loc, patch);
+    if (next.currentState === loc.currentState) continue;
+    await db.locations.update(loc.id, { currentState: next.currentState, updatedAt: now });
+    loc.currentState = next.currentState;
+    used.add(loc.id);
+    applied++;
+  }
+  return applied;
+}
+
 /**
  * File a previously-on wrap when the user skips full review.
  * Recap always lands; a thin facts/threads/state pass runs after and fails open.
@@ -1465,6 +1596,7 @@ export interface SoftWrapExtract {
   facts: string[];
   threads: string[];
   characterUpdates: EpisodeWrapCharacterUpdate[];
+  place: PlacePatch | null;
 }
 
 /** Cap extract rows and drop updates for people not in the scene. */
@@ -1479,6 +1611,7 @@ export function capSoftWrapExtract(
       location?: string;
       condition?: string;
     }>;
+    place?: { name?: string; currentState?: string; atmosphere?: string };
   },
   inSceneNames: Set<string>
 ): SoftWrapExtract {
@@ -1496,7 +1629,7 @@ export function capSoftWrapExtract(
       condition: u.condition?.trim() || undefined
     });
   }
-  return { facts, threads, characterUpdates };
+  return { facts, threads, characterUpdates, place: normalizePlacePatch(raw.place) };
 }
 
 export async function fileSoftWrapContinuity(
@@ -1523,9 +1656,14 @@ export async function fileSoftWrapContinuity(
       }))
     );
   }
-  if (extract.characterUpdates.length === 0) return;
-  const cast = await db.characters.where('worldId').equals(world.id).toArray();
-  await applyLiveCharacterStateUpdates(world.id, cast, extract.characterUpdates);
+  if (extract.characterUpdates.length > 0) {
+    const cast = await db.characters.where('worldId').equals(world.id).toArray();
+    await applyLiveCharacterStateUpdates(world.id, cast, extract.characterUpdates);
+  }
+  if (extract.place?.currentState) {
+    const locations = await db.locations.where('worldId').equals(world.id).toArray();
+    await applyPlacePatches(locations, [extract.place], episode.locationId);
+  }
 }
 
 /** True when Skip already wrote a recap — retry must not re-file continuity. */
@@ -1621,14 +1759,20 @@ export async function commitSoftEpisodeWrap(
         location?: string;
         condition?: string;
       }>;
+      place?: { name?: string; currentState?: string; atmosphere?: string };
     }>(
       world,
       'You are a continuity editor filing a skipped episode wrap. Respond with JSON only: ' +
-      '{"facts":["..."],"threads":["..."],"characterUpdates":[{"name":"<exact in-scene name>","goal":"","emotion":"","location":"","condition":""}]}. ' +
+      '{"facts":["..."],"threads":["..."],' +
+      '"characterUpdates":[{"name":"<exact in-scene name>","goal":"","emotion":"","location":"","condition":""}],' +
+      '"place":{"name":"<scene place>","currentState":"<how the room is left>"}}. ' +
       `At most ${SOFT_WRAP_FACT_CAP} durable facts and ${SOFT_WRAP_THREAD_CAP} unresolved threads. ` +
       'Facts must still be true next episode (revelations, injuries, promises, debts). ' +
-      'characterUpdates: only named in-scene NPCs; omit empties. Do not invent people, relationships, or calendar hits.',
+      'characterUpdates: only named in-scene NPCs; omit empties. ' +
+      'place.currentState: lasting physical condition of the scene as left; omit if nothing changed. ' +
+      'Do not invent people, relationships, or calendar hits.',
       `World: ${world.title}. Season ${season.number}, episode ${episode.number}.\n` +
+      `Place: ${episode.location || '(unnamed)'}\n` +
       `In-scene cast: ${inScene.map((c) => c.name).join(', ') || '(none)'}\n\n` +
       `Recap:\n${recap}\n\nEpisode material:\n${source}`,
       1400
@@ -1903,6 +2047,12 @@ export interface EpisodeWrapDraft {
   hitTargets: string[];
   /** Calendar events this episode played — id-backed for reliable commit. */
   hitCalendarEvents: Array<{ id: string; title: string; kind?: string; storyDay?: number }>;
+  /** How the scene location is left; atmosphere is weather for the next opening. */
+  place: PlacePatch | null;
+  /** Other named library places that clearly changed this episode. */
+  elsewhere: PlacePatch[];
+  /** Off-screen life between this close and the next open — empty when same day. */
+  meanwhile: string;
 }
 
 /** Season-like episode analysis for the wrap review UI. */
@@ -1914,6 +2064,7 @@ export async function analyzeEpisode(
 ): Promise<EpisodeWrapDraft> {
   const turns = await db.turns.where('episodeId').equals(episode.id).sortBy('createdAt');
   const characters = await db.characters.where('worldId').equals(world.id).toArray();
+  const locations = await db.locations.where('worldId').equals(world.id).toArray();
   const existing = await db.continuity.where('seasonId').equals(season.id).toArray();
   const openThreads = await db.threads
     .where('seasonId')
@@ -1942,7 +2093,10 @@ export async function analyzeEpisode(
     nextStoryDay: Math.max(dayStart, dayNow) + cal.episodeAdvanceDays,
     dateNote: '',
     hitTargets: [],
-    hitCalendarEvents: []
+    hitCalendarEvents: [],
+    place: null,
+    elsewhere: [],
+    meanwhile: ''
   };
   if (!text.trim()) return empty;
 
@@ -2017,6 +2171,19 @@ export async function analyzeEpisode(
     `World "today" now: ${formatStoryDate(cal, dayNow)}\n` +
     `Location: ${episode.location || '(unset)'}\n`;
 
+  const sceneLoc = episode.locationId
+    ? locations.find((l) => l.id === episode.locationId)
+    : locations.find((l) => l.name.toLowerCase() === (episode.location ?? '').trim().toLowerCase());
+  const placeLines = locations.slice(0, 24).map((l) => {
+    const here = sceneLoc && l.id === sceneLoc.id ? ' · THIS SCENE' : '';
+    const state = l.currentState.trim() ? ` now: ${l.currentState.trim()}` : '';
+    return `- ${l.name}${here}${state}`;
+  }).join('\n');
+  const ledgerLines = (episode.sceneLedger ?? []).map((d) => `- ${d}`).join('\n');
+  const placeBlock =
+    `Known places (use exact names for place/elsewhere):\n${placeLines || '(none)'}\n` +
+    (ledgerLines ? `\nAlready true in this room this episode:\n${ledgerLines}\n` : '');
+
   const result = await utilityJson<{
     recap?: string;
     beats?: { text?: string; consequence?: string }[];
@@ -2047,6 +2214,9 @@ export async function analyzeEpisode(
     dateNote?: string;
     hitTargets?: string[];
     hitCalendarEvents?: string[];
+    place?: { name?: string; currentState?: string; atmosphere?: string };
+    elsewhere?: Array<{ name?: string; currentState?: string; atmosphere?: string }>;
+    meanwhile?: string;
   }>(
     world,
     'You are a continuity editor closing an interactive fiction episode. ' +
@@ -2063,9 +2233,12 @@ export async function analyzeEpisode(
     '"characterUpdates":[{"name":"<exact cast name>","goal":"<current goal or empty>","emotion":"<emotional state>","location":"<where they are>","condition":"<injuries/status>"}],' +
     '"knowledgeUpdates":[{"name":"<exact cast name>","nowKnows":"<what they learned>","clearMustNotKnow":"<clause from MUST NOT KNOW that is no longer secret to them>"}],' +
     '"relationshipUpdates":[{"from":"<cast name>","to":"<cast name>","kind":"<ally|rival|lover|debt|…>","note":"<one line what changed>"}],' +
+    '"place":{"name":"<exact scene place name>","currentState":"<one sentence: how this room/street is left — damage, occupancy, objects moved>","atmosphere":"<optional weather/light/smell for the NEXT opening if still here>"},' +
+    '"elsewhere":[{"name":"<exact other place name>","currentState":"<how that place changed because of this episode>"}],' +
     '"storyDayEnd":<integer story day when this episode ends — >= storyDayStart; same day if no time passed>,' +
     '"nextStoryDay":<integer story day the NEXT episode should open on — >= storyDayEnd>,' +
-    '"dateNote":"<one short sentence: how time passed — dawn, overnight, two days later, same afternoon, etc.>"}\n' +
+    '"dateNote":"<one short sentence: how time passed — dawn, overnight, two days later, same afternoon, etc.>",' +
+    '"meanwhile":"<2–4 sentences of off-screen life during the gap before the next episode opens — empty string if same day>"}\n' +
     'Rules:\n' +
     '- Recap must be usable as "previously on": include proper names, calendar timing, place, decisive exchanges, open pressure.\n' +
     '- Beats: 3–7 events that matter later; never vague ("things escalated").\n' +
@@ -2073,21 +2246,26 @@ export async function analyzeEpisode(
     '- Threads: only NEW open tensions (0–8). Put settled prior threads in resolvedThreads.\n' +
     '- hitTargets: only from the Pending plot targets list; copy text near-exactly; omit if the target was not advanced.\n' +
     '- hitCalendarEvents: only from Due calendar events; prefer the bracketed id; title fallback allowed; omit if not addressed.\n' +
-    '- characterUpdates: every non-player cast member who appeared or was meaningfully affected; omit empties.\n' +
+    '- characterUpdates: every non-player who appeared OR was named off-scene in a way that changed their situation; ' +
+    'use "none" to clear a field that no longer applies (a mood that passed, an injury that healed).\n' +
     '- knowledgeUpdates: only when someone learned something that was blocked or newly revealed; clearMustNotKnow should match their wall when possible.\n' +
     '- relationshipUpdates: only real shifts (trust, debt, romance, enmity); use exact cast names.\n' +
+    '- place.currentState: lasting physical condition of THIS SCENE as you leave it (not weather). place.atmosphere is weather/light for the next opening only.\n' +
+    '- elsewhere: only places from Known places that clearly changed; exact names; omit if none.\n' +
+    '- meanwhile: what off-screen people and places do during the gap to nextStoryDay. Empty if nextStoryDay === storyDayEnd. Invent nothing that contradicts facts; you MAY infer quiet life (travel, waiting, a wound closing) from time passing.\n' +
     '- storyDayEnd: infer from the prose + calendar (night falling → often same day; "next morning" → +1; multi-day travel → higher). ' +
     `Default to ${dayNow} if unclear. Never go below the episode start day.\n` +
     `- nextStoryDay: when the following episode should open. Same as storyDayEnd for immediate continuation; ` +
     `storyDayEnd+${cal.episodeAdvanceDays} is the world default when time simply moves on.\n` +
     '- Guest effects only for walk-ons, not Cast cards.\n' +
-    '- Invent nothing that did not happen in the episode material.',
+    '- Invent nothing that did not happen in the episode material — except meanwhile, which may cover the unshown gap.',
     `World: ${world.title} — ${world.line}\n` +
     `Season ${season.number} premise (current pressure): ${season.premise || '(unwritten)'}\n` +
     `Episode ${episode.number}${episode.title ? ` — ${episode.title}` : ''}` +
     `${episode.location ? ` @ ${episode.location}` : ''}\n` +
     `Date range so far: ${formatEpisodeDateRange(cal, dayStart, dayNow)}\n\n` +
     dateBlock + '\n' +
+    placeBlock + '\n' +
     `Cast (names must match characterUpdates):\n${castBlock || '(none)'}\n\n` +
     guestBlock +
     `Known facts (do not repeat):\n${knownFacts || '(none)'}\n\n` +
@@ -2172,7 +2350,21 @@ export async function analyzeEpisode(
       title: e.title,
       kind: e.kind,
       storyDay: e.storyDay
-    })).slice(0, 10)
+    })).slice(0, 10),
+    place: normalizePlacePatch(
+      result.place
+        ? {
+          ...result.place,
+          name: (result.place.name || sceneLoc?.name || episode.location || '').trim()
+        }
+        : null
+    ),
+    elsewhere: normalizePlacePatches(result.elsewhere, 4)
+      .filter((p) => {
+        const sceneName = (sceneLoc?.name ?? episode.location).trim().toLowerCase();
+        return !sceneName || p.name.trim().toLowerCase() !== sceneName;
+      }),
+    meanwhile: clipMeanwhile(result.meanwhile)
   };
 
   try {
@@ -2213,6 +2405,10 @@ export interface CommitEpisodeWrapInput {
   hitTargets?: string[];
   /** Calendar event ids (preferred) or titles the author confirmed as played. */
   hitCalendarEvents?: Array<{ id?: string; title?: string } | string>;
+  /** Lasting condition of the scene location; atmosphere rides to the next episode. */
+  place?: PlacePatch | null;
+  elsewhere?: PlacePatch[];
+  meanwhile?: string;
 }
 
 /**
@@ -2437,11 +2633,19 @@ export async function commitEpisodeWrap(
     const c = byName(u.name);
     if (!c || c.isPlayer) continue;
     const state = {
-      goal: u.goal?.trim() || c.state.goal,
-      emotion: u.emotion?.trim() || c.state.emotion,
-      location: u.location?.trim() || c.state.location,
-      condition: u.condition?.trim() || c.state.condition
+      goal: mergeStateField(u.goal, c.state.goal),
+      emotion: mergeStateField(u.emotion, c.state.emotion),
+      location: mergeStateField(u.location, c.state.location),
+      condition: mergeStateField(u.condition, c.state.condition)
     };
+    if (
+      state.goal === c.state.goal &&
+      state.emotion === c.state.emotion &&
+      state.location === c.state.location &&
+      state.condition === c.state.condition
+    ) {
+      continue;
+    }
     await db.characters.update(c.id, { state, updatedAt: now });
     c.state = state;
   }
@@ -2526,6 +2730,38 @@ export async function commitEpisodeWrap(
       ? Math.floor(input.nextStoryDay)
       : dayEnd + cal.episodeAdvanceDays
   );
+  const gap = gapDays(dayEnd, nextDay);
+
+  const places = await db.locations.where('worldId').equals(world.id).toArray();
+  if (input.place) {
+    await applyPlacePatches(places, [input.place], episode.locationId);
+  }
+  if ((input.elsewhere ?? []).length > 0) {
+    await applyPlacePatches(places, input.elsewhere ?? [], undefined);
+  }
+
+  const meanwhileLine = meanwhileFact({
+    episodeNumber: episode.number,
+    gap,
+    text: input.meanwhile ?? ''
+  });
+  if (meanwhileLine) {
+    await db.continuity.add({
+      id: uid(),
+      worldId: world.id,
+      seasonId: season.id,
+      episodeId: episode.id,
+      text: meanwhileLine,
+      source: 'auto',
+      createdAt: Date.now()
+    });
+  }
+
+  const nextAtmosphere = nextAtmosphereNote({
+    carried: episode.atmosphereNote,
+    override: input.place?.atmosphere,
+    gap
+  });
 
   // Mark author-confirmed calendar events as played BEFORE wrap miss evaluation.
   const playedIds = new Set<string>();
@@ -2588,7 +2824,8 @@ export async function commitEpisodeWrap(
       storyDayEnd: dayEnd,
       nextStoryDay: nextDay,
       dateNote: dateNote || null,
-      plotTargets: nextPlotTargets
+      plotTargets: nextPlotTargets,
+      atmosphereNote: nextAtmosphere ?? null
     }
   );
   await db.worlds.update(world.id, { updatedAt: Date.now() });

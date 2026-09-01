@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { matchPlotTargets, normalizeBeats, capSoftWrapExtract, directorFallbackNarrationBrief, softWrapAlreadyFiled } from './engine';
+import {
+  matchPlotTargets, mergeStateField, normalizeBeats, capSceneLedger, capSoftWrapExtract,
+  directorFallbackNarrationBrief, softWrapAlreadyFiled, SCENE_LEDGER_CAP
+} from './engine';
 import {
   episodeContextPressure,
   episodeHistoryChars,
@@ -139,6 +142,88 @@ describe('normalizeBeats', () => {
     expect(speak[0]).toMatchObject({ type: 'speak', characterId: 'c2' });
     expect(beats.some((b) => b.type === 'narration')).toBe(true);
   });
+
+  it('injects the NPC who has been quiet rather than the first cast card', () => {
+    const spoke = (i: number): Turn => ({
+      id: `t${i}`, episodeId: 'e', worldId: 'w', role: 'character' as const, mode: null,
+      characterId: 'c1', text: 'Ada again.', createdAt: i
+    });
+    const beats = normalizeBeats(
+      { beats: [{ type: 'narration', brief: 'She stares.' }] },
+      cast,
+      guests,
+      new Map(),
+      'speak',
+      'Well?',
+      'scene',
+      undefined,
+      [spoke(1), spoke(2), spoke(3)]
+    );
+    expect(beats[0]).toMatchObject({ type: 'speak', characterId: 'c2' });
+    if (beats[0].type === 'speak') {
+      expect(beats[0].brief).toMatch(/have not spoken yet/i);
+    }
+  });
+
+  it('still routes to the NPC the player addressed by name', () => {
+    const spoke: Turn = {
+      id: 't1', episodeId: 'e', worldId: 'w', role: 'character', mode: null,
+      characterId: 'c1', text: 'Ada holds the floor.', createdAt: 1
+    };
+    const beats = normalizeBeats(
+      { beats: [{ type: 'narration', brief: 'She stares.' }] },
+      cast,
+      guests,
+      new Map(),
+      'speak',
+      'Ada, answer me.',
+      'scene',
+      undefined,
+      [spoke]
+    );
+    expect(beats[0]).toMatchObject({ type: 'speak', characterId: 'c1' });
+    if (beats[0].type === 'speak') {
+      expect(beats[0].brief).toMatch(/speaking straight at you/i);
+    }
+  });
+});
+
+describe('capSceneLedger', () => {
+  it('trims, de-duplicates, and caps the tracked details', () => {
+    const ledger = capSceneLedger([
+      '  Rain on the office glass  ',
+      'rain on the office glass',
+      ...Array.from({ length: 10 }, (_, i) => `detail ${i}`)
+    ]);
+    expect(ledger).not.toBeNull();
+    expect(ledger).toHaveLength(SCENE_LEDGER_CAP);
+    expect(ledger![0]).toBe('Rain on the office glass');
+    expect(ledger!.filter((d) => /rain on the office glass/i.test(d))).toHaveLength(1);
+  });
+
+  it('returns null for unusable output so the prior ledger survives', () => {
+    expect(capSceneLedger(undefined)).toBeNull();
+    expect(capSceneLedger('rain')).toBeNull();
+    expect(capSceneLedger([])).toBeNull();
+    expect(capSceneLedger(['  ', 42])).toBeNull();
+  });
+});
+
+describe('mergeStateField', () => {
+  it('keeps the prior value when the tracker omits or blanks a field', () => {
+    expect(mergeStateField(undefined, 'wary')).toBe('wary');
+    expect(mergeStateField('   ', 'wary')).toBe('wary');
+  });
+
+  it('clears a mood or injury the tracker marks as finished', () => {
+    expect(mergeStateField('none', 'furious')).toBe('');
+    expect(mergeStateField('resolved.', 'bleeding')).toBe('');
+    expect(mergeStateField('-', 'limping')).toBe('');
+  });
+
+  it('takes a real new value', () => {
+    expect(mergeStateField('calm', 'furious')).toBe('calm');
+  });
 });
 
 describe('packTurnsDetailed / pressure', () => {
@@ -277,6 +362,21 @@ describe('capSoftWrapExtract', () => {
     expect(capped.characterUpdates).toEqual([
       { name: 'Ada', goal: 'Hide the books', emotion: 'tight', location: undefined, condition: undefined }
     ]);
+    expect(capped.place).toBeNull();
+  });
+
+  it('keeps a scene place patch on skip wrap', () => {
+    const capped = capSoftWrapExtract({
+      facts: [],
+      threads: [],
+      characterUpdates: [],
+      place: { name: 'Harbour office', currentState: '  The lamp is smashed.  ' }
+    }, new Set(['ada']));
+    expect(capped.place).toEqual({
+      name: 'Harbour office',
+      currentState: 'The lamp is smashed.',
+      atmosphere: undefined
+    });
   });
 });
 

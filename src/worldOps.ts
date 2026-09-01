@@ -629,6 +629,44 @@ export interface NextEpisodeOpts {
   dateNote?: string | null;
   /** Plot targets for the next episode (Aim + carried pending). */
   plotTargets?: PlotTarget[];
+  /**
+   * Weather/time of day for the opening scene.
+   * Omitted = inherit (unless days passed, then weather is dropped).
+   * `null` or empty = open without a weather note.
+   */
+  atmosphereNote?: string | null;
+}
+
+/**
+ * Look and weather the next episode inherits, since it opens in the same place.
+ * Resetting these made every episode start from a blank room even when the story
+ * never left it.
+ */
+export function carryScenePresentation(current: Episode): Partial<Episode> {
+  const carried: Partial<Episode> = { image: current.image ?? null };
+  const note = current.atmosphereNote?.trim();
+  if (note) carried.atmosphereNote = note;
+  if (current.moodPinned) carried.moodPinned = true;
+  return carried;
+}
+
+/**
+ * Opening look for the next episode: same room, but weather does not survive a
+ * time gap unless wrap supplied a fresh note.
+ */
+export function openingScenePresentation(
+  current: Episode,
+  opts: { gapDays: number; atmosphereNote?: string | null } = { gapDays: 0 }
+): Partial<Episode> {
+  const carried = carryScenePresentation(current);
+  if (opts.atmosphereNote !== undefined) {
+    const note = (opts.atmosphereNote ?? '').trim();
+    if (note) carried.atmosphereNote = note;
+    else delete carried.atmosphereNote;
+  } else if (opts.gapDays > 0) {
+    delete carried.atmosphereNote;
+  }
+  return carried;
 }
 
 /**
@@ -676,6 +714,10 @@ export async function nextEpisode(current: Episode, opts: NextEpisodeOpts = {}):
       id: uid(), seasonId: current.seasonId, worldId: current.worldId,
       number: current.number + 1, title: '', location: current.location,
       locationId: current.locationId ?? null,
+      ...openingScenePresentation(current, {
+        gapDays: nextDay - dayEnd,
+        ...(opts.atmosphereNote !== undefined ? { atmosphereNote: opts.atmosphereNote } : {})
+      }),
       castIds: current.castIds,
       guests: [],
       // Omit activeGuestIds — empty guests; prompts treat omitted as "all" when guests exist.

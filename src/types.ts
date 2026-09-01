@@ -177,6 +177,12 @@ export interface Episode {
   /** Episode transcript char count when runningSummary was last refreshed */
   runningSummaryAtChars?: number;
   /**
+   * Physical details the prose has established in this scene — the rain that started,
+   * the lamp that broke, who is holding what. Refreshed alongside live cast state and
+   * replaced wholesale, so details that stop being true drop off.
+   */
+  sceneLedger?: string[];
+  /**
    * Transcript char count when in-scene cast live state (goal/emotion/…) was last
    * lightly patched mid-episode. Throttles utility updates between wraps.
    */

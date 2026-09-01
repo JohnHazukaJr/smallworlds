@@ -5,9 +5,14 @@ export type Screen = 'library' | 'story' | 'cast' | 'locations' | 'sequel' | 'pr
 export type MoodId = 'ember' | 'ash' | 'frost' | 'rot' | 'dusk' | 'bloom' | 'storm' | 'brine';
 export type BackdropId = 'scene' | 'moment' | 'character' | 'none';
 export type AvatarSize = 'S' | 'M' | 'L';
+/** How spoken turns sit on the page: running prose, or a staged cast list. */
+export type DialogueStyle = 'prose' | 'staged';
 
 /** How the story page renders on this device. */
 export interface DisplayPrefs {
+  /** prose = novel page with inline attribution; staged = avatar + name plate per line */
+  dialogueStyle: DialogueStyle;
+  /** avatar plate size in staged layout */
   avatarSize: AvatarSize;
   /** prose font size in px */
   textSize: number;
@@ -20,9 +25,12 @@ export interface DisplayPrefs {
 }
 
 export const DEFAULT_DISPLAY: DisplayPrefs = {
+  dialogueStyle: 'prose',
   avatarSize: 'S',
   textSize: 19,
-  textScrim: 0,
+  // Scene images persist across episodes now, so prose needs a page under it by
+  // default rather than sitting straight on a photograph.
+  textScrim: 26,
   imageDim: 45,
   imageBlur: 0
 };

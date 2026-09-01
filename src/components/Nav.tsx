@@ -17,8 +17,17 @@ const TABS: Array<[string, Screen]> = [
   ['Worlds', 'library'],
   ['Story', 'story'],
   ['Cast', 'cast'],
+  ['Places', 'locations'],
   ['Settings', 'settings']
 ];
+
+const TAB_GLYPHS: Partial<Record<Screen, string>> = {
+  library: '◈',
+  story: '¶',
+  cast: '◇',
+  locations: '⌂',
+  settings: '⚙'
+};
 
 export function Rail() {
   const screen = useApp((s) => s.screen);
@@ -102,22 +111,26 @@ export function TabBar() {
   const currentWorldId = useApp((s) => s.currentWorldId);
   return (
     <div className="tabbar">
-      {TABS.map(([label, key]) => (
-        <button
-          key={key}
-          className={screen === key ? 'active' : ''}
-          disabled={key === 'cast' && !currentWorldId}
-          onClick={() => {
-            if (key === 'cast' && !currentWorldId) return;
-            go(key);
-          }}
-        >
-          <span style={{ fontSize: 14, fontFamily: 'Spectral, serif', textTransform: 'none', letterSpacing: 0 }}>
-            {label === 'Worlds' ? '◈' : label === 'Story' ? '¶' : label === 'Cast' ? '◇' : '⚙'}
-          </span>
-          {label}
-        </button>
-      ))}
+      {TABS.map(([label, key]) => {
+        const needsWorld = key === 'cast' || key === 'locations';
+        const blocked = needsWorld && !currentWorldId;
+        return (
+          <button
+            key={key}
+            className={screen === key ? 'active' : ''}
+            disabled={blocked}
+            onClick={() => {
+              if (blocked) return;
+              go(key);
+            }}
+          >
+            <span style={{ fontSize: 14, fontFamily: 'Spectral, serif', textTransform: 'none', letterSpacing: 0 }}>
+              {TAB_GLYPHS[key] ?? '⚙'}
+            </span>
+            {label}
+          </button>
+        );
+      })}
     </div>
   );
 }

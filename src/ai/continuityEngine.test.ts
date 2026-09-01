@@ -10,6 +10,7 @@ import {
   DIRECTOR_THREAD_CAP,
   DIRECTOR_TRANSCRIPT_TURNS,
   directorUserPrompt,
+  sceneLedgerSection,
   type PromptContext
 } from './prompts';
 import { inferContextWindowTokens, promptCharBudget } from './contextBudget';
@@ -181,6 +182,45 @@ describe('director prompt budgets', () => {
     expect(capped.length).toBeLessThan(uncapped.length);
     expect(capped).toMatch(/unique-token-39/);
   });
+
+  it('reports turn-taking and in-room ties so the director can vary who answers', () => {
+    const cast = [
+      npc('c1', 'Ada'),
+      npc('c2', 'Ben', {
+        relationships: [{ targetId: 'c1', kind: 'rival', note: 'after the same ledger' }]
+      })
+    ];
+    const turns: Turn[] = ['first', 'second'].map((text, i) => ({
+      id: `t${i}`,
+      episodeId: 'e',
+      worldId: 'w',
+      role: 'character' as const,
+      mode: null,
+      characterId: 'c1',
+      text,
+      createdAt: i
+    }));
+    const user = directorUserPrompt(
+      ctx({ characters: cast, episode: { ...episode(), castIds: ['c1', 'c2'] }, turns }),
+      'speak',
+      'Ben, where were you?'
+    );
+    expect(user).toMatch(/Room dynamics/);
+    expect(user).toMatch(/Last voice in the room: Ada\./);
+    expect(user).toMatch(/Has not spoken this episode: Ben\./);
+    expect(user).toMatch(/aimed at: Ben\./);
+    expect(user).toMatch(/Ben → Ada: rival — after the same ledger/);
+  });
+
+  it('omits the dynamics block when nobody is on stage', () => {
+    const user = directorUserPrompt(
+      ctx({ characters: [], episode: { ...episode(), castIds: [] } }),
+      'steer',
+      'Look around.'
+    );
+    expect(user).not.toMatch(/Room dynamics/);
+    expect(user).not.toMatch(/Ties inside the room/);
+  });
 });
 
 describe('beat-scoped character layers', () => {
@@ -241,6 +281,43 @@ describe('beat-scoped character layers', () => {
     expect(prompt).toContain('Against generic prose');
   });
 
+  it('holds the narrator to details the prose already established', () => {
+    const prompt = buildNarratorSystemPrompt(
+      ctx({
+        episode: {
+          ...episode(),
+          sceneLedger: ['Rain has not let up on the office glass', 'The desk lamp is broken']
+        }
+      }),
+      { focusIds: ['c1'] }
+    );
+    expect(prompt).toMatch(/Already true in this room/);
+    expect(prompt).toContain('The desk lamp is broken');
+    expect(prompt).toMatch(/Do not re-introduce them as if new/);
+  });
+
+  it('shares the established details with speak agents', () => {
+    const prompt = buildCharacterSystemPrompt(
+      ctx({ episode: { ...episode(), sceneLedger: ['The desk lamp is broken'] } }),
+      npc('c1', 'Ada')
+    );
+    expect(prompt).toContain('The desk lamp is broken');
+  });
+
+  it('omits the ledger section when nothing is established', () => {
+    expect(buildNarratorSystemPrompt(ctx(), { focusIds: ['c1'] }))
+      .not.toMatch(/Already true in this room/);
+    expect(sceneLedgerSection({ ...episode(), sceneLedger: [] })).toBeNull();
+    expect(sceneLedgerSection({ ...episode(), sceneLedger: ['  '] })).toBeNull();
+  });
+
+  it('trims the ledger on a tight pack', () => {
+    const sceneLedger = ['one', 'two', 'three', 'four', 'five', 'six'];
+    const section = sceneLedgerSection({ ...episode(), sceneLedger }, 4) ?? '';
+    expect(section).toContain('- four');
+    expect(section).not.toContain('- five');
+  });
+
   it('keeps atmosphere and rules on a tight pack', () => {
     const prompt = buildNarratorSystemPrompt(ctx(), { pack: 'tight', focusIds: ['c1'] });
     expect(prompt).toContain('salt-rot wood and wet wool');
@@ -282,6 +359,7 @@ describe('narration brief contract', () => {
     expect(sys).toMatch(/sensory job/i);
     expect(sys).toMatch(/never a weather catalogue/i);
     expect(sys).toMatch(/want or friction/i);
+    expect(sys).toMatch(/room is not a queue/i);
   });
 
   it('tells the narrator not to recap and to use named bodies', () => {

@@ -5,8 +5,9 @@ import { isPlayerAgencyMode, worldCalendarEventPrefs } from '../types';
 import { selectCalendarEventsForPrompt } from '../calendarEvents';
 import { formatEpisodeDateRange, formatStoryDate, PLOT_TARGET_CAP, worldCalendar } from '../worldOps';
 import type { ChatMessage } from './client';
-import { parseDeliveryTone } from './deliveryTone';
+import { deliveryPhrase, parseDeliveryTone } from './deliveryTone';
 import { SPEAK_FORMAT_RULES } from './dialogueFormat';
+import { roomDynamicsLines, speakerCandidates } from './roomDynamics';
 
 /** Shorter budgets when a narrator beat is one slice of a multi-agent turn. */
 const NARRATION_BEAT_TOKENS: Record<TurnLength, number> = {
@@ -596,6 +597,25 @@ function worldBibleSection(world: World, cap = WORLD_BIBLE_CAP): string {
   return `## The world\n${clipText(world.bible || world.line, cap)}`;
 }
 
+/**
+ * Physical facts the prose has already put in the room this episode.
+ * Without this the narrator re-introduces the same rain every few turns, or quietly
+ * drops the lamp it broke — the tell that nothing is actually persisting.
+ */
+export function sceneLedgerSection(episode: Episode, cap = 8): string | null {
+  const details = (episode.sceneLedger ?? [])
+    .map((d) => d.trim())
+    .filter(Boolean)
+    .slice(0, cap);
+  if (details.length === 0) return null;
+  return (
+    `## Already true in this room (established earlier in this scene)\n` +
+    `Stay consistent with these. Do not re-introduce them as if new, and do not quietly ` +
+    `undo one without showing it change:\n` +
+    details.map((d) => `- ${d}`).join('\n')
+  );
+}
+
 function runningSummaryFor(episode: Episode, cap: number): string | null {
   const running = episode.runningSummary?.trim();
   if (!running) return null;
@@ -923,6 +943,9 @@ function worldFrameSections(ctx: PromptContext, opts: PromptBuildOpts = {}): str
     );
   }
 
+  const ledger = sceneLedgerSection(episode, tight ? 4 : 8);
+  if (ledger) sections.push(ledger);
+
   if (player) {
     const sheet = focus.has(player.id) ? psycheSheet(player, characters) : presenceSheet(player, characters);
     sections.push(`## The player\n${sheet}`);
@@ -1015,6 +1038,10 @@ function leanAgentFrame(
   const pressure = speakSituationPressure(ctx);
   if (pressure) sections.push(pressure);
   sections.push(...currentLocationBlock(ctx, { atmosphereOnly: tight }));
+  // Characters share the room's established state — nobody should ignore the rain
+  // the narration started two beats ago.
+  const ledger = sceneLedgerSection(ctx.episode, tight ? 3 : 5);
+  if (ledger) sections.push(ledger);
   return sections;
 }
 
@@ -1226,17 +1253,17 @@ export const MODE_PREFIX: Record<ComposeMode, (input: string) => string> = {
   speak: (input) => {
     const { tone, body } = parseDeliveryTone(input);
     const spoken = body.replace(/^"|"$/g, '');
-    const delivery = tone ? ` with a ${tone} delivery` : '';
+    const delivery = tone ? ` ${deliveryPhrase(tone)}` : '';
     return `(The player says the following aloud${delivery}, and nothing more — do not add words to their mouth): "${spoken}"`;
   },
   act: (input) => {
     const { tone, body } = parseDeliveryTone(input);
-    const delivery = tone ? `, with a ${tone} manner` : '';
+    const delivery = tone ? ` ${deliveryPhrase(tone)}` : '';
     return `(The player does the following${delivery}, without speaking — do not invent dialogue for them): ${body}`;
   },
   play: (input) => {
     const { tone, body } = parseDeliveryTone(input);
-    const delivery = tone ? ` with a ${tone} manner` : '';
+    const delivery = tone ? ` ${deliveryPhrase(tone)}` : '';
     return (
       `(The player both acts and speaks${delivery}. ` +
       `Honor *actions* and "dialogue" exactly as written — do not invent extra spoken lines or strip the gestures): ${body}`
@@ -1469,8 +1496,14 @@ export function injectedSpeakBrief(opts: {
   emotion?: string;
   goal?: string;
   anchor?: string;
+  /** one-line "who you are here" for walk-ons with no cast card */
+  role?: string;
+  /** where they stand in the room's turn-taking right now */
+  situation?: string;
 }): string {
   const bits: string[] = [`Answer the player's last move as ${opts.name.trim() || 'Someone'}`];
+  const role = (opts.role ?? '').trim();
+  if (role) bits.push(`who you are here: ${cueClip(role, 64)}`);
   const voice = (opts.speechStyle ?? '').trim();
   if (voice) bits.push(`voice: ${cueClip(voice, 56)}`);
   const feel = (opts.emotion ?? '').trim();
@@ -1481,25 +1514,30 @@ export function injectedSpeakBrief(opts: {
   if (tic) bits.push(`one tic: ${cueClip(tic, 40)}`);
   const hold = (opts.anchor ?? '').trim();
   if (hold) bits.push(`hold: ${cueClip(hold, 44)}`);
+  const situation = (opts.situation ?? '').trim();
+  if (situation) bits.push(cueClip(situation, 88));
   bits.push('do not soften; leave room for the player');
   return `${bits.join('; ')}.`;
 }
 
-export function injectedSpeakBriefForCharacter(c: Character): string {
+export function injectedSpeakBriefForCharacter(c: Character, situation?: string): string {
   return injectedSpeakBrief({
     name: c.name,
     speechStyle: c.speechStyle,
     mannerisms: c.mannerisms,
     emotion: c.state?.emotion,
     goal: c.state?.goal,
-    anchor: c.anchors.find((a) => a.trim())
+    anchor: c.anchors.find((a) => a.trim()),
+    situation
   });
 }
 
-export function injectedSpeakBriefForGuest(g: EpisodeGuest): string {
+export function injectedSpeakBriefForGuest(g: EpisodeGuest, situation?: string): string {
   return injectedSpeakBrief({
     name: g.name,
-    speechStyle: g.voice
+    speechStyle: g.voice,
+    role: g.brief,
+    situation
   });
 }
 
@@ -1648,6 +1686,8 @@ export function directorSystemPrompt(
     'Speak characterId may be the cast id OR the exact character name (never the player). ' +
     'Narration briefs name who moves in the room and one sensory job (sight, sound, smell, temperature, or touch) — never a weather catalogue, never finished dialogue. ' +
     'Speak briefs name want or friction (answer, refuse, deflect, bargain, stall) plus tone — a single intent, never the finished line, never "give a speech" or a multi-point monologue. ' +
+    'The room is not a queue: the right voice is whoever has the most at stake, not whoever spoke last or stands first in the cast list. ' +
+    'A brief may have someone answer for another, cut them off, or talk past the player — see Room dynamics below. ' +
     engageReply +
     sizeGuidance +
     `Hard cap for ${sizeLabel}: at most ${maxSpeak} speak beat${maxSpeak === 1 ? '' : 's'} and at most ${maxTotal} beats total. ` +
@@ -1655,6 +1695,33 @@ export function directorSystemPrompt(
     'Always include at least one narration beat unless the player just spoke and an immediate reply is natural — then you may open with speak. ' +
     'End the plan on tension or an opening for the player.'
   );
+}
+
+/**
+ * Relationship edges between NPCs who are both on stage.
+ * The speak agents already see their own ties; the director needs them to plan
+ * cross-talk — a rival cutting in, an ally covering for someone.
+ */
+export function inSceneDyadLines(inScene: Character[], cap: number): string[] {
+  const byId = new Map(inScene.map((c) => [c.id, c]));
+  const lines: string[] = [];
+  const seen = new Set<string>();
+  for (const c of inScene) {
+    for (const r of c.relationships) {
+      const target = byId.get(r.targetId);
+      if (!target || target.id === c.id) continue;
+      const key = `${c.id}>${target.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const note = (r.note ?? '').trim();
+      lines.push(
+        `- ${c.name} → ${target.name}: ${r.kind || 'linked'}` +
+        (note ? ` — ${clipText(note, 72)}` : '')
+      );
+      if (lines.length >= cap) return lines;
+    }
+  }
+  return lines;
 }
 
 export function directorUserPrompt(
@@ -1697,6 +1764,21 @@ export function directorUserPrompt(
   const guestList = guests.length > 0
     ? guests.map((g) => `- ${g.id} · ${g.name}: ${g.brief}`).join('\n')
     : '(none yet — you may introduce walk-ons via castDelta.introduce)';
+
+  const dyads = inSceneDyadLines(inScene, tight ? 3 : 6);
+  const dyadBlock = dyads.length > 0
+    ? `Ties inside the room (play NPCs off each other, not only off the player):\n${dyads.join('\n')}\n\n`
+    : '';
+
+  const dynamics = roomDynamicsLines({
+    candidates: speakerCandidates(inScene, guests),
+    playerText: input,
+    turns: ctx.turns
+  });
+  const dynamicsBlock = dynamics.length > 0
+    ? `Room dynamics (advisory — vary who carries a scene; a silent NPC who has a stake ` +
+      `is often the sharper answer than whoever spoke last):\n${dynamics.map((l) => `- ${l}`).join('\n')}\n\n`
+    : '';
 
   const preferCast = opts?.preferCharacterId
     ? inScene.find((c) => c.id === opts.preferCharacterId)
@@ -1806,6 +1888,8 @@ export function directorUserPrompt(
     `In-scene cast:\n${castList}\n\n` +
     `Off-scene cast (may enter via castDelta.enter):\n${offList}\n\n` +
     `Active walk-ons (guest ids):\n${guestList}\n\n` +
+    dyadBlock +
+    dynamicsBlock +
     preferLine +
     `Continuity (do not contradict):\n${factLines || '(none)'}\n\n` +
     `${threadSec ?? 'Open threads (draw on sparingly; soft tensions, not the plot-target hit-list):\n(none)'}\n\n` +

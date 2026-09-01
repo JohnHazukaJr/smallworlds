@@ -59,6 +59,14 @@ export const GAP_EFFECTS = [
   'Your protagonist may be a story others tell. Consider starting as someone new.'
 ];
 
+/**
+ * Ink for a speaker's name in prose layout — the character's own plate hue, lifted
+ * until it reads on the dark page. Carries speaker identity without an avatar column.
+ */
+export function speakerInk(hue: number): string {
+  return `oklch(0.83 0.055 ${hue})`;
+}
+
 export function avatarStyle(hue: number, size: number, ring?: string): CSSProperties {
   const r = size > 30 ? 6 : 4;
   return {

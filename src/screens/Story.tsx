@@ -7,8 +7,8 @@ import {
   WriteAbortedError, type EpisodeWrapDraft, type StreamMeta, type SeedCalendarEventDraft
 } from '../ai/engine';
 import {
-  DELIVERY_TONES,
   applyDeliveryTone,
+  isDeliveryTone,
   parseDeliveryTone,
   type DeliveryTone
 } from '../ai/deliveryTone';
@@ -25,13 +25,17 @@ import {
   pendingBeatLabel, preferBucketsForEpisodes, resolveSpeakerName, selectDirectorFacts, selectDirectorThreads,
   type DirectorBeat
 } from '../ai/prompts';
+import { DeliveryPicker } from '../components/DeliveryPicker';
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
 import { db, guardStorage, recordTombstones, safeWrite, uid } from '../db';
 import {
   CALENDAR_EVENT_KINDS, CALENDAR_EVENT_SCALES, CALENDAR_EVENT_VISIBILITIES,
   emptyCalendarEvent, evaluateCalendarEvents
 } from '../calendarEvents';
-import { AVATAR_PX, DEFAULT_DISPLAY, moodFromHue, useApp, type AvatarSize, type StoryLayout } from '../store/app';
+import {
+  AVATAR_PX, DEFAULT_DISPLAY, moodFromHue, useApp,
+  type AvatarSize, type DialogueStyle, type StoryLayout
+} from '../store/app';
 import { useSettings } from '../store/settings';
 import type {
   CalendarEvent, CalendarEventKind, CalendarEventScale, CalendarEventVisibility,
@@ -45,7 +49,8 @@ import {
 import { AppError, classifyError, formatUserError } from '../errors';
 import { Chip, ErrorNote, Mono, Sheet, Spinner, Toggle, useVw } from '../ui/bits';
 import { fileToSceneImage } from '../ui/image';
-import { avatarStyle, BACKDROPS, MOODS, STRIPE, ACCENT, ACCENT_RGBA } from '../ui/theme';
+import { attributionRun, isDialogueBlock, lastSpokenBy } from '../ui/attribution';
+import { avatarStyle, speakerInk, BACKDROPS, MOODS, STRIPE, ACCENT, ACCENT_RGBA } from '../ui/theme';
 import {
   calendarPatch, characterPortraits, dayFromParts, emptyLocation, evaluateWorldWriteReady, formatStoryDate,
   advanceMonths, buildEpisodePlotTargets, formatStoryDateShort, latestEndedEpisode, nextEpisode, partsForDay,
@@ -89,6 +94,20 @@ interface WrapReviewDraft {
   /** Day the next episode opens on */
   nextStoryDay: number;
   dateNote: string;
+  place: {
+    name: string;
+    currentState: string;
+    atmosphere: string;
+    keep: boolean;
+  } | null;
+  elsewhere: Array<{
+    name: string;
+    currentState: string;
+    atmosphere: string;
+    keep: boolean;
+  }>;
+  meanwhile: string;
+  meanwhileKeep: boolean;
 }
 
 function draftFromAnalysis(d: EpisodeWrapDraft): WrapReviewDraft {
@@ -132,7 +151,23 @@ function draftFromAnalysis(d: EpisodeWrapDraft): WrapReviewDraft {
     storyDayStart: d.storyDayStart,
     storyDayEnd: d.storyDayEnd,
     nextStoryDay: Math.max(d.storyDayEnd, d.nextStoryDay),
-    dateNote: d.dateNote
+    dateNote: d.dateNote,
+    place: d.place
+      ? {
+        name: d.place.name,
+        currentState: d.place.currentState ?? '',
+        atmosphere: d.place.atmosphere ?? '',
+        keep: true
+      }
+      : null,
+    elsewhere: d.elsewhere.map((p) => ({
+      name: p.name,
+      currentState: p.currentState ?? '',
+      atmosphere: p.atmosphere ?? '',
+      keep: true
+    })),
+    meanwhile: d.meanwhile,
+    meanwhileKeep: !!d.meanwhile.trim()
   };
 }
 
@@ -250,13 +285,15 @@ function EmphasizedText({ text }: { text: string }) {
 }
 
 function SpeakParagraph({
-  segments, accent, prose, fontPx, last
+  segments, accent, prose, fontPx, last, lead
 }: {
   segments: SpeakSegment[];
   accent: string;
   prose: string;
   fontPx: number;
   last: boolean;
+  /** inline speaker attribution, prose layout only */
+  lead?: ReactNode;
 }) {
   return (
     <p
@@ -269,6 +306,7 @@ function SpeakParagraph({
         textWrap: 'pretty'
       }}
     >
+      {lead}
       {segments.map((seg, i) => {
         if (seg.kind === 'action') {
           return (
@@ -304,12 +342,13 @@ function SpeakParagraph({
 }
 
 function SpeakBody({
-  segments, accent, prose, fontPx
+  segments, accent, prose, fontPx, lead
 }: {
   segments: SpeakSegment[];
   accent: string;
   prose: string;
   fontPx: number;
+  lead?: ReactNode;
 }) {
   const paras = groupSpeakParagraphs(segments);
   return (
@@ -322,16 +361,71 @@ function SpeakBody({
           prose={prose}
           fontPx={fontPx}
           last={pi === paras.length - 1}
+          lead={pi === 0 ? lead : undefined}
         />
       ))}
     </div>
   );
 }
 
-function ProseBlockView({ b, accent, prose, fontPx, avatarPx }: {
-  b: ProseBlock; accent: string; prose: string; fontPx: number; avatarPx: number;
+/** Inline attribution for prose layout — the speaker's own hue does the identifying. */
+function SpeakerLead({ b }: { b: ProseBlock }) {
+  const ink = b.hue !== undefined ? speakerInk(b.hue) : 'rgba(236,234,230,0.8)';
+  return (
+    <span style={{
+      color: ink,
+      fontWeight: 600,
+      fontVariant: 'small-caps',
+      letterSpacing: '0.04em',
+      marginRight: 9
+    }}>
+      {b.speaker}
+      {b.deliveryTone && (
+        <span style={{ fontVariant: 'normal', fontWeight: 400, fontStyle: 'italic', opacity: 0.72 }}>
+          {' '}({b.deliveryTone})
+        </span>
+      )}
+    </span>
+  );
+}
+
+function ProseBlockView({ b, accent, prose, fontPx, avatarPx, dialogueStyle, continues }: {
+  b: ProseBlock;
+  accent: string;
+  prose: string;
+  fontPx: number;
+  avatarPx: number;
+  dialogueStyle: DialogueStyle;
+  /** previous block was the same speaker — drop the repeat attribution */
+  continues?: boolean;
 }) {
-  const isDialog = b.kind === 'dialogue' || b.kind === 'action' || b.kind === 'speak';
+  const isDialog = isDialogueBlock(b);
+
+  if (isDialog && dialogueStyle === 'prose') {
+    const lead = b.speaker && !continues ? <SpeakerLead b={b} /> : undefined;
+    return (
+      <div style={{ marginBottom: 20 }}>
+        {b.kind === 'speak' && b.segments ? (
+          <SpeakBody segments={b.segments} accent={accent} prose={prose} fontPx={fontPx} lead={lead} />
+        ) : (
+          <p className="serif" style={{
+            fontSize: fontPx, lineHeight: 1.78, margin: 0, color: prose,
+            fontStyle: b.kind === 'dialogue' ? 'italic' : 'normal', textWrap: 'pretty'
+          }}>
+            {lead}
+            {b.kind === 'action' ? (
+              <span style={{ color: accent, fontWeight: 600 }}>
+                <EmphasizedText text={b.text} />
+              </span>
+            ) : (
+              <EmphasizedText text={b.text} />
+            )}
+          </p>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', marginBottom: isDialog ? 24 : 22 }}>
       {isDialog && b.hue !== undefined && (
@@ -455,11 +549,8 @@ export function Story() {
   const [deliveryTone, setDeliveryTone] = useState<DeliveryTone | null>(() => {
     try {
       const last = localStorage.getItem('sw-last-delivery-tone');
-      return last && (DELIVERY_TONES as readonly string[]).includes(last) ? last as DeliveryTone : null;
+      return last && isDeliveryTone(last) ? last : null;
     } catch { return null; }
-  });
-  const [deliveryTipSeen, setDeliveryTipSeen] = useState(() => {
-    try { return localStorage.getItem('sw-delivery-tip-seen') === '1'; } catch { return false; }
   });
   const [length, setLength] = useState<TurnLength>(() => {
     try {
@@ -1030,7 +1121,22 @@ export function Story() {
         storyDayStart: wrapDraft.storyDayStart,
         storyDayEnd: wrapDraft.storyDayEnd,
         nextStoryDay: wrapDraft.nextStoryDay,
-        dateNote: wrapDraft.dateNote
+        dateNote: wrapDraft.dateNote,
+        place: wrapDraft.place?.keep
+          ? {
+            name: wrapDraft.place.name,
+            currentState: wrapDraft.place.currentState || undefined,
+            atmosphere: wrapDraft.place.atmosphere || undefined
+          }
+          : null,
+        elsewhere: wrapDraft.elsewhere
+          .filter((p) => p.keep && (p.currentState.trim() || p.atmosphere.trim()))
+          .map((p) => ({
+            name: p.name,
+            currentState: p.currentState || undefined,
+            atmosphere: p.atmosphere || undefined
+          })),
+        meanwhile: wrapDraft.meanwhileKeep ? wrapDraft.meanwhile : ''
       });
       resetAfterEpisodeEnd();
       setNotice('Episode filed · next episode is open.');
@@ -1172,6 +1278,16 @@ export function Story() {
     .split(',')[0].split('.')[0].toLowerCase();
   const climateLine = (episode.atmosphereNote || activeLocation?.atmosphere || '')
     .split(/[.\n]/)[0].trim();
+  // Chapter head: where and when this episode opens, in reading order rather than chrome.
+  const sceneDate = formatStoryDate(
+    worldCalendar(world),
+    episode.storyDay && episode.storyDay > 0 ? episode.storyDay : worldCalendar(world).currentDay
+  );
+  const chapterHeadLine = [
+    activeLocation?.name || episode.location || '',
+    sceneDate,
+    climateLine
+  ].map((s) => s.trim()).filter(Boolean).join(' · ');
   const stageCast = inScene;
   const stageGuests = episode.activeGuestIds == null
     ? guests
@@ -1430,9 +1546,31 @@ export function Story() {
               } : {})
             }}
           >
-            <div className="label" style={{ marginBottom: 22, opacity: 0.7 }}>
-              Season {numberWord(season.number)} · episode {numberWord(episode.number)}{episode.title ? ` — ${episode.title}` : ''}
-            </div>
+            <header style={{ marginBottom: 26 }}>
+              <div className="label" style={{ opacity: 0.6 }}>
+                Season {numberWord(season.number)} · episode {numberWord(episode.number)}
+              </div>
+              {episode.title && (
+                <div className="serif" style={{
+                  fontSize: narrow ? 21 : 25, fontWeight: 300, lineHeight: 1.25,
+                  margin: '10px 0 0', color: '#f2efe9'
+                }}>
+                  {episode.title}
+                </div>
+              )}
+              {chapterHeadLine && (
+                <div className="serif" style={{
+                  marginTop: 8, fontSize: 13.5, lineHeight: 1.55, fontStyle: 'italic',
+                  color: 'rgba(230,233,235,0.55)'
+                }}>
+                  {chapterHeadLine}
+                </div>
+              )}
+              <div style={{
+                height: 1, marginTop: 18,
+                background: `linear-gradient(90deg, ${M.accent}55, rgba(255,255,255,0.06) 45%, transparent)`
+              }} />
+            </header>
 
             {season.bible && turns.length === 0 && (
               <div className="craft-row" style={{ padding: '16px 18px', marginBottom: 26 }}>
@@ -1449,13 +1587,11 @@ export function Story() {
                     : 'The world is ready — step in.'}
                 </p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  <div className="label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span className="seed-mark" />
-                    {activeLocation?.name || episode.location || 'No place linked yet'}
-                  </div>
-                  {climateLine && (
-                    <div style={{ fontSize: 13.5, color: 'rgba(230,233,235,0.62)', fontStyle: 'italic' }}>
-                      {climateLine}
+                  {/* Place and weather already sit in the chapter head — only nudge when missing. */}
+                  {!(activeLocation?.name || episode.location) && (
+                    <div className="label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span className="seed-mark" />
+                      No place linked yet
                     </div>
                   )}
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
@@ -1575,6 +1711,8 @@ export function Story() {
                 prose={M.prose}
                 fontPx={fontPx}
                 avatarPx={avatarPx}
+                dialogueStyle={display.dialogueStyle}
+                prevSpeaker={ti > 0 ? lastSpokenBy(visible[ti - 1].blocks) : null}
                 streaming={streaming}
                 hasBelow={ti < visible.length - 1 || streaming}
                 onRetry={() => void retryFrom(turn)}
@@ -1599,12 +1737,23 @@ export function Story() {
                 text: partialMeta.role === 'character' ? previewSpeakText(partial) : partial,
                 createdAt: 0
               }, characters, guests)
-                .map((b, i) => <ProseBlockView key={`p${i}`} b={b} accent={M.accent} prose={M.prose} fontPx={fontPx} avatarPx={avatarPx} />)
+                .map((b, i) => (
+                  <ProseBlockView
+                    key={`p${i}`}
+                    b={b}
+                    accent={M.accent}
+                    prose={M.prose}
+                    fontPx={fontPx}
+                    avatarPx={avatarPx}
+                    dialogueStyle={display.dialogueStyle}
+                  />
+                ))
             )}
 
-            {streaming && (
+            {/* Prose arriving is its own progress — a spinner under live text just reads as "bot thinking". */}
+            {streaming && !partial && (
               <div style={{ marginTop: 22 }}>
-                <Spinner accent={ACCENT} label={progressLabel || 'writing…'} />
+                <Spinner accent={ACCENT} label={progressLabel || 'the scene turns…'} />
               </div>
             )}
 
@@ -1770,31 +1919,7 @@ export function Story() {
             ))}
           </div>
           {agencyOn && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.45 }}>
-                delivery
-              </span>
-              {!deliveryTipSeen && (
-                <div style={{ fontSize: 12, lineHeight: 1.45, color: 'rgba(236,234,230,0.55)' }}>
-                  Optional tone for how you speak or act — e.g. sarcastic, quietly. Tap again to clear.
-                  <button className="btn-quiet" style={{ marginLeft: 8, fontSize: 11 }} onClick={() => {
-                    setDeliveryTipSeen(true);
-                    try { localStorage.setItem('sw-delivery-tip-seen', '1'); } catch { /* ignore */ }
-                  }}>got it</button>
-                </div>
-              )}
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                {DELIVERY_TONES.map((tone) => (
-                  <Chip
-                    key={tone}
-                    active={deliveryTone === tone}
-                    onClick={() => setDeliveryTone((cur) => (cur === tone ? null : tone))}
-                  >
-                    {tone}
-                  </Chip>
-                ))}
-              </div>
-            </div>
+            <DeliveryPicker value={deliveryTone} onChange={setDeliveryTone} />
           )}
           {agencyOn && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -2270,6 +2395,22 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
             placeholder="rain on the glass · late afternoon · cold iron smell…"
             style={{ fontSize: 13 }}
           />
+
+          {(episode.sceneLedger?.length ?? 0) > 0 && (
+            <div className="craft-row" style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <Mono style={{ fontSize: 9 }}>already true in this room</Mono>
+              <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.45)' }}>
+                Tracked from the prose as you play. The narrator and cast are held to these.
+              </div>
+              <ul style={{ margin: 0, paddingLeft: 16, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {episode.sceneLedger!.map((d, i) => (
+                  <li key={i} className="serif" style={{ fontSize: 13, lineHeight: 1.5, color: 'rgba(236,234,230,0.78)' }}>
+                    {d}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.5 }}>
               mood {episode.moodPinned ? 'pinned' : 'follows location'}
@@ -2358,18 +2499,44 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
             onChange={(v) => setDisplay({ textSize: v })} />
         </div>
 
-        {/* avatars */}
+        {/* dialogue layout */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
-          <Mono style={{ fontSize: 9 }}>avatar size in the story</Mono>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            {(['S', 'M', 'L'] as AvatarSize[]).map((s) => (
-              <Chip key={s} active={display.avatarSize === s} onClick={() => setDisplay({ avatarSize: s })}>
-                {s === 'S' ? 'Small' : s === 'M' ? 'Medium' : 'Large'}
-              </Chip>
-            ))}
-            <div style={{ ...avatarStyle(200, AVATAR_PX[display.avatarSize], 'rgba(255,255,255,0.25)'), marginLeft: 'auto' }} />
+          <Mono style={{ fontSize: 9 }}>how dialogue sits on the page</Mono>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <Chip
+              active={display.dialogueStyle === 'prose'}
+              onClick={() => setDisplay({ dialogueStyle: 'prose' })}
+            >
+              Prose
+            </Chip>
+            <Chip
+              active={display.dialogueStyle === 'staged'}
+              onClick={() => setDisplay({ dialogueStyle: 'staged' })}
+            >
+              Staged
+            </Chip>
+          </div>
+          <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.45)' }}>
+            {display.dialogueStyle === 'prose'
+              ? 'Names run inline in the character’s own colour, like a novel. A speaker who keeps talking is not re-announced.'
+              : 'Every line gets an avatar plate and a name header — easier to scan who spoke.'}
           </div>
         </div>
+
+        {/* avatars */}
+        {display.dialogueStyle === 'staged' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
+            <Mono style={{ fontSize: 9 }}>avatar size in the story</Mono>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              {(['S', 'M', 'L'] as AvatarSize[]).map((s) => (
+                <Chip key={s} active={display.avatarSize === s} onClick={() => setDisplay({ avatarSize: s })}>
+                  {s === 'S' ? 'Small' : s === 'M' ? 'Medium' : 'Large'}
+                </Chip>
+              ))}
+              <div style={{ ...avatarStyle(200, AVATAR_PX[display.avatarSize], 'rgba(255,255,255,0.25)'), marginLeft: 'auto' }} />
+            </div>
+          </div>
+        )}
 
         <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
           onClick={() => setDisplay(DEFAULT_DISPLAY)}>reset display to defaults</button>
@@ -2380,7 +2547,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
 
 // ---------- turn row with edit / retry / delete-below ----------
 
-function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, streaming, hasBelow, onRetry, onReroll, onDeleteBelow }: {
+function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, dialogueStyle, prevSpeaker, streaming, hasBelow, onRetry, onReroll, onDeleteBelow }: {
   turn: Turn;
   blocks: ProseBlock[];
   characters: Character[];
@@ -2388,6 +2555,9 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, st
   prose: string;
   fontPx: number;
   avatarPx: number;
+  dialogueStyle: DialogueStyle;
+  /** who held the floor just before this turn, so prose layout can skip a repeat name */
+  prevSpeaker: string | null;
   streaming: boolean;
   hasBelow: boolean;
   onRetry: () => void;
@@ -2441,9 +2611,22 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, st
     );
   }
 
+  const continued = attributionRun(blocks, prevSpeaker);
+
   return (
     <div className="turn-row" style={{ position: 'relative' }}>
-      {blocks.map((b, i) => <ProseBlockView key={i} b={b} accent={accent} prose={prose} fontPx={fontPx} avatarPx={avatarPx} />)}
+      {blocks.map((b, i) => (
+        <ProseBlockView
+          key={i}
+          b={b}
+          accent={accent}
+          prose={prose}
+          fontPx={fontPx}
+          avatarPx={avatarPx}
+          dialogueStyle={dialogueStyle}
+          continues={continued[i]}
+        />
+      ))}
       <div className="turn-tools" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: -4, marginBottom: 20 }}>
         <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
           onClick={() => { setDraft(turn.text); setEditing(true); }}>Edit</button>
@@ -4409,6 +4592,132 @@ function WrapReviewBody({
           </div>
         </div>
       </div>
+
+      {(draft.place || draft.elsewhere.length > 0) && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <Mono style={{ fontSize: 9 }}>the world as you left it</Mono>
+          <div style={{ fontSize: 12, lineHeight: 1.45, opacity: 0.5 }}>
+            Places keep this condition into the next episode. Weather is only for the next opening.
+          </div>
+          {draft.place && (
+            <div style={{
+              display: 'flex', flexDirection: 'column', gap: 10,
+              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '14px 14px',
+              background: 'rgba(255,255,255,0.04)',
+              opacity: draft.place.keep ? 1 : 0.42
+            }}>
+              <Mono style={{ fontSize: 8, opacity: 0.5 }}>
+                {draft.place.name || 'this scene'}
+              </Mono>
+              <textarea
+                rows={2}
+                value={draft.place.currentState}
+                onChange={(e) => onChange({
+                  ...draft,
+                  place: { ...draft.place!, currentState: e.target.value }
+                })}
+                placeholder="How the place is left — lamp smashed, quay empty…"
+                style={{ fontSize: 13.5, lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, color: '#eceae6' }}
+              />
+              <textarea
+                rows={2}
+                value={draft.place.atmosphere}
+                onChange={(e) => onChange({
+                  ...draft,
+                  place: { ...draft.place!, atmosphere: e.target.value }
+                })}
+                placeholder="Weather / light for the next opening (optional)"
+                style={{ fontSize: 12.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.55)', background: 'transparent', border: 0, padding: 0 }}
+              />
+              <KeepDropChips
+                keep={draft.place.keep}
+                onKeep={() => onChange({ ...draft, place: { ...draft.place!, keep: true } })}
+                onDrop={() => onChange({ ...draft, place: { ...draft.place!, keep: false } })}
+              />
+            </div>
+          )}
+          {draft.elsewhere.map((p, i) => (
+            <div key={`${p.name}-${i}`} style={{
+              display: 'flex', flexDirection: 'column', gap: 10,
+              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '14px 14px',
+              background: 'rgba(255,255,255,0.04)',
+              opacity: p.keep ? 1 : 0.42
+            }}>
+              <input
+                value={p.name}
+                onChange={(e) => {
+                  const elsewhere = draft.elsewhere.map((row, j) =>
+                    j === i ? { ...row, name: e.target.value } : row
+                  );
+                  onChange({ ...draft, elsewhere });
+                }}
+                placeholder="Place name"
+                style={{ fontSize: 13, background: 'transparent', border: 0, padding: 0, color: '#f0eee9' }}
+              />
+              <textarea
+                rows={2}
+                value={p.currentState}
+                onChange={(e) => {
+                  const elsewhere = draft.elsewhere.map((row, j) =>
+                    j === i ? { ...row, currentState: e.target.value } : row
+                  );
+                  onChange({ ...draft, elsewhere });
+                }}
+                placeholder="How that place changed"
+                style={{ fontSize: 13, lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, color: '#eceae6' }}
+              />
+              <KeepDropChips
+                keep={p.keep}
+                onKeep={() => {
+                  const elsewhere = draft.elsewhere.map((row, j) =>
+                    j === i ? { ...row, keep: true } : row
+                  );
+                  onChange({ ...draft, elsewhere });
+                }}
+                onDrop={() => {
+                  const elsewhere = draft.elsewhere.map((row, j) =>
+                    j === i ? { ...row, keep: false } : row
+                  );
+                  onChange({ ...draft, elsewhere });
+                }}
+              />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {draft.nextStoryDay > draft.storyDayEnd && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <Mono style={{ fontSize: 9 }}>meanwhile</Mono>
+          <div style={{ fontSize: 12, lineHeight: 1.45, opacity: 0.5 }}>
+            Off-screen life during the {draft.nextStoryDay - draft.storyDayEnd} day
+            {draft.nextStoryDay - draft.storyDayEnd === 1 ? '' : 's'} before the next episode opens.
+          </div>
+          <div style={{
+            display: 'flex', flexDirection: 'column', gap: 10,
+            border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '14px 14px',
+            background: 'rgba(255,255,255,0.04)',
+            opacity: draft.meanwhileKeep ? 1 : 0.42
+          }}>
+            <textarea
+              className="serif"
+              rows={4}
+              value={draft.meanwhile}
+              onChange={(e) => onChange({ ...draft, meanwhile: e.target.value })}
+              placeholder="Who waited, who travelled, what healed, what got worse…"
+              style={{
+                fontFamily: 'Spectral, serif', fontSize: 15, lineHeight: 1.6, color: '#f0eee9',
+                width: '100%', background: 'transparent', border: 0, padding: 0
+              }}
+            />
+            <KeepDropChips
+              keep={draft.meanwhileKeep}
+              onKeep={() => onChange({ ...draft, meanwhileKeep: true })}
+              onDrop={() => onChange({ ...draft, meanwhileKeep: false })}
+            />
+          </div>
+        </div>
+      )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <Mono style={{ fontSize: 9 }}>beats</Mono>
