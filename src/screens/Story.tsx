@@ -680,6 +680,8 @@ export function Story() {
   const [moreSheet, setMoreSheet] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
   const [composerFocused, setComposerFocused] = useState(false);
+  const [composeMore, setComposeMore] = useState(false);
+  const [hudTucked, setHudTucked] = useState(false);
   const [keyboardOffset, setKeyboardOffset] = useState(0);
   const [sceneFadeKey, setSceneFadeKey] = useState(0);
   /** Context-pressure nudge: dismiss until chars rise ~10% of budget or location changes. */
@@ -777,9 +779,28 @@ export function Story() {
   }, [episode?.image, mood, episode?.locationId]);
 
   useEffect(() => {
-    if (!readMode) setComposerOpen(true);
-    else setComposerOpen(false);
+    if (!readMode) {
+      setComposerOpen(true);
+      setHudTucked(false);
+      setComposeMore(false);
+    } else {
+      setComposerOpen(false);
+      setComposeMore(false);
+    }
   }, [readMode]);
+
+  useEffect(() => {
+    if (!readMode) return;
+    const el = scrollRef.current;
+    const tuck = () => { if (!composerOpen) setHudTucked(true); };
+    const onScroll = () => tuck();
+    el?.addEventListener('scroll', onScroll, { passive: true });
+    const idle = window.setTimeout(tuck, 2400);
+    return () => {
+      el?.removeEventListener('scroll', onScroll);
+      window.clearTimeout(idle);
+    };
+  }, [readMode, composerOpen, episode?.id]);
 
   // Reset nudge baseline when the active episode changes.
   useEffect(() => {
@@ -1346,21 +1367,13 @@ export function Story() {
     act: 'You do something. No dialogue, no narration from you.',
     play: '*opens the door* "Anyone home?" — gesture in *stars*, words in quotes.'
   };
-  const modeHint: Record<ComposeMode, string> = {
-    continue: 'continue',
-    steer: 'you direct',
-    speak: 'you say',
-    act: 'you do',
-    play: 'you say & do'
-  };
-
   const directorContent = (
     <DirectorContent
       world={world} season={season} episode={episode} characters={characters} locations={locations}
       continuity={continuity} threads={threads} accent={ACCENT} narrow={narrow}
       onGoLocations={goLocations}
       onGoCast={goCast}
-      onNudge={(text) => { setComposeModeSafe('steer'); setInput(text); setDirectorSheet(false); }}
+      onNudge={(text) => { setComposeModeSafe('steer'); setInput(text); setDirectorSheet(false); setComposerOpen(true); }}
     />
   );
 
@@ -1392,7 +1405,7 @@ export function Story() {
       color: M.text,
       paddingBottom: keyboardOffset > 0 ? keyboardOffset : undefined
     }}>
-      {/* backdrop — scene image when the episode has one, mood gradient otherwise */}
+      {/* backdrop — the room fills the frame */}
       {episode.image ? (
         <>
           <div
@@ -1412,24 +1425,20 @@ export function Story() {
           }} />
         </>
       ) : (
-        <>
-          <div
-            key={`mood-${sceneFadeKey}`}
-            className="scene-crossfade"
-            style={{
-              position: 'absolute', inset: 0, zIndex: 0,
-              background: `linear-gradient(160deg, ${BD.a}, ${BD.b}), ${STRIPE('rgba(255,255,255,0.05)', 'rgba(255,255,255,0.01)')}`,
-              opacity: backdrop === 'none' ? 0.25 : 1, transition: 'opacity 0.45s ease'
-            }}
-          />
-          <div style={{
-            position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none',
-            background: 'radial-gradient(720px 520px at 50% 40%, transparent, rgba(8,9,12,0.72) 78%), linear-gradient(180deg, rgba(8,9,12,0.5), rgba(8,9,12,0.2) 30%, rgba(8,9,12,0.6))',
-            backdropFilter: 'blur(3px)'
-          }} />
-        </>
+        <div
+          key={`mood-${sceneFadeKey}`}
+          className="scene-crossfade"
+          style={{
+            position: 'absolute', inset: 0, zIndex: 0,
+            background: `linear-gradient(160deg, ${BD.a}, ${BD.b})`,
+            opacity: backdrop === 'none' ? 0.35 : 1, transition: 'opacity 0.45s ease'
+          }}
+        />
       )}
-      {/* Mood climate wash — paints the room, not just the text */}
+      <div
+        className="scene-room-vignette"
+        style={{ position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none' }}
+      />
       <div
         key={`tint-${mood}`}
         style={{
@@ -1438,47 +1447,58 @@ export function Story() {
           transition: 'background 0.45s ease'
         }}
       />
+      <div
+        className={`climate-layer climate-${mood}`}
+        style={{ position: 'absolute', inset: 0, zIndex: 1 }}
+      />
+
+      {readMode && hudTucked && !composerOpen && (
+        <div
+          className="scene-hud-hotzone"
+          onMouseEnter={() => setHudTucked(false)}
+          onClick={() => setHudTucked(false)}
+          aria-hidden
+        />
+      )}
 
       {/* header — thin strip in Read mode */}
       {readMode ? (
-        <div style={{
-          position: 'relative', zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        <div
+          className={`scene-hud${hudTucked && !composerOpen ? ' tucked' : ''}`}
+          onMouseEnter={() => setHudTucked(false)}
+          style={{
+          position: 'relative', zIndex: 5, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           gap: 12,
           paddingTop: narrow ? 'calc(10px + env(safe-area-inset-top))' : 11,
           paddingBottom: narrow ? 10 : 11,
           paddingLeft: narrow ? 14 : 22,
           paddingRight: narrow ? 14 : 22,
-          borderBottom: '1px solid rgba(255,255,255,0.06)',
-          background: 'rgba(12,14,16,0.45)', backdropFilter: 'blur(14px) saturate(110%)'
+          background: 'transparent'
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
-            <div style={{
-              width: 3, height: 18, borderRadius: 1, flexShrink: 0,
-              background: M.accent, opacity: 0.9
-            }} />
             <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
-              <div className="label" style={{ fontSize: 12, color: 'rgba(230,233,235,0.72)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {world.title} · ep {episode.number}{locLabel ? ` · ${locLabel}` : ''}
+              <div className="serif" style={{ fontSize: 13, fontStyle: 'italic', color: 'rgba(230,233,235,0.55)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {world.title}{locLabel ? ` · ${locLabel}` : ''}
               </div>
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
             {showWrapNudge && (!readMode || !composerOpen) && (
-              <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11 }}
+              <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 11 }}
                 onClick={() => setWrapOpen('episode')}>File episode?</button>
             )}
-            <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 12 }}
-              onClick={() => setComposerOpen((o) => !o)}>
+            <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
+              onClick={() => { setComposerOpen((o) => !o); setHudTucked(false); }}>
               {composerOpen ? 'Hide' : 'Write'}
             </button>
             {narrow ? (
-              <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 12 }}
+              <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
                 onClick={() => setMoreSheet(true)}>More</button>
             ) : (
               <>
-                <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 12 }}
+                <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
                   onClick={() => setDirectorSheet(true)}>Direct</button>
-                <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 12 }}
+                <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
                   onClick={() => setLayout('write')}>Exit read</button>
               </>
             )}
@@ -1505,11 +1525,6 @@ export function Story() {
               <div className="label" style={{ fontSize: 11 }}>
                 Season {season.number} · episode {episode.number}{locLabel ? ` · ${locLabel}` : ''} · {formatStoryDate(worldCalendar(world), worldCalendar(world).currentDay)} · {M.label}
               </div>
-              {(climateLine) && (
-                <div style={{ fontSize: 11, color: 'rgba(230,233,235,0.48)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '52ch' }}>
-                  {climateLine}
-                </div>
-              )}
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
@@ -1570,107 +1585,83 @@ export function Story() {
         gridTemplateColumns: 'minmax(0, 1fr)'
       }}>
         <section ref={scrollRef} style={{ overflow: 'auto', display: 'flex', flexDirection: 'column', position: 'relative' }}>
-          {/* Cast stage — write mode only; read mode keeps the page clear */}
-          {!readMode && (
-          <button
-            type="button"
-            onClick={() => setDirectorSheet(true)}
-            title="Open Direct — who’s in the scene"
-            style={{
-              maxWidth: '40rem', width: 'calc(100% - 24px)', margin: '12px auto 0',
-              display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
-              border: '1px solid rgba(255,255,255,0.08)', borderRadius: 4,
-              padding: '8px 12px', cursor: 'pointer', textAlign: 'left',
-              background: 'rgba(8,10,12,0.35)', color: 'inherit'
-            }}
-          >
-            <div className="label" style={{ opacity: 0.5, flexShrink: 0 }}>Here</div>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', flex: 1, minWidth: 0 }}>
-              {stageCast.map((c) => (
-                <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-                  <div style={portraitPlate(c.hue, 22, characterPortraits(c)[0])} />
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
-                    <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(236,234,230,0.88)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 110 }}>
-                      {c.name || 'unnamed'}{c.isPlayer ? ' · you' : ''}
-                    </span>
-                    {c.state?.emotion?.trim() && (
-                      <span style={{ fontSize: 10, color: 'rgba(230,233,235,0.42)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 110 }}>
-                        {c.state.emotion.trim()}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              ))}
-              {stageGuests.map((g) => (
-                <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <div style={portraitPlate(guestHue(g.id), 22, null, 'rgba(255,255,255,0.14)')} />
-                  <span style={{ fontSize: 12, color: 'rgba(236,234,230,0.75)' }}>{g.name}</span>
-                </div>
-              ))}
-              {stageCast.length === 0 && stageGuests.length === 0 && (
-                <span style={{ fontSize: 12, color: 'rgba(230,233,235,0.45)' }}>No one staged — open Direct</span>
-              )}
+          {climateLine && (
+            <div className="climate-breath" style={{
+              padding: narrow ? '18px 20px 0' : '22px 28px 0',
+              fontSize: narrow ? 14 : 16
+            }}>
+              {climateLine}
             </div>
-          </button>
           )}
 
           <div
             className="page-plane"
             style={{
               maxWidth: '40rem',
-              margin: readMode ? '18px auto 28px' : '12px auto 18px',
+              margin: readMode ? '8px auto 28px' : '8px auto 18px',
               width: 'calc(100% - 24px)',
               padding: narrow
-                ? (readMode ? '32px 22px 48px' : '26px 18px 40px')
-                : (readMode ? '52px 44px 80px' : '44px 36px 68px'),
+                ? (readMode ? '28px 22px 48px' : '22px 18px 40px')
+                : (readMode ? '40px 36px 80px' : '32px 32px 68px'),
               ...(display.textScrim > 0 ? {
-                background: `linear-gradient(180deg, rgba(236,228,214,0.12), rgba(16,14,12,${(display.textScrim / 100).toFixed(2)}) 42%, rgba(10,11,13,${Math.min(0.82, display.textScrim / 100 + 0.08).toFixed(2)}))`,
-                backdropFilter: 'blur(14px) saturate(108%)'
+                background: `linear-gradient(180deg, rgba(8,9,12,${(display.textScrim / 100 * 0.35).toFixed(2)}), rgba(8,9,12,${(display.textScrim / 100).toFixed(2)}) 16%, rgba(8,9,12,${(display.textScrim / 100).toFixed(2)}) 84%, rgba(8,9,12,${(display.textScrim / 100 * 0.4).toFixed(2)}))`
               } : {})
             }}
           >
-            <header style={{ marginBottom: turns.length === 0 ? 28 : 36 }}>
-              <div className="serif" style={{
-                fontSize: 11,
-                letterSpacing: '0.16em',
-                textTransform: 'uppercase',
-                color: 'rgba(230,233,235,0.42)',
-                fontWeight: 500
-              }}>
-                Season {numberWord(season.number)} · episode {numberWord(episode.number)}
-              </div>
-              <div className="serif" style={{
-                fontSize: narrow ? 26 : 32,
-                fontWeight: 300,
-                lineHeight: 1.2,
-                margin: '12px 0 0',
-                color: '#f4f0e8'
-              }}>
-                {episode.title.trim() || activeLocation?.name || episode.location || 'Untitled scene'}
-              </div>
-              {(sceneDate || climateLine) && (
+            <header style={{ marginBottom: turns.length === 0 ? 28 : 22 }}>
+              {turns.length === 0 ? (
+                <>
+                  <div className="serif" style={{
+                    fontSize: 11,
+                    letterSpacing: '0.16em',
+                    textTransform: 'uppercase',
+                    color: 'rgba(230,233,235,0.42)',
+                    fontWeight: 500
+                  }}>
+                    Season {numberWord(season.number)} · episode {numberWord(episode.number)}
+                  </div>
+                  <div className="serif" style={{
+                    fontSize: narrow ? 26 : 32,
+                    fontWeight: 300,
+                    lineHeight: 1.2,
+                    margin: '12px 0 0',
+                    color: '#f4f0e8'
+                  }}>
+                    {episode.title.trim() || activeLocation?.name || episode.location || 'Untitled scene'}
+                  </div>
+                  {sceneDate && (
+                    <div className="serif" style={{
+                      marginTop: 10, fontSize: 15, lineHeight: 1.55, fontStyle: 'italic',
+                      color: 'rgba(230,233,235,0.52)'
+                    }}>
+                      {sceneDate}
+                    </div>
+                  )}
+                </>
+              ) : (
                 <div className="serif" style={{
-                  marginTop: 10, fontSize: 15, lineHeight: 1.55, fontStyle: 'italic',
-                  color: 'rgba(230,233,235,0.52)'
+                  fontSize: 14, fontStyle: 'italic', lineHeight: 1.45,
+                  color: 'rgba(230,233,235,0.42)'
                 }}>
-                  {[sceneDate, climateLine].filter(Boolean).join(' · ')}
+                  {episode.title.trim() || activeLocation?.name || episode.location}
+                  {sceneDate ? ` · ${sceneDate}` : ''}
                 </div>
               )}
-              {readMode && (stageCast.length > 0 || stageGuests.length > 0) && (
+              {(stageCast.length > 0 || stageGuests.length > 0) && (
                 <button
                   type="button"
                   onClick={() => setDirectorSheet(true)}
                   className="serif"
                   style={{
                     display: 'block',
-                    marginTop: 14,
+                    marginTop: turns.length === 0 ? 14 : 8,
                     padding: 0,
                     border: 0,
                     background: 'transparent',
                     cursor: 'pointer',
                     fontSize: 13.5,
                     fontStyle: 'italic',
-                    color: 'rgba(230,233,235,0.4)',
+                    color: 'rgba(230,233,235,0.38)',
                     textAlign: 'left'
                   }}
                 >
@@ -1680,10 +1671,12 @@ export function Story() {
                   ].join(' · ')}
                 </button>
               )}
-              <div style={{
-                height: 1, marginTop: 22,
-                background: 'linear-gradient(90deg, rgba(236,228,214,0.22), rgba(255,255,255,0.05) 48%, transparent)'
-              }} />
+              {turns.length === 0 && (
+                <div style={{
+                  height: 1, marginTop: 22,
+                  background: 'linear-gradient(90deg, rgba(236,228,214,0.22), rgba(255,255,255,0.05) 48%, transparent)'
+                }} />
+              )}
             </header>
 
             {season.bible && turns.length === 0 && (
@@ -1884,6 +1877,32 @@ export function Story() {
               </p>
             )}
 
+            {!streaming && input.trim() && composeMode !== 'continue' && (
+              <div style={{ opacity: 0.46, marginTop: 10 }}>
+                {parseTurn({
+                  id: 'ghost',
+                  episodeId: episode.id,
+                  worldId: world.id,
+                  role: 'user',
+                  mode: composeMode,
+                  text: agencyOn ? applyDeliveryTone(input, deliveryTone) : input,
+                  createdAt: 0
+                }, characters, guests).map((b, i, arr) => (
+                  <ProseBlockView
+                    key={`g${i}`}
+                    b={b}
+                    accent={M.accent}
+                    prose={M.prose}
+                    fontPx={fontPx}
+                    avatarPx={avatarPx}
+                    dialogueStyle={display.dialogueStyle}
+                    fromPlayer
+                    caret={i === arr.length - 1}
+                  />
+                ))}
+              </div>
+            )}
+
           </div>
         </section>
       </div>
@@ -1892,61 +1911,30 @@ export function Story() {
       {readMode && !composerOpen ? (
         <div style={{
           position: 'relative', zIndex: 2, display: 'flex', justifyContent: 'center',
-          padding: '10px 16px calc(12px + env(safe-area-inset-bottom))',
-          background: 'linear-gradient(180deg, transparent, rgba(8,9,12,0.55))'
+          padding: '8px 16px calc(12px + env(safe-area-inset-bottom))',
+          background: 'linear-gradient(180deg, transparent, rgba(8,9,12,0.4))'
         }}>
           <button
-            onClick={() => setComposerOpen(true)}
+            onClick={() => { setComposerOpen(true); setHudTucked(false); }}
+            className="serif"
             style={{
-              border: '1px solid rgba(255,255,255,0.16)', background: 'rgba(8,9,12,0.55)',
-              color: 'inherit', borderRadius: 4, padding: '10px 22px', cursor: 'pointer',
-              fontSize: 12, fontWeight: 600, opacity: 0.85
+              border: 0, background: 'transparent',
+              color: 'inherit', padding: '10px 18px', cursor: 'pointer',
+              fontSize: 16, fontStyle: 'italic', opacity: 0.7
             }}
           >
-            Write · continue
+            Continue
           </button>
         </div>
       ) : (
-        <div style={{
-          position: 'relative', zIndex: 2, borderTop: '1px solid rgba(255,255,255,0.08)',
-          // Tab bar already reserves safe-area — don't double-pad in write mode.
+        <div className="compose-air" style={{
+          position: 'relative', zIndex: 2,
           padding: narrow
-            ? (readMode ? '11px 12px calc(12px + env(safe-area-inset-bottom))' : '11px 12px 12px')
-            : '15px 24px 18px',
-          display: 'flex', flexDirection: 'column', gap: 11,
-          background: 'rgba(8,9,12,0.42)', backdropFilter: 'blur(24px) saturate(140%)'
+            ? (readMode ? '10px 16px calc(12px + env(safe-area-inset-bottom))' : '11px 12px 12px')
+            : '12px 24px 16px',
+          display: 'flex', flexDirection: 'column', gap: 10,
+          background: readMode ? 'transparent' : 'rgba(8,9,12,0.28)'
         }}>
-          <button
-            type="button"
-            onClick={() => setDirectorSheet(true)}
-            title="Open Direct to edit location"
-            style={{
-              display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
-              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 4,
-              padding: '8px 10px', cursor: 'pointer', textAlign: 'left',
-              background: 'rgba(255,255,255,0.04)', color: 'inherit', width: '100%',
-              boxShadow: `inset 2px 0 0 ${ACCENT_RGBA.a35}`
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
-              <span className="label" style={{ opacity: 0.5, flexShrink: 0 }}>Place</span>
-              <span style={{
-                fontSize: 12.5, color: 'rgba(236,234,230,0.85)',
-                whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
-              }}>
-                {activeLocation?.name || episode.location || 'No location set'}
-              </span>
-              {climateLine && (
-                <span style={{
-                  fontSize: 11, color: 'rgba(230,233,235,0.42)',
-                  whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '28ch'
-                }}>
-                  · {climateLine}
-                </span>
-              )}
-            </div>
-            <span className="label" style={{ opacity: 0.4, flexShrink: 0 }}>Direct</span>
-          </button>
           {showWrapNudge && (
             <div style={{
               display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
@@ -2009,6 +1997,8 @@ export function Story() {
               })}>Dismiss</button>
             </div>
           )}
+          {(!readMode || composeMore) && (
+          <>
           <div style={{
             display: 'grid',
             gridTemplateColumns: narrow ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))',
@@ -2109,21 +2099,50 @@ export function Story() {
                 </Chip>
               ))}
             </div>
-            {readMode && (
-              <button className="btn-quiet" style={{ fontSize: 11, minHeight: 40 }} onClick={() => setComposerOpen(false)}>collapse</button>
-            )}
           </div>
+          </>
+          )}
+          {readMode && (
+            <div style={{ display: 'flex', justifyContent: 'center', gap: 16 }}>
+              <button className="btn-quiet" style={{ fontSize: 12, minHeight: 36 }}
+                onClick={() => setComposeMore((o) => !o)}>
+                {composeMore ? 'Less' : 'More'}
+              </button>
+              <button className="btn-quiet" style={{ fontSize: 12, minHeight: 36 }}
+                onClick={() => setComposerOpen(false)}>
+                collapse
+              </button>
+            </div>
+          )}
+          {composeMode === 'continue' ? (
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 16,
+              maxWidth: '40rem', margin: '0 auto', width: '100%', padding: '6px 0 2px'
+            }}>
+              <p className="serif" style={{
+                margin: 0, fontSize: narrow ? 16 : 18, fontStyle: 'italic',
+                color: 'rgba(230,233,235,0.5)', flex: 1, textAlign: 'center'
+              }}>
+                the scene continues
+              </p>
+              {streaming ? (
+                <button className="btn-quiet" style={{ minHeight: 44 }} onClick={() => abortRef.current?.abort()}>Stop</button>
+              ) : (
+                <button
+                  className="btn-primary"
+                  style={{ padding: '10px 19px', minHeight: 44 }}
+                  onClick={() => void write()}
+                >
+                  Write on
+                </button>
+              )}
+            </div>
+          ) : (
           <div style={{
-            display: 'flex', gap: 13, alignItems: 'flex-end', border: '1px solid rgba(255,255,255,0.12)',
-            borderRadius: 4, padding: narrow ? '10px 12px' : '14px 16px',
-            background: 'rgba(255,255,255,0.035)',
-            boxShadow: `inset 2px 0 0 ${ACCENT_RGBA.a45}`
+            display: 'flex', gap: 13, alignItems: 'flex-end',
+            maxWidth: '40rem', margin: '0 auto', width: '100%',
+            padding: '4px 0'
           }}>
-            {!narrow && (
-              <div className="label" style={{ paddingBottom: 8, whiteSpace: 'nowrap', opacity: 0.65 }}>
-                {modeHint[composeMode]}
-              </div>
-            )}
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -2134,15 +2153,15 @@ export function Story() {
               }}
               placeholder={composerPlaceholder[composeMode]}
               rows={2}
-              disabled={streaming || composeMode === 'continue'}
+              disabled={streaming}
               style={{
                 flex: 1, border: 0, background: 'transparent', padding: '4px 0',
-                fontFamily: 'Spectral, serif', fontSize: narrow ? 15 : 16.5, lineHeight: 1.6,
-                minHeight: 26, opacity: composeMode === 'continue' ? 0.45 : 1
+                fontFamily: 'Spectral, serif', fontSize: narrow ? 16 : 18, lineHeight: 1.7,
+                minHeight: 44
               }}
             />
             {streaming ? (
-              <button className="btn-ghost" style={{ alignSelf: 'flex-end', minHeight: 44 }} onClick={() => abortRef.current?.abort()}>Stop</button>
+              <button className="btn-quiet" style={{ alignSelf: 'flex-end', minHeight: 44 }} onClick={() => abortRef.current?.abort()}>Stop</button>
             ) : (
               <button
                 className="btn-primary"
@@ -2160,6 +2179,7 @@ export function Story() {
               </button>
             )}
           </div>
+          )}
           {!readMode && (
             <div style={{ display: 'flex', gap: 16, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.4, flexWrap: 'wrap' }}>
               <span>memory: {continuity.length} facts · {threads.length} open threads</span>
@@ -2620,7 +2640,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
         {/* text visibility */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
           <Mono style={{ fontSize: 9 }}>text</Mono>
-          <SliderRow label="plate behind text" value={display.textScrim} min={0} max={80} unit="%"
+          <SliderRow label="air behind text" value={display.textScrim} min={0} max={80} unit="%"
             onChange={(v) => setDisplay({ textScrim: v })} />
           <SliderRow label="text size" value={display.textSize} min={15} max={24} unit="px"
             onChange={(v) => setDisplay({ textSize: v })} />

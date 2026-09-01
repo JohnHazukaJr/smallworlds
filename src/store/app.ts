@@ -16,7 +16,7 @@ export interface DisplayPrefs {
   avatarSize: AvatarSize;
   /** prose font size in px */
   textSize: number;
-  /** 0–80 — darkness of the plate behind the story text */
+  /** 0–80 — darkness of the air behind the story text */
   textScrim: number;
   /** 0–90 — darkness laid over a scene image */
   imageDim: number;
@@ -28,10 +28,9 @@ export const DEFAULT_DISPLAY: DisplayPrefs = {
   dialogueStyle: 'prose',
   avatarSize: 'S',
   textSize: 20,
-  // Scene images persist across episodes now, so prose needs a page under it by
-  // default rather than sitting straight on a photograph.
-  textScrim: 26,
-  imageDim: 45,
+  // Enough air for type to read, light enough that the place still shows.
+  textScrim: 30,
+  imageDim: 26,
   imageBlur: 0
 };
 
@@ -40,10 +39,10 @@ export const AVATAR_PX: Record<AvatarSize, number> = { S: 34, M: 50, L: 68 };
 /** Write = full chrome + composer; Read = distraction-free. Director is always an overlay. */
 export type StoryLayout = 'write' | 'read';
 
-/** Map legacy persisted layout ids onto write|read. */
+/** Map legacy persisted layout ids onto write|read. Missing → Read (the scene is the default). */
 export function normalizeStoryLayout(raw: unknown): StoryLayout {
-  if (raw === 'read') return 'read';
-  return 'write'; // immersive, director, write, or anything else
+  if (raw === 'write') return 'write';
+  return 'read';
 }
 
 /** Map a location plate hue to the closest story mood (8 climates). */
@@ -89,7 +88,7 @@ export const useApp = create<AppStore>()(
     (set) => ({
       screen: 'library',
       currentWorldId: null,
-      layout: 'write',
+      layout: 'read',
       mood: 'ember',
       backdrop: 'scene',
       display: DEFAULT_DISPLAY,
