@@ -27,7 +27,7 @@ export interface DisplayPrefs {
 export const DEFAULT_DISPLAY: DisplayPrefs = {
   dialogueStyle: 'prose',
   avatarSize: 'S',
-  textSize: 19,
+  textSize: 20,
   // Scene images persist across episodes now, so prose needs a page under it by
   // default rather than sitting straight on a photograph.
   textScrim: 26,

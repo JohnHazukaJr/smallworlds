@@ -285,7 +285,7 @@ function EmphasizedText({ text }: { text: string }) {
 }
 
 function SpeakParagraph({
-  segments, accent, prose, fontPx, last, lead
+  segments, accent, prose, fontPx, last, lead, caret, novel
 }: {
   segments: SpeakSegment[];
   accent: string;
@@ -294,15 +294,18 @@ function SpeakParagraph({
   last: boolean;
   /** inline speaker attribution, prose layout only */
   lead?: ReactNode;
+  caret?: boolean;
+  /** novel page: gestures stay in the same ink as the sentence */
+  novel?: boolean;
 }) {
   return (
     <p
       className="serif"
       style={{
         fontSize: fontPx,
-        lineHeight: 1.78,
+        lineHeight: 1.82,
         margin: 0,
-        marginBottom: last ? 0 : 12,
+        marginBottom: last ? 0 : 10,
         textWrap: 'pretty'
       }}
     >
@@ -312,7 +315,12 @@ function SpeakParagraph({
           return (
             <span
               key={i}
-              style={{
+              style={novel ? {
+                fontStyle: 'italic',
+                fontWeight: 400,
+                color: prose,
+                marginRight: 6
+              } : {
                 fontWeight: 600,
                 fontStyle: 'normal',
                 color: accent,
@@ -337,18 +345,21 @@ function SpeakParagraph({
           </span>
         );
       })}
+      {last && caret && <span className="prose-caret" aria-hidden />}
     </p>
   );
 }
 
 function SpeakBody({
-  segments, accent, prose, fontPx, lead
+  segments, accent, prose, fontPx, lead, caret, novel
 }: {
   segments: SpeakSegment[];
   accent: string;
   prose: string;
   fontPx: number;
   lead?: ReactNode;
+  caret?: boolean;
+  novel?: boolean;
 }) {
   const paras = groupSpeakParagraphs(segments);
   return (
@@ -362,6 +373,8 @@ function SpeakBody({
           fontPx={fontPx}
           last={pi === paras.length - 1}
           lead={pi === 0 ? lead : undefined}
+          caret={caret}
+          novel={novel}
         />
       ))}
     </div>
@@ -376,20 +389,59 @@ function SpeakerLead({ b }: { b: ProseBlock }) {
       color: ink,
       fontWeight: 600,
       fontVariant: 'small-caps',
-      letterSpacing: '0.04em',
-      marginRight: 9
+      letterSpacing: '0.06em',
+      marginRight: 8
     }}>
       {b.speaker}
       {b.deliveryTone && (
-        <span style={{ fontVariant: 'normal', fontWeight: 400, fontStyle: 'italic', opacity: 0.72 }}>
-          {' '}({b.deliveryTone})
+        <span style={{
+          fontVariant: 'normal',
+          fontWeight: 400,
+          fontStyle: 'italic',
+          letterSpacing: 0,
+          opacity: 0.62
+        }}>
+          {`, ${b.deliveryTone}`}
         </span>
       )}
+      {' '}
     </span>
   );
 }
 
-function ProseBlockView({ b, accent, prose, fontPx, avatarPx, dialogueStyle, continues }: {
+function OpeningNarration({
+  text, prose, fontPx, caret
+}: {
+  text: string;
+  prose: string;
+  fontPx: number;
+  caret?: boolean;
+}) {
+  const t = text.trimStart();
+  const first = t.charAt(0);
+  const rest = t.slice(1);
+  const drop = first && /^[\p{L}]/u.test(first);
+  return (
+    <p
+      className="serif"
+      style={{
+        fontSize: fontPx,
+        lineHeight: 1.82,
+        margin: 0,
+        color: prose,
+        textWrap: 'pretty'
+      }}
+    >
+      {drop ? <span className="prose-drop">{first}</span> : first}
+      <EmphasizedText text={rest} />
+      {caret && <span className="prose-caret" aria-hidden />}
+    </p>
+  );
+}
+
+function ProseBlockView({
+  b, accent, prose, fontPx, avatarPx, dialogueStyle, continues, opening, caret, fromPlayer
+}: {
   b: ProseBlock;
   accent: string;
   prose: string;
@@ -398,28 +450,67 @@ function ProseBlockView({ b, accent, prose, fontPx, avatarPx, dialogueStyle, con
   dialogueStyle: DialogueStyle;
   /** previous block was the same speaker — drop the repeat attribution */
   continues?: boolean;
+  /** first narration of the episode — drop-cap the opening letter */
+  opening?: boolean;
+  /** live stream caret at the end of this block */
+  caret?: boolean;
+  fromPlayer?: boolean;
 }) {
   const isDialog = isDialogueBlock(b);
+  const caretMark = caret ? <span className="prose-caret" aria-hidden /> : null;
 
-  if (isDialog && dialogueStyle === 'prose') {
-    const lead = b.speaker && !continues ? <SpeakerLead b={b} /> : undefined;
+  if (dialogueStyle === 'prose') {
+    const kindClass =
+      b.kind === 'direction' ? 'steer'
+      : isDialog ? `speak${fromPlayer ? ' player' : ''}${continues ? ' continues' : ''}`
+      : '';
+    const lead = isDialog && b.speaker && !continues ? <SpeakerLead b={b} /> : undefined;
+
+    if (b.kind === 'direction') {
+      return (
+        <div className={`prose-block ${kindClass}`}>
+          <p
+            className="serif"
+            style={{
+              fontSize: Math.max(14, fontPx - 2),
+              lineHeight: 1.7,
+              margin: 0,
+              fontStyle: 'italic',
+              color: 'rgba(230,233,235,0.5)',
+              textWrap: 'pretty'
+            }}
+          >
+            {b.text}
+            {caretMark}
+          </p>
+        </div>
+      );
+    }
+
+    if (opening && b.kind === 'narration') {
+      return (
+        <div className="prose-block">
+          <OpeningNarration text={b.text} prose={prose} fontPx={fontPx} caret={caret} />
+        </div>
+      );
+    }
+
     return (
-      <div style={{ marginBottom: 20 }}>
+      <div className={`prose-block ${kindClass}`.trim()}>
         {b.kind === 'speak' && b.segments ? (
-          <SpeakBody segments={b.segments} accent={accent} prose={prose} fontPx={fontPx} lead={lead} />
+          <SpeakBody segments={b.segments} accent={accent} prose={prose} fontPx={fontPx} lead={lead} caret={caret} novel />
         ) : (
           <p className="serif" style={{
-            fontSize: fontPx, lineHeight: 1.78, margin: 0, color: prose,
-            fontStyle: b.kind === 'dialogue' ? 'italic' : 'normal', textWrap: 'pretty'
+            fontSize: fontPx,
+            lineHeight: 1.82,
+            margin: 0,
+            color: prose,
+            fontStyle: b.kind === 'dialogue' || b.kind === 'action' ? 'italic' : 'normal',
+            textWrap: 'pretty'
           }}>
             {lead}
-            {b.kind === 'action' ? (
-              <span style={{ color: accent, fontWeight: 600 }}>
-                <EmphasizedText text={b.text} />
-              </span>
-            ) : (
-              <EmphasizedText text={b.text} />
-            )}
+            <EmphasizedText text={b.text} />
+            {caretMark}
           </p>
         )}
       </div>
@@ -1283,11 +1374,6 @@ export function Story() {
     worldCalendar(world),
     episode.storyDay && episode.storyDay > 0 ? episode.storyDay : worldCalendar(world).currentDay
   );
-  const chapterHeadLine = [
-    activeLocation?.name || episode.location || '',
-    sceneDate,
-    climateLine
-  ].map((s) => s.trim()).filter(Boolean).join(' · ');
   const stageCast = inScene;
   const stageGuests = episode.activeGuestIds == null
     ? guests
@@ -1374,11 +1460,6 @@ export function Story() {
               <div className="label" style={{ fontSize: 12, color: 'rgba(230,233,235,0.72)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 {world.title} · ep {episode.number}{locLabel ? ` · ${locLabel}` : ''}
               </div>
-              {(climateLine) && (
-                <div style={{ fontSize: 11, color: 'rgba(230,233,235,0.45)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {climateLine}
-                </div>
-              )}
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
@@ -1489,31 +1570,31 @@ export function Story() {
         gridTemplateColumns: 'minmax(0, 1fr)'
       }}>
         <section ref={scrollRef} style={{ overflow: 'auto', display: 'flex', flexDirection: 'column', position: 'relative' }}>
-          {/* Cast stage — who’s here before they speak */}
+          {/* Cast stage — write mode only; read mode keeps the page clear */}
+          {!readMode && (
           <button
             type="button"
             onClick={() => setDirectorSheet(true)}
             title="Open Direct — who’s in the scene"
             style={{
-              maxWidth: 740, width: 'calc(100% - 24px)', margin: '14px auto 0',
+              maxWidth: '40rem', width: 'calc(100% - 24px)', margin: '12px auto 0',
               display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
-              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 4,
-              padding: '10px 12px', cursor: 'pointer', textAlign: 'left',
-              background: 'rgba(8,10,12,0.45)', color: 'inherit',
-              boxShadow: `inset 2px 0 0 ${ACCENT_RGBA.a45}`
+              border: '1px solid rgba(255,255,255,0.08)', borderRadius: 4,
+              padding: '8px 12px', cursor: 'pointer', textAlign: 'left',
+              background: 'rgba(8,10,12,0.35)', color: 'inherit'
             }}
           >
-            <div className="label" style={{ opacity: 0.55, flexShrink: 0 }}>Here</div>
+            <div className="label" style={{ opacity: 0.5, flexShrink: 0 }}>Here</div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', flex: 1, minWidth: 0 }}>
               {stageCast.map((c) => (
                 <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-                  <div style={portraitPlate(c.hue, 26, characterPortraits(c)[0])} />
+                  <div style={portraitPlate(c.hue, 22, characterPortraits(c)[0])} />
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
-                    <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(236,234,230,0.9)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 110 }}>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: 'rgba(236,234,230,0.88)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 110 }}>
                       {c.name || 'unnamed'}{c.isPlayer ? ' · you' : ''}
                     </span>
                     {c.state?.emotion?.trim() && (
-                      <span style={{ fontSize: 10, color: 'rgba(230,233,235,0.45)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 110 }}>
+                      <span style={{ fontSize: 10, color: 'rgba(230,233,235,0.42)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 110 }}>
                         {c.state.emotion.trim()}
                       </span>
                     )}
@@ -1522,7 +1603,7 @@ export function Story() {
               ))}
               {stageGuests.map((g) => (
                 <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <div style={portraitPlate(guestHue(g.id), 26, null, 'rgba(255,255,255,0.14)')} />
+                  <div style={portraitPlate(guestHue(g.id), 22, null, 'rgba(255,255,255,0.14)')} />
                   <span style={{ fontSize: 12, color: 'rgba(236,234,230,0.75)' }}>{g.name}</span>
                 </div>
               ))}
@@ -1531,87 +1612,120 @@ export function Story() {
               )}
             </div>
           </button>
+          )}
 
           <div
             className="page-plane"
             style={{
-              maxWidth: 740,
-              margin: '12px auto 18px',
+              maxWidth: '40rem',
+              margin: readMode ? '18px auto 28px' : '12px auto 18px',
               width: 'calc(100% - 24px)',
-              padding: narrow ? '26px 18px 40px' : '44px 32px 68px',
-              // Optional denser plate so prose stays readable over scene images.
+              padding: narrow
+                ? (readMode ? '32px 22px 48px' : '26px 18px 40px')
+                : (readMode ? '52px 44px 80px' : '44px 36px 68px'),
               ...(display.textScrim > 0 ? {
-                background: `linear-gradient(180deg, rgba(232,226,214,0.06), rgba(8,9,12,${(display.textScrim / 100).toFixed(2)}))`,
-                backdropFilter: 'blur(10px)'
+                background: `linear-gradient(180deg, rgba(236,228,214,0.12), rgba(16,14,12,${(display.textScrim / 100).toFixed(2)}) 42%, rgba(10,11,13,${Math.min(0.82, display.textScrim / 100 + 0.08).toFixed(2)}))`,
+                backdropFilter: 'blur(14px) saturate(108%)'
               } : {})
             }}
           >
-            <header style={{ marginBottom: 26 }}>
-              <div className="label" style={{ opacity: 0.6 }}>
+            <header style={{ marginBottom: turns.length === 0 ? 28 : 36 }}>
+              <div className="serif" style={{
+                fontSize: 11,
+                letterSpacing: '0.16em',
+                textTransform: 'uppercase',
+                color: 'rgba(230,233,235,0.42)',
+                fontWeight: 500
+              }}>
                 Season {numberWord(season.number)} · episode {numberWord(episode.number)}
               </div>
-              {episode.title && (
+              <div className="serif" style={{
+                fontSize: narrow ? 26 : 32,
+                fontWeight: 300,
+                lineHeight: 1.2,
+                margin: '12px 0 0',
+                color: '#f4f0e8'
+              }}>
+                {episode.title.trim() || activeLocation?.name || episode.location || 'Untitled scene'}
+              </div>
+              {(sceneDate || climateLine) && (
                 <div className="serif" style={{
-                  fontSize: narrow ? 21 : 25, fontWeight: 300, lineHeight: 1.25,
-                  margin: '10px 0 0', color: '#f2efe9'
+                  marginTop: 10, fontSize: 15, lineHeight: 1.55, fontStyle: 'italic',
+                  color: 'rgba(230,233,235,0.52)'
                 }}>
-                  {episode.title}
+                  {[sceneDate, climateLine].filter(Boolean).join(' · ')}
                 </div>
               )}
-              {chapterHeadLine && (
-                <div className="serif" style={{
-                  marginTop: 8, fontSize: 13.5, lineHeight: 1.55, fontStyle: 'italic',
-                  color: 'rgba(230,233,235,0.55)'
-                }}>
-                  {chapterHeadLine}
-                </div>
+              {readMode && (stageCast.length > 0 || stageGuests.length > 0) && (
+                <button
+                  type="button"
+                  onClick={() => setDirectorSheet(true)}
+                  className="serif"
+                  style={{
+                    display: 'block',
+                    marginTop: 14,
+                    padding: 0,
+                    border: 0,
+                    background: 'transparent',
+                    cursor: 'pointer',
+                    fontSize: 13.5,
+                    fontStyle: 'italic',
+                    color: 'rgba(230,233,235,0.4)',
+                    textAlign: 'left'
+                  }}
+                >
+                  {[
+                    ...stageCast.map((c) => c.name || 'unnamed'),
+                    ...stageGuests.map((g) => g.name)
+                  ].join(' · ')}
+                </button>
               )}
               <div style={{
-                height: 1, marginTop: 18,
-                background: `linear-gradient(90deg, ${M.accent}55, rgba(255,255,255,0.06) 45%, transparent)`
+                height: 1, marginTop: 22,
+                background: 'linear-gradient(90deg, rgba(236,228,214,0.22), rgba(255,255,255,0.05) 48%, transparent)'
               }} />
             </header>
 
             {season.bible && turns.length === 0 && (
-              <div className="craft-row" style={{ padding: '16px 18px', marginBottom: 26 }}>
-                <Mono style={{ marginBottom: 8 }}>previously</Mono>
-                <p className="serif" style={{ fontSize: 15.5, lineHeight: 1.7, margin: 0, color: 'rgba(236,234,230,0.75)' }}>{season.bible.recap}</p>
+              <div style={{ marginBottom: 32 }}>
+                <div className="serif" style={{
+                  fontSize: 11, letterSpacing: '0.16em', textTransform: 'uppercase',
+                  color: 'rgba(230,233,235,0.38)', marginBottom: 10
+                }}>
+                  Previously
+                </div>
+                <p className="serif" style={{
+                  fontSize: fontPx, lineHeight: 1.82, margin: 0, fontStyle: 'italic',
+                  color: 'rgba(236,234,230,0.62)', textWrap: 'pretty'
+                }}>
+                  {season.bible.recap}
+                </p>
               </div>
             )}
 
             {turns.length === 0 && !streaming && (
               <div style={{ fontSize: 14, lineHeight: 1.7, display: 'flex', flexDirection: 'column', gap: 16, marginBottom: 8 }}>
-                <p className="serif" style={{ fontSize: 20, opacity: 0.85, margin: 0, fontWeight: 300 }}>
-                  {season.premise
-                    ? <>The world holds: <em>{season.premise}</em></>
-                    : 'The world is ready — step in.'}
-                </p>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  {/* Place and weather already sit in the chapter head — only nudge when missing. */}
-                  {!(activeLocation?.name || episode.location) && (
-                    <div className="label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <span className="seed-mark" />
-                      No place linked yet
-                    </div>
-                  )}
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-                    {stageCast.map((c) => (
-                      <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <div style={portraitPlate(c.hue, 24, characterPortraits(c)[0])} />
-                        <span style={{ fontSize: 12, color: 'rgba(236,234,230,0.8)' }}>
-                          {c.name || 'unnamed'}{c.isPlayer ? ' · you' : ''}
-                          {c.state?.emotion?.trim() ? ` · ${c.state.emotion.trim()}` : ''}
-                        </span>
-                      </div>
-                    ))}
-                    {stageGuests.map((g) => (
-                      <div key={g.id} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <div style={portraitPlate(guestHue(g.id), 24, null, 'rgba(255,255,255,0.14)')} />
-                        <span style={{ fontSize: 12, color: 'rgba(236,234,230,0.7)' }}>{g.name}</span>
-                      </div>
-                    ))}
+                {season.premise ? (
+                  <p className="serif" style={{
+                    fontSize: fontPx, lineHeight: 1.82, margin: 0, fontStyle: 'italic',
+                    color: 'rgba(236,234,230,0.55)', textWrap: 'pretty'
+                  }}>
+                    {season.premise}
+                  </p>
+                ) : (
+                  <p className="serif" style={{
+                    fontSize: fontPx, lineHeight: 1.82, margin: 0, fontWeight: 300,
+                    color: 'rgba(236,234,230,0.5)'
+                  }}>
+                    The page is blank. Write on, and the narrator takes the first beat.
+                  </p>
+                )}
+                {!(activeLocation?.name || episode.location) && (
+                  <div className="label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span className="seed-mark" />
+                    No place linked yet
                   </div>
-                </div>
+                )}
                 {writeReady && writeReady.missing.length > 0 && !writeAnyway && (
                   <div style={{
                     border: '1px solid rgba(255,255,255,0.12)', borderRadius: 6, padding: '12px 14px',
@@ -1639,13 +1753,13 @@ export function Story() {
                     {writeReady.warnings[0]}
                   </div>
                 )}
+                {(!hasAI || (writeReady && writeReady.missing.length > 0 && !writeAnyway)) && (
                 <p style={{ fontSize: 14, margin: 0, color: 'rgba(236,234,230,0.78)' }}>
                   {!hasAI
                     ? 'Add a writing model in Settings before Write on.'
-                    : writeReady && writeReady.missing.length > 0 && !writeAnyway
-                      ? 'Fix the checklist above, or press Write anyway, then Write on.'
-                      : <>Press <strong>Write on</strong> — the narrator takes the first beat.</>}
+                    : 'Fix the checklist above, or press Write anyway, then Write on.'}
                 </p>
+                )}
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                   {hasAI && (
                     <button
@@ -1690,13 +1804,19 @@ export function Story() {
             )}
 
             {blocks.length > turnWindow && (
-              <div style={{ marginBottom: 22 }}>
+              <div style={{ margin: '0 0 28px', textAlign: 'center' }}>
                 <button
-                  className="btn-ghost"
-                  style={{ fontSize: 11, padding: '8px 14px' }}
+                  type="button"
                   onClick={() => setTurnWindow((n) => n + 60)}
+                  className="serif"
+                  title={`${blocks.length - turnWindow} earlier turns`}
+                  style={{
+                    border: 0, background: 'transparent', cursor: 'pointer',
+                    fontSize: 14, fontStyle: 'italic', color: 'rgba(230,233,235,0.42)',
+                    padding: '6px 8px'
+                  }}
                 >
-                  Show earlier turns ({blocks.length - turnWindow} hidden)
+                  · · · earlier pages · · ·
                 </button>
               </div>
             )}
@@ -1715,6 +1835,7 @@ export function Story() {
                 prevSpeaker={ti > 0 ? lastSpokenBy(visible[ti - 1].blocks) : null}
                 streaming={streaming}
                 hasBelow={ti < visible.length - 1 || streaming}
+                opening={blocks.length <= turnWindow && ti === 0}
                 onRetry={() => void retryFrom(turn)}
                 onReroll={
                   turn.role === 'narrator' || turn.role === 'character'
@@ -1737,7 +1858,7 @@ export function Story() {
                 text: partialMeta.role === 'character' ? previewSpeakText(partial) : partial,
                 createdAt: 0
               }, characters, guests)
-                .map((b, i) => (
+                .map((b, i, arr) => (
                   <ProseBlockView
                     key={`p${i}`}
                     b={b}
@@ -1746,15 +1867,21 @@ export function Story() {
                     fontPx={fontPx}
                     avatarPx={avatarPx}
                     dialogueStyle={display.dialogueStyle}
+                    opening={turns.length === 0 && i === 0}
+                    fromPlayer={partialMeta.role === 'user'}
+                    caret={i === arr.length - 1}
                   />
                 ))
             )}
 
-            {/* Prose arriving is its own progress — a spinner under live text just reads as "bot thinking". */}
             {streaming && !partial && (
-              <div style={{ marginTop: 22 }}>
-                <Spinner accent={ACCENT} label={progressLabel || 'the scene turns…'} />
-              </div>
+              <p className="serif" style={{
+                fontSize: fontPx, lineHeight: 1.82, margin: '0.4em 0 0',
+                fontStyle: 'italic', color: 'rgba(230,233,235,0.42)'
+              }}>
+                {progressLabel || 'the scene turns'}
+                <span className="prose-caret" aria-hidden />
+              </p>
             )}
 
           </div>
@@ -2547,7 +2674,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
 
 // ---------- turn row with edit / retry / delete-below ----------
 
-function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, dialogueStyle, prevSpeaker, streaming, hasBelow, onRetry, onReroll, onDeleteBelow }: {
+function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, dialogueStyle, prevSpeaker, streaming, hasBelow, opening, onRetry, onReroll, onDeleteBelow }: {
   turn: Turn;
   blocks: ProseBlock[];
   characters: Character[];
@@ -2560,6 +2687,7 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, di
   prevSpeaker: string | null;
   streaming: boolean;
   hasBelow: boolean;
+  opening?: boolean;
   onRetry: () => void;
   onReroll?: () => void;
   onDeleteBelow: () => void;
@@ -2625,9 +2753,11 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, di
           avatarPx={avatarPx}
           dialogueStyle={dialogueStyle}
           continues={continued[i]}
+          opening={opening && i === 0}
+          fromPlayer={turn.role === 'user'}
         />
       ))}
-      <div className="turn-tools" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: -4, marginBottom: 20 }}>
+      <div className="turn-tools" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 0, marginBottom: 8 }}>
         <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
           onClick={() => { setDraft(turn.text); setEditing(true); }}>Edit</button>
         <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
