@@ -187,6 +187,11 @@ export interface Episode {
    * lightly patched mid-episode. Throttles utility updates between wraps.
    */
   liveStateAtChars?: number;
+  /**
+   * Transcript char count when live canon (facts / threads / place / knowledge)
+   * was last filed mid-episode. Throttles the utility pass between wraps.
+   */
+  liveCanonAtChars?: number;
   /** Episode plot targets the director should work toward (Aim-from-wrap / manual). */
   plotTargets?: PlotTarget[];
   /**

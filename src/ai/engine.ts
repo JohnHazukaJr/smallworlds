@@ -48,6 +48,19 @@ import {
 } from './prompts';
 import { rankReplySpeakers, speakerCandidates, type RankedSpeaker } from './roomDynamics';
 import {
+  isNearDuplicate,
+  knowledgeFactLine,
+  knowledgeStillNovel,
+  LIVE_CANON_FACT_CAP,
+  LIVE_CANON_THREAD_CAP,
+  liveCanonHasWork,
+  novelLines,
+  normalizeLiveCanonExtract,
+  selectStaleFactTexts,
+  WRAP_NEW_FACT_CAP,
+  WRAP_NEW_THREAD_CAP
+} from './liveCanon';
+import {
   clipMeanwhile,
   gapDays,
   matchLocationForPatch,
@@ -1076,6 +1089,9 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
     await maybeRefreshLiveSceneState(
       opts.world, ctx, beatsCompleted, opts.signal, progress, opts.onNotice
     );
+    await maybeFileLiveCanon(
+      opts.world, ctx, beatsCompleted, opts.signal, progress, opts.onNotice
+    );
   } catch (e) {
     if ((e as Error).name === 'AbortError' || e instanceof WriteAbortedError) {
       if (beatsCompleted > 0) {
@@ -1475,6 +1491,157 @@ async function maybeRefreshLiveSceneState(
   }
 }
 
+/**
+ * File hard facts / threads / place / knowledge while the episode is still open.
+ * Same throttle as live scene state. Errors must not block a successful write.
+ */
+async function maybeFileLiveCanon(
+  world: World,
+  ctx: Awaited<ReturnType<typeof loadContext>>,
+  turnsSaved: number,
+  signal: AbortSignal | undefined,
+  progress: (label: string) => void,
+  onNotice?: (message: string) => void
+): Promise<void> {
+  if (turnsSaved <= 0) return;
+  const chars = episodeHistoryChars(ctx.turns);
+  const pressure = episodeContextPressure(chars);
+  const lastAt = ctx.episode.liveCanonAtChars ?? 0;
+  const growthNeeded = pressure === 'ok' || pressure === 'warm'
+    ? HISTORY_CHAR_BUDGET * 0.14
+    : HISTORY_CHAR_BUDGET * 0.1;
+  if (lastAt === 0 && ctx.turns.length < 4) return;
+  if (lastAt > 0 && chars < lastAt + growthNeeded) return;
+
+  const recent = ctx.turns.slice(-14);
+  const guests = ctx.episode.guests ?? [];
+  const digest = recent
+    .map((t) => {
+      if (t.role === 'user') return `[player]: ${t.text.slice(0, 280)}`;
+      if (t.role === 'character') {
+        const name = resolveSpeakerName(t, ctx.characters, guests);
+        return `[${name}]: ${t.text.slice(0, 320)}`;
+      }
+      return `[narrator]: ${t.text.slice(0, 320)}`;
+    })
+    .join('\n\n');
+  if (!digest.trim()) return;
+
+  const inScene = ctx.characters.filter(
+    (c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer
+  );
+  const inSceneNames = new Set(inScene.map((c) => c.name.trim().toLowerCase()).filter(Boolean));
+  const existingFactTexts = ctx.continuity.map((f) => f.text);
+  const existingThreadTexts = ctx.threads.map((t) => t.text);
+  const episodeFactCount = ctx.continuity.filter((f) => f.episodeId === ctx.episode.id).length;
+  const knownBlock = existingFactTexts.slice(-24).map((t) => `- ${t}`).join('\n');
+  const threadBlock = existingThreadTexts.slice(0, 16).map((t) => `- ${t}`).join('\n');
+  const ledger = (ctx.episode.sceneLedger ?? []).map((d) => `- ${d}`).join('\n');
+  const placeLine = ctx.episode.location || '(unnamed)';
+  const loc = ctx.episode.locationId
+    ? ctx.locations.find((l) => l.id === ctx.episode.locationId)
+    : ctx.locations.find((l) => l.name.toLowerCase() === placeLine.trim().toLowerCase());
+
+  try {
+    progress('filing what happened…');
+    const result = await utilityJson<{
+      facts?: string[];
+      threads?: string[];
+      place?: { name?: string; currentState?: string; atmosphere?: string };
+      knowledge?: Array<{ name?: string; nowKnows?: string }>;
+    }>(
+      world,
+      'You file hard canon for an interactive story WHILE the episode is still open. Return JSON only: ' +
+        '{"facts":["..."],"threads":["..."],"place":{"name":"<scene place>","currentState":"...","atmosphere":"..."},' +
+        '"knowledge":[{"name":"<exact in-scene name>","nowKnows":"..."}]}. ' +
+        'Do not invent. Omit any key that has nothing new. ' +
+        `facts: 2–${LIVE_CANON_FACT_CAP} durable facts that must stay true later (debts, promises, objects held, injuries, who saw what). ` +
+        'Not weather, not mood, not a plot recap. Do not repeat Known facts. ' +
+        `threads: 0–${LIVE_CANON_THREAD_CAP} NEW open tensions not already listed. ` +
+        'place: lasting room condition and optional weather/light now true; omit if unchanged. ' +
+        'knowledge: only in-scene named cast who clearly learned something; omit if none. ' +
+        'Each line under 220 characters.',
+      `World: ${world.title}. Episode ${ctx.episode.number}.\n` +
+        `Place: ${placeLine}${loc?.currentState ? ` (now: ${loc.currentState})` : ''}\n` +
+        `In-scene cast: ${inScene.map((c) => c.name).join(', ') || '(none)'}\n\n` +
+        `Known facts (do not repeat):\n${knownBlock || '(none)'}\n\n` +
+        `Open threads (do not repeat):\n${threadBlock || '(none)'}\n\n` +
+        `Physical ledger (do not refile as facts):\n${ledger || '(none)'}\n\n` +
+        `Recent beats:\n${digest.slice(0, 10000)}\n\n` +
+        `Return live canon JSON.`,
+      900,
+      signal,
+      25_000
+    );
+
+    const extract = normalizeLiveCanonExtract(result, {
+      existingFacts: existingFactTexts,
+      existingThreads: existingThreadTexts,
+      inSceneNames,
+      episodeFactCount
+    });
+
+    const now = Date.now();
+    const newFacts = extract.facts.map((text) => ({
+      id: uid(),
+      worldId: world.id,
+      seasonId: ctx.season.id,
+      episodeId: ctx.episode.id,
+      text,
+      source: 'auto' as const,
+      createdAt: now
+    }));
+    const knowledgeFacts = extract.knowledge.map((k) => {
+      const c = inScene.find((x) => x.name.toLowerCase() === k.name.toLowerCase());
+      const name = c?.name ?? k.name;
+      return {
+        id: uid(),
+        worldId: world.id,
+        seasonId: ctx.season.id,
+        episodeId: ctx.episode.id,
+        text: knowledgeFactLine(name, k.nowKnows),
+        source: 'auto' as const,
+        createdAt: now
+      };
+    });
+    const newThreads = extract.threads.map((text) => ({
+      id: uid(),
+      worldId: world.id,
+      seasonId: ctx.season.id,
+      text,
+      openedLabel: `opened S${ctx.season.number} · E${ctx.episode.number}`,
+      status: 'open' as const,
+      createdAt: now
+    }));
+
+    if (liveCanonHasWork(extract)) {
+      if (newFacts.length > 0) await db.continuity.bulkAdd(newFacts);
+      if (knowledgeFacts.length > 0) await db.continuity.bulkAdd(knowledgeFacts);
+      if (newThreads.length > 0) await db.threads.bulkAdd(newThreads);
+      if (extract.place?.currentState) {
+        await applyPlacePatches(ctx.locations, [extract.place], ctx.episode.locationId);
+      }
+    }
+
+    const epPatch: Partial<Episode> = { liveCanonAtChars: chars, updatedAt: now };
+    if (extract.place?.atmosphere?.trim()) {
+      epPatch.atmosphereNote = extract.place.atmosphere.trim();
+    }
+    await db.episodes.update(ctx.episode.id, epPatch);
+    ctx.episode = { ...ctx.episode, ...epPatch };
+    if (newFacts.length > 0 || knowledgeFacts.length > 0) {
+      ctx.continuity = [...ctx.continuity, ...newFacts, ...knowledgeFacts];
+    }
+    if (newThreads.length > 0) {
+      ctx.threads = [...ctx.threads, ...newThreads];
+    }
+  } catch (e) {
+    if ((e as Error).name === 'AbortError') throw e;
+    logAppError(e, 'live canon');
+    onNotice?.('Couldn’t file live memory — writing still saved; wrap can catch up.');
+  }
+}
+
 /** Longest scene ledger we will carry into a prompt. */
 export const SCENE_LEDGER_CAP = 8;
 
@@ -1632,12 +1799,33 @@ export function capSoftWrapExtract(
   return { facts, threads, characterUpdates, place: normalizePlacePatch(raw.place) };
 }
 
+/** Drop facts/threads already on file so Skip wrap does not duplicate live canon. */
+export function dedupeSoftWrapExtract(
+  extract: SoftWrapExtract,
+  existingFacts: string[],
+  existingThreads: string[]
+): SoftWrapExtract {
+  return {
+    ...extract,
+    facts: novelLines(extract.facts, existingFacts, SOFT_WRAP_FACT_CAP),
+    threads: novelLines(extract.threads, existingThreads, SOFT_WRAP_THREAD_CAP)
+  };
+}
+
 export async function fileSoftWrapContinuity(
   world: World,
   season: Season,
   episode: Episode,
   extract: SoftWrapExtract
 ): Promise<void> {
+  const existingFacts = (await db.continuity.where('seasonId').equals(season.id).toArray())
+    .map((f) => f.text);
+  const openThreads = await db.threads
+    .where('seasonId')
+    .equals(season.id)
+    .filter((t) => t.status === 'open')
+    .toArray();
+  extract = dedupeSoftWrapExtract(extract, existingFacts, openThreads.map((t) => t.text));
   const now = Date.now();
   if (extract.facts.length > 0) {
     await db.continuity.bulkAdd(
@@ -1815,6 +2003,7 @@ export async function clearEpisodeRunningSummary(episodeId: string): Promise<voi
     runningSummary: null,
     runningSummaryAtChars: 0,
     liveStateAtChars: 0,
+    liveCanonAtChars: 0,
     updatedAt: Date.now()
   });
 }
@@ -2030,6 +2219,8 @@ export interface EpisodeWrapDraft {
   guestEffects: string[];
   /** Open threads from earlier that this episode settled */
   resolvedThreads: string[];
+  /** Known facts this episode made false — Keep in review to drop them from memory */
+  staleFacts: string[];
   characterUpdates: EpisodeWrapCharacterUpdate[];
   knowledgeUpdates: EpisodeWrapKnowledgeUpdate[];
   relationshipUpdates: EpisodeWrapRelationshipUpdate[];
@@ -2084,6 +2275,7 @@ export async function analyzeEpisode(
     threads: [],
     guestEffects: [],
     resolvedThreads: [],
+    staleFacts: [],
     characterUpdates: [],
     knowledgeUpdates: [],
     relationshipUpdates: [],
@@ -2188,6 +2380,7 @@ export async function analyzeEpisode(
     recap?: string;
     beats?: { text?: string; consequence?: string }[];
     facts?: string[];
+    staleFacts?: string[];
     threads?: string[];
     guestEffects?: string[];
     resolvedThreads?: string[];
@@ -2219,13 +2412,15 @@ export async function analyzeEpisode(
     meanwhile?: string;
   }>(
     world,
-    'You are a continuity editor closing an interactive fiction episode. ' +
-    'Your output is the ONLY memory the NEXT episode will reliably have of this one — be concrete and complete. ' +
+    'You are a continuity editor closing a chapter of interactive fiction. ' +
+    'Durable facts and open threads were already filed during play — merge and prune; do not dump a second copy of Known facts. ' +
+    'Your job is the previously-on recap, how time passed, the next opening, stale or resolved items, and only genuinely NEW or CONFLICTING facts/threads. ' +
     'Respond with JSON only:\n' +
     '{"recap":"<150-280 word previously-on paragraph — include WHEN (weekday/day) and WHERE if known, plus names, stakes, what hangs>",' +
     '"beats":[{"text":"<what happened, one concrete sentence with names>","consequence":"<what it leaves hanging for later>"}],' +
-    '"facts":["<durable facts — include dated facts when time mattered, e.g. On Thursday (day 12) …>"],' +
-    '"threads":["<NEW unresolved tensions raised this episode>"],' +
+    '"facts":["<NEW durable facts not already in Known facts — omit if play already filed them>"],' +
+    '"staleFacts":["<near-exact Known facts that are no longer true — omit if none>"],' +
+    '"threads":["<NEW unresolved tensions not already in Open threads>"],' +
     '"resolvedThreads":["<exact or near-exact text of prior open threads this episode settled — omit if none>"],' +
     '"hitTargets":["<exact or near-exact text of pending plot targets this episode meaningfully advanced or fulfilled — omit if none>"],' +
     '"hitCalendarEvents":["<exact id from the Due calendar list, or near-exact title — omit if none>"],' +
@@ -2242,8 +2437,9 @@ export async function analyzeEpisode(
     'Rules:\n' +
     '- Recap must be usable as "previously on": include proper names, calendar timing, place, decisive exchanges, open pressure.\n' +
     '- Beats: 3–7 events that matter later; never vague ("things escalated").\n' +
-    '- Facts: 4–12 new durable facts; do NOT repeat Known facts; each fact stands alone with names; date when relevant.\n' +
-    '- Threads: only NEW open tensions (0–8). Put settled prior threads in resolvedThreads.\n' +
+    '- Facts: 0–6 NEW durable facts; do NOT repeat Known facts; empty array if play already filed them; date when relevant.\n' +
+    '- staleFacts: 0–8 Known facts this episode made false (a debt paid, an object no longer held, an injury healed). Near-exact wording. Omit if none.\n' +
+    '- Threads: only NEW open tensions (0–6). Empty if already on file. Put settled prior threads in resolvedThreads.\n' +
     '- hitTargets: only from the Pending plot targets list; copy text near-exactly; omit if the target was not advanced.\n' +
     '- hitCalendarEvents: only from Due calendar events; prefer the bracketed id; title fallback allowed; omit if not addressed.\n' +
     '- characterUpdates: every non-player who appeared OR was named off-scene in a way that changed their situation; ' +
@@ -2288,16 +2484,19 @@ export async function analyzeEpisode(
     : storyDayEnd + cal.episodeAdvanceDays;
   const nextStoryDay = Math.max(storyDayEnd, parsedNext);
 
+  const knownFactTexts = existing.map((f) => f.text);
+  const openThreadTexts = openThreads.map((t) => t.text);
   const draftCore: EpisodeWrapDraft = {
     recap: (result.recap ?? '').trim() || 'The episode closed without a clear recap.',
     beats: (result.beats ?? [])
       .map((b) => ({ text: (b.text ?? '').trim(), consequence: (b.consequence ?? '').trim() }))
       .filter((b) => b.text)
       .slice(0, 9),
-    facts: (result.facts ?? []).map((f) => f.trim()).filter(Boolean).slice(0, 14),
-    threads: (result.threads ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 10),
+    facts: novelLines(result.facts ?? [], knownFactTexts, WRAP_NEW_FACT_CAP),
+    threads: novelLines(result.threads ?? [], openThreadTexts, WRAP_NEW_THREAD_CAP),
     guestEffects: (result.guestEffects ?? []).map((g) => g.trim()).filter(Boolean).slice(0, 8),
     resolvedThreads: (result.resolvedThreads ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 10),
+    staleFacts: selectStaleFactTexts(result.staleFacts ?? [], knownFactTexts, 8),
     characterUpdates: (result.characterUpdates ?? [])
       .map((u) => ({
         name: (u.name ?? '').trim(),
@@ -2317,6 +2516,9 @@ export async function analyzeEpisode(
       }))
       .filter((u) => u.name && castNames.has(u.name.toLowerCase()))
       .filter((u) => u.nowKnows || u.clearMustNotKnow)
+      .filter((u) =>
+        !!u.clearMustNotKnow || knowledgeStillNovel(u.name, u.nowKnows, knownFactTexts)
+      )
       .slice(0, 12),
     relationshipUpdates: (result.relationshipUpdates ?? [])
       .map((u) => ({
@@ -2390,6 +2592,8 @@ export interface CommitEpisodeWrapInput {
   threads: string[];
   guestEffects: string[];
   resolvedThreads?: string[];
+  /** Known facts to drop from continuity (no longer true). */
+  staleFacts?: string[];
   characterUpdates?: EpisodeWrapCharacterUpdate[];
   knowledgeUpdates?: EpisodeWrapKnowledgeUpdate[];
   relationshipUpdates?: EpisodeWrapRelationshipUpdate[];
@@ -2587,10 +2791,30 @@ export async function commitEpisodeWrap(
   }
 
   const now = Date.now();
+  const existingRows = await db.continuity.where('seasonId').equals(season.id).toArray();
+  const prunedIds = new Set<string>();
+  for (const line of (input.staleFacts ?? []).map((t) => t.trim()).filter(Boolean)) {
+    const hit = existingRows.find((f) =>
+      !prunedIds.has(f.id)
+      && !f.pinned
+      && (
+        f.text.trim().toLowerCase() === line.toLowerCase()
+        || isNearDuplicate(line, [f.text])
+        || isNearDuplicate(f.text, [line])
+      )
+    );
+    if (!hit) continue;
+    prunedIds.add(hit.id);
+    await db.continuity.delete(hit.id);
+  }
+  const remainingFactTexts = existingRows
+    .filter((f) => !prunedIds.has(f.id))
+    .map((f) => f.text);
+
   // Guest effects stay on episode.wrap for prior-episode prompts — do not also file into continuity.
   const factLines = [
     dateFact,
-    ...input.facts.map((f) => f.trim()).filter(Boolean)
+    ...novelLines(input.facts, [...remainingFactTexts, dateFact], WRAP_NEW_FACT_CAP)
   ];
   if (factLines.length > 0) {
     await db.continuity.bulkAdd(
@@ -2599,8 +2823,19 @@ export async function commitEpisodeWrap(
         text, source: 'auto' as const, createdAt: now
       }))
     );
+    remainingFactTexts.push(...factLines);
   }
-  const threadLines = input.threads.map((t) => t.trim()).filter(Boolean);
+
+  const openForDedupe = await db.threads
+    .where('seasonId')
+    .equals(season.id)
+    .filter((t) => t.status === 'open')
+    .toArray();
+  const threadLines = novelLines(
+    input.threads,
+    openForDedupe.map((t) => t.text),
+    WRAP_NEW_THREAD_CAP
+  );
   if (threadLines.length > 0) {
     await db.threads.bulkAdd(
       threadLines.map((text) => ({
@@ -2668,15 +2903,19 @@ export async function commitEpisodeWrap(
       mustNotKnow = parts.join('; ');
     }
     if (k.nowKnows?.trim()) {
-      await db.continuity.add({
-        id: uid(),
-        worldId: world.id,
-        seasonId: season.id,
-        episodeId: episode.id,
-        text: `${c.name} now knows: ${k.nowKnows.trim()}`,
-        source: 'auto',
-        createdAt: now
-      });
+      const line = `${c.name} now knows: ${k.nowKnows.trim()}`;
+      if (knowledgeStillNovel(c.name, k.nowKnows, remainingFactTexts)) {
+        await db.continuity.add({
+          id: uid(),
+          worldId: world.id,
+          seasonId: season.id,
+          episodeId: episode.id,
+          text: line,
+          source: 'auto',
+          createdAt: now
+        });
+        remainingFactTexts.push(line);
+      }
     }
     if (mustNotKnow !== c.mustNotKnow) {
       await db.characters.update(c.id, { mustNotKnow, updatedAt: now });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   matchPlotTargets, mergeStateField, normalizeBeats, capSceneLedger, capSoftWrapExtract,
-  directorFallbackNarrationBrief, softWrapAlreadyFiled, SCENE_LEDGER_CAP
+  dedupeSoftWrapExtract, directorFallbackNarrationBrief, softWrapAlreadyFiled, SCENE_LEDGER_CAP
 } from './engine';
 import {
   episodeContextPressure,
@@ -377,6 +377,23 @@ describe('capSoftWrapExtract', () => {
       currentState: 'The lamp is smashed.',
       atmosphere: undefined
     });
+  });
+});
+
+describe('dedupeSoftWrapExtract', () => {
+  it('does not re-file facts and threads already on file from play', () => {
+    const capped = capSoftWrapExtract({
+      facts: ['Ada still has the brass office key', 'The quay lock is forced'],
+      threads: ['Who paid Ivo?', 'What happened to the lamp?'],
+      characterUpdates: []
+    }, new Set(['ada']));
+    const deduped = dedupeSoftWrapExtract(
+      capped,
+      ['Ada still holds the brass office key'],
+      ['Who paid Ivo the harbour fee?']
+    );
+    expect(deduped.facts).toEqual(['The quay lock is forced']);
+    expect(deduped.threads).toEqual(['What happened to the lamp?']);
   });
 });
 

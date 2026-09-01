@@ -22,14 +22,14 @@ export const ACCENT_RGBA = {
 
 /** Moods = weather of the world (washes), not glowing orbs. */
 export const MOODS: Record<MoodId, { label: string; tint: string; text: string; accent: string; prose: string }> = {
-  ember: { label: 'Ember', tint: 'rgba(196,120,70,0.22)', text: '#f0ebe4', accent: 'oklch(0.72 0.05 55)', prose: '#ebe2d6' },
-  ash:   { label: 'Ash',   tint: 'rgba(150,165,185,0.2)', text: '#eef0f3', accent: 'oklch(0.74 0.03 250)', prose: '#e2e5ea' },
-  frost: { label: 'Frost', tint: 'rgba(120,175,205,0.24)', text: '#e8f1f5', accent: 'oklch(0.74 0.05 210)', prose: '#dae7ee' },
-  rot:   { label: 'Rot',   tint: 'rgba(130,165,110,0.22)', text: '#eaf0e4', accent: 'oklch(0.72 0.06 140)', prose: '#dfe7d4' },
-  dusk:  { label: 'Dusk',  tint: 'rgba(120,105,145,0.24)', text: '#eeeaf2', accent: 'oklch(0.68 0.035 295)', prose: '#e4e0ea' },
-  bloom: { label: 'Bloom', tint: 'rgba(155,170,110,0.2)', text: '#f0f2e8', accent: 'oklch(0.74 0.05 115)', prose: '#e6eadc' },
-  storm: { label: 'Storm', tint: 'rgba(70,90,120,0.28)', text: '#e8edf2', accent: 'oklch(0.66 0.04 240)', prose: '#dce4ec' },
-  brine: { label: 'Brine', tint: 'rgba(80,155,150,0.22)', text: '#e6f2f0', accent: 'oklch(0.72 0.05 185)', prose: '#d8eae6' }
+  ember: { label: 'Ember', tint: 'rgba(196,150,110,0.12)', text: '#f0ebe4', accent: 'oklch(0.72 0.05 55)', prose: '#ebe2d6' },
+  ash:   { label: 'Ash',   tint: 'rgba(150,165,185,0.12)', text: '#eef0f3', accent: 'oklch(0.74 0.03 250)', prose: '#e2e5ea' },
+  frost: { label: 'Frost', tint: 'rgba(120,170,195,0.12)', text: '#e8f1f5', accent: 'oklch(0.74 0.05 210)', prose: '#dae7ee' },
+  rot:   { label: 'Rot',   tint: 'rgba(140,175,130,0.12)', text: '#eaf0e4', accent: 'oklch(0.72 0.06 140)', prose: '#dfe7d4' },
+  dusk:  { label: 'Dusk',  tint: 'rgba(130,125,145,0.12)', text: '#eeeaf2', accent: 'oklch(0.68 0.035 295)', prose: '#e4e0ea' },
+  bloom: { label: 'Bloom', tint: 'rgba(165,175,130,0.12)', text: '#f0f2e8', accent: 'oklch(0.74 0.05 115)', prose: '#e6eadc' },
+  storm: { label: 'Storm', tint: 'rgba(110,130,155,0.14)', text: '#e8edf2', accent: 'oklch(0.66 0.04 240)', prose: '#dce4ec' },
+  brine: { label: 'Brine', tint: 'rgba(110,165,160,0.12)', text: '#e6f2f0', accent: 'oklch(0.72 0.05 185)', prose: '#d8eae6' }
 };
 
 export const STRIPE = (a: string, b: string) =>

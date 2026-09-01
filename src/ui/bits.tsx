@@ -201,7 +201,8 @@ export function Sheet({
           : { top: 0, right: 0, bottom: 0, width, borderLeft: '1px solid rgba(255,255,255,0.12)', animation: 'wr-fade 0.25s ease both' }),
         display: 'flex', flexDirection: 'column', gap: 0,
         padding: 0,
-        background: 'rgba(12,14,16,0.96)', backdropFilter: 'blur(14px) saturate(110%)',
+        background: 'rgba(16,18,22,0.52)', backdropFilter: 'blur(22px) saturate(140%)',
+        borderColor: 'rgba(255,255,255,0.16)',
         boxShadow: '-12px 0 32px rgba(0,0,0,0.4)',
         overflow: 'hidden',
         minHeight: 0
@@ -220,7 +221,7 @@ export function Sheet({
             padding: narrow
               ? '12px 16px calc(12px + env(safe-area-inset-bottom))'
               : '14px 22px 18px',
-            background: 'rgba(10,12,14,0.98)',
+            background: 'rgba(16,18,22,0.45)',
             display: 'flex', flexDirection: 'column', gap: 10
           }}>
             {footer}

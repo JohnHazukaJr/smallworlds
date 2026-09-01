@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { normalizeScrollBackdrop, type ScrollBackdrop } from '../ui/scrollBackdrop';
 
 export type Screen = 'library' | 'story' | 'cast' | 'locations' | 'sequel' | 'profile' | 'settings' | 'onboard';
 export type MoodId = 'ember' | 'ash' | 'frost' | 'rot' | 'dusk' | 'bloom' | 'storm' | 'brine';
@@ -7,34 +8,44 @@ export type BackdropId = 'scene' | 'moment' | 'character' | 'none';
 export type AvatarSize = 'S' | 'M' | 'L';
 /** How spoken turns sit on the page: running prose, or a staged cast list. */
 export type DialogueStyle = 'prose' | 'staged';
+export type { ScrollBackdrop };
 
 /** How the story page renders on this device. */
 export interface DisplayPrefs {
   /** prose = novel page with inline attribution; staged = avatar + name plate per line */
   dialogueStyle: DialogueStyle;
-  /** avatar plate size in staged layout */
+  /** circular face size in the story scroll */
   avatarSize: AvatarSize;
   /** prose font size in px */
   textSize: number;
   /** 0–80 — darkness of the air behind the story text */
   textScrim: number;
-  /** 0–90 — darkness laid over a scene image */
+  /** 0–90 — dim wash laid over the scroll background photo */
   imageDim: number;
   /** 0–20 px blur on a scene image */
   imageBlur: number;
+  /**
+   * What sits behind the scroll, under the dim wash.
+   * Auto: scene photo you or the AI set, else place photo, else climate.
+   */
+  scrollBackdrop: ScrollBackdrop;
+  /** When true, generating a scene photo switches the scroll to Auto so it shows. */
+  aiSetsScrollBg: boolean;
 }
 
 export const DEFAULT_DISPLAY: DisplayPrefs = {
   dialogueStyle: 'prose',
-  avatarSize: 'S',
+  avatarSize: 'M',
   textSize: 20,
-  // Enough air for type to read, light enough that the place still shows.
-  textScrim: 30,
-  imageDim: 26,
-  imageBlur: 0
+  // Enough air for type to read, light enough that the place still shows through glass.
+  textScrim: 22,
+  imageDim: 22,
+  imageBlur: 0,
+  scrollBackdrop: 'auto',
+  aiSetsScrollBg: true
 };
 
-export const AVATAR_PX: Record<AvatarSize, number> = { S: 34, M: 50, L: 68 };
+export const AVATAR_PX: Record<AvatarSize, number> = { S: 40, M: 52, L: 68 };
 
 /** Write = full chrome + composer; Read = distraction-free. Director is always an overlay. */
 export type StoryLayout = 'write' | 'read';
@@ -122,7 +133,13 @@ export const useApp = create<AppStore>()(
           ...current,
           ...p,
           layout: normalizeStoryLayout(p.layout),
-          display: { ...DEFAULT_DISPLAY, ...(p.display ?? {}) },
+          display: {
+            ...DEFAULT_DISPLAY,
+            ...(p.display ?? {}),
+            scrollBackdrop: normalizeScrollBackdrop(
+              (p.display as Partial<DisplayPrefs> | undefined)?.scrollBackdrop
+            )
+          },
           // Never restore one-shot focus from disk.
           pendingCharacterId: null,
           pendingLocationId: null

@@ -48,8 +48,12 @@ import {
 } from '../types';
 import { AppError, classifyError, formatUserError } from '../errors';
 import { Chip, ErrorNote, Mono, Sheet, Spinner, Toggle, useVw } from '../ui/bits';
+import { Face } from '../ui/Face';
 import { fileToSceneImage } from '../ui/image';
 import { attributionRun, isDialogueBlock, lastSpokenBy } from '../ui/attribution';
+import {
+  SCROLL_BACKDROP_LABEL, SCROLL_BACKDROPS, resolveScrollBackdrop
+} from '../ui/scrollBackdrop';
 import { avatarStyle, speakerInk, BACKDROPS, MOODS, STRIPE, ACCENT, ACCENT_RGBA } from '../ui/theme';
 import {
   calendarPatch, characterPortraits, dayFromParts, emptyLocation, evaluateWorldWriteReady, formatStoryDate,
@@ -65,6 +69,7 @@ interface WrapReviewDraft {
   threads: Array<{ text: string; keep: boolean }>;
   guestEffects: Array<{ text: string; keep: boolean }>;
   resolvedThreads: Array<{ text: string; keep: boolean }>;
+  staleFacts: Array<{ text: string; keep: boolean }>;
   hitTargets: Array<{ text: string; keep: boolean }>;
   hitCalendarEvents: Array<{ id: string; title: string; kind?: string; storyDay?: number; keep: boolean }>;
   characterUpdates: Array<{
@@ -118,6 +123,7 @@ function draftFromAnalysis(d: EpisodeWrapDraft): WrapReviewDraft {
     threads: d.threads.map((text) => ({ text, keep: true })),
     guestEffects: d.guestEffects.map((text) => ({ text, keep: true })),
     resolvedThreads: d.resolvedThreads.map((text) => ({ text, keep: true })),
+    staleFacts: (d.staleFacts ?? []).map((text) => ({ text, keep: true })),
     hitTargets: (d.hitTargets ?? []).map((text) => ({ text, keep: true })),
     hitCalendarEvents: (d.hitCalendarEvents ?? []).map((row) => ({
       id: row.id,
@@ -189,13 +195,6 @@ const DIALOGUE_RE = /^([A-Z][^:\n]{0,48}?):\s*["“](.+?)["”]?\s*$/;
 
 function findByName(characters: Character[], name: string): Character | undefined {
   return characters.find((c) => c.name.toLowerCase() === name.toLowerCase().trim());
-}
-
-function portraitPlate(hue: number, size: number, portrait?: string | null, border = 'rgba(255,255,255,0.2)'): CSSProperties {
-  return {
-    ...avatarStyle(hue, size, border),
-    ...(portrait ? { backgroundImage: `url(${portrait})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {})
-  };
 }
 
 function guestHue(guestId: string): number {
@@ -458,6 +457,15 @@ function ProseBlockView({
 }) {
   const isDialog = isDialogueBlock(b);
   const caretMark = caret ? <span className="prose-caret" aria-hidden /> : null;
+  const faceHue = b.hue ?? 200;
+  const face = isDialog ? (
+    <Face
+      hue={faceHue}
+      size={continues ? Math.max(32, Math.round(avatarPx * 0.82)) : avatarPx}
+      portrait={b.portrait}
+      name={b.speaker}
+    />
+  ) : null;
 
   if (dialogueStyle === 'prose') {
     const kindClass =
@@ -495,42 +503,61 @@ function ProseBlockView({
       );
     }
 
+    const copy = b.kind === 'speak' && b.segments ? (
+      <SpeakBody segments={b.segments} accent={accent} prose={prose} fontPx={fontPx} lead={lead} caret={caret} novel />
+    ) : (
+      <p className="serif" style={{
+        fontSize: fontPx,
+        lineHeight: 1.82,
+        margin: 0,
+        color: prose,
+        fontStyle: b.kind === 'dialogue' || b.kind === 'action' ? 'italic' : 'normal',
+        textWrap: 'pretty'
+      }}>
+        {lead}
+        <EmphasizedText text={b.text} />
+        {caretMark}
+      </p>
+    );
+
+    if (isDialog && face) {
+      return (
+        <div className={`prose-block ${kindClass} speak-row`.trim()}>
+          {face}
+          <div className="speak-copy">{copy}</div>
+        </div>
+      );
+    }
+
     return (
       <div className={`prose-block ${kindClass}`.trim()}>
-        {b.kind === 'speak' && b.segments ? (
-          <SpeakBody segments={b.segments} accent={accent} prose={prose} fontPx={fontPx} lead={lead} caret={caret} novel />
-        ) : (
-          <p className="serif" style={{
-            fontSize: fontPx,
-            lineHeight: 1.82,
-            margin: 0,
-            color: prose,
-            fontStyle: b.kind === 'dialogue' || b.kind === 'action' ? 'italic' : 'normal',
-            textWrap: 'pretty'
-          }}>
-            {lead}
-            <EmphasizedText text={b.text} />
-            {caretMark}
-          </p>
-        )}
+        {copy}
       </div>
     );
   }
 
   return (
-    <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', marginBottom: isDialog ? 24 : 22 }}>
-      {isDialog && b.hue !== undefined && (
-        <div style={{ ...portraitPlate(b.hue, avatarPx, b.portrait), marginTop: 4 }} />
-      )}
+    <div
+      className={isDialog ? `speak-row${fromPlayer ? ' player' : ''}` : undefined}
+      style={{
+        display: 'flex',
+        gap: 14,
+        alignItems: 'flex-start',
+        marginBottom: isDialog ? 24 : 22,
+        flexDirection: isDialog && fromPlayer ? 'row-reverse' : 'row'
+      }}
+    >
+      {face}
       <div style={{
         flex: 1, minWidth: 0,
-        ...(isDialog ? { borderLeft: `1px solid ${accent}55`, paddingLeft: 14 } : {})
+        ...(isDialog ? { borderLeft: fromPlayer ? 0 : `1px solid ${accent}55`, borderRight: fromPlayer ? `1px solid ${accent}55` : 0, paddingLeft: fromPlayer ? 0 : 14, paddingRight: fromPlayer ? 14 : 0 } : {})
       }}>
         {isDialog && b.speaker && (
           <div style={{
             fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: '0.14em',
             textTransform: 'uppercase', color: accent, marginBottom: 6,
-            display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap'
+            display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap',
+            justifyContent: fromPlayer ? 'flex-end' : 'flex-start'
           }}>
             <span>{b.speaker}{b.kind === 'action' ? ' · acts' : ''}</span>
             {b.deliveryTone && (
@@ -572,7 +599,7 @@ function ProseBlockView({
 export function Story() {
   const vw = useVw();
   const narrow = vw < 780;
-  const { currentWorldId, layout, setLayout, mood, setMood, backdrop, setBackdrop, go, display, goLocations: openLocations, goCast: openCast } = useApp();
+  const { currentWorldId, layout, setLayout, mood, setMood, backdrop, go, display, setDisplay, goLocations: openLocations, goCast: openCast } = useApp();
   const providers = useSettings((s) => s.providers);
   const hasAI = providers.length > 0;
   const M = MOODS[mood];
@@ -1206,6 +1233,7 @@ export function Story() {
         threads: wrapDraft.threads.filter((t) => t.keep).map((t) => t.text),
         guestEffects: wrapDraft.guestEffects.filter((g) => g.keep).map((g) => g.text),
         resolvedThreads: wrapDraft.resolvedThreads.filter((t) => t.keep).map((t) => t.text),
+        staleFacts: wrapDraft.staleFacts.filter((t) => t.keep).map((t) => t.text),
         characterUpdates: wrapDraft.characterUpdates
           .filter((u) => u.keep && u.name.trim())
           .map(({ name, goal, emotion, location, condition }) => ({
@@ -1391,6 +1419,12 @@ export function Story() {
   const stageGuests = episode.activeGuestIds == null
     ? guests
     : guests.filter((g) => episode.activeGuestIds!.includes(g.id));
+  const scrollBg = resolveScrollBackdrop({
+    mode: display.scrollBackdrop,
+    episodeImage: episode.image,
+    locationPortrait: activeLocation?.portrait
+  });
+  const scrollPhoto = scrollBg.kind === 'image' ? scrollBg.src : null;
 
   return (
     <div
@@ -1405,15 +1439,15 @@ export function Story() {
       color: M.text,
       paddingBottom: keyboardOffset > 0 ? keyboardOffset : undefined
     }}>
-      {/* backdrop — the room fills the frame */}
-      {episode.image ? (
+      {/* backdrop — the room fills the frame, under dim-wash glass */}
+      {scrollPhoto ? (
         <>
           <div
-            key={`img-${sceneFadeKey}`}
+            key={`img-${sceneFadeKey}-${scrollPhoto.slice(0, 24)}`}
             className={display.imageBlur > 0 ? 'scene-crossfade' : 'scene-crossfade scene-backdrop-drift'}
             style={{
               position: 'absolute', inset: 0, zIndex: 0,
-              backgroundImage: `url(${episode.image})`, backgroundSize: 'cover', backgroundPosition: 'center',
+              backgroundImage: `url(${JSON.stringify(scrollPhoto)})`, backgroundSize: 'cover', backgroundPosition: 'center',
               filter: display.imageBlur > 0 ? `blur(${display.imageBlur}px)` : undefined,
               transform: display.imageBlur > 0 ? 'scale(1.06)' : undefined
             }}
@@ -1431,7 +1465,8 @@ export function Story() {
           style={{
             position: 'absolute', inset: 0, zIndex: 0,
             background: `linear-gradient(160deg, ${BD.a}, ${BD.b})`,
-            opacity: backdrop === 'none' ? 0.35 : 1, transition: 'opacity 0.45s ease'
+            opacity: scrollBg.kind === 'off' ? 0 : backdrop === 'none' ? 0.28 : 1,
+            transition: 'opacity 0.45s ease'
           }}
         />
       )}
@@ -1439,18 +1474,22 @@ export function Story() {
         className="scene-room-vignette"
         style={{ position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none' }}
       />
-      <div
-        key={`tint-${mood}`}
-        style={{
-          position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none',
-          background: M.tint,
-          transition: 'background 0.45s ease'
-        }}
-      />
-      <div
-        className={`climate-layer climate-${mood}`}
-        style={{ position: 'absolute', inset: 0, zIndex: 1 }}
-      />
+      {scrollBg.kind !== 'off' && (
+        <>
+          <div
+            key={`tint-${mood}`}
+            style={{
+              position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none',
+              background: M.tint,
+              transition: 'background 0.45s ease'
+            }}
+          />
+          <div
+            className={`climate-layer climate-${mood}`}
+            style={{ position: 'absolute', inset: 0, zIndex: 1 }}
+          />
+        </>
+      )}
 
       {readMode && hudTucked && !composerOpen && (
         <div
@@ -1464,7 +1503,7 @@ export function Story() {
       {/* header — thin strip in Read mode */}
       {readMode ? (
         <div
-          className={`scene-hud${hudTucked && !composerOpen ? ' tucked' : ''}`}
+          className={`scene-hud glass-clear${hudTucked && !composerOpen ? ' tucked' : ''}`}
           onMouseEnter={() => setHudTucked(false)}
           style={{
           position: 'relative', zIndex: 5, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -1513,12 +1552,13 @@ export function Story() {
           paddingLeft: narrow ? 14 : 24,
           paddingRight: narrow ? 14 : 24,
           borderBottom: '1px solid rgba(255,255,255,0.08)',
-          flexWrap: 'wrap', background: 'rgba(12,14,16,0.5)', backdropFilter: 'blur(14px) saturate(110%)'
-        }}>
+          flexWrap: 'wrap'
+        }}
+        className="glass-clear">
           <div style={{ display: 'flex', alignItems: 'center', gap: 13, minWidth: 0 }}>
             <div style={{
               width: 3, height: 28, borderRadius: 1, flexShrink: 0,
-              background: M.accent, opacity: 0.9
+              background: ACCENT, opacity: 0.9
             }} />
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
               <div className="serif" style={{ fontSize: 16, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{world.title}</div>
@@ -1543,16 +1583,14 @@ export function Story() {
               <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setMoreSheet(true)}>More</button>
             ) : (
               <>
-                {!episode.image && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 7, border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px', background: 'rgba(255,255,255,0.05)' }}>
-                    <span className="label" style={{ fontSize: 11, opacity: 0.55 }}>Backdrop</span>
-                    {(Object.keys(BACKDROPS) as Array<keyof typeof BACKDROPS>).map((id) => (
-                      <Chip key={id} active={backdrop === id} onClick={() => setBackdrop(id)}>
-                        {id === 'none' ? 'Off' : id[0].toUpperCase() + id.slice(1)}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', maxWidth: '100%', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px' }} className="glass-clear">
+                    <span className="label" style={{ fontSize: 11, opacity: 0.55 }}>Scroll</span>
+                    {SCROLL_BACKDROPS.map((id) => (
+                      <Chip key={id} active={display.scrollBackdrop === id} onClick={() => setDisplay({ scrollBackdrop: id })}>
+                        {SCROLL_BACKDROP_LABEL[id]}
                       </Chip>
                     ))}
                   </div>
-                )}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px', background: 'rgba(255,255,255,0.05)', maxWidth: '100%' }}>
                   <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.45 }}>
                     mood{episode.moodPinned ? ' · pinned' : ''}
@@ -1595,7 +1633,7 @@ export function Story() {
           )}
 
           <div
-            className="page-plane"
+            className="page-plane glass-scroll"
             style={{
               maxWidth: '40rem',
               margin: readMode ? '8px auto 28px' : '8px auto 18px',
@@ -1609,6 +1647,14 @@ export function Story() {
             }}
           >
             <header style={{ marginBottom: turns.length === 0 ? 28 : 22 }}>
+              <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
+                {activeLocation && (
+                  <div style={{
+                    ...locationThumb(activeLocation, turns.length === 0 ? 52 : 32),
+                    marginTop: turns.length === 0 ? 18 : 2
+                  }} />
+                )}
+                <div style={{ minWidth: 0, flex: 1 }}>
               {turns.length === 0 ? (
                 <>
                   <div className="serif" style={{
@@ -1647,6 +1693,8 @@ export function Story() {
                   {sceneDate ? ` · ${sceneDate}` : ''}
                 </div>
               )}
+                </div>
+              </div>
               {(stageCast.length > 0 || stageGuests.length > 0) && (
                 <button
                   type="button"
@@ -1932,8 +1980,7 @@ export function Story() {
           padding: narrow
             ? (readMode ? '10px 16px calc(12px + env(safe-area-inset-bottom))' : '11px 12px 12px')
             : '12px 24px 16px',
-          display: 'flex', flexDirection: 'column', gap: 10,
-          background: readMode ? 'transparent' : 'rgba(8,9,12,0.28)'
+          display: 'flex', flexDirection: 'column', gap: 10
         }}>
           {showWrapNudge && (
             <div style={{
@@ -1943,10 +1990,10 @@ export function Story() {
             }}>
               <div style={{ flex: 1, minWidth: narrow ? 0 : 200, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.78)' }}>
                 {pressure === 'escalate'
-                  ? 'Earlier beats may already be dropping from context. File this episode so continuity keeps them.'
+                  ? 'This chapter is getting long. Close it so the season can move — facts from play are already on file.'
                   : locationShiftNudge && (pressure === 'ok' || pressure === 'warm')
-                    ? 'The scene moved. End the episode to file key details into continuity before they crowd the narrator\'s memory.'
-                    : 'This episode is getting long for the narrator\'s memory. End it to file key details into continuity.'}
+                    ? 'The scene moved. Close the chapter when you are ready; memory from play is already on file.'
+                    : 'This chapter is getting long. Close it so the season can move.'}
               </div>
               <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
                 <button className="btn-primary" style={{ padding: '7px 12px', fontSize: 12 }}
@@ -2205,10 +2252,10 @@ export function Story() {
                 onClick={() => void confirmEpisodeWrap()}
               >
                 {wrapBusy ? (
-                  'Filing continuity…'
+                  'Closing the chapter…'
                 ) : (
                   <span style={{ display: 'flex', flexDirection: 'column', gap: 2, lineHeight: 1.25 }}>
-                    <span>File wrap · open episode {episode.number + 1}</span>
+                    <span>Close chapter · open episode {episode.number + 1}</span>
                     <span style={{ fontSize: 11, fontWeight: 500, opacity: 0.8 }}>
                       {formatStoryDate(worldCalendar(world), wrapDraft?.nextStoryDay ?? worldCalendar(world).currentDay).toLowerCase()}
                     </span>
@@ -2270,8 +2317,8 @@ export function Story() {
             </div>
             <div style={{ fontSize: 13, lineHeight: 1.6, opacity: 0.62, maxWidth: '48ch', color: '#eceae6' }}>
               {wrapPhase === 'review'
-                ? 'Edit the recap, Keep or Drop beats/facts/threads/cast state, then confirm to file memory and open the next episode.'
-                : 'The utility model reads the full episode (compressing long ones) and proposes a previously-on recap, beats, continuity, resolved threads, and cast state — you review before anything is filed. Skipping still keeps a short recap so the next episode remembers this one.'}
+                ? 'Edit the recap and time skip, Keep or Drop anything new or stale, then close the chapter. Facts from play are already on file.'
+                : 'The utility model proposes a previously-on recap, how time passed, and only new or stale memory — you review before the next episode opens. Skipping still keeps a short recap.'}
             </div>
           </div>
           <button className="btn-ghost" style={{ width: 30, height: 30, padding: 0, flexShrink: 0 }} onClick={closeWrapSheet}>×</button>
@@ -2302,7 +2349,7 @@ export function Story() {
 
         {wrapPhase === 'analyzing' ? (
           <div style={{ padding: '20px 0' }}>
-            <Spinner label="extracting recap, beats, and continuity" />
+            <Spinner label="closing the chapter" />
           </div>
         ) : wrapPhase === 'review' && wrapDraft ? (
           <WrapReviewBody draft={wrapDraft} onChange={setWrapDraft} guests={guests} world={world} />
@@ -2313,7 +2360,7 @@ export function Story() {
               border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, padding: '12px 14px',
               background: 'rgba(255,255,255,0.04)'
             }}>
-              Analyze builds a dense previously-on for the next episode plus Keep/Drop beats, facts, threads, resolutions, and cast state
+              Analyze closes the chapter: previously-on, time skip, next opening, plus Keep/Drop only for new or stale facts and threads
               {guests.length > 0 ? ', and walk-on effects' : ''}. Episode prose stays saved; only the active episode stays in the writing loop.
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
@@ -2325,7 +2372,7 @@ export function Story() {
               ))}
               {continuity.length === 0 && (
                 <div style={{ fontSize: 12.5, opacity: 0.5, color: '#eceae6' }}>
-                  Nothing filed yet — ending an episode with a summary fills this.
+                  Nothing filed yet — play files facts as the scene unfolds.
                 </div>
               )}
             </div>
@@ -2377,6 +2424,14 @@ export function Story() {
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setDisplayOpen(true); }}>
             Display
           </button>
+          <Mono style={{ fontSize: 11 }}>scroll background</Mono>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {SCROLL_BACKDROPS.map((id) => (
+              <Chip key={id} active={display.scrollBackdrop === id} onClick={() => setDisplay({ scrollBackdrop: id })}>
+                {SCROLL_BACKDROP_LABEL[id]}
+              </Chip>
+            ))}
+          </div>
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setWorldEditOpen(true); }}>
             Edit world
           </button>
@@ -2478,6 +2533,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
     try {
       const image = await fileToSceneImage(file);
       await guardStorage(() => db.episodes.update(episode.id, { image, updatedAt: Date.now() }));
+      setDisplay({ scrollBackdrop: 'auto' });
     } catch (e) {
       setImgError(formatUserError(e));
     } finally {
@@ -2499,6 +2555,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
         atmosphereNote: episode.atmosphereNote
       });
       await guardStorage(() => db.episodes.update(episode.id, { image, updatedAt: Date.now() }));
+      if (display.aiSetsScrollBg) setDisplay({ scrollBackdrop: 'auto' });
     } catch (e) {
       setImgError(formatUserError(e));
     } finally {
@@ -2595,6 +2652,31 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
           </div>
         </div>
 
+        {/* scroll background */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <Mono style={{ fontSize: 9 }}>scroll background — under the glass</Mono>
+          <div style={{ fontSize: 12, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
+            What you see behind the story. Auto uses a scene photo you or the AI set, then the place photo, then climate.
+            Dim wash keeps the type readable without hiding the room.
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            {SCROLL_BACKDROPS.map((id) => (
+              <Chip key={id} active={display.scrollBackdrop === id} onClick={() => setDisplay({ scrollBackdrop: id })}>
+                {SCROLL_BACKDROP_LABEL[id]}
+              </Chip>
+            ))}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.5 }}>
+              AI may set the scene photo
+            </span>
+            <Toggle
+              on={display.aiSetsScrollBg}
+              onClick={() => setDisplay({ aiSetsScrollBg: !display.aiSetsScrollBg })}
+            />
+          </div>
+        </div>
+
         {/* scene image */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <Mono style={{ fontSize: 9 }}>scene image — episode {episode.number}</Mono>
@@ -2605,7 +2687,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
           {episode.image && (
             <div style={{
               height: 120, borderRadius: 13, border: '1px solid rgba(255,255,255,0.12)',
-              backgroundImage: `url(${episode.image})`, backgroundSize: 'cover', backgroundPosition: 'center'
+              backgroundImage: `url(${JSON.stringify(episode.image)})`, backgroundSize: 'cover', backgroundPosition: 'center'
             }} />
           )}
           {imgError && <ErrorNote error={imgError} onDismiss={() => setImgError('')} />}
@@ -2627,14 +2709,10 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
               onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); e.target.value = ''; }}
             />
           </div>
-          {episode.image && (
-            <>
-              <SliderRow label="image darkness" value={display.imageDim} min={0} max={90} unit="%"
-                onChange={(v) => setDisplay({ imageDim: v })} />
-              <SliderRow label="image blur" value={display.imageBlur} min={0} max={20} unit="px"
-                onChange={(v) => setDisplay({ imageBlur: v })} />
-            </>
-          )}
+          <SliderRow label="dim wash" value={display.imageDim} min={0} max={90} unit="%"
+            onChange={(v) => setDisplay({ imageDim: v })} />
+          <SliderRow label="image blur" value={display.imageBlur} min={0} max={20} unit="px"
+            onChange={(v) => setDisplay({ imageBlur: v })} />
         </div>
 
         {/* text visibility */}
@@ -2665,25 +2743,25 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
           </div>
           <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.45)' }}>
             {display.dialogueStyle === 'prose'
-              ? 'Names run inline in the character’s own colour, like a novel. A speaker who keeps talking is not re-announced.'
-              : 'Every line gets an avatar plate and a name header — easier to scan who spoke.'}
+              ? 'Speech sits with a circular photo and the speaker’s name in their colour. A speaker who keeps talking is not re-announced.'
+              : 'Every line gets a circular photo and a name — a conversation, not a chip list.'}
           </div>
         </div>
 
         {/* avatars */}
-        {display.dialogueStyle === 'staged' && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
-            <Mono style={{ fontSize: 9 }}>avatar size in the story</Mono>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
+            <Mono style={{ fontSize: 9 }}>face size in the scroll</Mono>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               {(['S', 'M', 'L'] as AvatarSize[]).map((s) => (
                 <Chip key={s} active={display.avatarSize === s} onClick={() => setDisplay({ avatarSize: s })}>
                   {s === 'S' ? 'Small' : s === 'M' ? 'Medium' : 'Large'}
                 </Chip>
               ))}
-              <div style={{ ...avatarStyle(200, AVATAR_PX[display.avatarSize], 'rgba(255,255,255,0.25)'), marginLeft: 'auto' }} />
+              <div style={{ marginLeft: 'auto' }}>
+                <Face hue={200} size={AVATAR_PX[display.avatarSize]} name="Ada" />
+              </div>
             </div>
           </div>
-        )}
 
         <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
           onClick={() => setDisplay(DEFAULT_DISPLAY)}>reset display to defaults</button>
@@ -2915,7 +2993,7 @@ function SceneCastPanel({ episode, characters, accent, onGoCast }: {
               opacity: active ? 1 : 0.45
             }}
           >
-            <div style={portraitPlate(c.hue, 30, characterPortraits(c)[0])} />
+            <Face hue={c.hue} size={30} portrait={characterPortraits(c)[0]} name={c.name} />
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
               <div style={{ fontSize: 13, fontWeight: 600, color: '#f0eee9' }}>{c.name}</div>
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -2952,7 +3030,7 @@ function SceneCastPanel({ episode, characters, accent, onGoCast }: {
                 onClick={() => void toggleGuest(g.id)}
                 style={{ display: 'flex', gap: 10, alignItems: 'center', flex: 1, minWidth: 0, cursor: 'pointer' }}
               >
-                <div style={portraitPlate(guestHue(g.id), 30, null, 'rgba(255,255,255,0.14)')} />
+                <Face hue={guestHue(g.id)} size={30} name={g.name} />
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
                   <div style={{ fontSize: 13, fontWeight: 600, color: '#f0eee9' }}>{g.name}</div>
                   <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -3041,17 +3119,18 @@ function locationThumb(l: Location, size = 30): CSSProperties {
   if (l.portrait) {
     return {
       width: size, height: size, borderRadius: '50%', flexShrink: 0,
-      backgroundImage: `url(${l.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center',
-      border: '1px solid rgba(255,255,255,0.18)'
+      backgroundImage: `url(${JSON.stringify(l.portrait)})`, backgroundSize: 'cover', backgroundPosition: 'center',
+      border: '1px solid rgba(255,255,255,0.22)',
+      boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.2)'
     };
   }
-  return avatarStyle(l.hue, size);
+  return { ...avatarStyle(l.hue, size), borderRadius: '50%' };
 }
 
 function SceneLocationsPanel({ episode, locations, accent, world, onGoLocations }: {
   episode: Episode; locations: Location[]; accent: string; world?: World; onGoLocations: () => void;
 }) {
-  const { setMood } = useApp();
+  const { setMood, display, setDisplay } = useApp();
   const [genBusy, setGenBusy] = useState(false);
   const [genError, setGenError] = useState('');
 
@@ -3108,6 +3187,7 @@ function SceneLocationsPanel({ episode, locations, accent, world, onGoLocations 
         atmosphereNote: episode.atmosphereNote
       });
       await guardStorage(() => db.episodes.update(episode.id, { image, updatedAt: Date.now() }));
+      if (display.aiSetsScrollBg) setDisplay({ scrollBackdrop: 'auto' });
     } catch (e) {
       setGenError(formatUserError(e));
     } finally {
@@ -4587,7 +4667,7 @@ function WrapReviewBody({
     onChange({ ...draft, beats: draft.beats.map((b, j) => (j === i ? { ...b, ...p } : b)) });
   };
   const patchLine = (
-    key: 'facts' | 'threads' | 'guestEffects' | 'resolvedThreads',
+    key: 'facts' | 'threads' | 'guestEffects' | 'resolvedThreads' | 'staleFacts',
     i: number,
     p: Partial<{ text: string; keep: boolean }>
   ) => {
@@ -4997,18 +5077,24 @@ function WrapReviewBody({
       )}
 
       {([
-        ['facts', 'continuity facts'] as const,
+        ['facts', 'new continuity facts'] as const,
+        ['staleFacts', 'facts no longer true — Keep to drop from memory'] as const,
         ['threads', 'new open threads'] as const,
         ['resolvedThreads', 'threads resolved this episode'] as const,
         ['guestEffects', 'walk-on effects'] as const
       ]).map(([key, label]) => {
         if (key === 'guestEffects' && draft.guestEffects.length === 0 && guests.length === 0) return null;
         if (key === 'resolvedThreads' && draft.resolvedThreads.length === 0) return null;
+        if (key === 'staleFacts' && draft.staleFacts.length === 0) return null;
         return (
           <div key={key} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <Mono style={{ fontSize: 9 }}>{label}</Mono>
             {draft[key].length === 0 && (
-              <div style={{ fontSize: 12.5, opacity: 0.5 }}>None proposed.</div>
+              <div style={{ fontSize: 12.5, opacity: 0.5 }}>
+                {key === 'facts' || key === 'threads'
+                  ? 'Already on file from play — nothing new or conflicting to review.'
+                  : 'None proposed.'}
+              </div>
             )}
             {draft[key].map((row, i) => (
               <div key={i} style={{

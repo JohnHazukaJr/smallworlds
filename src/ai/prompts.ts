@@ -619,7 +619,11 @@ export function sceneLedgerSection(episode: Episode, cap = 8): string | null {
 function runningSummaryFor(episode: Episode, cap: number): string | null {
   const running = episode.runningSummary?.trim();
   if (!running) return null;
-  return `## Earlier this episode (running summary)\n${clipText(running, cap)}`;
+  return (
+    `## Earlier this episode (running summary)\n` +
+    `Glue only — what just happened after early turns dropped. Continuity facts and the room ledger outrank this if they conflict.\n` +
+    clipText(running, cap)
+  );
 }
 
 function priorMemoryFor(ctx: PromptContext, agent: PromptAgent): string | null {
@@ -908,6 +912,16 @@ function worldFrameSections(ctx: PromptContext, opts: PromptBuildOpts = {}): str
     : priorMemoryFor(ctx, 'narrator');
   if (priorEps) sections.push(priorEps);
 
+  const factCap = tight ? 8 : FACT_CAPS.narrator.facts;
+  const threadCap = tight ? 4 : FACT_CAPS.narrator.threads;
+  const cont = continuityBlock(ctx, 'narrator', 'hard', factCap);
+  const threads = threadsBlock(ctx, 'narrator', 'narrator', threadCap);
+  // When packing, facts sit in front of the running summary so glue cannot bury canon.
+  if (tight) {
+    if (cont) sections.push(cont);
+    if (threads) sections.push(threads);
+  }
+
   const running = runningSummaryFor(episode, PRIOR_CAPS.narrator.runningCap);
   if (running) sections.push(running);
 
@@ -966,12 +980,10 @@ function worldFrameSections(ctx: PromptContext, opts: PromptBuildOpts = {}): str
     );
   }
 
-  const factCap = tight ? 8 : FACT_CAPS.narrator.facts;
-  const threadCap = tight ? 4 : FACT_CAPS.narrator.threads;
-  const cont = continuityBlock(ctx, 'narrator', 'hard', factCap);
-  if (cont) sections.push(cont);
-  const threads = threadsBlock(ctx, 'narrator', 'narrator', threadCap);
-  if (threads) sections.push(threads);
+  if (!tight) {
+    if (cont) sections.push(cont);
+    if (threads) sections.push(threads);
+  }
 
   return sections;
 }
@@ -1031,7 +1043,7 @@ function leanAgentFrame(
     : priorMemoryFor(ctx, agent);
   if (prior) sections.push(prior);
   const running = runningSummaryFor(ctx.episode, PRIOR_CAPS[agent].runningCap);
-  if (running) sections.push(running);
+  if (running && !tight) sections.push(running);
   sections.push(calendarBlock(ctx.world, ctx.episode, 'compact'));
   const calEvents = calendarEventsSection(ctx, 'compact', { includeUpcoming: !tight });
   if (calEvents) sections.push(calEvents.startsWith('##') ? calEvents : `## Calendar texture\n${calEvents}`);
@@ -1158,6 +1170,10 @@ export function buildCharacterSystemPrompt(
   if (cont) sections.push(cont);
   const charThreads = threadsBlock(ctx, 'character', 'speak', threadCap);
   if (charThreads) sections.push(charThreads);
+  if (tight) {
+    const running = runningSummaryFor(ctx.episode, PRIOR_CAPS.character.runningCap);
+    if (running) sections.push(running);
+  }
 
   // Speak format lives on the user message only (buildCharacterSpeakMessages).
   sections.push(
@@ -1227,6 +1243,10 @@ export function buildGuestSystemPrompt(
       '## Open threads — tensions you may lean on if you know them',
       '## Open threads'
     ));
+  }
+  if (tight) {
+    const running = runningSummaryFor(ctx.episode, PRIOR_CAPS.guest.runningCap);
+    if (running) sections.push(running);
   }
 
   sections.push(
@@ -1853,8 +1873,9 @@ export function directorUserPrompt(
   const running = runningSummaryFor(ctx.episode, PRIOR_CAPS.director.runningCap);
   const runningLine = running
     ? running.replace(
-      '## Earlier this episode (running summary)\n',
-      'Earlier this episode (summary): '
+      '## Earlier this episode (running summary)\n' +
+      'Glue only — what just happened after early turns dropped. Continuity facts and the room ledger outrank this if they conflict.\n',
+      'Earlier this episode (summary — glue only; Continuity facts outrank this): '
     )
     : '';
   const targets = plotTargetsSection(ctx.episode, ctx.season);
@@ -1882,6 +1903,8 @@ export function directorUserPrompt(
     calEventsCompact +
     (seasonBibleClip ? `${seasonBibleClip}\n` : '') +
     (priorMemory ? `\nRecent episode memory:\n${priorMemory}\n` : '') +
+    `Continuity (do not contradict — these outrank any running summary):\n${factLines || '(none)'}\n\n` +
+    `${threadSec ?? 'Open threads (draw on sparingly; soft tensions, not the plot-target hit-list):\n(none)'}\n\n` +
     (runningLine ? `${runningLine}\n` : '') +
     (locLine ? `\n${locLine}` : '') +
     `\n` +
@@ -1891,8 +1914,6 @@ export function directorUserPrompt(
     dyadBlock +
     dynamicsBlock +
     preferLine +
-    `Continuity (do not contradict):\n${factLines || '(none)'}\n\n` +
-    `${threadSec ?? 'Open threads (draw on sparingly; soft tensions, not the plot-target hit-list):\n(none)'}\n\n` +
     `Knowledge walls:\n${knowledgeWalls || '(none)'}\n\n` +
     `Latest player move: ${MODE_PREFIX[mode](input)}\n\n` +
     `Recent transcript:\n${transcript || '(episode just opened)'}\n\n` +

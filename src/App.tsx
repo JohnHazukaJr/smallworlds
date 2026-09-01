@@ -48,11 +48,9 @@ export default function App() {
       color: 'var(--paper)', overflowX: 'hidden',
       display: 'flex', flexDirection: 'column'
     }}>
-      {!readMode && (
-        <div className="horizon-wash" style={{
-          position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 0
-        }} />
-      )}
+      <div className="horizon-wash" style={{
+        position: 'fixed', inset: 0, pointerEvents: 'none', zIndex: 0
+      }} />
 
       {storagePressure && screen !== 'profile' && (
         <div style={{

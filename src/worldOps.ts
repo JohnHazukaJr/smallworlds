@@ -725,6 +725,7 @@ export async function nextEpisode(current: Episode, opts: NextEpisodeOpts = {}):
       runningSummary: null,
       runningSummaryAtChars: 0,
       liveStateAtChars: 0,
+      liveCanonAtChars: 0,
       storyDay: nextDay,
       storyDayEnd: null,
       dateNote: null,

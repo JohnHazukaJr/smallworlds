@@ -16,7 +16,7 @@ import {
 import { inferContextWindowTokens, promptCharBudget } from './contextBudget';
 import { isContextOverflowError } from './client';
 import { DEFAULT_AI } from '../worldOps';
-import type { CalendarEvent, Character, Episode, Location, Season, Turn, World } from '../types';
+import type { CalendarEvent, Character, ContinuityFact, Episode, Location, OpenThread, Season, Turn, World } from '../types';
 
 const npc = (id: string, name: string, extras: Partial<Character> = {}): Character => ({
   id, worldId: 'w', name, role: 'registrar', age: '', appearance: '', mannerisms: '', summary: 'Keeps the books.',
@@ -221,6 +221,27 @@ describe('director prompt budgets', () => {
     expect(user).not.toMatch(/Room dynamics/);
     expect(user).not.toMatch(/Ties inside the room/);
   });
+
+  it('puts continuity before the running summary so facts outrank glue', () => {
+    const continuity: ContinuityFact[] = [{
+      id: 'f1', worldId: 'w', seasonId: 's', episodeId: 'e',
+      text: 'Ada still has the brass office key',
+      source: 'auto', createdAt: 1
+    }];
+    const user = directorUserPrompt(
+      ctx({
+        continuity,
+        episode: { ...episode(), runningSummary: 'A mushy recap that might forget the key.' }
+      }),
+      'speak',
+      'Hello?'
+    );
+    const factAt = user.indexOf('Ada still has the brass office key');
+    const glueAt = user.indexOf('A mushy recap that might forget the key.');
+    expect(factAt).toBeGreaterThan(0);
+    expect(glueAt).toBeGreaterThan(factAt);
+    expect(user).toMatch(/outrank any running summary/);
+  });
 });
 
 describe('beat-scoped character layers', () => {
@@ -324,6 +345,36 @@ describe('beat-scoped character layers', () => {
     expect(prompt).toContain('No blades past the rail.');
     expect(prompt).toContain('Never describe the sea as wine-dark.');
     expect(prompt).not.toContain('LONG_HISTORY_SHOULD_DROP_ON_TIGHT');
+  });
+
+  it('treats the running summary as glue that continuity outranks', () => {
+    const continuity: ContinuityFact[] = [{
+      id: 'f1', worldId: 'w', seasonId: 's', episodeId: 'e',
+      text: 'Ada still has the brass office key',
+      source: 'auto', createdAt: 1
+    }];
+    const threads: OpenThread[] = [{
+      id: 'th1', worldId: 'w', seasonId: 's', text: 'Who paid Ivo?',
+      openedLabel: 'opened S1 · E2', status: 'open', createdAt: 1
+    }];
+    const prompt = buildNarratorSystemPrompt(
+      ctx({
+        continuity,
+        threads,
+        episode: {
+          ...episode(),
+          runningSummary: 'A mushy recap that might forget the key.',
+          sceneLedger: ['Rain on the glass']
+        }
+      }),
+      { pack: 'tight', focusIds: ['c1'] }
+    );
+    const factAt = prompt.indexOf('Ada still has the brass office key');
+    const glueAt = prompt.indexOf('A mushy recap that might forget the key.');
+    expect(factAt).toBeGreaterThan(0);
+    expect(glueAt).toBeGreaterThan(factAt);
+    expect(prompt).toMatch(/Glue only/i);
+    expect(prompt).toContain('Rain on the glass');
   });
 });
 
