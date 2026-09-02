@@ -361,6 +361,7 @@ export async function createWorld(input: NewWorldInput): Promise<World> {
     ai: { ...DEFAULT_AI, mature: s.matureDefault, ...input.ai },
     proseModel: null,
     utilityModel: null,
+    imageModel: null,
     activeSeasonId: seasonId,
     calendar: {
       currentDay: 1,

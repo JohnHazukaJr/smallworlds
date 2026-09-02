@@ -42,10 +42,10 @@ export function Rail() {
   const syncError = useSyncMeta((s) => s.error);
 
   return (
-    <nav style={{
-      borderRight: '1px solid rgba(255,255,255,0.08)', padding: '24px 14px',
+    <nav className="glass-clear" style={{
+      borderRight: '1px solid rgba(255,255,255,0.12)', padding: '24px 14px',
       display: 'flex', flexDirection: 'column', gap: 28, position: 'sticky', top: 0, height: '100vh',
-      background: 'rgba(10,12,14,0.72)', backdropFilter: 'blur(12px) saturate(105%)'
+      borderRadius: 0, borderTop: 0, borderBottom: 0, borderLeft: 0
     }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingLeft: 6, paddingRight: 4 }}>
         <div className="serif" style={{ fontSize: 26, fontWeight: 300, letterSpacing: '0.01em', color: '#f2f4f5', lineHeight: 1.05 }}>

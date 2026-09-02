@@ -324,7 +324,7 @@ const THREAD_CAP = 12;
 export const DIRECTOR_FACT_CAP = 16;
 export const DIRECTOR_THREAD_CAP = 10;
 /** How many recent packed turns the director sees (after history packing). */
-export const DIRECTOR_TRANSCRIPT_TURNS = 28;
+export const DIRECTOR_TRANSCRIPT_TURNS = 8;
 /** How many prior wrapped episodes to surface in prompts. */
 const PRIOR_EPISODE_DIGEST_COUNT = 3;
 
@@ -883,60 +883,27 @@ function resolveCurrentLocations(episode: Episode, locations: Location[]): Locat
   return byId.length > 0 ? byId : byName;
 }
 
-function worldFrameSections(ctx: PromptContext, opts: PromptBuildOpts = {}): string[] {
+/**
+ * Byte-stable prefix for one episode/cast snapshot.
+ * Shared by narrator and speak so later beats in a Write can hit implicit cache.
+ * Presence sheets only — focused psyche / off-scene names go after this.
+ */
+export function storyCachePrefix(ctx: PromptContext, opts: PromptBuildOpts = {}): string {
+  return storyCacheSections(ctx, opts).join('\n\n');
+}
+
+function storyCacheSections(ctx: PromptContext, opts: PromptBuildOpts = {}): string[] {
   const { world, season, episode, characters } = ctx;
   const tight = opts.pack === 'tight';
-  const focus = new Set(opts.focusIds ?? []);
   const inScene = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
   const player = characters.find((c) => c.isPlayer);
-  const offSceneFocused = characters.filter(
-    (c) => !episode.castIds.includes(c.id) && !c.isPlayer && focus.has(c.id)
-  );
   const sections: string[] = [];
 
   sections.push(worldBibleSection(world, tight ? 1800 : WORLD_BIBLE_CAP));
-
   const bible = seasonBibleSection(season, tight ? 600 : SEASON_BIBLE_RECAP_CAP);
   if (bible) sections.push(bible);
-
   sections.push(pressurePremise(ctx, { includeSeasonMeta: true }));
-
-  const targets = plotTargetsSection(episode, season);
-  if (targets) sections.push(targets);
-
-  const priorEps = tight
-    ? formatPriorEpisodesSection(ctx, {
-      beatCapImmediate: 3, beatCapDigest: 1,
-      recapDigestChars: 160, recapImmediateChars: 700
-    })
-    : priorMemoryFor(ctx, 'narrator');
-  if (priorEps) sections.push(priorEps);
-
-  const factCap = tight ? 8 : FACT_CAPS.narrator.facts;
-  const threadCap = tight ? 4 : FACT_CAPS.narrator.threads;
-  const cont = continuityBlock(ctx, 'narrator', 'hard', factCap);
-  const threads = threadsBlock(ctx, 'narrator', 'narrator', threadCap);
-  // When packing, facts sit in front of the running summary so glue cannot bury canon.
-  if (tight) {
-    if (cont) sections.push(cont);
-    if (threads) sections.push(threads);
-  }
-
-  const running = runningSummaryFor(episode, PRIOR_CAPS.narrator.runningCap);
-  if (running) sections.push(running);
-
-  sections.push(calendarBlock(world, episode, 'full'));
-  const calEvents = calendarEventsSection(ctx, 'full', { includeUpcoming: !tight });
-  if (calEvents) sections.push(calEvents);
   sections.push(episodeHeader(episode));
-
-  const guests = activeGuests(episode);
-  if (guests.length > 0) {
-    sections.push(
-      `## Walk-ons in this episode (not Cast cards — temporary)\n` +
-      guests.map((g) => `- ${g.name}: ${g.brief}${g.voice ? ` Voice: ${g.voice}` : ''}`).join('\n')
-    );
-  }
 
   sections.push(...currentLocationBlock(ctx, {
     includeOthers: !tight,
@@ -957,34 +924,94 @@ function worldFrameSections(ctx: PromptContext, opts: PromptBuildOpts = {}): str
     );
   }
 
-  const ledger = sceneLedgerSection(episode, tight ? 4 : 8);
-  if (ledger) sections.push(ledger);
-
   if (player) {
-    const sheet = focus.has(player.id) ? psycheSheet(player, characters) : presenceSheet(player, characters);
-    sections.push(`## The player\n${sheet}`);
+    sections.push(`## The player\n${presenceSheet(player, characters)}`);
   }
-
   if (inScene.length > 0) {
     sections.push(
       `## Characters in the scene\n` +
-      inScene.map((c) =>
-        (focus.has(c.id) ? psycheSheet(c, characters) : presenceSheet(c, characters))
-      ).join('\n\n')
+      inScene.map((c) => presenceSheet(c, characters)).join('\n\n')
     );
   }
+
+  const guests = activeGuests(episode);
+  if (guests.length > 0) {
+    sections.push(
+      `## Walk-ons in this episode (not Cast cards — temporary)\n` +
+      guests.map((g) => `- ${g.name}: ${g.brief}${g.voice ? ` Voice: ${g.voice}` : ''}`).join('\n')
+    );
+  }
+
+  return sections;
+}
+
+function worldSpineSections(
+  ctx: PromptContext,
+  agent: Exclude<PromptAgent, 'director'>,
+  opts: PromptBuildOpts = {}
+): string[] {
+  const tight = opts.pack === 'tight';
+  const sections: string[] = [];
+  const targets = plotTargetsSection(ctx.episode, ctx.season);
+  if (targets) sections.push(targets);
+
+  const priorEps = tight
+    ? formatPriorEpisodesSection(ctx, {
+      beatCapImmediate: 3, beatCapDigest: 1,
+      recapDigestChars: 160, recapImmediateChars: 700
+    })
+    : priorMemoryFor(ctx, agent);
+  if (priorEps) sections.push(priorEps);
+
+  const factCap = tight ? 8 : FACT_CAPS[agent].facts;
+  const threadCap = tight ? 4 : FACT_CAPS[agent].threads;
+  const tone = agent === 'narrator' ? 'hard' : 'plausible';
+  const threadKind = agent === 'narrator' ? 'narrator' : 'speak';
+  const cont = continuityBlock(ctx, agent, tone, factCap);
+  const threads = threadsBlock(ctx, agent, threadKind, threadCap);
+  if (cont) sections.push(cont);
+  if (threads) sections.push(threads);
+
+  sections.push(calendarBlock(ctx.world, ctx.episode, agent === 'narrator' ? 'full' : 'compact'));
+  const calEvents = calendarEventsSection(ctx, agent === 'narrator' ? 'full' : 'compact', {
+    includeUpcoming: !tight
+  });
+  if (calEvents) {
+    sections.push(calEvents.startsWith('##') ? calEvents : `## Calendar texture\n${calEvents}`);
+  }
+
+  const ledger = sceneLedgerSection(ctx.episode, tight ? 4 : agent === 'narrator' ? 8 : 5);
+  if (ledger) sections.push(ledger);
+  return sections;
+}
+
+function worldGlueSection(ctx: PromptContext, agent: PromptAgent): string | null {
+  return runningSummaryFor(ctx.episode, PRIOR_CAPS[agent].runningCap);
+}
+
+function narratorFocusTail(ctx: PromptContext, opts: PromptBuildOpts = {}): string[] {
+  const focus = new Set(opts.focusIds ?? []);
+  if (focus.size === 0) return [];
+  const { characters, episode } = ctx;
+  const sections: string[] = [];
+  const focusedInScene = characters.filter(
+    (c) => !c.isPlayer && episode.castIds.includes(c.id) && focus.has(c.id)
+  );
+  if (focusedInScene.length > 0) {
+    sections.push(
+      `## This beat (deeper sheet)\n` +
+      focusedInScene.map((c) => psycheSheet(c, characters)).join('\n\n')
+    );
+  }
+  const offSceneFocused = characters.filter(
+    (c) => !episode.castIds.includes(c.id) && !c.isPlayer && focus.has(c.id)
+  );
   if (offSceneFocused.length > 0) {
     sections.push(
       `## Named off-scene (this beat only)\n` +
       offSceneFocused.map((c) => presenceSheet(c, characters)).join('\n\n')
     );
   }
-
-  if (!tight) {
-    if (cont) sections.push(cont);
-    if (threads) sections.push(threads);
-  }
-
   return sections;
 }
 
@@ -1029,31 +1056,12 @@ function leanAgentFrame(
   agent: 'character' | 'guest',
   opts: PromptBuildOpts = {}
 ): string[] {
-  const tight = opts.pack === 'tight';
   const sections: string[] = [];
-  sections.push(worldBibleSection(ctx.world, tight ? 1800 : WORLD_BIBLE_CAP));
-  const bible = seasonBibleSection(ctx.season, tight ? 600 : SEASON_BIBLE_RECAP_CAP);
-  if (bible) sections.push(bible);
-  sections.push(pressurePremise(ctx));
-  const prior = tight
-    ? formatPriorEpisodesSection(ctx, {
-      beatCapImmediate: 3, beatCapDigest: 1,
-      recapDigestChars: 160, recapImmediateChars: 700
-    })
-    : priorMemoryFor(ctx, agent);
-  if (prior) sections.push(prior);
-  const running = runningSummaryFor(ctx.episode, PRIOR_CAPS[agent].runningCap);
-  if (running && !tight) sections.push(running);
-  sections.push(calendarBlock(ctx.world, ctx.episode, 'compact'));
-  const calEvents = calendarEventsSection(ctx, 'compact', { includeUpcoming: !tight });
-  if (calEvents) sections.push(calEvents.startsWith('##') ? calEvents : `## Calendar texture\n${calEvents}`);
   const pressure = speakSituationPressure(ctx);
   if (pressure) sections.push(pressure);
-  sections.push(...currentLocationBlock(ctx, { atmosphereOnly: tight }));
-  // Characters share the room's established state — nobody should ignore the rain
-  // the narration started two beats ago.
-  const ledger = sceneLedgerSection(ctx.episode, tight ? 3 : 5);
-  if (ledger) sections.push(ledger);
+  sections.push(...worldSpineSections(ctx, agent, opts));
+  const running = worldGlueSection(ctx, agent);
+  if (running) sections.push(running);
   return sections;
 }
 
@@ -1074,13 +1082,18 @@ export function buildNarratorSystemPrompt(ctx: PromptContext, opts: PromptBuildO
   const ai = world.ai;
   const sections: string[] = [];
 
+  sections.push(storyCachePrefix(ctx, opts));
+
   sections.push(
     `You are the narrator of "${world.title}", a longform interactive story written in collaboration with one player. ` +
     `You write narration only: setting, atmosphere, physical action, and what can be seen or felt. ` +
     `You never write spoken dialogue for any character. Named characters speak through their own voices in separate turns.`
   );
 
-  sections.push(...worldFrameSections(ctx, opts));
+  sections.push(...narratorFocusTail(ctx, opts));
+  sections.push(...worldSpineSections(ctx, 'narrator', opts));
+  const running = worldGlueSection(ctx, 'narrator');
+  if (running) sections.push(running);
 
   sections.push(
     `## Character conduct (for what you show, not what they say)\n` +
@@ -1132,8 +1145,9 @@ export function buildCharacterSystemPrompt(
     (c) => c.id !== character.id && !ctx.episode.castIds.includes(c.id) && focus.has(c.id)
   );
   const guests = activeGuests(ctx.episode);
-  const tight = opts.pack === 'tight';
   const sections: string[] = [];
+
+  sections.push(storyCachePrefix(ctx, opts));
 
   sections.push(
     `You ARE ${character.name} in the story "${world.title}". You speak and act only as yourself. ` +
@@ -1162,17 +1176,6 @@ export function buildCharacterSystemPrompt(
       `## Walk-ons present\n` +
       guests.map((g) => `- ${g.name}: ${g.brief}`).join('\n')
     );
-  }
-
-  const factCap = tight ? 8 : FACT_CAPS.character.facts;
-  const threadCap = tight ? 4 : FACT_CAPS.character.threads;
-  const cont = continuityBlock(ctx, 'character', 'plausible', factCap);
-  if (cont) sections.push(cont);
-  const charThreads = threadsBlock(ctx, 'character', 'speak', threadCap);
-  if (charThreads) sections.push(charThreads);
-  if (tight) {
-    const running = runningSummaryFor(ctx.episode, PRIOR_CAPS.character.runningCap);
-    if (running) sections.push(running);
   }
 
   // Speak format lives on the user message only (buildCharacterSpeakMessages).
@@ -1213,8 +1216,9 @@ export function buildGuestSystemPrompt(
   const { world, characters } = ctx;
   const ai = world.ai;
   const inScene = characters.filter((c) => ctx.episode.castIds.includes(c.id));
-  const tight = opts.pack === 'tight';
   const sections: string[] = [];
+
+  sections.push(storyCachePrefix(ctx, opts));
 
   sections.push(
     `You ARE ${guest.name}, a temporary walk-on in "${world.title}" (not a permanent cast member). ` +
@@ -1226,27 +1230,6 @@ export function buildGuestSystemPrompt(
   sections.push(`## Who you are this scene\n${guest.brief}${guest.voice ? `\nVoice: ${guest.voice}` : ''}`);
   if (inScene.length > 0) {
     sections.push(`## Others present\n${inScene.map((c) => presenceSheet(c, characters)).join('\n\n')}`);
-  }
-
-  const factCap = tight ? 8 : FACT_CAPS.guest.facts;
-  const threadCap = tight ? 4 : FACT_CAPS.guest.threads;
-  const cont = continuityBlock(ctx, 'guest', 'plausible', factCap);
-  if (cont) {
-    sections.push(cont.replace(
-      '## Continuity — facts you may know if you could plausibly know them',
-      '## Continuity you may know if plausible'
-    ));
-  }
-  const guestThreads = threadsBlock(ctx, 'guest', 'speak', threadCap);
-  if (guestThreads) {
-    sections.push(guestThreads.replace(
-      '## Open threads — tensions you may lean on if you know them',
-      '## Open threads'
-    ));
-  }
-  if (tight) {
-    const running = runningSummaryFor(ctx.episode, PRIOR_CAPS.guest.runningCap);
-    if (running) sections.push(running);
   }
 
   sections.push(
@@ -1292,11 +1275,14 @@ export const MODE_PREFIX: Record<ComposeMode, (input: string) => string> = {
 };
 
 /**
- * Rough char budget for packed episode transcript (≈4 chars per token).
- * Kept below the old 96k so system frame (bible + prior wraps + cast) still fits
- * typical 128k-context models mid-season.
+ * Wrap-nudge pacing — how full the episode transcript is before we suggest wrapping.
+ * Not the amount of verbatim history sent on each Write.
  */
 export const HISTORY_CHAR_BUDGET = 56000;
+
+/** Verbatim tail shipped on each Write. Spine + glue cover the rest. */
+export const HISTORY_TAIL_CHAR_BUDGET = 16_000;
+export const HISTORY_TAIL_MAX_TURNS = 16;
 
 /** Soft ceiling for system + history chars when no model budget is passed. */
 export const TOTAL_PROMPT_CHAR_SOFT_CAP = 110_000;
@@ -1373,19 +1359,19 @@ export function packTurnsDetailed(
   totalCap = TOTAL_PROMPT_CHAR_SOFT_CAP
 ): PackedTurns {
   const room = totalCap - Math.max(0, systemChars);
-  const defaulting = totalCap === TOTAL_PROMPT_CHAR_SOFT_CAP && systemChars === 0;
-  const budget = defaulting
-    ? Math.min(HISTORY_CHAR_BUDGET, Math.max(0, room))
-    : Math.max(0, room);
+  const budget = Math.min(HISTORY_TAIL_CHAR_BUDGET, Math.max(0, room));
   let used = 0;
   const reversed = [...turns].reverse();
-  const kept: Turn[] = [];
+  const keptRev: Turn[] = [];
   for (const t of reversed) {
     used += t.text.length;
-    if (used > budget && kept.length >= PACK_MIN_TURNS) break;
-    kept.push(t);
+    if (used > budget && keptRev.length >= PACK_MIN_TURNS) break;
+    keptRev.push(t);
   }
-  kept.reverse();
+  keptRev.reverse();
+  const kept = keptRev.length > HISTORY_TAIL_MAX_TURNS
+    ? keptRev.slice(-HISTORY_TAIL_MAX_TURNS)
+    : keptRev;
   const omitCount = turns.length - kept.length;
   const omitted = omitCount > 0 ? turns.slice(0, omitCount) : [];
   return { kept, omitted };
@@ -1417,7 +1403,7 @@ export function compressOmittedTurns(
 
 /**
  * History prefix when older turns were packed out.
- * Running summary already lives in the system frame — only add the omitted digest here.
+ * If a running summary already covers those beats, skip the digest (never send both).
  */
 function earlierEpisodePrefix(
   episode: Episode | undefined,
@@ -1425,7 +1411,7 @@ function earlierEpisodePrefix(
   characters: Character[],
   guests: EpisodeGuest[]
 ): ChatMessage | null {
-  void episode;
+  if (episode?.runningSummary?.trim()) return null;
   const digest = compressOmittedTurns(omitted, characters, guests);
   if (!digest) return null;
   return {
@@ -1684,8 +1670,8 @@ export function directorSystemPrompt(
 
   return (
     'You are the scene director for an interactive story. ' +
-    'Plan cast changes and an ordered list of beats. ' +
-    'Respond with JSON only: ' +
+    'Call plan_turn. Do not write story prose. ' +
+    'Fallback shape if tools are unavailable: ' +
     '{"castDelta":{' +
     '"enter":["<characterId>",...],' +
     '"leave":["<characterIdOrGuestId>",...],' +

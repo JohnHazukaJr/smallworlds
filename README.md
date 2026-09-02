@@ -27,8 +27,11 @@ npm run preview    # serve the production build locally
 The app runs on your own API keys. Open **Settings → Your AI providers → add a provider**.
 
 - **OpenRouter** (recommended): one pay-as-you-go key at [openrouter.ai/keys](https://openrouter.ai/keys)
-  gives you hundreds of models — Claude, Kimi K2, DeepSeek, GPT, Grok, Llama — so you can compare
-  which writes your stories best.
+  gives you hundreds of models — Claude, GLM, Kimi K2, DeepSeek, GPT, Grok, Llama — so you can compare
+  which writes your stories best. GLM 5.x slugs are `z-ai/glm-5.2` and `z-ai/glm-5.3`.
+- **Z.ai**: direct GLM (`glm-5.2`, `glm-5.3`, `glm-5.3-flash`, `glm-image`). The browser may hit CORS —
+  use OpenRouter’s `z-ai/glm-5.2`, or sign in so the optional cloud relay can reach `api.z.ai`.
+  China BigModel is Custom: `https://open.bigmodel.cn/api/paas/v4`.
 - **Anthropic / OpenAI / Gemini / Moonshot / Together / DeepSeek / xAI** direct keys also work.
 - **Local models**: point the Ollama or Custom endpoint preset at your local server
   (for Ollama, set `OLLAMA_ORIGINS=*` so the browser may call it).
@@ -36,11 +39,12 @@ The app runs on your own API keys. Open **Settings → Your AI providers → add
 There is no hardcoded model list: the picker fetches the provider's live catalog where supported and
 always accepts a free-typed model ID, so new models work the day they launch.
 
-Set two defaults in Settings:
+Set three defaults in Settings (each can be overridden per world):
 
-- **Prose model** — writes the story. Spend your best model here.
-- **Utility model** — background work (continuity extraction, season analysis, character drafts).
-  A cheap fast model is ideal. Both can be overridden per world.
+- **Prose model** — writes the story. Recommended pairing: `glm-5.2` (or Flash if you want speed).
+- **Utility model** — director, wrap, live canon, drafts. Recommended: `glm-5.2`.
+- **Image model** — scene backdrops. Recommended: `glm-image`. Official Z.ai image generation is
+  text-only; matching uploaded cast photos needs an OpenRouter-style multimodal image model.
 
 ## How it works
 
@@ -71,7 +75,8 @@ Set two defaults in Settings:
 - **Optional cloud sync** (Profile): set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` (see
   `.env.example`), run `supabase/migrations/001_initial.sql`, then sign in with phone, email, or
   Google. Sync is revisioned pull/push with RLS; API keys sync only as E2E ciphertext via a separate
-  secrets passphrase.
+  secrets passphrase. Deploy `supabase/functions/ai-proxy` if you want the browser to reach Z.ai /
+  BigModel through an allowlisted relay (forwards your Bearer token; no hosted inference).
 
 ## Security
 

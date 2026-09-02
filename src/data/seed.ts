@@ -24,6 +24,7 @@ export async function seedStarterWorld(): Promise<string> {
     ai: { ...DEFAULT_AI },
     proseModel: null,
     utilityModel: null,
+    imageModel: null,
     activeSeasonId: seasonId,
     calendar: { currentDay: 1, system: 'Tide-time and guild-time — the harbour keeps both, and they do not agree.', weekdays: undefined, dayOneWeekday: 0, episodeAdvanceDays: 1 },
     createdAt: now,

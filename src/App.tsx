@@ -56,7 +56,7 @@ export default function App() {
         <div style={{
           flexShrink: 0, position: 'relative', zIndex: 40,
           borderBottom: '1px solid var(--focus)',
-          background: 'rgba(14, 24, 28, 0.94)', backdropFilter: 'blur(12px)',
+          background: 'rgba(255, 255, 255, 0.05)', backdropFilter: 'blur(14px) saturate(140%)',
           padding: '10px 16px', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap'
         }}>
           <Mono style={{ fontSize: 10, color: 'var(--accent-strong)' }}>Storage pressure</Mono>

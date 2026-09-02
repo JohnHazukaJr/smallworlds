@@ -49,7 +49,7 @@ export function PassphraseDialog(p: PassphraseDialogProps) {
       <div className="craft-row fade-in" style={{
         position: 'fixed', zIndex: 51, top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
         width: 'min(420px, calc(100% - 32px))', maxWidth: 'calc(100% - 32px)', padding: '24px 24px 20px',
-        display: 'flex', flexDirection: 'column', gap: 14, background: 'rgba(14,16,20,0.92)'
+        display: 'flex', flexDirection: 'column', gap: 14
       }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           <div className="serif" style={{ fontWeight: 300, fontSize: 22, color: '#f6f4f0' }}>{p.title}</div>

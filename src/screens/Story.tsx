@@ -1,7 +1,7 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
 import {
-  analyzeEpisode, commitEpisodeWrap, commitSoftEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, draftColdOpenNarration, proseModelFor,
+  analyzeEpisode, commitEpisodeWrap, commitSoftEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, draftColdOpenNarration, imageModelFor,
   clearEpisodeRunningSummary, regenerateBeat, rollbackTurnSnapshot,
   snapshotTurnsAfter, snapshotTurnsFrom, writeTurn, seedSeasonCalendarEvents,
   WriteAbortedError, type EpisodeWrapDraft, type StreamMeta, type SeedCalendarEventDraft
@@ -19,7 +19,7 @@ import {
   previewSpeakText,
   type SpeakSegment
 } from '../ai/dialogueFormat';
-import { generateSceneImage } from '../ai/image';
+import { collectSceneImageRefs, generateSceneImage, sceneHasPortraitRefs } from '../ai/image';
 import {
   episodeContextPressure, episodeHistoryChars, HISTORY_CHAR_BUDGET,
   pendingBeatLabel, preferBucketsForEpisodes, resolveSpeakerName, selectDirectorFacts, selectDirectorThreads,
@@ -2481,7 +2481,7 @@ export function Story() {
       {/* display settings */}
       <DisplaySheet
         open={displayOpen} onClose={() => setDisplayOpen(false)} narrow={narrow}
-        episode={episode} world={world} locations={locations}
+        episode={episode} world={world} locations={locations} characters={characters}
       />
     </div>
   );
@@ -2509,15 +2509,17 @@ function SliderRow({ label, value, min, max, unit, onChange }: {
   );
 }
 
-function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
+function DisplaySheet({ open, onClose, narrow, episode, world, locations, characters }: {
   open: boolean; onClose: () => void; narrow: boolean;
-  episode: Episode; world: World; locations: Location[];
+  episode: Episode; world: World; locations: Location[]; characters: Character[];
 }) {
   const { display, setDisplay, mood, setMood } = useApp();
   const [imgError, setImgError] = useState('');
   const [imgBusy, setImgBusy] = useState(false);
   const [genBusy, setGenBusy] = useState(false);
   const [note, setNote] = useState(episode.atmosphereNote ?? '');
+  const canMatchFaces = sceneHasPortraitRefs(characters, episode.castIds);
+  const [matchCast, setMatchCast] = useState(canMatchFaces);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { setNote(episode.atmosphereNote ?? ''); }, [episode.id, episode.atmosphereNote]);
@@ -2549,12 +2551,17 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
     setGenBusy(true);
     setImgError('');
     try {
-      const { provider, model } = proseModelFor(world);
-      const image = await generateSceneImage({
-        provider, model, world, location: sceneLoc,
-        atmosphereNote: episode.atmosphereNote
+      const { provider, model } = imageModelFor(world);
+      const refs = collectSceneImageRefs({
+        characters, castIds: episode.castIds, location: sceneLoc
       });
-      await guardStorage(() => db.episodes.update(episode.id, { image, updatedAt: Date.now() }));
+      const result = await generateSceneImage({
+        provider, model, world, location: sceneLoc,
+        atmosphereNote: episode.atmosphereNote,
+        matchCast, refs
+      });
+      await guardStorage(() => db.episodes.update(episode.id, { image: result.dataUrl, updatedAt: Date.now() }));
+      if (result.warning) setImgError(result.warning);
       if (display.aiSetsScrollBg) setDisplay({ scrollBackdrop: 'auto' });
     } catch (e) {
       setImgError(formatUserError(e));
@@ -2691,6 +2698,14 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations }: {
             }} />
           )}
           {imgError && <ErrorNote error={imgError} onDismiss={() => setImgError('')} />}
+          {canMatchFaces && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <Toggle on={matchCast} onClick={() => setMatchCast((v) => !v)} />
+              <div style={{ fontSize: 12.5, lineHeight: 1.45, color: 'rgba(236,234,230,0.7)' }}>
+                Match cast photos — keep uploaded faces when the image model accepts references.
+              </div>
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button className="btn-primary" style={{ fontSize: 12, padding: '8px 14px' }}
               disabled={genBusy || imgBusy || !sceneLoc}
@@ -3127,8 +3142,9 @@ function locationThumb(l: Location, size = 30): CSSProperties {
   return { ...avatarStyle(l.hue, size), borderRadius: '50%' };
 }
 
-function SceneLocationsPanel({ episode, locations, accent, world, onGoLocations }: {
-  episode: Episode; locations: Location[]; accent: string; world?: World; onGoLocations: () => void;
+function SceneLocationsPanel({ episode, locations, accent, world, characters, onGoLocations }: {
+  episode: Episode; locations: Location[]; accent: string; world?: World;
+  characters: Character[]; onGoLocations: () => void;
 }) {
   const { setMood, display, setDisplay } = useApp();
   const [genBusy, setGenBusy] = useState(false);
@@ -3181,12 +3197,18 @@ function SceneLocationsPanel({ episode, locations, accent, world, onGoLocations 
     setGenBusy(true);
     setGenError('');
     try {
-      const { provider, model } = proseModelFor(world);
-      const image = await generateSceneImage({
-        provider, model, world, location: activeLoc,
-        atmosphereNote: episode.atmosphereNote
+      const { provider, model } = imageModelFor(world);
+      const refs = collectSceneImageRefs({
+        characters, castIds: episode.castIds, location: activeLoc
       });
-      await guardStorage(() => db.episodes.update(episode.id, { image, updatedAt: Date.now() }));
+      const result = await generateSceneImage({
+        provider, model, world, location: activeLoc,
+        atmosphereNote: episode.atmosphereNote,
+        matchCast: sceneHasPortraitRefs(characters, episode.castIds),
+        refs
+      });
+      await guardStorage(() => db.episodes.update(episode.id, { image: result.dataUrl, updatedAt: Date.now() }));
+      if (result.warning) setGenError(result.warning);
       if (display.aiSetsScrollBg) setDisplay({ scrollBackdrop: 'auto' });
     } catch (e) {
       setGenError(formatUserError(e));
@@ -3861,7 +3883,7 @@ function DirectorContent(props: {
           <SceneCastPanel episode={props.episode} characters={props.characters} accent={props.accent} onGoCast={props.onGoCast} />
           <SceneLocationsPanel
             episode={props.episode} locations={props.locations} accent={props.accent}
-            world={props.world} onGoLocations={props.onGoLocations}
+            world={props.world} characters={props.characters} onGoLocations={props.onGoLocations}
           />
           <ScenePlatePanel episode={props.episode} bd={BACKDROPS.scene} />
         </div>

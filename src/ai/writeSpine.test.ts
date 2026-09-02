@@ -7,6 +7,7 @@ import {
   episodeContextPressure,
   episodeHistoryChars,
   HISTORY_CHAR_BUDGET,
+  HISTORY_TAIL_CHAR_BUDGET,
   injectedSpeakBrief,
   injectedSpeakBriefForCharacter,
   packTurnsDetailed,
@@ -239,7 +240,7 @@ describe('packTurnsDetailed / pressure', () => {
     expect(kept.length).toBeGreaterThan(0);
     expect(omitted.length).toBeGreaterThan(0);
     expect(kept.at(-1)?.id).toBe(turns.at(-1)?.id);
-    expect(episodeHistoryChars(kept)).toBeLessThanOrEqual(HISTORY_CHAR_BUDGET + 3000);
+    expect(episodeHistoryChars(kept)).toBeLessThanOrEqual(HISTORY_TAIL_CHAR_BUDGET + 3000);
   });
 
   it('drops the 20k history floor when the system frame ate the window', () => {

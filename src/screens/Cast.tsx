@@ -733,8 +733,8 @@ function RelationsEditor({
           zIndex: 5,
           margin: '0 -4px',
           padding: '8px 4px 10px',
-          background: 'rgba(10,12,16,0.92)',
-          backdropFilter: 'blur(16px)',
+          background: 'rgba(255,255,255,0.045)',
+          backdropFilter: 'blur(14px) saturate(140%)',
           borderBottom: '1px solid rgba(255,255,255,0.08)'
         } : {})
       }}>

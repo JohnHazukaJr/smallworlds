@@ -87,6 +87,7 @@ export async function importDevice(data: DeviceExport, opts?: { mergeWorlds?: bo
     providers: data.settings.providers.map((p) => ({ ...p })),
     proseModel: data.settings.proseModel,
     utilityModel: data.settings.utilityModel,
+    imageModel: data.settings.imageModel ?? null,
     matureDefault: data.settings.matureDefault,
     defaultVisibility: data.settings.defaultVisibility
   });

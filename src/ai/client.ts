@@ -1,4 +1,18 @@
 import type { ProviderConfig } from '../types';
+import {
+  modelProfile,
+  thinkingOnForJob,
+  type ChatJob
+} from './modelProfile';
+import { isZaiProvider, providerFetch } from './providerFetch';
+
+export interface ToolSpec {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+export type { ChatJob };
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -14,12 +28,19 @@ export interface StreamRequest {
   temperature?: number;
   signal?: AbortSignal;
   onDelta?: (text: string) => void;
+  job?: ChatJob;
+  thinking?: boolean;
+  jsonMode?: boolean;
+  tools?: ToolSpec[];
+  toolChoice?: 'auto' | { name: string };
 }
 
 /** Full streamed text plus whether the provider stopped for length. */
 export interface StreamResult {
   text: string;
   truncated: boolean;
+  toolCalls?: Array<{ name: string; arguments: string }>;
+  sawReasoning?: boolean;
 }
 
 export class AIError extends Error {
@@ -43,7 +64,6 @@ export function isContextOverflowError(e: unknown): boolean {
   return false;
 }
 
-/** Empty stream — usually context overflow, refusal, or a reasoning model spending all tokens. */
 function throwEmptyResponse(finishReason: string, sawReasoning: boolean): never {
   const reason = finishReason ? ` (stop: ${finishReason})` : '';
   if (sawReasoning || isLengthStop(finishReason)) {
@@ -59,21 +79,10 @@ function throwEmptyResponse(finishReason: string, sawReasoning: boolean): never 
   );
 }
 
-/**
- * Claude Sonnet 5 / Opus 4.7+ reject non-default sampling params with 400.
- * Match both direct Anthropic ids and OpenRouter-style `anthropic/...` slugs.
- */
 export function modelOmitsSamplingParams(model: string): boolean {
-  const m = model.toLowerCase();
-  if (!m.includes('claude')) return false;
-  if (/sonnet[-_.]?5\b/.test(m) || /sonnet[-_.]?5\./.test(m)) return true;
-  // Opus 4.7+ and any Opus 5+
-  if (/opus[-_.]?4[-_.]?([7-9]|\d{2,})\b/.test(m)) return true;
-  if (/opus[-_.]?([5-9])\b/.test(m)) return true;
-  return false;
+  return modelProfile(model).omitsSampling;
 }
 
-/** Attach temperature only when the model accepts it. */
 function withTemperature<T extends Record<string, unknown>>(
   body: T,
   model: string,
@@ -83,7 +92,6 @@ function withTemperature<T extends Record<string, unknown>>(
   return { ...body, temperature: temperature ?? 0.9 };
 }
 
-/** Anthropic ephemeral prompt cache breakpoint on a text block. */
 const PROMPT_CACHE_CONTROL = { type: 'ephemeral' as const };
 const PROMPT_CACHE_BETA = 'prompt-caching-2024-07-31';
 
@@ -96,16 +104,11 @@ function isClaudeModel(model: string): boolean {
   return m.includes('claude') || m.includes('anthropic/');
 }
 
-/**
- * True when we can attach Anthropic-style cache_control to the system prompt:
- * direct Anthropic, or OpenRouter Claude (passthrough).
- */
 export function supportsAnthropicPromptCache(provider: ProviderConfig, model: string): boolean {
   if (provider.kind === 'anthropic') return true;
   return provider.kind === 'openai' && isOpenRouter(provider) && isClaudeModel(model);
 }
 
-/** Single system text block with an ephemeral cache breakpoint. */
 function cachedSystemBlock(text: string) {
   return { type: 'text' as const, text, cache_control: PROMPT_CACHE_CONTROL };
 }
@@ -138,7 +141,6 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** Delay before a single retry; honor Retry-After seconds when present (capped). */
 function retryDelayMs(res: Response | null): number {
   const raw = res?.headers?.get('Retry-After');
   if (raw) {
@@ -146,6 +148,62 @@ function retryDelayMs(res: Response | null): number {
     if (Number.isFinite(sec) && sec >= 0) return Math.min(Math.max(sec * 1000, 200), 10_000);
   }
   return 800;
+}
+
+export function resolveThinking(req: Pick<StreamRequest, 'model' | 'job' | 'thinking'>): boolean {
+  if (req.thinking !== undefined) return req.thinking;
+  return thinkingOnForJob(req.model, req.job ?? 'prose');
+}
+
+/** Build the OpenAI-compatible chat body (exported for tests). */
+export function buildOpenAIChatBody(req: StreamRequest): Record<string, unknown> {
+  const profile = modelProfile(req.model);
+  const thinking = resolveThinking(req);
+  const cacheSystem = supportsAnthropicPromptCache(req.provider, req.model);
+  const systemMessage = cacheSystem
+    ? { role: 'system' as const, content: [cachedSystemBlock(req.system)] }
+    : { role: 'system' as const, content: req.system };
+
+  const body: Record<string, unknown> = {
+    model: req.model,
+    stream: true,
+    messages: [systemMessage, ...req.messages]
+  };
+  if (profile.usesMaxCompletionTokens) body.max_completion_tokens = req.maxTokens;
+  else body.max_tokens = req.maxTokens;
+
+  if (profile.supportsThinkingToggle) {
+    body.thinking = { type: thinking ? 'enabled' : 'disabled' };
+    if (thinking) body.reasoning_effort = 'high';
+  }
+  if (req.jsonMode && profile.supportsJsonObject && !req.tools?.length) {
+    body.response_format = { type: 'json_object' };
+  }
+  if (req.tools?.length) {
+    body.tools = req.tools.map((t) => ({
+      type: 'function',
+      function: { name: t.name, description: t.description, parameters: t.parameters }
+    }));
+    if (req.toolChoice && req.toolChoice !== 'auto') {
+      body.tool_choice = { type: 'function', function: { name: req.toolChoice.name } };
+    } else if (req.toolChoice === 'auto') {
+      body.tool_choice = 'auto';
+    }
+  }
+  return withTemperature(body, req.model, req.temperature);
+}
+
+function openaiHeaders(provider: ProviderConfig): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
+  if (isOpenRouter(provider)) {
+    headers['HTTP-Referer'] = 'https://smallworlds.local';
+    headers['X-Title'] = 'Small Worlds AI';
+  }
+  if (isZaiProvider(provider)) {
+    headers['Accept-Language'] = 'en-US,en';
+  }
+  return headers;
 }
 
 async function streamChatOnce(req: StreamRequest): Promise<StreamResult> {
@@ -156,13 +214,29 @@ async function streamChatOnce(req: StreamRequest): Promise<StreamResult> {
   }
 }
 
+function resultEmpty(r: StreamResult): boolean {
+  return !r.text.trim() && !(r.toolCalls && r.toolCalls.length > 0);
+}
+
 /**
  * Stream a chat completion from any configured provider.
  * One automatic retry on 429 / transient 5xx / network failure.
+ * Empty thinking streams retry once (thinking off for prose/test; more output for utility/wrap).
  */
 export async function streamChat(req: StreamRequest): Promise<StreamResult> {
+  const run = (next: StreamRequest) => streamChatOnce(next);
   try {
-    return await streamChatOnce(req);
+    const first = await run(req);
+    if (!resultEmpty(first)) return first;
+    const thinking = resolveThinking(req);
+    if (!thinking || req.signal?.aborted) {
+      throwEmptyResponse('', first.sawReasoning ?? false);
+    }
+    const job = req.job ?? 'prose';
+    if (job === 'prose' || job === 'test') {
+      return run({ ...req, thinking: false });
+    }
+    return run({ ...req, maxTokens: Math.max(req.maxTokens + 2000, Math.floor(req.maxTokens * 1.5)) });
   } catch (e) {
     if (req.signal?.aborted) throw e;
     if ((e as Error)?.name === 'AbortError') throw e;
@@ -175,7 +249,7 @@ export async function streamChat(req: StreamRequest): Promise<StreamResult> {
 
     const fromHeader = (e as AIError & { retryAfterMs?: number }).retryAfterMs;
     await sleep(fromHeader ?? 800, req.signal);
-    return streamChatOnce(req);
+    return run(req);
   }
 }
 
@@ -211,64 +285,72 @@ async function throwHttpError(res: Response): Promise<never> {
     try { detail = await res.text(); } catch { /* ignore */ }
   }
   const err = new AIError(`${res.status} ${res.statusText}${detail ? ` — ${detail}` : ''}`, res.status);
-  // Stash Retry-After for the streamChat retry helper via a non-enumerable field.
   if (isRetryableStatus(res.status)) {
     (err as AIError & { retryAfterMs?: number }).retryAfterMs = retryDelayMs(res);
   }
   throw err;
 }
 
-async function streamOpenAI(req: StreamRequest): Promise<StreamResult> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (req.provider.apiKey) headers['Authorization'] = `Bearer ${req.provider.apiKey}`;
-  if (isOpenRouter(req.provider)) {
-    headers['HTTP-Referer'] = 'https://smallworlds.local';
-    headers['X-Title'] = 'Small Worlds AI';
+function contentPiece(raw: unknown): string {
+  if (typeof raw === 'string') return raw;
+  if (Array.isArray(raw)) {
+    return raw.map((p: { text?: string }) => p?.text ?? '').join('');
   }
-  const cacheSystem = supportsAnthropicPromptCache(req.provider, req.model);
-  const systemMessage = cacheSystem
-    ? { role: 'system' as const, content: [cachedSystemBlock(req.system)] }
-    : { role: 'system' as const, content: req.system };
-  const res = await fetch(`${req.provider.baseUrl}/chat/completions`, {
+  return '';
+}
+
+async function streamOpenAI(req: StreamRequest): Promise<StreamResult> {
+  const url = `${req.provider.baseUrl.replace(/\/$/, '')}/chat/completions`;
+  const res = await providerFetch(url, {
     method: 'POST',
-    headers,
+    headers: openaiHeaders(req.provider),
     signal: req.signal,
-    body: JSON.stringify(withTemperature({
-      model: req.model,
-      stream: true,
-      max_tokens: req.maxTokens,
-      messages: [systemMessage, ...req.messages]
-    }, req.model, req.temperature))
+    body: JSON.stringify(buildOpenAIChatBody(req))
   });
   if (!res.ok) await throwHttpError(res);
   let full = '';
   let truncated = false;
   let finishReason = '';
   let sawReasoning = false;
+  const toolBuf: Record<number, { name: string; arguments: string }> = {};
   await readSSE(res, (data) => {
     try {
       const json = JSON.parse(data);
       const choice = json.choices?.[0];
       const delta = choice?.delta;
-      // Standard content; some routers put text under `text` or array parts.
-      let piece = '';
-      const raw = delta?.content ?? choice?.message?.content ?? delta?.text;
-      if (typeof raw === 'string') piece = raw;
-      else if (Array.isArray(raw)) {
-        piece = raw.map((p: { text?: string }) => p?.text ?? '').join('');
+      const piece = contentPiece(delta?.content ?? choice?.message?.content ?? delta?.text);
+      if (delta?.reasoning || delta?.reasoning_content || choice?.message?.reasoning_content) {
+        sawReasoning = true;
       }
-      if (delta?.reasoning || delta?.reasoning_content) sawReasoning = true;
       if (piece) {
         full += piece;
         req.onDelta?.(piece);
+      }
+      const calls = delta?.tool_calls as Array<{
+        index?: number;
+        function?: { name?: string; arguments?: string };
+      }> | undefined;
+      if (Array.isArray(calls)) {
+        for (const c of calls) {
+          const i = c.index ?? 0;
+          if (!toolBuf[i]) toolBuf[i] = { name: '', arguments: '' };
+          if (c.function?.name) toolBuf[i].name += c.function.name;
+          if (c.function?.arguments) toolBuf[i].arguments += c.function.arguments;
+        }
       }
       const reason: string | undefined = choice?.finish_reason;
       if (reason) finishReason = reason;
       if (isLengthStop(reason)) truncated = true;
     } catch { /* keep-alive or malformed chunk */ }
   });
-  if (!full.trim()) throwEmptyResponse(finishReason, sawReasoning);
-  return { text: full, truncated };
+  const toolCalls = Object.values(toolBuf).filter((t) => t.name || t.arguments);
+  if (!full.trim() && toolCalls.length === 0) throwEmptyResponse(finishReason, sawReasoning);
+  return {
+    text: full,
+    truncated,
+    sawReasoning,
+    ...(toolCalls.length ? { toolCalls } : {})
+  };
 }
 
 async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
@@ -280,7 +362,7 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
     'anthropic-dangerous-direct-browser-access': 'true'
   };
   if (cacheSystem) headers['anthropic-beta'] = PROMPT_CACHE_BETA;
-  const res = await fetch(`${req.provider.baseUrl}/messages`, {
+  const res = await providerFetch(`${req.provider.baseUrl.replace(/\/$/, '')}/messages`, {
     method: 'POST',
     signal: req.signal,
     headers,
@@ -303,7 +385,6 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
         full += json.delta.text;
         req.onDelta?.(json.delta.text);
       }
-      // Final chunk: { type: 'message_delta', delta: { stop_reason: 'max_tokens' | 'end_turn' | ... } }
       if (json.type === 'message_delta') {
         const reason: string | undefined = json.delta?.stop_reason ?? json.stop_reason;
         if (reason) finishReason = reason;
@@ -319,8 +400,8 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
 }
 
 async function streamGemini(req: StreamRequest): Promise<StreamResult> {
-  const url = `${req.provider.baseUrl}/models/${encodeURIComponent(req.model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(req.provider.apiKey)}`;
-  const res = await fetch(url, {
+  const url = `${req.provider.baseUrl.replace(/\/$/, '')}/models/${encodeURIComponent(req.model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(req.provider.apiKey)}`;
+  const res = await providerFetch(url, {
     method: 'POST',
     signal: req.signal,
     headers: { 'Content-Type': 'application/json' },
@@ -345,7 +426,6 @@ async function streamGemini(req: StreamRequest): Promise<StreamResult> {
       const json = JSON.parse(data);
       const parts: Array<{ text?: string; thought?: boolean }> =
         json.candidates?.[0]?.content?.parts ?? [];
-      // Skip Gemini thinking parts — they pad or empty the visible stream.
       const text = parts
         .filter((p) => {
           if (p.thought) {
@@ -366,10 +446,9 @@ async function streamGemini(req: StreamRequest): Promise<StreamResult> {
     } catch { /* ignore malformed chunk */ }
   });
   if (!full.trim()) throwEmptyResponse(finishReason, sawThought);
-  return { text: full, truncated };
+  return { text: full, truncated, sawReasoning: sawThought };
 }
 
-/** Cheap non-streaming sanity check used by "Test connection". */
 export async function testConnection(provider: ProviderConfig, model: string): Promise<{ ok: true; ms: number }> {
   const started = performance.now();
   await streamChat({
@@ -377,8 +456,10 @@ export async function testConnection(provider: ProviderConfig, model: string): P
     model,
     system: 'You are a connection test. Reply with the single word: ok',
     messages: [{ role: 'user', content: 'ping' }],
-    maxTokens: 20,
-    temperature: 0
+    maxTokens: 32,
+    temperature: 0,
+    job: 'test',
+    thinking: false
   });
   return { ok: true, ms: Math.round(performance.now() - started) };
 }

@@ -31,6 +31,7 @@ interface SettingsStore extends AppSettings {
   removeProvider: (id: string) => void;
   setProseModel: (m: ModelRef | null) => void;
   setUtilityModel: (m: ModelRef | null) => void;
+  setImageModel: (m: ModelRef | null) => void;
   setMatureDefault: (v: boolean) => void;
   setDefaultVisibility: (v: AppSettings['defaultVisibility']) => void;
   /** Replace settings from a device restore (does not touch vault ciphertext). */
@@ -43,6 +44,7 @@ export const useSettings = create<SettingsStore>()(
       providers: [],
       proseModel: null,
       utilityModel: null,
+      imageModel: null,
       matureDefault: true,
       defaultVisibility: 'private',
       vaultPersistError: '',
@@ -59,18 +61,21 @@ export const useSettings = create<SettingsStore>()(
         set((s) => ({
           providers: s.providers.filter((p) => p.id !== id),
           proseModel: s.proseModel?.providerId === id ? null : s.proseModel,
-          utilityModel: s.utilityModel?.providerId === id ? null : s.utilityModel
+          utilityModel: s.utilityModel?.providerId === id ? null : s.utilityModel,
+          imageModel: s.imageModel?.providerId === id ? null : s.imageModel
         }));
         void syncVaultSafe(set);
       },
       setProseModel: (proseModel) => set({ proseModel }),
       setUtilityModel: (utilityModel) => set({ utilityModel }),
+      setImageModel: (imageModel) => set({ imageModel }),
       setMatureDefault: (matureDefault) => set({ matureDefault }),
       setDefaultVisibility: (defaultVisibility) => set({ defaultVisibility }),
       hydrateFromBackup: (s) => set({
         providers: s.providers,
         proseModel: s.proseModel,
         utilityModel: s.utilityModel,
+        imageModel: s.imageModel ?? null,
         matureDefault: s.matureDefault,
         defaultVisibility: s.defaultVisibility
       })
@@ -83,6 +88,7 @@ export const useSettings = create<SettingsStore>()(
         providers: vaultEnabled() ? s.providers.map((p) => ({ ...p, apiKey: '' })) : s.providers,
         proseModel: s.proseModel,
         utilityModel: s.utilityModel,
+        imageModel: s.imageModel,
         matureDefault: s.matureDefault,
         defaultVisibility: s.defaultVisibility
         // vaultPersistError is session-only — not persisted
@@ -106,6 +112,7 @@ export function settingsSnapshot(): AppSettings {
     providers: s.providers.map((p) => ({ ...p })),
     proseModel: s.proseModel,
     utilityModel: s.utilityModel,
+    imageModel: s.imageModel ?? null,
     matureDefault: s.matureDefault,
     defaultVisibility: s.defaultVisibility
   };

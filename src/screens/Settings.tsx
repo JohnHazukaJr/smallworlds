@@ -60,22 +60,33 @@ export function Settings() {
 
       {/* default models */}
       <Section title="Default models" note="per-world overrides live below">
-        <div style={{ display: 'grid', gridTemplateColumns: narrow ? '1fr' : '1fr 1fr', gap: 14 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: narrow ? '1fr' : '1fr 1fr 1fr', gap: 14 }}>
           <div className="craft-row" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>Prose model</div>
             <div style={{ fontSize: 12, lineHeight: 1.55, color: 'rgba(236,234,230,0.5)' }}>
-              Writes the story. Spend your best model here.
+              Writes the story. Recommended: glm-5.2 (or glm-5.3-flash if you want speed).
             </div>
             <ModelPicker value={s.proseModel} onChange={s.setProseModel} />
           </div>
           <div className="craft-row" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>Utility model</div>
             <div style={{ fontSize: 12, lineHeight: 1.55, color: 'rgba(236,234,230,0.5)' }}>
-              Background work: continuity extraction, season analysis, character drafts. A cheap, fast model is ideal.
-              Falls back to the prose model if unset.
+              Director, wrap, drafts, live canon. Recommended: glm-5.2. Falls back to prose if unset.
             </div>
             <ModelPicker value={s.utilityModel} onChange={s.setUtilityModel} />
           </div>
+          <div className="craft-row" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>Image model</div>
+            <div style={{ fontSize: 12, lineHeight: 1.55, color: 'rgba(236,234,230,0.5)' }}>
+              Scene backdrops. Recommended: glm-image. Falls back to prose if unset.
+            </div>
+            <ModelPicker value={s.imageModel ?? null} onChange={s.setImageModel} />
+          </div>
+        </div>
+        <div style={{ fontSize: 12, lineHeight: 1.55, color: 'rgba(236,234,230,0.45)', marginTop: 10 }}>
+          Z.ai in the browser may fail CORS — use OpenRouter’s <span className="mono">z-ai/glm-5.2</span> or sign in
+          so the cloud relay can reach Z.ai. Custom still covers BigModel China
+          (<span className="mono">open.bigmodel.cn/api/paas/v4</span>).
         </div>
       </Section>
 
@@ -564,6 +575,16 @@ function WorldSettings({ world }: { world: World }) {
             {world.utilityModel && (
               <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
                 onClick={() => patchWorld({ utilityModel: null })}>use global default</button>
+            )}
+          </Field>
+          <Field label="Image model override" note="unset = global default">
+            <ModelPicker
+              value={world.imageModel ?? null}
+              onChange={(m) => patchWorld({ imageModel: m })}
+            />
+            {world.imageModel && (
+              <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
+                onClick={() => patchWorld({ imageModel: null })}>use global default</button>
             )}
           </Field>
         </div>

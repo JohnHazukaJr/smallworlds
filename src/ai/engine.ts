@@ -1,11 +1,10 @@
 import { db, guardStorage, recordTombstones, uid } from '../db';
 import { emptyCalendarEvent, evaluateCalendarEvents } from '../calendarEvents';
 import { logAppError } from '../errors';
-import { resolveModel, useSettings } from '../store/settings';
 import { GAP_DAYS, GAP_LABELS } from '../ui/theme';
 import type {
   CalendarEvent, CalendarEventKind, CalendarEventPromptPolicy, CalendarEventScale,
-  Character, CharacterState, ComposeMode, Episode, EpisodeGuest, EpisodeWrap, EpisodeWrapBeat, Location, ModelRef,
+  Character, CharacterState, ComposeMode, Episode, EpisodeGuest, EpisodeWrap, EpisodeWrapBeat, Location,
   OpenThread, PlotTarget, Relationship, Season, SeasonWrap, SeasonWrapPlotArc, SeasonWrapRelationshipUpdate,
   Turn, TurnLength, TurnRole, World, WrapBeat, WrapCharacterOutcome
 } from '../types';
@@ -18,6 +17,8 @@ import {
   formatEpisodeDateRange, formatStoryDate, nextEpisode, pendingPlotTargets, worldCalendar
 } from '../worldOps';
 import { AIError, streamChat, isContextOverflowError, type ChatMessage, type StreamRequest } from './client';
+import { imageModelFor, proseModelFor, utilityModelFor } from './models';
+import { ANALYZE_EPISODE_TOOL, FILE_CANON_TOOL, PLAN_TURN_TOOL, utilityCall, type ToolSpec } from './utilityCall';
 import { promptCharBudget } from './contextBudget';
 import { applyDeliveryTone, parseDeliveryTone } from './deliveryTone';
 import { hasSpokenDialogue, normalizeSpeakText } from './dialogueFormat';
@@ -72,26 +73,7 @@ import {
   type PlacePatch
 } from './worldMemory';
 
-// ---------- Model resolution ----------
-
-function requireModel(ref: ModelRef | null, label: string) {
-  const resolved = resolveModel(ref);
-  if (!resolved) {
-    throw new AIError(`No ${label} model configured. Add a provider and pick a model in Settings.`);
-  }
-  return resolved;
-}
-
-export function proseModelFor(world: World | null) {
-  const s = useSettings.getState();
-  return requireModel(world?.proseModel ?? s.proseModel, 'writing');
-}
-
-export function utilityModelFor(world: World | null) {
-  const s = useSettings.getState();
-  // Fall back to the prose model when no utility model is set.
-  return requireModel(world?.utilityModel ?? s.utilityModel ?? world?.proseModel ?? s.proseModel, 'utility');
-}
+export { imageModelFor, proseModelFor, utilityModelFor };
 
 // ---------- Prose generation ----------
 
@@ -765,7 +747,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         characterId: opts.preferCharacterId,
         guestId: opts.preferGuestId
       };
-      const directorCap = promptCharBudget(utilityModelFor(opts.world).model, 1400);
+      const directorCap = promptCharBudget(utilityModelFor(opts.world).model, 2500);
       const planDirector = (pack: PromptBuildOpts['pack'] = 'normal') => utilityJson<{
         castDelta?: { enter?: string[]; leave?: string[]; introduce?: IntroduceSpec[] };
         beats: Array<{ type?: string; brief?: string; characterId?: string; guestId?: string }>;
@@ -778,8 +760,11 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
           pack,
           totalCap: directorCap
         }),
-        1400,
-        opts.signal
+        2500,
+        opts.signal,
+        UTILITY_TIMEOUT_MS,
+        'utility',
+        PLAN_TURN_TOOL
       );
       let plan: Awaited<ReturnType<typeof planDirector>>;
       try {
@@ -1443,7 +1428,7 @@ async function maybeRefreshLiveSceneState(
     }>(
       world,
       'You track live state in an interactive story. ' +
-        'Return JSON only: {"updates":[{"name":"<exact cast name>","goal":"...","emotion":"...","location":"...","condition":"..."}],' +
+        'Call return_json with this shape: {"updates":[{"name":"<exact cast name>","goal":"...","emotion":"...","location":"...","condition":"..."}],' +
         '"scene":["<physical detail now true in this room>"]}. ' +
         'updates: only characters whose state clearly shifted in the recent beats. ' +
         'Omit unchanged fields. Use "none" for a field that no longer applies — a mood that ' +
@@ -1551,7 +1536,7 @@ async function maybeFileLiveCanon(
       knowledge?: Array<{ name?: string; nowKnows?: string }>;
     }>(
       world,
-      'You file hard canon for an interactive story WHILE the episode is still open. Return JSON only: ' +
+      'You file hard canon for an interactive story WHILE the episode is still open. Call file_canon. Do not write story prose. Shape: ' +
         '{"facts":["..."],"threads":["..."],"place":{"name":"<scene place>","currentState":"...","atmosphere":"..."},' +
         '"knowledge":[{"name":"<exact in-scene name>","nowKnows":"..."}]}. ' +
         'Do not invent. Omit any key that has nothing new. ' +
@@ -1568,10 +1553,12 @@ async function maybeFileLiveCanon(
         `Open threads (do not repeat):\n${threadBlock || '(none)'}\n\n` +
         `Physical ledger (do not refile as facts):\n${ledger || '(none)'}\n\n` +
         `Recent beats:\n${digest.slice(0, 10000)}\n\n` +
-        `Return live canon JSON.`,
+        `Call file_canon.`,
       900,
       signal,
-      25_000
+      25_000,
+      'utility',
+      FILE_CANON_TOOL
     );
 
     const extract = normalizeLiveCanonExtract(result, {
@@ -1950,7 +1937,7 @@ export async function commitSoftEpisodeWrap(
       place?: { name?: string; currentState?: string; atmosphere?: string };
     }>(
       world,
-      'You are a continuity editor filing a skipped episode wrap. Respond with JSON only: ' +
+      'You are a continuity editor filing a skipped episode wrap. Call return_json with this shape: ' +
       '{"facts":["..."],"threads":["..."],' +
       '"characterUpdates":[{"name":"<exact in-scene name>","goal":"","emotion":"","location":"","condition":""}],' +
       '"place":{"name":"<scene place>","currentState":"<how the room is left>"}}. ' +
@@ -1963,7 +1950,10 @@ export async function commitSoftEpisodeWrap(
       `Place: ${episode.location || '(unnamed)'}\n` +
       `In-scene cast: ${inScene.map((c) => c.name).join(', ') || '(none)'}\n\n` +
       `Recap:\n${recap}\n\nEpisode material:\n${source}`,
-      1400
+      1400,
+      undefined,
+      45_000,
+      'wrap'
     );
     const capped = capSoftWrapExtract(result, inSceneNames);
     await fileSoftWrapContinuity(world, season, episode, capped);
@@ -2042,48 +2032,17 @@ export async function rollbackTurnSnapshot(
 
 // ---------- Utility calls (JSON tasks on the utility model) ----------
 
-function extractJson<T>(raw: string): T {
-  const cleaned = raw.replace(/```(?:json)?/g, '').trim();
-  const start = Math.min(
-    ...['{', '['].map((c) => cleaned.indexOf(c)).filter((i) => i >= 0)
-  );
-  if (!Number.isFinite(start)) throw new AIError('The model did not return JSON.');
-  const open = cleaned[start];
-  const close = open === '{' ? '}' : ']';
-  const end = cleaned.lastIndexOf(close);
-  if (end <= start) throw new AIError('The model returned malformed JSON.');
-  try {
-    return JSON.parse(cleaned.slice(start, end + 1)) as T;
-  } catch {
-    throw new AIError('The model returned malformed JSON.');
-  }
-}
-
 async function utilityJson<T>(
   world: World | null,
   system: string,
   user: string,
   maxTokens = 3000,
   signal?: AbortSignal,
-  timeoutMs = UTILITY_TIMEOUT_MS
+  timeoutMs = UTILITY_TIMEOUT_MS,
+  job: 'utility' | 'wrap' = 'utility',
+  tool?: ToolSpec
 ): Promise<T> {
-  const { provider, model } = utilityModelFor(world);
-  const { signal: timed, cancel } = withTimeoutSignal(signal, timeoutMs);
-  try {
-    const { text: raw } = await streamChat({
-      provider, model, system,
-      messages: [{ role: 'user', content: user }],
-      maxTokens, temperature: 0.4, signal: timed
-    });
-    return extractJson<T>(raw);
-  } catch (e) {
-    if ((e as Error).name === 'AbortError' && !signal?.aborted) {
-      throw new AIError(`Utility model timed out after ${timeoutMs / 1000}s.`);
-    }
-    throw e;
-  } finally {
-    cancel();
-  }
+  return utilityCall<T>({ world, system, user, maxTokens, signal, timeoutMs, job, tool });
 }
 
 const WRAP_CHUNK_CHARS = 20000;
@@ -2167,7 +2126,7 @@ export async function extractContinuity(world: World, season: Season, episode: E
 
   const result = await utilityJson<{ facts: string[]; threads: string[] }>(
     world,
-    'You are a continuity editor for a longform story. You extract durable facts and unresolved threads. Respond with JSON only: {"facts": string[], "threads": string[]}. Facts are things that will still be true next episode (revelations, injuries, promises, debts, deaths, changed relationships). Threads are tensions raised but not resolved. 3-6 of each at most. Never repeat facts already known.',
+    'You are a continuity editor for a longform story. You extract durable facts and unresolved threads. Call return_json with this shape: {"facts": string[], "threads": string[]}. Facts are things that will still be true next episode (revelations, injuries, promises, debts, deaths, changed relationships). Threads are tensions raised but not resolved. 3-6 of each at most. Never repeat facts already known.',
     `Known facts:\n${existing.map((f) => `- ${f.text}`).join('\n') || '(none)'}\n\nEpisode ${episode.number} text:\n${text.slice(0, 24000)}`
   );
 
@@ -2415,7 +2374,7 @@ export async function analyzeEpisode(
     'You are a continuity editor closing a chapter of interactive fiction. ' +
     'Durable facts and open threads were already filed during play — merge and prune; do not dump a second copy of Known facts. ' +
     'Your job is the previously-on recap, how time passed, the next opening, stale or resolved items, and only genuinely NEW or CONFLICTING facts/threads. ' +
-    'Respond with JSON only:\n' +
+    'Call analyze_episode with this shape. Do not write story prose.\n' +
     '{"recap":"<150-280 word previously-on paragraph — include WHEN (weekday/day) and WHERE if known, plus names, stakes, what hangs>",' +
     '"beats":[{"text":"<what happened, one concrete sentence with names>","consequence":"<what it leaves hanging for later>"}],' +
     '"facts":["<NEW durable facts not already in Known facts — omit if play already filed them>"],' +
@@ -2469,9 +2428,11 @@ export async function analyzeEpisode(
     `Pending plot targets (report hits via hitTargets):\n${pendingTargetBlock}\n\n` +
     `Due calendar events (report played via hitCalendarEvents):\n${dueCalendarBlock}\n\n` +
     `Episode material:\n${corpus.slice(0, 60000)}`,
-    4000,
+    6000,
     signal,
-    WRAP_ANALYZE_TIMEOUT_MS
+    WRAP_ANALYZE_TIMEOUT_MS,
+    'wrap',
+    ANALYZE_EPISODE_TOOL
   );
 
   const castNames = new Set(characters.filter((c) => !c.isPlayer).map((c) => c.name.toLowerCase()));
@@ -3102,9 +3063,12 @@ export async function analyzeSeason(world: World, season: Season): Promise<Seaso
     characters: { name: string; outcome: string }[];
   }>(
     world,
-    `You are a story editor reviewing a finished season. Respond with JSON only:\n{"beats": [{"where": "S${season.number} · E<n> · <place>", "text": "<what happened, one sentence>", "consequence": "<what it left behind, one sentence>"}], "characters": [{"name": "<character name>", "outcome": "<where the season leaves them, 1-2 sentences>"}]}\nExtract 4-7 beats — the events that will shape what comes next. Cover every named character in "characters".`,
+    `You are a story editor reviewing a finished season. Call return_json with this shape:\n{"beats": [{"where": "S${season.number} · E<n> · <place>", "text": "<what happened, one sentence>", "consequence": "<what it left behind, one sentence>"}], "characters": [{"name": "<character name>", "outcome": "<where the season leaves them, 1-2 sentences>"}]}\nExtract 4-7 beats — the events that will shape what comes next. Cover every named character in "characters".`,
     `World: ${world.title}. Season ${season.number} premise: ${season.premise}\n\nCast: ${characters.map((c) => c.name).join(', ')}\n\n${episodeSummaries.join('\n\n---\n\n').slice(0, 60000)}`,
-    4000
+    4000,
+    undefined,
+    WRAP_ANALYZE_TIMEOUT_MS,
+    'wrap'
   );
 
   const now = Date.now();
@@ -3184,7 +3148,7 @@ export async function evolveCharacters(world: World, wrap: SeasonWrap, gapLabel:
   const result = await utilityJson<EvolveResult>(
     world,
     'You are a senior story editor handing a cast from one finished season into the next. ' +
-    'Propose only earned changes across the time gap. Respond with JSON only:\n' +
+    'Propose only earned changes across the time gap. Call return_json with this shape:\n' +
     '{"characters":[{' +
     '"name":string,' +
     '"evolution":"<1-2 sentences of what changed off-screen>",' +
@@ -3212,7 +3176,10 @@ export async function evolveCharacters(world: World, wrap: SeasonWrap, gapLabel:
       const head = `- ${w.name}: season outcome — ${w.outcome || 'unknown'}`;
       return c ? `${head}\n${sheetBrief(c)}` : head;
     }).join('\n\n')}`,
-    4500
+    4500,
+    undefined,
+    WRAP_ANALYZE_TIMEOUT_MS,
+    'wrap'
   );
 
   const charResults = result.characters ?? [];
@@ -3727,7 +3694,7 @@ export async function seedSeasonCalendarEvents(
   }>(
     world,
     'You seed a season calendar of dated texture for longform interactive fiction. ' +
-    'Respond with JSON only: {"events":[{"title":"...","summary":"...","kind":"holiday|festival|ceremony|gathering|sport|disaster|personal|mundane|custom",' +
+    'Call return_json with this shape: {"events":[{"title":"...","summary":"...","kind":"holiday|festival|ceremony|gathering|sport|disaster|personal|mundane|custom",' +
     '"scale":"small|medium|large","storyDay":<int>,"endDay":<optional int>,"promptPolicy":"soft|hard","characterNames":["optional cast names"]}]}\n' +
     'Rules:\n' +
     '- Prefer mostly small/medium mundane, gathering, holiday, festival, ceremony, sport — keep the world feeling lived-in.\n' +
@@ -3805,7 +3772,7 @@ export async function draftCharacter(world: World | null, description: string): 
     state?: { goal?: string; emotion?: string; location?: string; condition?: string };
   }>(
     world,
-    'You design deep NPC character sheets for longform interactive fiction. Respond with JSON only:\n' +
+    'You design deep NPC character sheets for longform interactive fiction. Call return_json with this shape:\n' +
     '{"name": string, "role": "<role · relationship to protagonist>", "age": string, "appearance": string, ' +
     '"mannerisms": "<2-3 recurring physical habits or tics, concrete and observable>", ' +
     '"backstory": "<the history that shaped them, 2-3 sentences>", "summary": "<who they are, 2-4 sentences of prose>", ' +
@@ -3840,7 +3807,7 @@ export async function draftLocation(world: World | null, description: string): P
     history: string; inhabitants: string; rules: string[]; secrets: string; currentState: string;
   }>(
     world,
-    'You design deep location sheets for longform interactive fiction. Respond with JSON only:\n{"name": string, "tagline": "<short tagline, e.g. \'harbour district · public square\'>", "summary": "<what the place is, first impression, 2-4 sentences of prose>", "atmosphere": "<sensory detail — sight, sound, smell, feel — the narrator leans on>", "features": "<notable landmarks, rooms, or geography within it>", "history": "<how it came to be / what happened here, 2-3 sentences>", "inhabitants": "<who or what is typically found here>", "rules": [<2-4 hazards, laws, or hard rules specific to this place that are never broken>], "secrets": "<something hidden here, not common knowledge>", "currentState": "<its condition right now, one sentence>"}\nMake it specific and concrete, with at least one pressure or danger, never generic.',
+    'You design deep location sheets for longform interactive fiction. Call return_json with this shape:\n{"name": string, "tagline": "<short tagline, e.g. \'harbour district · public square\'>", "summary": "<what the place is, first impression, 2-4 sentences of prose>", "atmosphere": "<sensory detail — sight, sound, smell, feel — the narrator leans on>", "features": "<notable landmarks, rooms, or geography within it>", "history": "<how it came to be / what happened here, 2-3 sentences>", "inhabitants": "<who or what is typically found here>", "rules": [<2-4 hazards, laws, or hard rules specific to this place that are never broken>], "secrets": "<something hidden here, not common knowledge>", "currentState": "<its condition right now, one sentence>"}\nMake it specific and concrete, with at least one pressure or danger, never generic.',
     `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}Location to create: ${description}`
   );
   return result;
@@ -3972,7 +3939,7 @@ export async function fleshOutCharacter(
   }>(
     world,
     `You flesh out character sheets for longform interactive fiction. ${subjectFrame} ${NON_DESTRUCTIVE_RULE}\n` +
-    `Respond with JSON only: {"name": string, "role": string, "age": string, "appearance": string, "mannerisms": string, ` +
+    `Call return_json with this shape: {"name": string, "role": string, "age": string, "appearance": string, "mannerisms": string, ` +
     `"backstory": string, "summary": string, "speechStyle": string, "exampleLines": string[], "traits": string, ` +
     `"desires": string, "fears": string, "flaws": string, "secrets": string, "mustNotKnow": string, "anchors": string[], ` +
     `"state":{"goal":string,"emotion":string,"location":string,"condition":string}, ` +
@@ -4061,7 +4028,7 @@ export async function fleshOutRelationships(
   }>(
     world,
     `You design relationship links between cast members for longform interactive fiction. ${NON_DESTRUCTIVE_RULE}\n` +
-    `Respond with JSON only: {"relationships":[{"targetName":"<exact name from roster>","kind":"ally|rival|lover|debt|family|mentor|…","note":"<concrete one-line history or tension>"}]}\n` +
+    `Call return_json with this shape: {"relationships":[{"targetName":"<exact name from roster>","kind":"ally|rival|lover|debt|family|mentor|…","note":"<concrete one-line history or tension>"}]}\n` +
     `${RELATIONSHIP_POV_RULES} Prefer roster members the Subject is not yet linked to. Never invent cast names not in the roster.`,
     worldFleshPreamble(world) +
     `SUBJECT (the character whose outbound relationships you are writing — not the player unless isPlayer is true):\n` +
@@ -4090,7 +4057,7 @@ export async function fleshOutLocation(world: World | null, location: Location):
     history: string; inhabitants: string; rules: string[]; secrets: string; currentState: string;
   }>(
     world,
-    `You flesh out location sheets for longform interactive fiction. ${NON_DESTRUCTIVE_RULE}\nRespond with JSON only, same shape as the input: {"name": string, "tagline": string, "summary": string, "atmosphere": string, "features": string, "history": string, "inhabitants": string, "rules": string[], "secrets": string, "currentState": string}`,
+    `You flesh out location sheets for longform interactive fiction. ${NON_DESTRUCTIVE_RULE}\nCall return_json with this shape, same shape as the input: {"name": string, "tagline": string, "summary": string, "atmosphere": string, "features": string, "history": string, "inhabitants": string, "rules": string[], "secrets": string, "currentState": string}`,
     `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}Current location sheet (JSON, blank strings/arrays mean unset):\n${JSON.stringify(current, null, 2)}`
   );
   return {
@@ -4116,7 +4083,7 @@ export async function fleshOutWorldLore(world: World): Promise<{
   }>(
     world,
     `You flesh out the lore of a story world for longform interactive fiction. ${NON_DESTRUCTIVE_RULE}\n` +
-    `Respond with JSON only: {"title": string, "line": "<one-sentence logline in second person>", ` +
+    `Call return_json with this shape: {"title": string, "line": "<one-sentence logline in second person>", ` +
     `"bible": "<setting, atmosphere, rules of the world, pressures at work — prose the narrator will follow>", ` +
     `"calendarSystem": "<optional short flavor for how time is named here, e.g. 'harbor reckoning' — omit or empty if Earth-like>"}`,
     `Current world sheet (JSON, blank strings mean unset):\n${JSON.stringify({
@@ -4151,7 +4118,7 @@ export async function fleshOutPremise(world: World, season: Season): Promise<str
 export async function fleshOutNarratorRules(world: World): Promise<string[]> {
   const result = await utilityJson<{ rules: string[] }>(
     world,
-    `You propose hard narrator rules for longform interactive fiction — non-negotiable behavioural constraints the narrator must never break. ${NON_DESTRUCTIVE_RULE} Respond with JSON only: {"rules": string[]}. Include every existing rule (reworded for clarity if needed) plus 2-5 new ones suited to this world.`,
+    `You propose hard narrator rules for longform interactive fiction — non-negotiable behavioural constraints the narrator must never break. ${NON_DESTRUCTIVE_RULE} Call return_json with this shape: {"rules": string[]}. Include every existing rule (reworded for clarity if needed) plus 2-5 new ones suited to this world.`,
     `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\nExisting narrator rules (may be empty):\n${world.ai.narratorRules.join('\n') || '(none)'}`
   );
   return mergeLines(world.ai.narratorRules, result.rules ?? []);
@@ -4172,7 +4139,7 @@ export async function interviewWorldIdea(
     questions?: Array<{ id?: string; question?: string; hint?: string }>;
   }>(
     null,
-    'You help authors lock a roleplay premise before world generation. Respond with JSON only:\n' +
+    'You help authors lock a roleplay premise before world generation. Call return_json with this shape:\n' +
     '{"questions":[{"id":"<short_slug>","question":"<one concrete question>","hint":"<optional short example answer>"}]}\n' +
     'Ask exactly 4 or 5 questions covering: who the player is / what they want, the opening pressure, ' +
     'who shares the opening scene, where it opens, and hard boundaries (tone, content, or plot lines that must never break). ' +
@@ -4220,7 +4187,7 @@ export async function composeWorldBriefFromInterview(
     customInstructions?: string;
   }>(
     null,
-    'You turn a roleplay idea and clarifying answers into a world brief for longform interactive fiction. Respond with JSON only:\n' +
+    'You turn a roleplay idea and clarifying answers into a world brief for longform interactive fiction. Call return_json with this shape:\n' +
     '{"title":"<1-4 evocative words>","line":"<one-sentence logline in second person>",' +
     '"bible":"<150-350 words: setting, atmosphere, rules, pressures — narrator will follow this>",' +
     '"premise":"<season 1 opening pressure, 2-5 sentences, present tense>",' +
@@ -4266,7 +4233,7 @@ export async function proposeWorldRoster(
   }
   const result = await utilityJson<WorldRosterProposal>(
     world,
-    `You propose an opening cast and places for a longform interactive story world. Respond with JSON only:\n` +
+    `You propose an opening cast and places for a longform interactive story world. Call return_json with this shape:\n` +
     `{"characters":[{"description":"<one specific sentence: who they are and their pressure on the protagonist>"}],` +
     `"locations":[{"description":"<one specific sentence: what the place is and why it matters>"}],` +
     `"openingLocationIndex":<0-based index into locations for where episode 1 opens>}\n` +
@@ -4341,7 +4308,7 @@ export async function seedOpeningMemory(
 
   const result = await utilityJson<{ facts: string[]; threads: string[] }>(
     world,
-    'You seed opening continuity for episode 1 of a longform interactive story. Respond with JSON only:\n' +
+    'You seed opening continuity for episode 1 of a longform interactive story. Call return_json with this shape:\n' +
     '{"facts":[<2-4 durable facts already true as the story opens>],' +
     '"threads":[<2-4 unresolved tensions already live as the story opens>]}\n' +
     'Facts are things that will still be true next episode (debts, alliances, injuries, public rules). ' +

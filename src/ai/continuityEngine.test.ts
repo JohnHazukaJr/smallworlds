@@ -10,7 +10,9 @@ import {
   DIRECTOR_THREAD_CAP,
   DIRECTOR_TRANSCRIPT_TURNS,
   directorUserPrompt,
+  packTurnsDetailed,
   sceneLedgerSection,
+  storyCachePrefix,
   type PromptContext
 } from './prompts';
 import { inferContextWindowTokens, promptCharBudget } from './contextBudget';
@@ -149,7 +151,7 @@ describe('director prompt budgets', () => {
   it('exposes richer caps and recent transcript window', () => {
     expect(DIRECTOR_FACT_CAP).toBe(16);
     expect(DIRECTOR_THREAD_CAP).toBe(10);
-    expect(DIRECTOR_TRANSCRIPT_TURNS).toBe(28);
+    expect(DIRECTOR_TRANSCRIPT_TURNS).toBe(8);
 
     const turns: Turn[] = Array.from({ length: 40 }, (_, i) => ({
       id: `t${i}`,
@@ -419,5 +421,58 @@ describe('narration brief contract', () => {
     expect(last).toMatch(/named bodies/i);
     expect(last).toMatch(/do not recap/i);
     expect(last).toContain('Ada crosses to the desk.');
+  });
+});
+
+describe('token-efficient packing', () => {
+  const manyTurns = (): Turn[] => Array.from({ length: 40 }, (_, i) => ({
+    id: `t${i}`, episodeId: 'e', worldId: 'w',
+    role: 'narrator' as const, mode: null,
+    text: `Beat ${i} unique-token-${i} ${'x'.repeat(80)}`,
+    createdAt: i
+  }));
+
+  it('never ships a running summary and an omitted digest together', () => {
+    const history = manyTurns();
+    const withSummary = buildNarrationBeatMessages(
+      history, [npc('c1', 'Ada')], 'Look around.', 'scene', [],
+      { ...episode(), runningSummary: 'A mushy recap of the same early beats.' },
+      0, { totalCap: 12_000 }
+    );
+    const blob = withSummary.map((m) => m.content).join('\n');
+    expect(blob).not.toMatch(/Compressed earlier beats/);
+    expect(blob).not.toMatch(/A mushy recap of the same early beats/);
+
+    const withoutSummary = buildNarrationBeatMessages(
+      history, [npc('c1', 'Ada')], 'Look around.', 'scene', [],
+      { ...episode(), runningSummary: null },
+      0, { totalCap: 12_000 }
+    );
+    expect(withoutSummary.map((m) => m.content).join('\n')).toMatch(/Compressed earlier beats/);
+  });
+
+  it('keeps the cached prefix stable when only turns change', () => {
+    const a = storyCachePrefix(ctx({ turns: manyTurns().slice(0, 4) }));
+    const b = storyCachePrefix(ctx({ turns: manyTurns() }));
+    expect(a).toBe(b);
+  });
+
+  it('shares the same prefix bytes across narrator and speak in one Write', () => {
+    const frame = ctx({ turns: manyTurns().slice(0, 4) });
+    const prefix = storyCachePrefix(frame);
+    expect(buildNarratorSystemPrompt(frame).startsWith(prefix)).toBe(true);
+    expect(buildCharacterSystemPrompt(frame, npc('c1', 'Ada')).startsWith(prefix)).toBe(true);
+  });
+
+  it('sends a smaller director payload than the narrator frame', () => {
+    const frame = ctx({ turns: manyTurns().slice(0, 20) });
+    expect(directorUserPrompt(frame, 'speak', 'Hello?').length)
+      .toBeLessThan(buildNarratorSystemPrompt(frame).length);
+  });
+
+  it('caps the verbatim tail well below the wrap-nudge budget', () => {
+    const { kept } = packTurnsDetailed(manyTurns());
+    expect(kept.length).toBeLessThanOrEqual(16);
+    expect(kept.at(-1)?.id).toBe('t39');
   });
 });

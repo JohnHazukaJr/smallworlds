@@ -19,6 +19,8 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://openrouter.ai/api/v1',
     keyUrl: 'https://openrouter.ai/keys',
     suggestedModels: [
+      'z-ai/glm-5.2',
+      'z-ai/glm-5.3',
       'anthropic/claude-sonnet-4.5',
       'anthropic/claude-opus-4.1',
       'moonshotai/kimi-k2',
@@ -27,7 +29,16 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'meta-llama/llama-4-maverick',
       'google/gemini-2.5-pro'
     ],
-    note: 'One key, hundreds of models. Recommended: compare narrative models side by side.'
+    note: 'One key, hundreds of models. Recommended: compare narrative models side by side. GLM 5.x is listed as z-ai/glm-5.2.'
+  },
+  {
+    id: 'zai',
+    label: 'Z.ai',
+    kind: 'openai',
+    baseUrl: 'https://api.z.ai/api/paas/v4',
+    keyUrl: 'https://z.ai/manage-apikey/apikey-list',
+    suggestedModels: ['glm-5.2', 'glm-5.3', 'glm-5.3-flash', 'glm-image'],
+    note: 'Direct GLM. Pair glm-5.2 for prose and utility, glm-image for scenes. The browser may hit CORS — use OpenRouter’s z-ai/glm-5.2, or sign in so the cloud relay can reach Z.ai. China BigModel is Custom: open.bigmodel.cn/api/paas/v4.'
   },
   {
     id: 'anthropic',

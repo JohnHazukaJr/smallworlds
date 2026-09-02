@@ -11,8 +11,9 @@ import type {
 } from '../types';
 import { CALENDAR_EVENT_CAP } from '../types';
 import { calendarPatch, PLOT_TARGET_CAP, worldCalendar } from '../worldOps';
-import { AIError, isContextOverflowError, streamChat } from './client';
-import { utilityModelFor } from './engine';
+import { isContextOverflowError, streamChat } from './client';
+import { utilityModelFor } from './models';
+import { utilityCall } from './utilityCall';
 
 export const VOLUME_DIGEST_SYSTEM =
   'You compress a longform interactive-fiction world into a canon digest for a new volume. ' +
@@ -30,23 +31,23 @@ export const VOLUME_LORE_SYSTEM =
   'You rewrite a story world as the opening of a new volume. Lived history is now established fact. ' +
   'Keep proper nouns and debts. Do not invent people or places. Do not soften behaviour anchors. ' +
   'Do not dump example lines into the bible. Secrets stay secrets. MUST NOT KNOW stays private. ' +
-  'Respond with JSON only.';
+  'Call return_json. Do not write prose.';
 
 export const VOLUME_CHARACTER_BATCH_SYSTEM =
   'You rewrite character sheets for a new volume so they describe who these people are NOW. ' +
   'Do not invent new people. Do not add unnamed NPCs. Match exact names from the batch. ' +
   'Do not soften anchors. Keep MUST NOT KNOW. Voice, appearance, and example-line rhythm stay ' +
   'unless the story earned a change. Backstory absorbs prior volume as history. ' +
-  'Respond with JSON only.';
+  'Call return_json. Do not write prose.';
 
 export const VOLUME_LOCATION_BATCH_SYSTEM =
   'You rewrite location sheets for a new volume: current state plus what happened there. ' +
   'Do not invent new places. Match exact names from the batch. Keep hard rules. ' +
-  'Respond with JSON only.';
+  'Call return_json. Do not write prose.';
 
 export const VOLUME_MEMORY_SYSTEM =
   'You distill a world memory ledger for a new volume. Keep pinned facts. Merge duplicates. ' +
-  'Drop trivia and resolved threads. Do not invent. Respond with JSON only.';
+  'Drop trivia and resolved threads. Do not invent. Call return_json. Do not write prose.';
 
 const UTILITY_TIMEOUT_MS = 45_000;
 const VOLUME_TIMEOUT_MS = 90_000;
@@ -227,23 +228,6 @@ export function remapRelationships(
   return out;
 }
 
-function extractJson<T>(raw: string): T {
-  const cleaned = raw.replace(/```(?:json)?/g, '').trim();
-  const start = Math.min(
-    ...['{', '['].map((c) => cleaned.indexOf(c)).filter((i) => i >= 0)
-  );
-  if (!Number.isFinite(start)) throw new AIError('The model did not return JSON.');
-  const open = cleaned[start];
-  const close = open === '{' ? '}' : ']';
-  const end = cleaned.lastIndexOf(close);
-  if (end <= start) throw new AIError('The model returned malformed JSON.');
-  try {
-    return JSON.parse(cleaned.slice(start, end + 1)) as T;
-  } catch {
-    throw new AIError('The model returned malformed JSON.');
-  }
-}
-
 function withTimeoutSignal(outer: AbortSignal | undefined, ms: number): { signal: AbortSignal; cancel: () => void } {
   const ctrl = new AbortController();
   const onOuter = () => ctrl.abort();
@@ -266,23 +250,9 @@ async function utilityJson<T>(
   signal?: AbortSignal,
   timeoutMs = UTILITY_TIMEOUT_MS
 ): Promise<T> {
-  const { provider, model } = utilityModelFor(world);
-  const { signal: timed, cancel } = withTimeoutSignal(signal, timeoutMs);
-  try {
-    const { text: raw } = await streamChat({
-      provider, model, system,
-      messages: [{ role: 'user', content: user }],
-      maxTokens, temperature: 0.4, signal: timed
-    });
-    return extractJson<T>(raw);
-  } catch (e) {
-    if ((e as Error).name === 'AbortError' && !signal?.aborted) {
-      throw new AIError(`Utility model timed out after ${timeoutMs / 1000}s.`);
-    }
-    throw e;
-  } finally {
-    cancel();
-  }
+  return utilityCall<T>({
+    world, system, user, maxTokens, signal, timeoutMs, job: 'wrap'
+  });
 }
 
 async function withOverflowRetry<T>(run: (tight: boolean) => Promise<T>): Promise<T> {
@@ -405,7 +375,7 @@ async function summarizeEpisode(
         'Summarize this story episode in 150-250 words, keeping every event that could matter later: ' +
         'decisions, revelations, injuries, promises, relationship shifts, proper nouns.',
       messages: [{ role: 'user', content: text.slice(0, 48_000) }],
-      maxTokens: 800, temperature: 0.3, signal: timed
+      maxTokens: 800, temperature: 0.3, signal: timed, job: 'wrap'
     });
     return `${heading} (summary):\n${summary}`;
   } catch (e) {
@@ -448,7 +418,7 @@ async function buildCanonDigest(
       provider, model,
       system: VOLUME_DIGEST_SYSTEM,
       messages: [{ role: 'user', content: clip(corpus, CORPUS_HARD_CHARS) }],
-      maxTokens: 2200, temperature: 0.3, signal: timed
+      maxTokens: 2200, temperature: 0.3, signal: timed, job: 'wrap'
     });
     return text.trim() || clip(corpus, CORPUS_HARD_CHARS);
   } finally {
@@ -785,7 +755,7 @@ async function distillLore(
         provider, model,
         system: VOLUME_RECAP_SYSTEM,
         messages: [{ role: 'user', content: clip(digest, tight ? 20_000 : CORPUS_HARD_CHARS) }],
-        maxTokens: 2200, temperature: 0.45, signal: timed
+        maxTokens: 2200, temperature: 0.45, signal: timed, job: 'wrap'
       });
       return text.trim();
     } finally {

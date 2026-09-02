@@ -510,6 +510,16 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                     onClick={() => patchWorld({ utilityModel: null })}>use global default</button>
                 )}
               </Field>
+              <Field label="Image model for this world" note="unset = global default">
+                <ModelPicker
+                  value={world.imageModel ?? null}
+                  onChange={(m) => patchWorld({ imageModel: m })}
+                />
+                {world.imageModel && (
+                  <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
+                    onClick={() => patchWorld({ imageModel: null })}>use global default</button>
+                )}
+              </Field>
             </div>
 
             <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}

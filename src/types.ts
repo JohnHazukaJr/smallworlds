@@ -62,6 +62,8 @@ export interface World {
   proseModel: ModelRef | null;
   /** provider/model override for utility tasks; null = use global default */
   utilityModel: ModelRef | null;
+  /** provider/model override for scene images; null = use global default */
+  imageModel?: ModelRef | null;
   activeSeasonId: string | null;
   /** in-fiction date tracker — worlds created before this field existed may lack it; read via worldCalendar() */
   calendar: WorldCalendar;
@@ -574,6 +576,8 @@ export interface AppSettings {
   proseModel: ModelRef | null;
   /** global default for background/utility tasks */
   utilityModel: ModelRef | null;
+  /** global default for scene image generation */
+  imageModel: ModelRef | null;
   matureDefault: boolean;
   defaultVisibility: Visibility;
 }
