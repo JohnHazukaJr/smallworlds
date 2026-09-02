@@ -1,0 +1,68 @@
+- generic [ref=f2e3]:
+  - main [ref=f2e36]:
+    - generic [ref=f2e830]:
+      - generic [ref=f2e831]:
+        - button "+ new" [ref=f2e832] [cursor=pointer]
+        - generic [ref=f2e833] [cursor=pointer]:
+          - generic [ref=f2e835]: The long room
+          - button "this scene — clear" [ref=f2e837]
+      - generic [ref=f2e838]:
+        - generic [ref=f2e839]:
+          - generic [ref=f2e840]:
+            - generic [ref=f2e841]: location plate · no photo yet
+            - button "Upload photo" [ref=f2e844] [cursor=pointer]
+            - generic [ref=f2e845]:
+              - generic [ref=f2e846]: plate hue
+              - slider [ref=f2e847]: "32"
+            - button "✦ Flesh out with AI" [ref=f2e850] [cursor=pointer]
+            - generic [ref=f2e851]:
+              - button "✓ this scene — clear" [ref=f2e852] [cursor=pointer]
+              - button "remove from world" [ref=f2e853] [cursor=pointer]
+          - generic [ref=f2e854]:
+            - generic [ref=f2e855]:
+              - generic [ref=f2e856]: location
+              - textbox "Name" [ref=f2e857]: The long room
+              - textbox "tagline · e.g. harbour district · public square" [ref=f2e858]: above the customs house · lamplit · one door
+            - generic [ref=f2e859]:
+              - generic [ref=f2e860]:
+                - generic [ref=f2e861]: current state
+                - textbox "—" [ref=f2e862]: The Cartwright has arranged the manifest so the false signature faces you.
+              - generic [ref=f2e863]:
+                - generic [ref=f2e864]: typically found here
+                - textbox "—" [ref=f2e865]: Whoever holds the current trade — clerks do not enter unbidden.
+        - generic [ref=f2e866]:
+          - button "Overview" [ref=f2e867] [cursor=pointer]
+          - button "Atmosphere" [ref=f2e868] [cursor=pointer]
+          - button "History" [ref=f2e869] [cursor=pointer]
+          - button "Rules & secrets" [ref=f2e870] [cursor=pointer]
+          - button "AI notes" [ref=f2e871] [cursor=pointer]
+        - generic [ref=f2e872]:
+          - generic [ref=f2e873]:
+            - generic [ref=f2e874]:
+              - generic [ref=f2e875]: What it is
+              - generic [ref=f2e876]: prose, not bullet points — this is the core of the sheet
+            - textbox [ref=f2e877]: A private deal room above the customs house floor. Tide sound comes up through the boards; lamp-smoke gathers along the ceiling beams and stays there. Conversations here have the shape of something overheard.
+          - generic [ref=f2e878]:
+            - generic [ref=f2e879]:
+              - generic [ref=f2e880]: Notable features
+              - generic [ref=f2e881]: landmarks, rooms, or geography within it
+            - textbox [ref=f2e882]: One long table, one door, a window that does not open onto the quay.
+  - generic [ref=f2e727]:
+    - button "◈ Worlds" [ref=f2e728] [cursor=pointer]:
+      - generic [ref=f2e729]: ◈
+      - text: Worlds
+    - button "¶ Story" [ref=f2e730] [cursor=pointer]:
+      - generic [ref=f2e731]: ¶
+      - text: Story
+    - button "◇ Cast" [ref=f2e732] [cursor=pointer]:
+      - generic [ref=f2e733]: ◇
+      - text: Cast
+    - button "⌂ Places" [active] [ref=f2e734] [cursor=pointer]:
+      - generic [ref=f2e735]: ⌂
+      - text: Places
+    - button "⚙ Settings" [ref=f2e736] [cursor=pointer]:
+      - generic [ref=f2e737]: ⚙
+      - text: Settings
+    - button "◎ Profile" [ref=f2e738] [cursor=pointer]:
+      - generic [ref=f2e739]: ◎
+      - text: Profile

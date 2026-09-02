@@ -1,0 +1,100 @@
+- generic [ref=f5e4]:
+  - navigation [ref=f5e63]:
+    - generic [ref=f5e64]:
+      - generic [ref=f5e65]: Small Worlds
+      - generic [ref=f5e66]: Make a world. Live in it.
+    - generic [ref=f5e67]:
+      - button "01 Worlds" [ref=f5e68] [cursor=pointer]:
+        - generic [ref=f5e69]: "01"
+        - generic [ref=f5e70]: Worlds
+      - button "02 Story" [ref=f5e71] [cursor=pointer]:
+        - generic [ref=f5e72]: "02"
+        - generic [ref=f5e73]: Story
+      - button "03 Cast" [ref=f5e74] [cursor=pointer]:
+        - generic [ref=f5e75]: "03"
+        - generic [ref=f5e76]: Cast
+      - button "04 Places" [ref=f5e77] [cursor=pointer]:
+        - generic [ref=f5e78]: "04"
+        - generic [ref=f5e79]: Places
+      - button "05 Settings" [ref=f5e80] [cursor=pointer]:
+        - generic [ref=f5e81]: "05"
+        - generic [ref=f5e82]: Settings
+      - button "06 Profile" [ref=f5e83] [cursor=pointer]:
+        - generic [ref=f5e84]: "06"
+        - generic [ref=f5e85]: Profile
+      - button "07 New world" [active] [ref=f5e86] [cursor=pointer]:
+        - generic [ref=f5e87]: "07"
+        - generic [ref=f5e88]: New world
+    - generic [ref=f5e89]:
+      - generic [ref=f5e90]:
+        - generic [ref=f5e91]: Instrument
+        - generic [ref=f5e92]: no model configured
+        - generic [ref=f5e93]: set one in Settings
+      - generic [ref=f5e94]: The Registrar
+  - main [ref=f5e5]:
+    - generic [ref=f5e305]:
+      - generic [ref=f5e306]:
+        - generic [ref=f5e307]: Making · step 1 of 7
+        - generic [ref=f5e316]:
+          - heading "How do you want to begin?" [level=1] [ref=f5e317]
+          - generic [ref=f5e318]: Describe a roleplay. AI will ask a few questions, generate the full world, then you review every sheet before Enter.
+        - generic [ref=f5e319]:
+          - generic [ref=f5e320]:
+            - button "From an idea Describe the roleplay. AI asks a few questions, builds the whole world, then you review and perfect." [ref=f5e321] [cursor=pointer]:
+              - generic [ref=f5e322]:
+                - generic [ref=f5e323]: From an idea
+                - generic [ref=f5e324]: Describe the roleplay. AI asks a few questions, builds the whole world, then you review and perfect.
+            - button "Step by step Shape, seed, voice, you, cast, place, memory — fill each yourself, with AI help when you want it." [ref=f5e325] [cursor=pointer]:
+              - generic [ref=f5e326]:
+                - generic [ref=f5e327]: Step by step
+                - generic [ref=f5e328]: Shape, seed, voice, you, cast, place, memory — fill each yourself, with AI help when you want it.
+          - generic [ref=f5e329]: Story shape
+          - generic [ref=f5e330]:
+            - button "One long story I keep returning to Seasons, episodes, a cast that ages and remembers." [ref=f5e331] [cursor=pointer]:
+              - generic [ref=f5e332]:
+                - generic [ref=f5e333]: One long story I keep returning to
+                - generic [ref=f5e334]: Seasons, episodes, a cast that ages and remembers.
+            - button "A world I want to wander Loose scenes, many characters, no fixed plot." [ref=f5e335] [cursor=pointer]:
+              - generic [ref=f5e336]:
+                - generic [ref=f5e337]: A world I want to wander
+                - generic [ref=f5e338]: Loose scenes, many characters, no fixed plot.
+            - button "A single character I want to know One person, deeply modelled, many conversations." [ref=f5e339] [cursor=pointer]:
+              - generic [ref=f5e340]:
+                - generic [ref=f5e341]: A single character I want to know
+                - generic [ref=f5e342]: One person, deeply modelled, many conversations.
+            - button "I want to see what happens Start blank. Decide later." [ref=f5e343] [cursor=pointer]:
+              - generic [ref=f5e344]:
+                - generic [ref=f5e345]: I want to see what happens
+                - generic [ref=f5e346]: Start blank. Decide later.
+          - generic [ref=f5e347]: From an idea needs a writing model. Pick one in Settings, or switch to Step by step.
+        - generic [ref=f5e348]:
+          - button "Next — your idea" [ref=f5e349] [cursor=pointer]
+          - button "Skip — back to worlds" [ref=f5e350] [cursor=pointer]
+      - generic [ref=f5e351]:
+        - generic [ref=f5e352]: What you are making
+        - generic [ref=f5e353]: Endpaper
+        - generic [ref=f5e355]:
+          - generic [ref=f5e358]:
+            - generic [ref=f5e359]: Idea → interview → world
+            - generic [ref=f5e360]: Paste a roleplay idea; AI asks clarifying questions, then drafts bible, premise, cast, places, memory, and a cold open — you review before Enter.
+          - generic [ref=f5e363]:
+            - generic [ref=f5e364]: Bible, premise, cast, place
+            - generic [ref=f5e365]: "Onboard builds a write-ready world: lore, what’s live this season, voiced NPCs with anchors and live state, and a location with hard rules."
+          - generic [ref=f5e368]:
+            - generic [ref=f5e369]: Opening memory
+            - generic [ref=f5e370]: Seed continuity facts and open threads so the first scene already has a situation to lean on.
+          - generic [ref=f5e373]:
+            - generic [ref=f5e374]: Characters that hold a line
+            - generic [ref=f5e375]: Behaviour anchors ride along in every Speak turn. They can refuse you, and they will.
+          - generic [ref=f5e378]:
+            - generic [ref=f5e379]: Direct after you enter
+            - generic [ref=f5e380]: "In Story: Direct edits cast and place, pins continuity, and sets Aim targets. Wrap files memory between episodes."
+          - generic [ref=f5e383]:
+            - generic [ref=f5e384]: Speak with delivery
+            - generic [ref=f5e385]: On Speak or Act, pick a tone chip so the scene hears how you mean it. Reply size is Short / Medium / Long.
+          - generic [ref=f5e388]:
+            - generic [ref=f5e389]: Your key, any model
+            - generic [ref=f5e390]: OpenRouter, Anthropic, Gemini, Kimi, local models — swap engines per world, any time.
+          - generic [ref=f5e393]:
+            - generic [ref=f5e394]: Private by design
+            - generic [ref=f5e395]: Everything lives on this device. Nothing is sent anywhere but the AI endpoint you name.

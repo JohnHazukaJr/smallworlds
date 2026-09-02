@@ -22,6 +22,7 @@ export async function seedStarterWorld(): Promise<string> {
     hue: 40,
     visibility: 'private',
     ai: { ...DEFAULT_AI },
+    storyStance: 'longform',
     proseModel: null,
     utilityModel: null,
     imageModel: null,

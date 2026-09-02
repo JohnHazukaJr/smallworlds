@@ -51,31 +51,36 @@ export class AIError extends Error {
 }
 
 export function isContextOverflowError(e: unknown): boolean {
+  if (e instanceof AIError && e.status === 413) return true;
   const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
+  if (msg.includes('413')) return true;
   if (msg.includes('context_length_exceeded')) return true;
   if (msg.includes('context length')) return true;
   if (msg.includes('maximum context')) return true;
   if (msg.includes('prompt is too long')) return true;
   if (msg.includes('too many tokens')) return true;
   if (msg.includes('token limit')) return true;
+  if (msg.includes('input tokens')) return true;
+  if (msg.includes('max prompt')) return true;
   if (msg.includes('too long') && (msg.includes('context') || msg.includes('prompt') || msg.includes('request'))) {
     return true;
   }
   return false;
 }
 
-function throwEmptyResponse(finishReason: string, sawReasoning: boolean): never {
+export function isEmptyModelResponse(e: unknown): boolean {
+  const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
+  return msg.includes('empty response') || msg.includes('empty reply');
+}
+
+export function isPromptPackRetryError(e: unknown): boolean {
+  return isContextOverflowError(e) || isEmptyModelResponse(e);
+}
+
+function throwEmptyResponse(finishReason: string): never {
   const reason = finishReason ? ` (stop: ${finishReason})` : '';
-  if (sawReasoning || isLengthStop(finishReason)) {
-    throw new AIError(
-      `The model returned an empty response${reason}. ` +
-      'The prompt may be too long for this model mid-season, or a reasoning model used its token budget on thinking. ' +
-      'Try again, wrap the episode, or pick a larger-context model in Settings.'
-    );
-  }
   throw new AIError(
-    `The model returned an empty response${reason}. ` +
-    'If this keeps happening deep in a season, the context is likely too large — wrap the episode or choose a shorter reply size.'
+    `The model returned an empty reply${reason}. Try again or pick a different model in Settings.`
   );
 }
 
@@ -218,28 +223,60 @@ function resultEmpty(r: StreamResult): boolean {
   return !r.text.trim() && !(r.toolCalls && r.toolCalls.length > 0);
 }
 
+function bumpMaxTokens(req: StreamRequest): StreamRequest {
+  return {
+    ...req,
+    maxTokens: Math.max(req.maxTokens + 2000, Math.floor(req.maxTokens * 1.5))
+  };
+}
+
 /**
  * Stream a chat completion from any configured provider.
  * One automatic retry on 429 / transient 5xx / network failure.
- * Empty thinking streams retry once (thinking off for prose/test; more output for utility/wrap).
+ * Empty utility/wrap replies retry once with more output tokens even when thinking is off.
+ * Empty thinking streams retry once (thinking off for prose/test).
  */
 export async function streamChat(req: StreamRequest): Promise<StreamResult> {
   const run = (next: StreamRequest) => streamChatOnce(next);
+  const job = req.job ?? 'prose';
+
+  const retryEmpty = async (first: StreamResult): Promise<StreamResult> => {
+    if (!resultEmpty(first)) return first;
+    if (req.signal?.aborted) throwEmptyResponse('');
+    if (job === 'utility' || job === 'wrap') {
+      const second = await run(bumpMaxTokens(req));
+      if (!resultEmpty(second)) return second;
+      throwEmptyResponse('');
+    }
+    const thinking = resolveThinking(req);
+    if (thinking) {
+      if (job === 'prose' || job === 'test') {
+        return run({ ...req, thinking: false });
+      }
+      const second = await run(bumpMaxTokens(req));
+      if (!resultEmpty(second)) return second;
+      throwEmptyResponse('');
+    }
+    throwEmptyResponse('');
+  };
+
   try {
     const first = await run(req);
-    if (!resultEmpty(first)) return first;
-    const thinking = resolveThinking(req);
-    if (!thinking || req.signal?.aborted) {
-      throwEmptyResponse('', first.sawReasoning ?? false);
-    }
-    const job = req.job ?? 'prose';
-    if (job === 'prose' || job === 'test') {
-      return run({ ...req, thinking: false });
-    }
-    return run({ ...req, maxTokens: Math.max(req.maxTokens + 2000, Math.floor(req.maxTokens * 1.5)) });
+    return await retryEmpty(first);
   } catch (e) {
     if (req.signal?.aborted) throw e;
     if ((e as Error)?.name === 'AbortError') throw e;
+
+    if (isEmptyModelResponse(e) && (job === 'utility' || job === 'wrap') && !req.signal?.aborted) {
+      try {
+        const second = await run(bumpMaxTokens(req));
+        if (!resultEmpty(second)) return second;
+        throwEmptyResponse('');
+      } catch (second) {
+        if (isEmptyModelResponse(second)) throwEmptyResponse('');
+        throw second;
+      }
+    }
 
     const status = e instanceof AIError ? e.status : undefined;
     const network =
@@ -310,7 +347,6 @@ async function streamOpenAI(req: StreamRequest): Promise<StreamResult> {
   if (!res.ok) await throwHttpError(res);
   let full = '';
   let truncated = false;
-  let finishReason = '';
   let sawReasoning = false;
   const toolBuf: Record<number, { name: string; arguments: string }> = {};
   await readSSE(res, (data) => {
@@ -339,12 +375,13 @@ async function streamOpenAI(req: StreamRequest): Promise<StreamResult> {
         }
       }
       const reason: string | undefined = choice?.finish_reason;
-      if (reason) finishReason = reason;
       if (isLengthStop(reason)) truncated = true;
     } catch { /* keep-alive or malformed chunk */ }
   });
   const toolCalls = Object.values(toolBuf).filter((t) => t.name || t.arguments);
-  if (!full.trim() && toolCalls.length === 0) throwEmptyResponse(finishReason, sawReasoning);
+  if (!full.trim() && toolCalls.length === 0) {
+    return { text: '', truncated, sawReasoning };
+  }
   return {
     text: full,
     truncated,
@@ -377,7 +414,6 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
   if (!res.ok) await throwHttpError(res);
   let full = '';
   let truncated = false;
-  let finishReason = '';
   await readSSE(res, (data) => {
     try {
       const json = JSON.parse(data);
@@ -387,7 +423,6 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
       }
       if (json.type === 'message_delta') {
         const reason: string | undefined = json.delta?.stop_reason ?? json.stop_reason;
-        if (reason) finishReason = reason;
         if (isLengthStop(reason)) truncated = true;
       }
       if (json.type === 'error') throw new AIError(json.error?.message ?? 'Provider error');
@@ -395,7 +430,7 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
       if (e instanceof AIError) throw e;
     }
   });
-  if (!full.trim()) throwEmptyResponse(finishReason, false);
+  if (!full.trim()) return { text: '', truncated };
   return { text: full, truncated };
 }
 
@@ -419,7 +454,6 @@ async function streamGemini(req: StreamRequest): Promise<StreamResult> {
   if (!res.ok) await throwHttpError(res);
   let full = '';
   let truncated = false;
-  let finishReason = '';
   let sawThought = false;
   await readSSE(res, (data) => {
     try {
@@ -441,11 +475,10 @@ async function streamGemini(req: StreamRequest): Promise<StreamResult> {
         req.onDelta?.(text);
       }
       const reason: string | undefined = json.candidates?.[0]?.finishReason;
-      if (reason) finishReason = reason;
       if (isLengthStop(reason)) truncated = true;
     } catch { /* ignore malformed chunk */ }
   });
-  if (!full.trim()) throwEmptyResponse(finishReason, sawThought);
+  if (!full.trim()) return { text: '', truncated, sawReasoning: sawThought };
   return { text: full, truncated, sawReasoning: sawThought };
 }
 

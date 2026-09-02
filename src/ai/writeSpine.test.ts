@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
-  matchPlotTargets, mergeStateField, normalizeBeats, capSceneLedger, capSoftWrapExtract,
-  dedupeSoftWrapExtract, directorFallbackNarrationBrief, softWrapAlreadyFiled, SCENE_LEDGER_CAP
+  matchPlotTargets, mergeStateField, mergeLiveRelationshipPatch, normalizeBeats, capSceneLedger, capSoftWrapExtract,
+  dedupeSoftWrapExtract, directorFallbackNarrationBrief, softWrapAlreadyFiled, SCENE_LEDGER_CAP,
+  isBlankWorldBrief, isEmptyRosterProposal
 } from './engine';
 import {
   episodeContextPressure,
@@ -187,6 +188,68 @@ describe('normalizeBeats', () => {
       expect(beats[0].brief).toMatch(/speaking straight at you/i);
     }
   });
+
+  it('keeps one speak per speaker when the plan repeats Ada', () => {
+    const beats = normalizeBeats(
+      {
+        beats: [
+          { type: 'speak', characterId: 'Ada', brief: 'first' },
+          { type: 'speak', characterId: 'Ada', brief: 'again' },
+          { type: 'narration', brief: 'Rain.' }
+        ]
+      },
+      cast,
+      guests,
+      new Map(),
+      'continue',
+      ''
+    );
+    const speak = beats.filter((b) => b.type === 'speak');
+    expect(speak).toHaveLength(1);
+    expect(speak[0]).toMatchObject({ type: 'speak', characterId: 'c1', brief: 'first' });
+  });
+
+  it('puts the named addressee first when the plan had Ada then Ben', () => {
+    const beats = normalizeBeats(
+      {
+        beats: [
+          { type: 'speak', characterId: 'Ada', brief: 'not her' },
+          { type: 'speak', characterId: 'Ben', brief: 'him' },
+          { type: 'narration', brief: 'Rain.' }
+        ]
+      },
+      cast,
+      guests,
+      new Map(),
+      'speak',
+      'Ben, look at me.'
+    );
+    expect(beats[0]).toMatchObject({ type: 'speak', characterId: 'c2' });
+  });
+
+  it('still injects a speak reply when the player used Act', () => {
+    const beats = normalizeBeats(
+      { beats: [{ type: 'narration', brief: 'She stares.' }] },
+      cast,
+      guests,
+      new Map(),
+      'act',
+      '*walks to the desk*'
+    );
+    expect(beats.some((b) => b.type === 'speak')).toBe(true);
+    expect(beats[0].type).toBe('speak');
+  });
+});
+
+describe('mergeLiveRelationshipPatch', () => {
+  it('merges kind and note, then no-ops when unchanged', () => {
+    const ada = npc('c1', 'Ada');
+    const ben = npc('c2', 'Ben');
+    const first = mergeLiveRelationshipPatch(ada, ben, { kind: 'rival', note: 'after the ledger' }, ['c1', 'c2']);
+    expect(first).toEqual([{ targetId: 'c2', kind: 'rival', note: 'after the ledger' }]);
+    ada.relationships = first!;
+    expect(mergeLiveRelationshipPatch(ada, ben, { kind: 'rival', note: 'after the ledger' }, ['c1', 'c2'])).toBeNull();
+  });
 });
 
 describe('capSceneLedger', () => {
@@ -248,6 +311,13 @@ describe('packTurnsDetailed / pressure', () => {
     const { kept } = packTurnsDetailed(turns, 90_000, 100_000);
     expect(episodeHistoryChars(kept)).toBeLessThan(20_000);
     expect(kept.length).toBeGreaterThanOrEqual(4);
+    expect(kept.at(-1)?.id).toBe(turns.at(-1)?.id);
+  });
+
+  it('keeps at most one turn when the system frame fills the window', () => {
+    const turns = mk(20, 3000);
+    const { kept } = packTurnsDetailed(turns, 100_000, 100_000);
+    expect(kept.length).toBeLessThanOrEqual(1);
     expect(kept.at(-1)?.id).toBe(turns.at(-1)?.id);
   });
 
@@ -415,6 +485,7 @@ describe('injectedSpeakBrief', () => {
     expect(brief).toMatch(/one tic:.*Taps the ledger/i);
     expect(brief).toMatch(/hold:.*Never lies/i);
     expect(brief).toMatch(/do not soften/i);
+    expect(brief).toMatch(/do not re-ask/i);
   });
 
   it('includes character live state via helper', () => {
@@ -475,5 +546,34 @@ describe('pendingBeatLabel', () => {
     expect(speak.startsWith('Ada:')).toBe(true);
     expect(speak.endsWith('…')).toBe(true);
     expect(speak.length).toBe(80);
+  });
+});
+
+describe('isBlankWorldBrief / isEmptyRosterProposal', () => {
+  const idea = 'A harbour where every debt is public.';
+
+  it('flags an untitled brief that is still the raw idea', () => {
+    expect(isBlankWorldBrief({
+      title: 'Untitled world',
+      bible: idea,
+      premise: ''
+    }, idea)).toBe(true);
+  });
+
+  it('passes a drafted brief', () => {
+    expect(isBlankWorldBrief({
+      title: 'Public Ledger',
+      bible: 'The quay keeps names in wet ink. You owe a debt under a false hand.',
+      premise: 'The registrar has asked to see you before the tide turns.'
+    }, idea)).toBe(false);
+  });
+
+  it('flags an empty roster when counts were requested', () => {
+    expect(isEmptyRosterProposal({ characters: [], locations: [] }, { characters: 4, locations: 3 })).toBe(true);
+    expect(isEmptyRosterProposal(
+      { characters: [{ description: 'A registrar with a wet stamp.' }], locations: [] },
+      { characters: 4, locations: 3 }
+    )).toBe(false);
+    expect(isEmptyRosterProposal({ characters: [], locations: [] }, { characters: 0, locations: 0 })).toBe(false);
   });
 });

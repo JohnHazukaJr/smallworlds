@@ -1,0 +1,55 @@
+- generic [ref=f3e83]:
+  - main [ref=f3e85]:
+    - generic [ref=f3e86]:
+      - generic [ref=f3e88]:
+        - generic [ref=f3e91]:
+          - generic [ref=f3e92]: The Registrar
+          - generic [ref=f3e93]: Season 1 · episode 1 · the long room · Monday, 1 January, Year 1 · day 1 · Bloom
+        - generic [ref=f3e94]:
+          - generic [ref=f3e95]:
+            - button "Write" [ref=f3e96] [cursor=pointer]
+            - button "Read" [ref=f3e97] [cursor=pointer]
+          - button "More" [ref=f3e98] [cursor=pointer]
+      - generic [ref=f3e100]:
+        - generic: Lamp oil, salt damp, and the low grind of the harbour through the floor
+        - generic [ref=f3e101]:
+          - generic [ref=f3e102]:
+            - generic [ref=f3e103]: The long room · Monday, 1 January, Year 1 · day 1
+            - button "The Cartwright · Marisol Vey · you" [ref=f3e107] [cursor=pointer]
+          - generic [ref=f3e108]:
+            - paragraph [ref=f3e110]:
+              - generic [ref=f3e111]: T
+              - text: he long room keeps its own weather. Lamp-smoke gathers along the ceiling beams and stays there, and the tide sound comes up through the floor rather than the windows, so that every conversation held here has the shape of something overheard. The Cartwright has not touched the cup you poured. That is the first thing you notice. The second is that he has arranged the manifest pages so the false signature faces you. You could tell him the truth. You could tell him a better lie. Marisol is on the tide stairs outside and will hear either one, because the long room keeps its own weather and gives nothing back.
+            - generic [ref=f3e112]:
+              - button "Edit" [ref=f3e113] [cursor=pointer]
+              - button "Retry from here" [ref=f3e114] [cursor=pointer]
+              - button "Re-roll line" [ref=f3e115] [cursor=pointer]
+              - button "Delete" [ref=f3e116] [cursor=pointer]
+      - generic [ref=f3e117]:
+        - generic [ref=f3e118]:
+          - button "Continue" [ref=f3e119] [cursor=pointer]
+          - button "Steer" [ref=f3e120] [cursor=pointer]
+          - button "Speak" [ref=f3e121] [cursor=pointer]
+          - button "Act" [ref=f3e122] [cursor=pointer]
+        - generic [ref=f3e124]:
+          - generic "How long each narration or spoken reply runs — not story structure" [ref=f3e125]: reply size
+          - button "Short" [ref=f3e126] [cursor=pointer]
+          - button "Medium" [ref=f3e127] [cursor=pointer]
+          - button "Long" [ref=f3e128] [cursor=pointer]
+        - generic [ref=f3e129]:
+          - paragraph [ref=f3e130]: the scene continues
+          - button "Write on" [disabled] [ref=f3e131]
+        - generic [ref=f3e132]: "memory: 3 facts · 3 open threads"
+  - generic [ref=f3e134]:
+    - button "Worlds" [ref=f3e135] [cursor=pointer]:
+      - generic [ref=f3e136]: ◈
+    - button "Story" [ref=f3e137] [cursor=pointer]:
+      - generic [ref=f3e138]: ¶
+    - button "Cast" [ref=f3e139] [cursor=pointer]:
+      - generic [ref=f3e140]: ◇
+    - button "Places" [ref=f3e141] [cursor=pointer]:
+      - generic [ref=f3e142]: ⌂
+    - button "Settings" [ref=f3e143] [cursor=pointer]:
+      - generic [ref=f3e144]: ⚙
+    - button "Profile" [ref=f3e145] [cursor=pointer]:
+      - generic [ref=f3e146]: ◎

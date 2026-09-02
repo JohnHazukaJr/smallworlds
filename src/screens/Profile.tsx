@@ -14,7 +14,7 @@ import {
 } from '../sync/serialize';
 import { pullEncryptedSecrets, pushEncryptedSecrets, syncNow, useSyncMeta } from '../sync/engine';
 import { formatUserError } from '../errors';
-import { ErrorNote, Mono, useVw } from '../ui/bits';
+import { ErrorNote, Mono, phoneChrome, useViewport } from '../ui/bits';
 import { avatarStyle, plateStyle, VIS } from '../ui/theme';
 import type { Visibility } from '../types';
 
@@ -29,8 +29,9 @@ function download(data: unknown, filename: string) {
 }
 
 export function Profile() {
-  const vw = useVw();
-  const narrow = vw < 780;
+  const { band } = useViewport();
+  const phone = phoneChrome(band);
+  const compact = band === 'compact';
   const s = useSettings();
   const vaultEnabled = useVault((v) => v.enabled);
   const [exporting, setExporting] = useState(false);
@@ -106,12 +107,18 @@ export function Profile() {
   const storageWarn = storage?.warn || hasStoragePressure();
 
   return (
-    <div className="fade-in" style={{ padding: narrow ? '26px 18px 70px' : '42px 46px 70px', maxWidth: 1020 }}>
+    <div className="fade-in" style={{
+      paddingTop: phone ? 'calc(26px + env(safe-area-inset-top))' : 42,
+      paddingRight: phone ? 18 : 46,
+      paddingBottom: phone ? 24 : 70,
+      paddingLeft: phone ? 18 : 46,
+      maxWidth: 1020
+    }}>
       <div style={{ display: 'flex', gap: 22, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 34 }}>
         <div style={avatarStyle(60, 84, 'rgba(255,255,255,0.2)')} />
         <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 9 }}>
-          <div className="serif" style={{ fontWeight: 300, fontSize: narrow ? 28 : 36, lineHeight: 1.1, color: '#f8f6f2' }}>Your shelf</div>
-          <div style={{ fontSize: 13.5, lineHeight: 1.65, color: 'rgba(236,234,230,0.58)', maxWidth: '58ch' }}>
+          <div className="serif" style={{ fontWeight: 300, fontSize: compact ? 26 : phone ? 28 : 36, lineHeight: 1.1, color: 'var(--ink-heading)' }}>Your shelf</div>
+          <div style={{ fontSize: 13.5, lineHeight: 1.65, color: 'var(--ink-muted)', maxWidth: '58ch' }}>
             Worlds live in this browser first. Back up the whole device (stories + settings + encrypted keys), or sign in
             to sync across machines. AI keys never leave your device unencrypted.
           </div>
@@ -160,7 +167,7 @@ export function Profile() {
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 13, marginBottom: 34 }}>
         <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-          <div style={{ fontSize: 15, fontWeight: 600, color: '#f6f4f0' }}>Your worlds</div>
+          <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink-heading)' }}>Your worlds</div>
           <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)' }}>
             sharing is a future feature — every world is private today
           </div>
@@ -169,7 +176,7 @@ export function Profile() {
           <div key={w.id} className="craft-row" style={{ padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
             <div style={{ ...plateStyle(w.hue, 46), width: 46, borderRadius: 12, border: '1px solid rgba(255,255,255,0.12)', padding: 0 }} />
             <div style={{ flex: 1, minWidth: 180, display: 'flex', flexDirection: 'column', gap: 3 }}>
-              <div className="serif" style={{ fontSize: 17, color: '#f0eee9' }}>{w.title}</div>
+              <div className="serif" style={{ fontSize: 17, color: 'var(--ink-heading)' }}>{w.title}</div>
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)' }}>{w.line.slice(0, 60)}</div>
             </div>
             <div style={{ display: 'flex', gap: 6 }}>

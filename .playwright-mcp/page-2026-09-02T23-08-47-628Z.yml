@@ -1,0 +1,217 @@
+- generic [ref=f6e3]:
+  - main [ref=f6e5]:
+    - generic [ref=f6e44]:
+      - generic [ref=f6e46]:
+        - generic [ref=f6e49]:
+          - generic [ref=f6e50]: The Registrar
+          - generic [ref=f6e51]: Season 1 · episode 1 · the long room · Monday, 1 January, Year 1 · day 1 · Bloom
+        - generic [ref=f6e52]:
+          - generic [ref=f6e53]:
+            - button "Write" [ref=f6e54] [cursor=pointer]
+            - button "Read" [ref=f6e55] [cursor=pointer]
+          - button "Direct" [active] [ref=f6e132] [cursor=pointer]
+          - button "End episode" [ref=f6e133] [cursor=pointer]
+          - generic [ref=f6e134]:
+            - generic [ref=f6e135]: Scroll
+            - button "Auto" [ref=f6e136] [cursor=pointer]
+            - button "Scene photo" [ref=f6e137] [cursor=pointer]
+            - button "Place photo" [ref=f6e138] [cursor=pointer]
+            - button "Climate" [ref=f6e139] [cursor=pointer]
+            - button "Off" [ref=f6e140] [cursor=pointer]
+          - generic [ref=f6e141]:
+            - generic [ref=f6e142]: mood
+            - button "Ember" [ref=f6e143] [cursor=pointer]
+            - button "Ash" [ref=f6e145] [cursor=pointer]
+            - button "Frost" [ref=f6e147] [cursor=pointer]
+            - button "Rot" [ref=f6e149] [cursor=pointer]
+            - button "Dusk" [ref=f6e151] [cursor=pointer]
+            - button "Bloom" [ref=f6e153] [cursor=pointer]
+            - button "Storm" [ref=f6e155] [cursor=pointer]
+            - button "Brine" [ref=f6e157] [cursor=pointer]
+          - button "Display" [ref=f6e159] [cursor=pointer]
+          - button "Edit world" [ref=f6e160] [cursor=pointer]
+      - generic [ref=f6e58]:
+        - generic: Lamp oil, salt damp, and the low grind of the harbour through the floor
+        - generic [ref=f6e59]:
+          - generic [ref=f6e60]:
+            - generic [ref=f6e61]: The long room · Monday, 1 January, Year 1 · day 1
+            - button "The Cartwright · Marisol Vey · you" [ref=f6e65] [cursor=pointer]
+          - generic [ref=f6e66]:
+            - paragraph [ref=f6e68]:
+              - generic [ref=f6e69]: T
+              - text: he long room keeps its own weather. Lamp-smoke gathers along the ceiling beams and stays there, and the tide sound comes up through the floor rather than the windows, so that every conversation held here has the shape of something overheard. The Cartwright has not touched the cup you poured. That is the first thing you notice. The second is that he has arranged the manifest pages so the false signature faces you. You could tell him the truth. You could tell him a better lie. Marisol is on the tide stairs outside and will hear either one, because the long room keeps its own weather and gives nothing back.
+            - generic [ref=f6e70]:
+              - button "Edit" [ref=f6e71] [cursor=pointer]
+              - button "Retry from here" [ref=f6e72] [cursor=pointer]
+              - button "Re-roll line" [ref=f6e73] [cursor=pointer]
+              - button "Delete" [ref=f6e74] [cursor=pointer]
+      - generic [ref=f6e75]:
+        - generic [ref=f6e76]:
+          - button "Continue" [ref=f6e77] [cursor=pointer]
+          - button "Steer" [ref=f6e78] [cursor=pointer]
+          - button "Speak" [ref=f6e79] [cursor=pointer]
+          - button "Act" [ref=f6e80] [cursor=pointer]
+        - generic [ref=f6e82]:
+          - generic "How long each narration or spoken reply runs — not story structure" [ref=f6e83]: reply size
+          - button "Short" [ref=f6e84] [cursor=pointer]
+          - button "Medium" [ref=f6e85] [cursor=pointer]
+          - button "Long" [ref=f6e86] [cursor=pointer]
+        - generic [ref=f6e87]:
+          - paragraph [ref=f6e88]: the scene continues
+          - button "Write on" [disabled] [ref=f6e89]
+        - generic [ref=f6e90]: "memory: 3 facts · 3 open threads"
+      - complementary [ref=f6e162]:
+        - generic [ref=f6e163]:
+          - generic [ref=f6e164]:
+            - generic [ref=f6e165]: Director
+            - button "Close" [ref=f6e166] [cursor=pointer]: ×
+          - generic [ref=f6e167]:
+            - generic [ref=f6e168]:
+              - button "calendar −" [ref=f6e169] [cursor=pointer]:
+                - generic [ref=f6e170]: calendar
+                - generic [ref=f6e171]: −
+              - generic [ref=f6e172]:
+                - generic [ref=f6e173]: calendar tracker
+                - generic [ref=f6e174]:
+                  - generic [ref=f6e175]: Monday, 1 January Y1
+                  - generic [ref=f6e176]: Absolute day 1 · S1 · E1 · The long room, above the customs house. Lamplit, tide-loud, one door.Episode opened Monday, 1 January Y1
+                  - generic [ref=f6e177]:
+                    - button "−1" [ref=f6e178] [cursor=pointer]
+                    - button "+1 day" [ref=f6e179] [cursor=pointer]
+                    - button "+7" [ref=f6e180] [cursor=pointer]
+                    - button "+1 month" [ref=f6e181] [cursor=pointer]
+                  - generic [ref=f6e182]:
+                    - generic [ref=f6e183]:
+                      - generic [ref=f6e184]: day
+                      - spinbutton "day" [ref=f6e185]: "1"
+                    - generic [ref=f6e186]:
+                      - generic [ref=f6e187]: month
+                      - combobox "month" [ref=f6e188] [cursor=pointer]:
+                        - option "January" [selected]
+                        - option "February"
+                        - option "March"
+                        - option "April"
+                        - option "May"
+                        - option "June"
+                        - option "July"
+                        - option "August"
+                        - option "September"
+                        - option "October"
+                        - option "November"
+                        - option "December"
+                    - generic [ref=f6e189]:
+                      - generic [ref=f6e190]: year
+                      - spinbutton "year" [ref=f6e191]: "1"
+                  - generic [ref=f6e192]:
+                    - text: absolute day
+                    - spinbutton "absolute day" [ref=f6e193]: "1"
+                  - generic [ref=f6e194]:
+                    - generic [ref=f6e195]: days to advance when episode ends
+                    - generic [ref=f6e196]:
+                      - button "days to advance when episode ends +1 day +2 +7 +14 1" [ref=f6e197] [cursor=pointer]: same day
+                      - button "+1 day" [ref=f6e198] [cursor=pointer]
+                      - button "+2" [ref=f6e199] [cursor=pointer]
+                      - button "+7" [ref=f6e200] [cursor=pointer]
+                      - button "+14" [ref=f6e201] [cursor=pointer]
+                      - spinbutton "Custom advance days" [ref=f6e202]: "1"
+                  - button "Calendar setup" [ref=f6e203] [cursor=pointer]
+                - generic [ref=f6e204]:
+                  - generic [ref=f6e205]: season calendar · 0 due · 0 scheduled
+                  - generic [ref=f6e206]: Dated texture as the calendar ticks. Peek shows a summary once; visibility is the lasting spoil policy. The narrator always gets the full beat when due.
+                  - generic [ref=f6e207]:
+                    - generic [ref=f6e208]:
+                      - switch "Enable calendar events" [checked] [ref=f6e209] [cursor=pointer]
+                      - text: enable calendar events
+                    - generic [ref=f6e211]:
+                      - switch "AI-seed calendar on season start" [ref=f6e212] [cursor=pointer]
+                      - text: AI-seed on season start
+                    - generic [ref=f6e214]:
+                      - generic [ref=f6e215]: default visibility
+                      - combobox "default visibility" [ref=f6e216] [cursor=pointer]:
+                        - option "spoiler"
+                        - option "title" [selected]
+                        - option "hidden"
+                  - generic [ref=f6e217]:
+                    - button "Add event" [ref=f6e218] [cursor=pointer]
+                    - button "Generate season texture" [ref=f6e219] [cursor=pointer]
+                  - generic [ref=f6e220]:
+                    - text: No events yet this season.
+                    - button "Add event" [ref=f6e221] [cursor=pointer]
+                    - text: ·
+                    - button "Generate…" [ref=f6e222] [cursor=pointer]
+            - generic [ref=f6e223]:
+              - button "scene −" [ref=f6e224] [cursor=pointer]:
+                - generic [ref=f6e225]: scene
+                - generic [ref=f6e226]: −
+              - generic [ref=f6e227]:
+                - generic [ref=f6e228]:
+                  - generic [ref=f6e229]:
+                    - generic [ref=f6e230]: in the scene
+                    - button "full editor → Cast" [ref=f6e231] [cursor=pointer]
+                  - generic [ref=f6e232] [cursor=pointer]:
+                    - generic [ref=f6e234]: I
+                    - generic [ref=f6e235]:
+                      - generic [ref=f6e236]: Ivo Tarrant
+                      - generic [ref=f6e237]: off-page
+                  - generic [ref=f6e239] [cursor=pointer]:
+                    - generic [ref=f6e241]: T
+                    - generic [ref=f6e242]:
+                      - generic [ref=f6e243]: The Cartwright
+                      - generic [ref=f6e244]: entertained
+                  - generic [ref=f6e246] [cursor=pointer]:
+                    - generic [ref=f6e248]: M
+                    - generic [ref=f6e249]:
+                      - generic [ref=f6e250]: Marisol Vey
+                      - generic [ref=f6e251]: careful
+                  - generic [ref=f6e253]:
+                    - generic [ref=f6e255]: "Y"
+                    - generic [ref=f6e256]:
+                      - generic [ref=f6e257]: you
+                      - generic [ref=f6e258]: player · always in scene
+                  - generic [ref=f6e260] [cursor=pointer]:
+                    - generic [ref=f6e262]: E
+                    - generic [ref=f6e263]:
+                      - generic [ref=f6e264]: Emine
+                      - generic [ref=f6e265]: off-page
+                  - generic [ref=f6e267]: walk-ons · this episode only
+                  - button "+ Add walk-on" [ref=f6e268] [cursor=pointer]
+                - generic [ref=f6e269]:
+                  - generic [ref=f6e270]: locations
+                  - generic [ref=f6e273] [cursor=pointer]:
+                    - generic [ref=f6e274]: The long room
+                    - generic [ref=f6e275]: above the customs house · lamplit · one door
+                  - generic [ref=f6e277]:
+                    - button "+ new" [ref=f6e278] [cursor=pointer]
+                    - button "generate scene image" [ref=f6e279] [cursor=pointer]
+                    - button "full editor → Places" [ref=f6e280] [cursor=pointer]
+                - generic [ref=f6e281]:
+                  - generic [ref=f6e282]: scene note — free text
+                  - generic [ref=f6e283]:
+                    - generic [ref=f6e284]: scene plate
+                    - generic [ref=f6e286] [cursor=pointer]: The long room, above the customs house. Lamplit, tide-loud, one door.
+            - button "memory +" [ref=f6e288] [cursor=pointer]:
+              - generic [ref=f6e289]: memory
+              - generic [ref=f6e290]: +
+            - button "nudges +" [ref=f6e292] [cursor=pointer]:
+              - generic [ref=f6e293]: nudges
+              - generic [ref=f6e294]: +
+        - button "Done" [ref=f6e296] [cursor=pointer]
+  - generic [ref=f6e14]:
+    - button "Worlds" [ref=f6e15] [cursor=pointer]:
+      - generic [ref=f6e16]: ◈
+      - text: Worlds
+    - button "Story" [ref=f6e17] [cursor=pointer]:
+      - generic [ref=f6e18]: ¶
+      - text: Story
+    - button "Cast" [ref=f6e19] [cursor=pointer]:
+      - generic [ref=f6e20]: ◇
+      - text: Cast
+    - button "Places" [ref=f6e21] [cursor=pointer]:
+      - generic [ref=f6e22]: ⌂
+      - text: Places
+    - button "Settings" [ref=f6e23] [cursor=pointer]:
+      - generic [ref=f6e24]: ⚙
+      - text: Settings
+    - button "Profile" [ref=f6e25] [cursor=pointer]:
+      - generic [ref=f6e26]: ◎
+      - text: Profile

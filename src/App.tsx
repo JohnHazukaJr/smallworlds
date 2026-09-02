@@ -5,7 +5,7 @@ import { useAuth } from './cloud/authStore';
 import { useVault } from './security/vault';
 import { hasStoragePressure, STORAGE_PRESSURE_EVENT } from './storage/quota';
 import { useApp } from './store/app';
-import { Mono, useVw } from './ui/bits';
+import { Mono, phoneChrome, tabBarInset, useViewport } from './ui/bits';
 import { Library } from './screens/Library';
 import { Story } from './screens/Story';
 import { Cast } from './screens/Cast';
@@ -19,10 +19,12 @@ export default function App() {
   const screen = useApp((s) => s.screen);
   const go = useApp((s) => s.go);
   const layout = useApp((s) => s.layout);
-  const vw = useVw();
-  const narrow = vw < 780;
+  const currentWorldId = useApp((s) => s.currentWorldId);
+  const { band, keyboardOpen } = useViewport();
+  const phone = phoneChrome(band);
+  const tabsVisible = phone && !keyboardOpen;
   const vaultLocked = useVault((v) => v.enabled && v.locked);
-  const readMode = screen === 'story' && layout === 'read';
+  const readMode = screen === 'story' && layout === 'read' && !!currentWorldId;
   const initAuth = useAuth((s) => s.init);
   const [storagePressure, setStoragePressure] = useState(() => hasStoragePressure());
 
@@ -71,15 +73,15 @@ export default function App() {
 
       <div style={{
         position: 'relative', zIndex: 1, flex: 1, minHeight: 0,
-        display: narrow || readMode ? 'flex' : 'grid',
-        flexDirection: narrow || readMode ? 'column' : undefined,
-        gridTemplateColumns: narrow || readMode ? undefined : '226px minmax(0, 1fr)',
-        paddingBottom: narrow && !readMode ? 'calc(58px + env(safe-area-inset-bottom))' : 0
+        display: phone || readMode ? 'flex' : 'grid',
+        flexDirection: phone || readMode ? 'column' : undefined,
+        gridTemplateColumns: phone || readMode ? undefined : '226px minmax(0, 1fr)',
+        paddingBottom: tabsVisible ? tabBarInset(true) : 0
       }}>
-        {!narrow && !readMode && <Rail />}
+        {!phone && !readMode && <Rail />}
         <main style={{
           minWidth: 0, minHeight: 0, flex: 1, position: 'relative', zIndex: 1,
-          display: 'flex', flexDirection: 'column'
+          display: 'flex', flexDirection: 'column', overflow: 'auto'
         }}>
           {screen === 'library' && <Library />}
           {screen === 'story' && <Story />}
@@ -92,7 +94,7 @@ export default function App() {
         </main>
       </div>
 
-      {narrow && !readMode && <TabBar />}
+      {tabsVisible && <TabBar />}
     </div>
   );
 }

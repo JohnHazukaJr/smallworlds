@@ -3,6 +3,8 @@
  * Keep AIError / WriteAbortedError; wrap them here at UI and soft-fail boundaries.
  */
 
+import { isContextOverflowError, isEmptyModelResponse } from './ai/client';
+
 export type AppErrorCode =
   | 'aborted'
   | 'auth'
@@ -90,14 +92,32 @@ function looksLikeVault(msg: string): boolean {
   return m.includes('vault') || m.includes('passphrase') || m.includes('decrypt');
 }
 
+function looksLikeMissingModel(msg: string): boolean {
+  return /no (writing|utility|image) model configured/i.test(msg);
+}
+
+/** Write-loop copy that should reach the player unchanged (not “check Settings”). */
+function looksLikeWriteLoop(msg: string): boolean {
+  const m = msg.toLowerCase();
+  return (
+    m.includes('no usable narration') ||
+    m.includes('no character replied') ||
+    m.includes('pin who should answer') ||
+    m.includes('re-roll produced') ||
+    m.includes('only narrator or character') ||
+    m.includes('could not find the speaker')
+  );
+}
+
 function looksLikeSync(msg: string): boolean {
   const m = msg.toLowerCase();
   return (
     m.includes('supabase') ||
-    m.includes('not configured') ||
+    m.includes('cloud sync') ||
+    m.includes('vite_supabase') ||
     m.includes('jwt') ||
     m.includes('refresh token') ||
-    m.includes('sync')
+    (m.includes('sync') && !looksLikeMissingModel(msg))
   );
 }
 
@@ -215,7 +235,16 @@ export function classifyError(e: unknown): AppError {
     });
   }
 
-  if (msg.toLowerCase().includes('not configured')) {
+  if (looksLikeMissingModel(msg)) {
+    return new AppError({
+      code: 'provider',
+      userMessage: 'No model picked. Add a provider and choose a writing model in Settings.',
+      detail: msg,
+      cause: e
+    });
+  }
+
+  if (msg.toLowerCase().includes('cloud sync is not configured')) {
     return new AppError({
       code: 'sync',
       userMessage: 'Cloud sync is not configured on this build.',
@@ -233,15 +262,51 @@ export function classifyError(e: unknown): AppError {
     });
   }
 
-  if (name === 'AIError' || msg.toLowerCase().includes('empty response')) {
-    const empty = msg.toLowerCase().includes('empty');
+  const empty = isEmptyModelResponse(e) || msg.toLowerCase().includes('empty response');
+  if (empty) {
     return new AppError({
-      code: empty && msg.toLowerCase().includes('too long') ? 'timeout' : 'provider',
-      userMessage: empty
-        ? (msg.toLowerCase().includes('too long') || msg.toLowerCase().includes('context')
-          ? 'The model returned an empty reply — context is likely too large this deep in the season. Wrap the episode or try a larger-context model.'
-          : 'The model returned an empty reply. Try again; if it persists, wrap the episode or switch models.')
-        : 'The model request failed. Check Settings and try again.',
+      code: 'provider',
+      userMessage: 'The model returned an empty reply. Try again or pick a different model in Settings.',
+      detail: msg,
+      status,
+      cause: e
+    });
+  }
+
+  if (msg.toLowerCase().includes('did not draft a world')) {
+    return new AppError({
+      code: 'provider',
+      userMessage: 'The model did not draft a world. Try again or switch models.',
+      detail: msg,
+      status,
+      cause: e
+    });
+  }
+
+  if (isContextOverflowError(e)) {
+    return new AppError({
+      code: 'provider',
+      userMessage: 'The prompt is too large for this model. Wrap the episode or try a larger-context model.',
+      detail: msg,
+      status,
+      cause: e
+    });
+  }
+
+  if (looksLikeWriteLoop(msg)) {
+    return new AppError({
+      code: 'provider',
+      userMessage: msg.trim(),
+      detail: msg,
+      status,
+      cause: e
+    });
+  }
+
+  if (name === 'AIError') {
+    return new AppError({
+      code: 'provider',
+      userMessage: 'The model request failed. Check Settings and try again.',
       detail: msg,
       status,
       cause: e

@@ -88,6 +88,10 @@ interface AppStore {
   clearPendingCharacter: () => void;
   clearPendingLocation: () => void;
   openWorld: (worldId: string) => void;
+  /** Drop the open-world pointer (deleted, discarded, or missing on disk). */
+  closeWorld: () => void;
+  /** Clear only if this id is the one currently open. */
+  closeWorldIf: (worldId: string) => void;
   setLayout: (l: StoryLayout) => void;
   setMood: (m: MoodId) => void;
   setBackdrop: (b: BackdropId) => void;
@@ -117,6 +121,10 @@ export const useApp = create<AppStore>()(
       clearPendingCharacter: () => set({ pendingCharacterId: null }),
       clearPendingLocation: () => set({ pendingLocationId: null }),
       openWorld: (currentWorldId) => set({ currentWorldId, screen: 'story' }),
+      closeWorld: () => set({ currentWorldId: null }),
+      closeWorldIf: (worldId) => set((s) => (
+        s.currentWorldId === worldId ? { currentWorldId: null } : s
+      )),
       setLayout: (layout) => set({ layout: normalizeStoryLayout(layout) }),
       setMood: (mood) => set({ mood }),
       setBackdrop: (backdrop) => set({ backdrop }),

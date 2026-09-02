@@ -10,14 +10,15 @@ import { formatUserError } from '../errors';
 import { ModelPicker } from '../screens/Settings';
 import { useApp } from '../store/app';
 import type {
-  Character, ContinuityFact, Episode, Location, OpenThread, Season, World, WorldAISettings
+  Character, ContinuityFact, Episode, Location, OpenThread, Season, StoryStance, World, WorldAISettings
 } from '../types';
 import { Bar, Chip, ErrorNote, Field, Mono, Sheet, Spinner, Toggle } from '../ui/bits';
 import { avatarStyle } from '../ui/theme';
 import {
-  advanceMonths, calendarPatch, dayFromParts, emptyCharacter, emptyLocation,
+  applyStanceToAi, advanceMonths, calendarPatch, dayFromParts, emptyCharacter, emptyLocation,
+  syncSceneLocationName,
   formatEpisodeDateRange, formatStoryDate, formatStoryDateShort, partsForDay, PLOT_TARGET_CAP,
-  worldCalendar
+  STORY_STANCES, storyStanceOf, worldCalendar
 } from '../worldOps';
 
 type Tab = 'context' | 'lore' | 'plot' | 'instructions' | 'settings' | 'cast' | 'locations';
@@ -61,6 +62,8 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
   const patchWorld = (p: Partial<World>) =>
     void safeWrite(() => db.worlds.update(world.id, { ...p, updatedAt: Date.now() }), onSaveFail);
   const patchAI = (p: Partial<WorldAISettings>) => patchWorld({ ai: { ...world.ai, ...p } });
+  const patchStance = (stance: StoryStance) =>
+    patchWorld({ storyStance: stance, ai: applyStanceToAi(world.ai, stance) });
   const patchSeason = (p: Partial<Season>) =>
     void safeWrite(() => db.seasons.update(season.id, { ...p, updatedAt: Date.now() }), onSaveFail);
   const patchEpisode = (p: Partial<Episode>) =>
@@ -70,8 +73,8 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
   const patchLoc = (id: string, p: Partial<Location>) =>
     void safeWrite(async () => {
       await db.locations.update(id, { ...p, updatedAt: Date.now() });
-      if (episode.locationId === id && typeof p.name === 'string') {
-        await db.episodes.update(episode.id, { location: p.name, updatedAt: Date.now() });
+      if (typeof p.name === 'string') {
+        await syncSceneLocationName({ id, name: p.name, worldId: world.id });
       }
     }, onSaveFail);
 
@@ -111,7 +114,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
     <Sheet open={open} onClose={onClose} narrow={narrow} width={520}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-          <div className="serif" style={{ fontWeight: 300, fontSize: 24, color: '#f6f4f0' }}>Edit the world</div>
+          <div className="serif" style={{ fontWeight: 300, fontSize: 24, color: 'var(--ink-heading)' }}>Edit the world</div>
           <Mono style={{ fontSize: monoPx }}>changes apply from the next turn</Mono>
         </div>
         <button className="btn-ghost" style={{ width: narrow ? 44 : 30, height: narrow ? 44 : 30, padding: 0, flexShrink: 0, fontSize: narrow ? 18 : undefined }} onClick={onClose}>×</button>
@@ -120,7 +123,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
       <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
         {(['context', 'lore', 'plot', 'instructions', 'settings', 'cast', 'locations'] as const).map((t) => (
           <Chip key={t} active={tab === t} onClick={() => setTab(t)}>
-            {t === 'context' ? 'Context' : t[0].toUpperCase() + t.slice(1)}
+            {t === 'context' ? 'Context' : t === 'locations' ? 'Places' : t[0].toUpperCase() + t.slice(1)}
           </Chip>
         ))}
       </div>
@@ -148,7 +151,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <input key={world.id + '-line-' + aiVersion} defaultValue={world.line}
                 onBlur={(e) => patchWorld({ line: e.target.value })} />
             </Field>
-            <Field label="World bible — lore" note="setting, rules, pressures · narrator / character / guest">
+            <Field label="World bible — lore" note="setting, rules · narrator / character / guest">
               <textarea key={world.id + '-bible-' + aiVersion} rows={14} defaultValue={world.bible}
                 onBlur={(e) => patchWorld({ bible: e.target.value })}
                 style={{ fontFamily: 'Spectral, serif', fontSize: 14.5, lineHeight: 1.65 }} />
@@ -171,7 +174,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
 
         {tab === 'plot' && (
           <>
-            <Field label={`Season ${season.number} premise`} note="living plot pressure — updates when you wrap an episode">
+            <Field label={`Season ${season.number} premise`} note="what’s live this season — updates when you wrap an episode">
               <textarea key={season.id + '-premise-' + aiVersion} rows={5} defaultValue={season.premise}
                 onBlur={(e) => patchSeason({ premise: e.target.value })}
                 style={{ fontFamily: 'Spectral, serif', fontSize: 14.5, lineHeight: 1.65 }} />
@@ -224,7 +227,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                   setDay(dayFromParts(cal, year, monthIndex, dayOfMonth));
                 return (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: '#f0eee9' }}>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: 'var(--ink-heading)' }}>
                       {formatStoryDateShort(cal, cal.currentDay)}
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -392,7 +395,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <input key={episode.id + '-title'} defaultValue={episode.title}
                 onBlur={(e) => patchEpisode({ title: e.target.value })} />
             </Field>
-            <Field label="Episode location note" note="free text · pick a saved location from the Locations tab or Story Direct">
+            <Field label="Episode location note" note="free text · pick a saved location from the Places tab or Story Direct">
               <textarea key={episode.id + '-loc'} rows={2} defaultValue={episode.location}
                 onBlur={(e) => {
                   const text = e.target.value;
@@ -420,8 +423,21 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
 
         {tab === 'instructions' && (
           <>
+            <Field label="Story shape" note="how this world wants to play">
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {STORY_STANCES.map((s) => (
+                  <Chip
+                    key={s.id}
+                    active={storyStanceOf(world) === s.id}
+                    onClick={() => patchStance(s.id)}
+                  >
+                    {s.label}
+                  </Chip>
+                ))}
+              </div>
+            </Field>
             <Field label="World instructions" note="verbatim in narrator, character, and guest prompts">
-              <textarea key={world.id + '-custom'} rows={6} defaultValue={world.ai.customInstructions}
+              <textarea key={world.id + '-custom-' + storyStanceOf(world)} rows={6} defaultValue={world.ai.customInstructions}
                 onBlur={(e) => patchAI({ customInstructions: e.target.value })}
                 placeholder="Themes to circle, imagery to reuse, what the story is really about…" />
             </Field>
@@ -471,7 +487,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
               <Toggle on={world.ai.mature} onClick={() => patchAI({ mature: !world.ai.mature })} />
-              <div style={{ fontSize: 12.5, color: 'rgba(236,234,230,0.6)' }}>
+              <div style={{ fontSize: 12.5, color: 'var(--ink-muted)' }}>
                 {world.ai.mature ? 'Adult world — unrestricted' : 'General audience'}
               </div>
             </div>
@@ -539,7 +555,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               }}>
                 <div style={avatarStyle(c.hue, 34)} />
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
-                  <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>
                     {c.name || 'unnamed'}{c.isPlayer ? ' · player' : ''}
                   </div>
                   <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -563,7 +579,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
             <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
               <button className="btn-quiet" style={{ fontSize: 11, padding: '4px 6px' }} onClick={() => setCharId(null)}>← cast</button>
               <div style={avatarStyle(selected.hue, 30)} />
-              <div style={{ fontSize: 14, fontWeight: 600, color: '#f0eee9', flex: 1 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink-heading)', flex: 1 }}>
                 {selected.name || 'unnamed'}{selected.isPlayer ? ' · player' : ''}
               </div>
               <button className="btn-quiet" style={{ fontSize: 10 }} onClick={() => { onClose(); goCast(selected.id); }}>full editor</button>
@@ -648,7 +664,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                   ? { width: 34, height: 34, borderRadius: '50%', flexShrink: 0, backgroundImage: `url(${l.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center', border: '1px solid rgba(255,255,255,0.18)' }
                   : avatarStyle(l.hue, 34)} />
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
-                  <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>
                     {l.name || 'unnamed'}{episode.locationId === l.id ? ' · scene' : ''}
                   </div>
                   <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -662,7 +678,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 const l = emptyLocation(world.id, { name: 'New location' });
                 void db.locations.add(l).then(() => setLocId(l.id));
               }}>+ new location</Chip>
-              <Chip onClick={() => { onClose(); goLocations(); }}>full editor → Locations</Chip>
+              <Chip onClick={() => { onClose(); goLocations(); }}>full editor → Places</Chip>
             </div>
           </>
         )}
@@ -670,11 +686,11 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
         {tab === 'locations' && selectedLoc && (
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
-              <button className="btn-quiet" style={{ fontSize: 11, padding: '4px 6px' }} onClick={() => setLocId(null)}>← locations</button>
+              <button className="btn-quiet" style={{ fontSize: 11, padding: '4px 6px' }} onClick={() => setLocId(null)}>← places</button>
               <div style={selectedLoc.portrait
                 ? { width: 30, height: 30, borderRadius: '50%', flexShrink: 0, backgroundImage: `url(${selectedLoc.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center', border: '1px solid rgba(255,255,255,0.18)' }
                 : avatarStyle(selectedLoc.hue, 30)} />
-              <div style={{ fontSize: 14, fontWeight: 600, color: '#f0eee9', flex: 1 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink-heading)', flex: 1 }}>
                 {selectedLoc.name || 'unnamed'}
               </div>
               <button className="btn-quiet" style={{ fontSize: 10 }} onClick={() => {
@@ -818,7 +834,7 @@ function ContextPreview({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
+      <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
         What the director plans from on the next turn (soft preview, not a raw dump). Narration also gets the world bible below.
       </div>
 
@@ -865,7 +881,7 @@ function ContextPreview({
         )}
       </ContextSection>
 
-      <ContextSection title="pressure" note="season premise">
+      <ContextSection title="situation" note="season premise">
         <div style={{ whiteSpace: 'pre-wrap' }}>
           {season.premise?.trim() || '(unwritten)'}
         </div>

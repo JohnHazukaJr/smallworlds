@@ -1,15 +1,74 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
+import { useState, useSyncExternalStore, type CSSProperties, type ReactNode } from 'react';
 import { AppError, classifyError } from '../errors';
 import { ACCENT, ACCENT_RGBA } from './theme';
+import {
+  COMPACT_MAX, REGULAR_MAX, TALL_CHROME_MIN, measureViewport, phoneChrome, tabBarInset,
+  type ViewportBand
+} from './viewport';
 
+export type { ViewportBand };
+export {
+  COMPACT_MAX, REGULAR_MAX, TAB_BAR_HEIGHT, TAB_LABEL_MIN, TALL_CHROME_MIN,
+  bandForWidth, editorsStacked, phoneChrome, sheetsFromBottom, shortStoryChrome, tabBarInset
+} from './viewport';
+
+const FALLBACK_VIEWPORT = {
+  width: 1440,
+  height: 900,
+  band: 'wide' as ViewportBand,
+  keyboardOffset: 0,
+  keyboardOpen: false
+};
+
+function sameViewport(
+  a: ReturnType<typeof measureViewport>,
+  b: ReturnType<typeof measureViewport>
+) {
+  return a.width === b.width
+    && a.height === b.height
+    && a.keyboardOffset === b.keyboardOffset
+    && a.band === b.band;
+}
+
+let viewportSnap = FALLBACK_VIEWPORT;
+
+function subscribeViewport(onChange: () => void) {
+  const notify = () => onChange();
+  window.addEventListener('resize', notify);
+  window.addEventListener('orientationchange', notify);
+  const vv = window.visualViewport;
+  vv?.addEventListener('resize', notify);
+  vv?.addEventListener('scroll', notify);
+  const compactMq = window.matchMedia(`(max-width: ${COMPACT_MAX}px)`);
+  const regularMq = window.matchMedia(`(max-width: ${REGULAR_MAX}px)`);
+  const shortMq = window.matchMedia(`(max-height: ${TALL_CHROME_MIN - 1}px)`);
+  compactMq.addEventListener('change', notify);
+  regularMq.addEventListener('change', notify);
+  shortMq.addEventListener('change', notify);
+  return () => {
+    window.removeEventListener('resize', notify);
+    window.removeEventListener('orientationchange', notify);
+    vv?.removeEventListener('resize', notify);
+    vv?.removeEventListener('scroll', notify);
+    compactMq.removeEventListener('change', notify);
+    regularMq.removeEventListener('change', notify);
+    shortMq.removeEventListener('change', notify);
+  };
+}
+
+function getViewportSnapshot() {
+  const next = measureViewport(window);
+  if (!sameViewport(viewportSnap, next)) viewportSnap = next;
+  return viewportSnap;
+}
+
+export function useViewport() {
+  return useSyncExternalStore(subscribeViewport, getViewportSnapshot, () => FALLBACK_VIEWPORT);
+}
+
+/** Width only — prefer useViewport() when you need band / keyboard. */
 export function useVw(): number {
-  const [vw, setVw] = useState(typeof window !== 'undefined' ? window.innerWidth : 1440);
-  useEffect(() => {
-    const onResize = () => setVw(window.innerWidth);
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
-  return vw;
+  return useViewport().width;
 }
 
 export function Mono({ children, style }: { children: ReactNode; style?: CSSProperties }) {
@@ -51,9 +110,14 @@ export function Chip({
   );
 }
 
-export function Toggle({ on, onClick, accent = ACCENT }: { on: boolean; onClick: () => void; accent?: string }) {
+export function Toggle({ on, onClick, accent = ACCENT, label }: { on: boolean; onClick: () => void; accent?: string; label?: string }) {
   return (
     <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-pressed={on}
+      aria-label={label}
       onClick={onClick}
       style={{
         width: 44, height: 24, borderRadius: 4, flexShrink: 0,
@@ -155,7 +219,13 @@ export function ErrorNote({
         )}
       </div>
       {onDismiss && (
-        <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 14 }} onClick={onDismiss}>×</button>
+        <button
+          type="button"
+          className="btn-quiet"
+          aria-label="Dismiss"
+          style={{ padding: '0 2px', fontSize: 14 }}
+          onClick={onDismiss}
+        >×</button>
       )}
     </div>
   );
@@ -170,6 +240,42 @@ export function ClassifiedErrorNote({
   tone?: 'error' | 'warn';
 }) {
   return <ErrorNote error={classifyError(error)} onDismiss={onDismiss} tone={tone} />;
+}
+
+export function ConfirmBar({
+  title,
+  body,
+  confirmLabel = 'Confirm',
+  onConfirm,
+  onCancel
+}: {
+  title: string;
+  body?: string;
+  confirmLabel?: string;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div
+      className="glass-nudge"
+      role="alertdialog"
+      aria-labelledby="sw-confirm-title"
+      style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div id="sw-confirm-title" style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-heading)' }}>{title}</div>
+        {body && (
+          <div style={{ marginTop: 4, fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-muted)' }}>{body}</div>
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+        <button type="button" className="btn-primary" style={{ padding: '7px 12px', fontSize: 12 }} onClick={onConfirm}>
+          {confirmLabel}
+        </button>
+        <button type="button" className="btn-quiet" style={{ fontSize: 11 }} onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -187,6 +293,9 @@ export function Sheet({
   narrow: boolean;
   width?: number;
 }) {
+  const { band, keyboardOpen } = useViewport();
+  const aboveTabs = phoneChrome(band) && !keyboardOpen;
+  const dock = tabBarInset(aboveTabs);
   if (!open) return null;
   return (
     <>
@@ -194,19 +303,19 @@ export function Sheet({
         onClick={onClose}
         style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(6,7,10,0.55)', backdropFilter: 'blur(4px)' }}
       />
-      <aside style={{
-        position: 'fixed', zIndex: 51,
-        ...(narrow
-          ? { left: 0, right: 0, bottom: 0, top: '8vh', borderTop: '1px solid rgba(255,255,255,0.12)', borderRadius: '10px 10px 0 0', animation: 'wr-slide-up 0.25s ease both' }
-          : { top: 0, right: 0, bottom: 0, width, borderLeft: '1px solid rgba(255,255,255,0.12)', animation: 'wr-fade 0.25s ease both' }),
-        display: 'flex', flexDirection: 'column', gap: 0,
-        padding: 0,
-        background: 'rgba(16,18,22,0.52)', backdropFilter: 'blur(22px) saturate(140%)',
-        borderColor: 'rgba(255,255,255,0.16)',
-        boxShadow: '-12px 0 32px rgba(0,0,0,0.4)',
-        overflow: 'hidden',
-        minHeight: 0
-      }}>
+      <aside
+        className="sheet-panel"
+        style={{
+          position: 'fixed', zIndex: 51,
+          ...(narrow
+            ? { left: 0, right: 0, bottom: dock, top: '8vh', borderTop: '1px solid var(--glass-rim)', borderRadius: '12px 12px 0 0', animation: 'wr-slide-up 0.35s ease both' }
+            : { top: 0, right: 0, bottom: dock, width, borderLeft: '1px solid var(--glass-rim)', animation: 'wr-fade 0.35s ease both' }),
+          display: 'flex', flexDirection: 'column', gap: 0,
+          padding: 0,
+          overflow: 'hidden',
+          minHeight: 0
+        }}
+      >
         <div style={{
           flex: 1, minHeight: 0, overflow: 'auto',
           display: 'flex', flexDirection: 'column', gap: 16,
@@ -217,11 +326,11 @@ export function Sheet({
         {footer != null && (
           <div style={{
             flexShrink: 0,
-            borderTop: '1px solid rgba(255,255,255,0.1)',
+            borderTop: '1px solid var(--glass-rim)',
             padding: narrow
               ? '12px 16px calc(12px + env(safe-area-inset-bottom))'
               : '14px 22px 18px',
-            background: 'rgba(16,18,22,0.45)',
+            background: 'var(--glass-fill)',
             display: 'flex', flexDirection: 'column', gap: 10
           }}>
             {footer}

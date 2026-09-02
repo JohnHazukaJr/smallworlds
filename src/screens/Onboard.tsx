@@ -9,22 +9,16 @@ import { db, deleteWorld, safeWrite } from '../db';
 import { formatUserError } from '../errors';
 import { normalizeRelationships } from '../relationships';
 import { useApp } from '../store/app';
-import { useSettings } from '../store/settings';
-import type { Character, Location, Season, World, WorldAISettings } from '../types';
-import { Bar, Chip, ErrorNote, Field, Spinner, Toggle, useVw } from '../ui/bits';
+import { resolveModel, useSettings } from '../store/settings';
+import type { Character, Episode, Location, Season, World, WorldAISettings } from '../types';
+import { Bar, Chip, ErrorNote, Field, Spinner, Toggle, editorsStacked, useViewport } from '../ui/bits';
 import { fileToPortraitImage } from '../ui/image';
 import { avatarStyle, STRIPE, ACCENT } from '../ui/theme';
 import {
-  characterPortraits, createWorld, DEFAULT_AI, emptyCharacter, emptyLocation,
-  evaluateWorldWriteReady, MAX_CHARACTER_PORTRAITS, portraitsPatch, worldWriteReady
+  applyStanceToAi, characterPortraits, createWorld, DEFAULT_AI, emptyCharacter, emptyLocation,
+  evaluateWorldWriteReady, MAX_CHARACTER_PORTRAITS, portraitsPatch, shapeTagFor,
+  stanceFromShapeIndex, STORY_STANCES, worldWriteReady
 } from '../worldOps';
-
-const SHAPES = [
-  { label: 'One long story I keep returning to', line: 'Seasons, episodes, a cast that ages and remembers.' },
-  { label: 'A world I want to wander', line: 'Loose scenes, many characters, no fixed plot.' },
-  { label: 'A single character I want to know', line: 'One person, deeply modelled, many conversations.' },
-  { label: 'I want to see what happens', line: 'Start blank. Decide later.' }
-];
 
 /** Cast/place counts for bulk flesh-out, tuned by story shape. */
 function rosterTargets(shapeIndex: number): { characters: number; locations: number } {
@@ -36,7 +30,7 @@ function rosterTargets(shapeIndex: number): { characters: number; locations: num
 const SEED_KINDS = [
   { label: 'A place', line: 'Somewhere with its own weather and its own rules.' },
   { label: 'A rule', line: 'Something in this world cannot be undone.' },
-  { label: 'A pressure', line: 'Something is coming and everyone knows it.' },
+  { label: 'A situation', line: 'What is true as it opens.' },
   { label: 'Notes I already have', line: 'Paste a paragraph of notes — it gets read into a world.' }
 ];
 
@@ -53,8 +47,8 @@ const LANES = [
 
 const PROMISES = [
   { t: 'Idea → interview → world', d: 'Paste a roleplay idea; AI asks clarifying questions, then drafts bible, premise, cast, places, memory, and a cold open — you review before Enter.' },
-  { t: 'Bible, premise, cast, place', d: 'Onboard builds a write-ready world: lore, season pressure, voiced NPCs with anchors and live state, and a location with hard rules.' },
-  { t: 'Opening memory', d: 'Seed continuity facts and open threads so the first scene already has pressure to lean on.' },
+  { t: 'Bible, premise, cast, place', d: 'Onboard builds a write-ready world: lore, what’s live this season, voiced NPCs with anchors and live state, and a location with hard rules.' },
+  { t: 'Opening memory', d: 'Seed continuity facts and open threads so the first scene already has a situation to lean on.' },
   { t: 'Characters that hold a line', d: 'Behaviour anchors ride along in every Speak turn. They can refuse you, and they will.' },
   { t: 'Direct after you enter', d: 'In Story: Direct edits cast and place, pins continuity, and sets Aim targets. Wrap files memory between episodes.' },
   { t: 'Speak with delivery', d: 'On Speak or Act, pick a tone chip so the scene hears how you mean it. Reply size is Short / Medium / Long.' },
@@ -63,10 +57,10 @@ const PROMISES = [
 ];
 
 /** A not-yet-persisted world shape, just enough context for AI drafting before the world exists in the DB. */
-function previewWorld(title: string, seed: string, ai: WorldAISettings): World {
+function previewWorld(title: string, seed: string, ai: WorldAISettings, storyStance?: World['storyStance']): World {
   return {
     id: '', title: title || 'Untitled world', line: seed.slice(0, 140), bible: seed,
-    hue: 0, visibility: 'private', ai, proseModel: null, utilityModel: null, imageModel: null,
+    hue: 0, visibility: 'private', ai, storyStance, proseModel: null, utilityModel: null, imageModel: null,
     activeSeasonId: null, calendar: { currentDay: 1, system: '', weekdays: undefined, dayOneWeekday: 0, episodeAdvanceDays: 1 }, createdAt: 0, updatedAt: 0
   };
 }
@@ -77,15 +71,20 @@ function previewSeason(premise: string): Season {
 }
 
 function shapeTag(shapeIndex: number): string {
-  return `Shape: ${SHAPES[shapeIndex].label} — ${SHAPES[shapeIndex].line}`;
+  return shapeTagFor(stanceFromShapeIndex(shapeIndex));
+}
+
+async function episodeForWorld(worldId: string, cached?: Episode) {
+  return cached ?? (await db.episodes.where('worldId').equals(worldId).first());
 }
 
 export function Onboard() {
-  const vw = useVw();
-  const narrow = vw < 1000;
+  const { band } = useViewport();
+  const narrow = editorsStacked(band);
   const { go, openWorld, goCast, goLocations } = useApp();
   const matureDefault = useSettings((s) => s.matureDefault);
-  const providers = useSettings((s) => s.providers);
+  const proseModel = useSettings((s) => s.proseModel);
+  const utilityModel = useSettings((s) => s.utilityModel);
 
   const [step, setStep] = useState(0);
   const [lane, setLane] = useState(0); // 0 = From an idea, 1 = Step by step
@@ -113,8 +112,10 @@ export function Onboard() {
   const [worldId, setWorldId] = useState<string | null>(null);
   const [seasonId, setSeasonId] = useState<string | null>(null);
 
-  const hasAI = providers.length > 0;
+  const hasAI = !!resolveModel(utilityModel ?? proseModel);
   const ideaLane = lane === 0;
+  const storyStance = stanceFromShapeIndex(shape);
+  const premiseRequired = storyStance === 'longform';
 
   const characters = useLiveQuery(
     async () => (worldId ? db.characters.where('worldId').equals(worldId).toArray() : []),
@@ -155,15 +156,30 @@ export function Onboard() {
 
   const ready = useMemo(
     () => evaluateWorldWriteReady({
-      world: worldRow ?? (worldId ? previewWorld(title, seed, ai) : null),
+      world: worldRow ?? (worldId ? previewWorld(title, seed, ai, stanceFromShapeIndex(shape)) : null),
       season: season ?? (seasonId ? previewSeason(premise) : null),
       episode,
       characters,
       locations: places,
       continuityCount: continuity.length
     }),
-    [worldRow, worldId, title, seed, ai, season, seasonId, premise, episode, characters, places, continuity.length]
+    [worldRow, worldId, title, seed, ai, shape, season, seasonId, premise, episode, characters, places, continuity.length]
   );
+
+  const persistShape = (index: number) => {
+    setShape(index);
+    const stance = stanceFromShapeIndex(index);
+    setAi((prev) => {
+      const next = applyStanceToAi(prev, stance);
+      if (worldId) {
+        void safeWrite(
+          () => db.worlds.update(worldId, { storyStance: stance, ai: next, updatedAt: Date.now() }),
+          setError
+        );
+      }
+      return next;
+    });
+  };
 
   const patchAI = (p: Partial<WorldAISettings>) => {
     setAi((prev) => {
@@ -187,12 +203,12 @@ export function Onboard() {
 
   /** Current world state (title/seed/ai + who's already in it) shaped for AI context, live or not. */
   const worldContext = (): World => {
-    const base = previewWorld(title.trim(), seed.trim(), ai);
+    const base = previewWorld(title.trim(), seed.trim(), ai, storyStance);
     const bits = [shapeTag(shape)];
     const castNames = npcCast.map((c) => c.name).filter(Boolean).join(', ');
     const placeNames = places.map((l) => l.name).filter(Boolean).join(', ');
     if (castNames) bits.push(`Cast already in this world: ${castNames}.`);
-    if (placeNames) bits.push(`Locations already in this world: ${placeNames}.`);
+    if (placeNames) bits.push(`Places already in this world: ${placeNames}.`);
     return { ...base, bible: `${base.bible}\n\n${bits.join(' ')}`.trim() };
   };
 
@@ -278,7 +294,8 @@ export function Onboard() {
     if (!name && !notes) return;
     const c = emptyCharacter(worldId, { name: name || notes.slice(0, 40), summary: notes });
     await db.characters.add(c);
-    if (episode) await db.episodes.update(episode.id, { castIds: [...episode.castIds, c.id] });
+    const ep = await episodeForWorld(worldId, episode);
+    if (ep) await db.episodes.update(ep.id, { castIds: [...ep.castIds, c.id] });
     setCastName('');
     setCastNotes('');
     setExpandedCastId(c.id);
@@ -297,7 +314,8 @@ export function Onboard() {
       const sheet = await fleshOutCharacter(worldContext(), draft, existingCast);
       const c: Character = { ...draft, ...sheet, updatedAt: Date.now() };
       await db.characters.add(c);
-      if (episode) await db.episodes.update(episode.id, { castIds: [...episode.castIds, c.id] });
+      const ep = await episodeForWorld(worldId, episode);
+      if (ep) await db.episodes.update(ep.id, { castIds: [...ep.castIds, c.id] });
       setCastName('');
       setCastNotes('');
       setExpandedCastId(c.id);
@@ -331,8 +349,9 @@ export function Onboard() {
     if (!name && !notes) return;
     const l = emptyLocation(worldId, { name: name || notes.slice(0, 40), summary: notes });
     await db.locations.add(l);
-    if (episode && !episode.locationId && !episode.location && l.name) {
-      await db.episodes.update(episode.id, { location: l.name, locationId: l.id });
+    const ep = await episodeForWorld(worldId, episode);
+    if (ep && !ep.locationId && !ep.location && l.name) {
+      await db.episodes.update(ep.id, { location: l.name, locationId: l.id });
     }
     setPlaceName('');
     setPlaceNotes('');
@@ -351,8 +370,9 @@ export function Onboard() {
       const sheet = await fleshOutLocation(worldContext(), draft);
       const l: Location = { ...draft, ...sheet, updatedAt: Date.now() };
       await db.locations.add(l);
-      if (episode && !episode.locationId && !episode.location && l.name) {
-        await db.episodes.update(episode.id, { location: l.name, locationId: l.id });
+      const ep = await episodeForWorld(worldId, episode);
+      if (ep && !ep.locationId && !ep.location && l.name) {
+        await db.episodes.update(ep.id, { location: l.name, locationId: l.id });
       }
       setPlaceName('');
       setPlaceNotes('');
@@ -393,7 +413,12 @@ export function Onboard() {
   };
 
   const runSeedMemory = async () => {
-    if (!worldId || !seasonId || !episode || !hasAI) return;
+    if (!worldId || !seasonId || !hasAI) return;
+    const ep = await episodeForWorld(worldId, episode);
+    if (!ep) {
+      setError('Episode is still opening — wait a moment and try again.');
+      return;
+    }
     setBusy('Seeding opening memory…');
     setError('');
     try {
@@ -401,7 +426,7 @@ export function Onboard() {
       const s = await db.seasons.get(seasonId);
       if (!world || !s) throw new Error('World not found.');
       const cast = await db.characters.where('worldId').equals(worldId).toArray();
-      await seedOpeningMemory(world, s, episode, cast);
+      await seedOpeningMemory(world, s, ep, cast);
     } catch (e) {
       setError(formatUserError(e));
     } finally {
@@ -410,14 +435,19 @@ export function Onboard() {
   };
 
   const runColdOpen = async () => {
-    if (!worldId || !seasonId || !episode || !hasAI) return;
+    if (!worldId || !seasonId || !hasAI) return;
+    const ep = await episodeForWorld(worldId, episode);
+    if (!ep) {
+      setError('Episode is still opening — wait a moment and try again.');
+      return;
+    }
     setBusy('Drafting cold open…');
     setError('');
     try {
       const world = await db.worlds.get(worldId);
       const s = await db.seasons.get(seasonId);
       if (!world || !s) throw new Error('World not found.');
-      const text = await draftColdOpenNarration(world, s, episode);
+      const text = await draftColdOpenNarration(world, s, ep);
       if (!text) setGateNote('Episode already has turns — cold open skipped.');
     } catch (e) {
       setError(formatUserError(e));
@@ -463,7 +493,7 @@ export function Onboard() {
 
   const checklistPanel = (compact: boolean) => (
     <div className="craft-row" style={{ padding: compact ? '12px 14px' : '14px 16px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div style={{ fontSize: compact ? 12.5 : 13.5, fontWeight: 600, color: '#f0eee9' }}>
+      <div style={{ fontSize: compact ? 12.5 : 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>
         {compact ? 'Write-ready' : 'Write-ready checklist'}
       </div>
       {ready.ok ? (
@@ -556,23 +586,30 @@ export function Onboard() {
    * so the user can review generated people (places + memory still ahead).
    */
   const runFleshEverything = async (opts?: { jumpToReview?: boolean }) => {
-    if (!worldId || !seasonId || !episode || !hasAI) return;
+    if (!worldId || !seasonId) return;
+    if (!hasAI) {
+      setError('Pick a writing model in Settings first.');
+      return;
+    }
+    const ep = await episodeForWorld(worldId, episode);
+    if (!ep) {
+      setError('Episode is still opening — wait a moment and try again.');
+      return;
+    }
     setError('');
     setBusy('Fleshing lore…');
     try {
       const world = await db.worlds.get(worldId);
       const s = await db.seasons.get(seasonId);
       if (!world || !s) throw new Error('World not found — finish giving it one true thing first.');
-      // Persist shape intent once if custom instructions are empty.
-      let liveWorld = world;
-      if (!(world.ai.customInstructions ?? '').trim()) {
-        const tagged = { ...world.ai, customInstructions: shapeTag(shape) };
-        await db.worlds.update(world.id, { ai: tagged, updatedAt: Date.now() });
-        setAi(tagged);
-        liveWorld = { ...world, ai: tagged };
-      }
+      // Persist stance (and a Shape: tag when instructions are still generated/empty).
+      const stance = stanceFromShapeIndex(shape);
+      const nextAi = applyStanceToAi(world.ai, stance);
+      await db.worlds.update(world.id, { storyStance: stance, ai: nextAi, updatedAt: Date.now() });
+      setAi(nextAi);
+      const liveWorld = { ...world, storyStance: stance, ai: nextAi };
       const targets = rosterTargets(shape);
-      await fleshOutWorldEverything(liveWorld, s, episode, {
+      await fleshOutWorldEverything(liveWorld, s, ep, {
         shape: shapeTag(shape),
         targetCharacters: targets.characters,
         targetLocations: targets.locations,
@@ -606,7 +643,7 @@ export function Onboard() {
       return false;
     }
     if (!hasAI) {
-      setError('Add an AI provider in Settings to use From an idea — or switch to Step by step.');
+      setError('Pick a writing model in Settings to use From an idea — or switch to Step by step.');
       return false;
     }
     setError('');
@@ -620,6 +657,7 @@ export function Onboard() {
           line: text.slice(0, 140),
           bible: text,
           premise: '',
+          storyStance: stanceFromShapeIndex(shape),
           ai: { ...ai, customInstructions: custom }
         });
         wid = world.id;
@@ -642,7 +680,7 @@ export function Onboard() {
         // Fallback questions if the model returns nothing
         setInterviewQs([
           { id: 'who', question: 'Who are you in this story, and what do you want as it opens?', hint: 'e.g. A smuggler under a false name, trying to keep the ledger quiet.' },
-          { id: 'pressure', question: 'What pressure will not wait — the opening conflict?', hint: 'e.g. Someone is asking about your handwriting.' },
+          { id: 'situation', question: 'What is true as it opens?', hint: 'e.g. Someone is asking about your handwriting — or nothing urgent, just the weather and who is in the room.' },
           { id: 'cast', question: 'Who shares the opening scene with you?', hint: 'e.g. The registrar who saw the false signature.' },
           { id: 'place', question: 'Where does episode 1 open, and what rule does that place enforce?', hint: 'e.g. The long room above customs — nothing spoken there is public unless carried downstairs.' },
           { id: 'walls', question: 'What must the narrator never do, and what content is off-limits?', hint: 'e.g. Never kill a named character off-page. No sexual content involving minors.' }
@@ -663,7 +701,7 @@ export function Onboard() {
   /** Idea lane: merge answers into the world, then flesh everything and jump to review. */
   const generateFromInterview = async () => {
     if (!hasAI) {
-      setError('Add an AI provider in Settings to generate from an idea.');
+      setError('Pick a writing model in Settings to generate from an idea.');
       return false;
     }
     const text = idea.trim() || seed.trim();
@@ -699,6 +737,7 @@ export function Onboard() {
           line: brief.line,
           bible: brief.bible,
           premise: brief.premise,
+          storyStance: stanceFromShapeIndex(shape),
           ai: nextAi
         });
         wid = world.id;
@@ -711,6 +750,7 @@ export function Onboard() {
           line: brief.line,
           bible: brief.bible,
           ai: nextAi,
+          storyStance: stanceFromShapeIndex(shape),
           updatedAt: Date.now()
         });
         if (sid) await db.seasons.update(sid, { premise: brief.premise });
@@ -760,8 +800,8 @@ export function Onboard() {
 
   const fleshEverythingPanel = worldId && hasAI ? (
     <div className="craft-row" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>Flesh out everything</div>
-      <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
+      <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>Flesh out everything</div>
+      <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
         Fills bible, premise, narrator rules, you, cast to roster targets, places, relationships, and opening memory.
         You review each step after — Story opens only when the write-ready checklist passes.
       </div>
@@ -787,10 +827,10 @@ export function Onboard() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <OptionList options={LANES} value={lane} onChange={(i) => { setLane(i); setInterviewQs([]); setInterviewAnswers({}); setReviewBanner(''); }} />
           <div style={{ fontSize: 12.5, fontWeight: 600, color: 'rgba(236,234,230,0.7)' }}>Story shape</div>
-          <OptionList options={SHAPES} value={shape} onChange={setShape} />
+          <OptionList options={STORY_STANCES} value={shape} onChange={persistShape} />
           {ideaLane && !hasAI && (
             <div style={{ fontSize: 12.5, color: 'oklch(0.78 0.06 195)' }}>
-              From an idea needs an AI provider. Add one in Settings, or switch to Step by step.
+              From an idea needs a writing model. Pick one in Settings, or switch to Step by step.
             </div>
           )}
         </div>
@@ -799,7 +839,7 @@ export function Onboard() {
     ideaLane
       ? {
           title: 'Describe the roleplay.',
-          body: 'Setting, who you are, the pressure that opens the story, tone — a paragraph is enough. AI will ask follow-ups next.',
+          body: 'Setting, who you are, what is true as it opens, tone — a paragraph is enough. AI will ask follow-ups next.',
           cta: 'Next — clarifying questions',
           content: (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -821,7 +861,7 @@ export function Onboard() {
         }
       : {
           title: 'Give the world one true thing.',
-          body: 'A place, a rule, a pressure. One sentence is enough to start — flesh with AI when you want a full bible, then keep editing.',
+          body: 'A place, a rule, a situation. One sentence is enough to start — flesh with AI when you want a full bible, then keep editing.',
           cta: 'Next — how it writes',
           content: (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -855,7 +895,7 @@ export function Onboard() {
           content: (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               {interviewQs.length === 0 ? (
-                <div style={{ fontSize: 13, color: 'rgba(236,234,230,0.55)' }}>
+                <div style={{ fontSize: 13, color: 'var(--ink-muted)' }}>
                   Questions appear after you continue from your idea.
                 </div>
               ) : (
@@ -870,7 +910,7 @@ export function Onboard() {
                   </Field>
                 ))
               )}
-              <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.5)' }}>
+              <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
                 Generation fills bible, premise, narrator rules, you, cast, places, relationships, opening memory, and a cold open — then opens review.
               </div>
             </div>
@@ -925,12 +965,17 @@ export function Onboard() {
                 </div>
               </div>
 
-              <Field label="Season 1 premise" note="required — the pressure the season opens under">
+              <Field
+                label="Season 1 premise"
+                note={premiseRequired ? 'required — what’s live this season' : 'optional — what’s live this season'}
+              >
                 <textarea
                   rows={3}
                   value={premise}
                   onChange={(e) => setPremiseAndSave(e.target.value)}
-                  placeholder="Where the story opens — concrete pressure, present tense. Required before you enter."
+                  placeholder={premiseRequired
+                    ? "What's live this season — concrete situation, present tense. Required before you enter."
+                    : "What's live this season — optional for this story shape."}
                 />
               </Field>
               {hasAI && (
@@ -987,17 +1032,20 @@ export function Onboard() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           {checklistPanel(true)}
           {ideaLane && (
-            <Field label="Season 1 premise" note="from your idea — edit freely">
+            <Field
+              label="Season 1 premise"
+              note={premiseRequired ? 'required — what’s live this season' : 'optional — what’s live this season'}
+            >
               <textarea
                 rows={3}
                 value={premise}
                 onChange={(e) => setPremiseAndSave(e.target.value)}
-                placeholder="Opening pressure for this season"
+                placeholder="What's live this season"
               />
             </Field>
           )}
           {!player ? (
-            <div style={{ fontSize: 13, color: 'rgba(236,234,230,0.55)' }}>Player sheet not found — go back one step and recreate the world.</div>
+            <div style={{ fontSize: 13, color: 'var(--ink-muted)' }}>Player sheet not found — go back one step and recreate the world.</div>
           ) : (
             <>
               <Field label="Who you are">
@@ -1181,7 +1229,7 @@ export function Onboard() {
           </div>
           {places.length > 0 && (
             <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }} onClick={() => openFullEditor('locations')}>
-              full editor → Locations
+              full editor → Places
             </button>
           )}
         </div>
@@ -1189,15 +1237,15 @@ export function Onboard() {
     },
     {
       title: 'Memory, then enter.',
-      body: 'Seed opening continuity and threads so episode 1 already has pressure. Enter is blocked until the write-ready checklist passes.',
+      body: 'Seed opening continuity and threads so episode 1 already has a situation to lean on. Enter is blocked until the write-ready checklist passes.',
       cta: busy ? busy : 'Enter the world',
       content: (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           {checklistPanel(false)}
 
           <div className="craft-row" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>Opening continuity</div>
-            <div style={{ fontSize: 12.5, color: 'rgba(236,234,230,0.55)' }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>Opening continuity</div>
+            <div style={{ fontSize: 12.5, color: 'var(--ink-muted)' }}>
               {continuity.length} fact{continuity.length === 1 ? '' : 's'} · {threads.length} open thread{threads.length === 1 ? '' : 's'}
               {turnCount > 0 ? ` · ${turnCount} opening turn${turnCount === 1 ? '' : 's'}` : ''}
             </div>
@@ -1222,9 +1270,9 @@ export function Onboard() {
           </div>
 
           <div className="craft-row" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>Relationships</div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>Relationships</div>
             {relationshipLines.length === 0 ? (
-              <div style={{ fontSize: 12.5, color: 'rgba(236,234,230,0.5)' }}>
+              <div style={{ fontSize: 12.5, color: 'var(--ink-muted)' }}>
                 No cast links yet — flesh cast or re-link after NPCs exist.
               </div>
             ) : (
@@ -1249,7 +1297,7 @@ export function Onboard() {
           </div>
 
           {gateNote && (
-            <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.55)' }}>{gateNote}</div>
+            <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-muted)' }}>{gateNote}</div>
           )}
         </div>
       )
@@ -1261,7 +1309,7 @@ export function Onboard() {
   const goNext = async () => {
     if (step === 0) {
       if (ideaLane && !hasAI) {
-        setError('From an idea needs an AI provider. Add one in Settings, or switch to Step by step.');
+        setError('From an idea needs a writing model. Pick one in Settings, or switch to Step by step.');
         return;
       }
       setError('');
@@ -1289,6 +1337,7 @@ export function Onboard() {
           const custom = (ai.customInstructions ?? '').trim() ? ai.customInstructions : shapeTag(shape);
           const world = await createWorld({
             title: t, line: s.slice(0, 140), bible: s, premise: '',
+            storyStance,
             ai: { ...ai, customInstructions: custom }
           });
           setWorldId(world.id);
@@ -1316,8 +1365,8 @@ export function Onboard() {
         if (!ok) return;
         return; // generateFromInterview sets step to 3
       }
-      if (!premise.trim()) {
-        setError('Season premise is required — write one or flesh it with AI.');
+      if (premiseRequired && !premise.trim()) {
+        setError('Season premise is required for a long story — write what’s live this season, or flesh it with AI.');
         return;
       }
       setStep(3);
@@ -1330,7 +1379,7 @@ export function Onboard() {
 
   return (
     <div className="fade-in" style={{ minHeight: 0, height: '100%', flex: 1, display: 'grid', gridTemplateColumns: narrow ? 'minmax(0, 1fr)' : '1.05fr 1fr' }}>
-      <div style={{ padding: narrow ? '30px 20px 46px' : '52px 44px 56px', display: 'flex', flexDirection: 'column', gap: 28, maxWidth: 660 }}>
+      <div style={{ padding: narrow ? '30px 20px 46px' : '52px 44px 56px', display: 'flex', flexDirection: 'column', gap: 28, maxWidth: 660, minWidth: 0, minHeight: 0, overflow: 'auto' }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           {steps.map((_, i) => (
             <div key={i} style={{
@@ -1345,8 +1394,8 @@ export function Onboard() {
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <h1 className="serif" style={{ fontWeight: 300, fontSize: narrow ? 32 : 42, lineHeight: 1.1, margin: 0, color: '#f8f6f2' }}>{ob.title}</h1>
-          <div style={{ fontSize: 15, lineHeight: 1.7, color: 'rgba(236,234,230,0.58)', maxWidth: '54ch' }}>{ob.body}</div>
+          <h1 className="serif" style={{ fontWeight: 300, fontSize: narrow ? 28 : 42, lineHeight: 1.1, margin: 0, color: 'var(--ink-heading)' }}>{ob.title}</h1>
+          <div style={{ fontSize: 15, lineHeight: 1.7, color: 'var(--ink-muted)', maxWidth: '54ch' }}>{ob.body}</div>
           {reviewBanner && step >= 3 && (
             <div className="craft-row" style={{ padding: '12px 14px', fontSize: 12.5, lineHeight: 1.55, color: 'oklch(0.78 0.06 195)' }}>
               {reviewBanner}
@@ -1414,7 +1463,7 @@ function SliderCard({ label, value, onChange, note, valueLabel }: {
   return (
     <div className="craft-row" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: 'rgba(236,234,230,0.92)' }}>{label}</div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-heading)' }}>{label}</div>
         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: 'oklch(0.72 0.06 195)' }}>{valueLabel}</div>
       </div>
       <Bar pct={value} />
@@ -1423,7 +1472,7 @@ function SliderCard({ label, value, onChange, note, valueLabel }: {
         onChange={(e) => onChange(Number(e.target.value))}
         style={{ padding: 0, height: 4 }}
       />
-      <div style={{ fontSize: 12, lineHeight: 1.5, color: 'rgba(236,234,230,0.5)' }}>{note}</div>
+      <div style={{ fontSize: 12, lineHeight: 1.5, color: 'var(--ink-muted)' }}>{note}</div>
     </div>
   );
 }
@@ -1458,16 +1507,16 @@ function CastCard({ c, expanded, hasAI, fleshBusy, onToggle, onRemove, onPatch, 
   };
 
   return (
-    <div className="craft-row" style={{ borderRadius: 4, overflow: 'hidden' }}>
+    <div className="craft-row" style={{ overflow: 'hidden' }}>
       <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }} onClick={onToggle}>
         <div style={{
           ...avatarStyle(c.hue, 34), flexShrink: 0,
           ...(primary ? { backgroundImage: `url(${primary})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {})
         }} />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>{c.name || 'unnamed'}{c.selfTag ? ' · me' : ''}</div>
+          <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>{c.name || 'unnamed'}{c.selfTag ? ' · me' : ''}</div>
           {c.role && (
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.5)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
               {c.role}
             </div>
           )}
@@ -1598,15 +1647,15 @@ function PlaceCard({ l, expanded, isOpening, hasAI, fleshBusy, onToggle, onRemov
   };
 
   return (
-    <div className="craft-row" style={{ borderRadius: 4, overflow: 'hidden', outline: isOpening ? `1px solid ${ACCENT}` : undefined }}>
+    <div className="craft-row" style={{ overflow: 'hidden', outline: isOpening ? `1px solid ${ACCENT}` : undefined }}>
       <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }} onClick={onToggle}>
         <div style={{ ...avatarStyle(l.hue, 34), flexShrink: 0, ...(l.portrait ? { backgroundImage: `url(${l.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}) }} />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>
+          <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>
             {l.name || 'unnamed'}{isOpening ? ' · opening' : ''}
           </div>
           {l.tagline && (
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.5)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
               {l.tagline}
             </div>
           )}

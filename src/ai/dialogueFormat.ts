@@ -63,6 +63,40 @@ export function hasSpokenDialogue(raw: string): boolean {
   return parseSpeakSegments(raw).some((s) => s.kind === 'speech' && s.text.trim().length > 0);
 }
 
+/** True when spoken dialogue asks something — later speak beats should wait for the player. */
+export function speakHoldsForPlayer(raw: string): boolean {
+  return parseSpeakSegments(raw).some((s) => s.kind === 'speech' && /\?/.test(s.text));
+}
+
+/**
+ * Keep *action* from an action-only first attempt when the dialogue retry
+ * returns speech without a physical beat.
+ */
+export function stitchSpeakRetry(first: string, retried: string): string {
+  const second = retried.trim();
+  if (!second) return first.trim();
+  if (!hasSpokenDialogue(second)) return first.trim() || second;
+  if (parseSpeakSegments(second).some((s) => s.kind === 'action')) return second;
+  const actions = parseSpeakSegments(first).filter((s) => s.kind === 'action');
+  if (actions.length === 0) return second;
+  return `${actions.map((a) => `*${a.text}*`).join(' ')} ${second}`.trim();
+}
+
+/**
+ * Drop leaked `Name: "dialogue"` lines from narrator prose so they cannot
+ * render as a second NPC voice.
+ */
+export function stripNarratorEmbeddedDialogue(raw: string): string {
+  const text = normalizeQuotes(raw);
+  if (!text.trim()) return '';
+  const stripped = text
+    .replace(/(?:^|\n)[ \t]*[A-Z][^:\n]{0,48}:[ \t]*"[^"]*"[ \t]*/g, '\n')
+    .replace(/[ \t]+[A-Z][^:\n]{0,48}:[ \t]*"[^"]*"/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  return stripped;
+}
+
 /**
  * Display-only cleanup for mid-stream speak text.
  * Drops dangling open `*` / `"` so the preview does not flash raw delimiters,
@@ -202,7 +236,8 @@ export const SPEAK_FORMAT_RULES =
   '- Physical looks, gestures, mannerisms, and body language go inside *asterisks* outside the spoken quotes.\n' +
   '- Words said aloud go inside "double quotes" only.\n' +
   '- Vocal stress on a word: wrap it in *asterisks* or **double asterisks** inside the quotes (shown bold). Example: "I *said* leave."\n' +
-  '- Prefer one tight reply: a short *action* plus one or two spoken lines. Do not monologue or lecture.\n' +
+  '- Prefer one tight reply: a short *action* plus one spoken line (two only if the second is a single short question).\n' +
+  '- At most one question. If you ask the player something, stop there — do not keep talking, pile on follow-ups, or answer yourself.\n' +
   '- Use a blank line only when tone truly shifts mid-reply; most replies need none.\n' +
   '- Examples (match the speaker\'s own voice — these are format only):\n' +
   '  *doesn\'t look up from the ledger* "Say it again. Slower."\n' +

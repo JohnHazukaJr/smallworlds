@@ -2,7 +2,7 @@ import { db, uid } from './db';
 import { evaluateCalendarEvents } from './calendarEvents';
 import { useSettings } from './store/settings';
 import type {
-  Character, Episode, Location, PlotTarget, Season, World, WorldAISettings, WorldCalendar
+  Character, Episode, Location, PlotTarget, Season, StoryStance, World, WorldAISettings, WorldCalendar
 } from './types';
 
 /** Max pending plot targets stored on an episode or season. */
@@ -334,12 +334,159 @@ export const DEFAULT_AI: WorldAISettings = {
   mature: true
 };
 
+export const STORY_STANCES: Array<{ id: StoryStance; label: string; line: string }> = [
+  { id: 'longform', label: 'One long story I keep returning to', line: 'Seasons, episodes, a cast that ages and remembers.' },
+  { id: 'wander', label: 'A world I want to wander', line: 'Loose scenes, many characters, no fixed plot.' },
+  { id: 'intimate', label: 'A single character I want to know', line: 'One person, deeply modelled, many conversations.' },
+  { id: 'sandbox', label: 'I want to see what happens', line: 'Start blank. Decide later.' }
+];
+
+export function shapeTagFor(stance: StoryStance): string {
+  const row = STORY_STANCES.find((s) => s.id === stance) ?? STORY_STANCES[0];
+  return `Shape: ${row.label} — ${row.line}`;
+}
+
+export function stanceFromShapeIndex(index: number): StoryStance {
+  return STORY_STANCES[index]?.id ?? 'longform';
+}
+
+export function shapeIndexFromStance(stance: StoryStance): number {
+  const i = STORY_STANCES.findIndex((s) => s.id === stance);
+  return i >= 0 ? i : 0;
+}
+
+export function isGeneratedShapeTag(custom: string): boolean {
+  const t = custom.trim();
+  return STORY_STANCES.some((s) => t === `Shape: ${s.label} — ${s.line}`);
+}
+
+export function inferStanceFromInstructions(custom: string): StoryStance | null {
+  const t = custom.trim();
+  if (!t) return null;
+  for (const s of STORY_STANCES) {
+    if (t.includes(`Shape: ${s.label}`)) return s.id;
+  }
+  return null;
+}
+
+export function storyStanceOf(
+  world: Pick<World, 'storyStance' | 'ai'> | null | undefined
+): StoryStance {
+  if (world?.storyStance && STORY_STANCES.some((s) => s.id === world.storyStance)) {
+    return world.storyStance;
+  }
+  return inferStanceFromInstructions(world?.ai.customInstructions ?? '') ?? 'longform';
+}
+
+export function protagonistRoleForPov(pov: WorldAISettings['pov']): string {
+  if (pov === 'first') return 'protagonist · first person';
+  if (pov === 'third') return 'protagonist · third person';
+  return 'protagonist · second person';
+}
+
+export function povPersonLabel(pov: WorldAISettings['pov']): string {
+  if (pov === 'first') return 'first person';
+  if (pov === 'third') return 'third person';
+  return 'second person';
+}
+
+/** Add or remove an NPC from the open episode. The player always stays in scene. */
+export function nextSceneCastIds(castIds: string[], characterId: string, isPlayer: boolean): string[] {
+  if (isPlayer) {
+    return castIds.includes(characterId) ? castIds : [...castIds, characterId];
+  }
+  return castIds.includes(characterId)
+    ? castIds.filter((id) => id !== characterId)
+    : [...castIds, characterId];
+}
+
+/** Episodes whose scene card is this place and whose display name is stale. */
+export function sceneLocationNamePatches(
+  episodes: Array<{ id: string; locationId?: string | null; location: string }>,
+  placeId: string,
+  name: string
+): Array<{ id: string; location: string }> {
+  const next = name.trim();
+  if (!next) return [];
+  return episodes
+    .filter((e) => e.locationId === placeId && e.location !== next)
+    .map((e) => ({ id: e.id, location: next }));
+}
+
+/** Keep episode.location in sync when a linked place is renamed. */
+export async function syncSceneLocationName(
+  place: Pick<Location, 'id' | 'name' | 'worldId'>
+): Promise<number> {
+  const episodes = await db.episodes.where('worldId').equals(place.worldId).toArray();
+  const patches = sceneLocationNamePatches(episodes, place.id, place.name);
+  if (patches.length === 0) return 0;
+  const now = Date.now();
+  await Promise.all(patches.map((p) => db.episodes.update(p.id, { location: p.location, updatedAt: now })));
+  return patches.length;
+}
+
+/** Episode ids whose scene still points at a place that is being removed. */
+export function sceneLocationClearPatches(
+  episodes: Array<{ id: string; locationId?: string | null }>,
+  placeId: string
+): string[] {
+  return episodes.filter((e) => e.locationId === placeId).map((e) => e.id);
+}
+
+/** Drop a deleted place from every episode that used it as the scene. */
+export async function clearDeletedPlaceFromEpisodes(
+  place: Pick<Location, 'id' | 'worldId'>
+): Promise<number> {
+  const episodes = await db.episodes.where('worldId').equals(place.worldId).toArray();
+  const ids = sceneLocationClearPatches(episodes, place.id);
+  if (ids.length === 0) return 0;
+  const now = Date.now();
+  await Promise.all(ids.map((id) => db.episodes.update(id, {
+    locationId: null, location: '', updatedAt: now
+  })));
+  return ids.length;
+}
+
+/** Episodes that still list a character who is leaving the world. */
+export function pruneCharacterFromEpisodePatches(
+  episodes: Array<{ id: string; castIds: string[] }>,
+  characterId: string
+): Array<{ id: string; castIds: string[] }> {
+  return episodes
+    .filter((e) => e.castIds.includes(characterId))
+    .map((e) => ({ id: e.id, castIds: e.castIds.filter((id) => id !== characterId) }));
+}
+
+/** Remove a deleted character from every episode scene list in the world. */
+export async function pruneDeletedCharacterFromEpisodes(
+  worldId: string,
+  characterId: string
+): Promise<number> {
+  const episodes = await db.episodes.where('worldId').equals(worldId).toArray();
+  const patches = pruneCharacterFromEpisodePatches(episodes, characterId);
+  if (patches.length === 0) return 0;
+  const now = Date.now();
+  await Promise.all(patches.map((p) => db.episodes.update(p.id, {
+    castIds: p.castIds, updatedAt: now
+  })));
+  return patches.length;
+}
+
+/** Replace a generated Shape: line; leave author-written instructions alone. */
+export function applyStanceToAi(ai: WorldAISettings, stance: StoryStance): WorldAISettings {
+  const tag = shapeTagFor(stance);
+  const cur = (ai.customInstructions ?? '').trim();
+  if (!cur || isGeneratedShapeTag(cur)) return { ...ai, customInstructions: tag };
+  return ai;
+}
+
 export interface NewWorldInput {
   title: string;
   line: string;
   bible: string;
   premise: string;
   hue?: number;
+  storyStance?: StoryStance;
   /** overrides for the world's narrator settings; merges onto defaults */
   ai?: Partial<WorldAISettings>;
 }
@@ -351,6 +498,8 @@ export async function createWorld(input: NewWorldInput): Promise<World> {
   const worldId = uid();
   const seasonId = uid();
 
+  const storyStance = input.storyStance ?? 'longform';
+  const mergedAi = { ...DEFAULT_AI, mature: s.matureDefault, ...input.ai };
   const world: World = {
     id: worldId,
     title: input.title || 'Untitled world',
@@ -358,7 +507,8 @@ export async function createWorld(input: NewWorldInput): Promise<World> {
     bible: input.bible,
     hue: input.hue ?? Math.floor(Math.random() * 360),
     visibility: s.defaultVisibility,
-    ai: { ...DEFAULT_AI, mature: s.matureDefault, ...input.ai },
+    ai: applyStanceToAi(mergedAi, storyStance),
+    storyStance,
     proseModel: null,
     utilityModel: null,
     imageModel: null,
@@ -390,7 +540,7 @@ export async function createWorld(input: NewWorldInput): Promise<World> {
   };
 
   const player: Character = emptyCharacter(worldId, {
-    name: 'you', role: 'protagonist · second person', hue: 60, isPlayer: true
+    name: 'you', role: protagonistRoleForPov(mergedAi.pov), hue: 60, isPlayer: true
   });
 
   const episode: Episode = {
@@ -462,7 +612,7 @@ export interface WorldWriteReadyResult {
   warnings: string[];
 }
 
-const BIBLE_MIN_CHARS = 120;
+export const BIBLE_MIN_CHARS = 120;
 
 /** Generic filler rule formerly auto-injected — soft-warn if still present. */
 export const GENERIC_LOCATION_RULE =
@@ -508,7 +658,9 @@ export function evaluateWorldWriteReady(opts: {
   if (world.bible.trim().length < BIBLE_MIN_CHARS) {
     missing.push(`Expand the world bible (at least ${BIBLE_MIN_CHARS} characters)`);
   }
-  if (!season?.premise?.trim()) missing.push('Write a season premise');
+  if (storyStanceOf(world) === 'longform' && !season?.premise?.trim()) {
+    missing.push('Write a season premise (what’s live this season)');
+  }
 
   const player = characters.find((c) => c.isPlayer);
   if (!player) missing.push('Player character is missing');

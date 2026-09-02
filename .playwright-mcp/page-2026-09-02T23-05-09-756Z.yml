@@ -1,0 +1,97 @@
+- generic [ref=f5e4]:
+  - navigation [ref=f5e63]:
+    - generic [ref=f5e64]:
+      - generic [ref=f5e65]: Small Worlds
+      - generic [ref=f5e66]: Make a world. Live in it.
+    - generic [ref=f5e67]:
+      - button "01 Worlds" [ref=f5e68] [cursor=pointer]:
+        - generic [ref=f5e69]: "01"
+        - generic [ref=f5e70]: Worlds
+      - button "02 Story" [ref=f5e71] [cursor=pointer]:
+        - generic [ref=f5e72]: "02"
+        - generic [ref=f5e73]: Story
+      - button "03 Cast" [ref=f5e74] [cursor=pointer]:
+        - generic [ref=f5e75]: "03"
+        - generic [ref=f5e76]: Cast
+      - button "04 Places" [ref=f5e77] [cursor=pointer]:
+        - generic [ref=f5e78]: "04"
+        - generic [ref=f5e79]: Places
+      - button "05 Settings" [ref=f5e80] [cursor=pointer]:
+        - generic [ref=f5e81]: "05"
+        - generic [ref=f5e82]: Settings
+      - button "06 Profile" [ref=f5e83] [cursor=pointer]:
+        - generic [ref=f5e84]: "06"
+        - generic [ref=f5e85]: Profile
+      - button "07 New world" [ref=f5e86] [cursor=pointer]:
+        - generic [ref=f5e87]: "07"
+        - generic [ref=f5e88]: New world
+    - generic [ref=f5e89]:
+      - generic [ref=f5e90]:
+        - generic [ref=f5e91]: Instrument
+        - generic [ref=f5e92]: no model configured
+        - generic [ref=f5e93]: set one in Settings
+      - generic [ref=f5e94]: The Registrar
+  - main [ref=f5e5]:
+    - generic [ref=f5e27]:
+      - generic [ref=f5e29]:
+        - generic [ref=f5e97]:
+          - generic [ref=f5e98]: The Registrar
+          - generic [ref=f5e99]: Season 1 · episode 1 · the long room · Monday, 1 January, Year 1 · day 1 · Bloom
+        - generic [ref=f5e33]:
+          - generic [ref=f5e100]:
+            - button "Write" [ref=f5e101] [cursor=pointer]
+            - button "Read" [ref=f5e102] [cursor=pointer]
+          - button "Direct" [ref=f5e35] [cursor=pointer]
+          - button "End episode" [ref=f5e36] [cursor=pointer]
+          - generic [ref=f5e103]:
+            - generic [ref=f5e104]: Scroll
+            - button "Auto" [ref=f5e105] [cursor=pointer]
+            - button "Scene photo" [ref=f5e106] [cursor=pointer]
+            - button "Place photo" [ref=f5e107] [cursor=pointer]
+            - button "Climate" [ref=f5e108] [cursor=pointer]
+            - button "Off" [ref=f5e109] [cursor=pointer]
+          - generic [ref=f5e110]:
+            - generic [ref=f5e111]: mood
+            - button "Ember" [ref=f5e112] [cursor=pointer]
+            - button "Ash" [ref=f5e114] [cursor=pointer]
+            - button "Frost" [ref=f5e116] [cursor=pointer]
+            - button "Rot" [ref=f5e118] [cursor=pointer]
+            - button "Dusk" [ref=f5e120] [cursor=pointer]
+            - button "Bloom" [ref=f5e122] [cursor=pointer]
+            - button "Storm" [ref=f5e124] [cursor=pointer]
+            - button "Brine" [ref=f5e126] [cursor=pointer]
+          - button "Display" [ref=f5e128] [cursor=pointer]
+          - button "Edit world" [ref=f5e129] [cursor=pointer]
+      - generic [ref=f5e39]:
+        - generic: Lamp oil, salt damp, and the low grind of the harbour through the floor
+        - generic [ref=f5e40]:
+          - generic [ref=f5e41]:
+            - generic [ref=f5e42]: The long room · Monday, 1 January, Year 1 · day 1
+            - button "The Cartwright · Marisol Vey · you" [ref=f5e46] [cursor=pointer]
+          - generic [ref=f5e47]:
+            - paragraph [ref=f5e49]:
+              - generic [ref=f5e50]: T
+              - text: he long room keeps its own weather. Lamp-smoke gathers along the ceiling beams and stays there, and the tide sound comes up through the floor rather than the windows, so that every conversation held here has the shape of something overheard. The Cartwright has not touched the cup you poured. That is the first thing you notice. The second is that he has arranged the manifest pages so the false signature faces you. You could tell him the truth. You could tell him a better lie. Marisol is on the tide stairs outside and will hear either one, because the long room keeps its own weather and gives nothing back.
+            - generic [ref=f5e51]:
+              - button "Edit" [ref=f5e52] [cursor=pointer]
+              - button "Retry from here" [ref=f5e53] [cursor=pointer]
+              - button "Re-roll line" [ref=f5e54] [cursor=pointer]
+              - button "Delete" [ref=f5e55] [cursor=pointer]
+      - generic [ref=f5e56]:
+        - generic [ref=f5e130]:
+          - button "Continue" [ref=f5e131] [cursor=pointer]
+          - button "Steer" [ref=f5e132] [cursor=pointer]
+          - button "Speak" [ref=f5e133] [cursor=pointer]
+          - button "Act" [ref=f5e134] [cursor=pointer]
+        - generic [ref=f5e136]:
+          - generic "How long each narration or spoken reply runs — not story structure" [ref=f5e137]: reply size
+          - button "Short" [ref=f5e138] [cursor=pointer]
+          - button "Medium" [ref=f5e139] [cursor=pointer]
+          - button "Long" [ref=f5e140] [cursor=pointer]
+        - generic [ref=f5e60]:
+          - paragraph [ref=f5e61]: the scene continues
+          - button "Write on" [disabled] [ref=f5e62]
+        - generic [ref=f5e141]:
+          - generic [ref=f5e142]: "memory: 3 facts · 3 open threads"
+          - generic [ref=f5e143]: adult world · unrestricted
+          - generic [ref=f5e144]: Ctrl+Enter write on

@@ -1,13 +1,14 @@
 import type {
-  CalendarEvent, Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, Location, OpenThread, Season, Turn, TurnLength, World
+  CalendarEvent, Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, Location, OpenThread, Season, StoryStance, Turn, TurnLength, World
 } from '../types';
 import { isPlayerAgencyMode, worldCalendarEventPrefs } from '../types';
 import { selectCalendarEventsForPrompt } from '../calendarEvents';
-import { formatEpisodeDateRange, formatStoryDate, PLOT_TARGET_CAP, worldCalendar } from '../worldOps';
+import { formatEpisodeDateRange, formatStoryDate, PLOT_TARGET_CAP, storyStanceOf, worldCalendar } from '../worldOps';
 import type { ChatMessage } from './client';
 import { deliveryPhrase, parseDeliveryTone } from './deliveryTone';
 import { SPEAK_FORMAT_RULES } from './dialogueFormat';
-import { roomDynamicsLines, speakerCandidates } from './roomDynamics';
+import { lastOpenQuestion, roomDynamicsLines, speakerCandidates } from './roomDynamics';
+import { directorCloseGuidance, narratorCloseGuidance, stancePlaybook } from './storyStance';
 
 /** Shorter budgets when a narrator beat is one slice of a multi-agent turn. */
 const NARRATION_BEAT_TOKENS: Record<TurnLength, number> = {
@@ -21,9 +22,9 @@ const NARRATION_BEAT_TOKENS: Record<TurnLength, number> = {
  * Soft word hints in speak messages do the real anti-ramble work; tokens are a hard ceiling.
  */
 const CHARACTER_SPEAK_TOKENS: Record<TurnLength, number> = {
-  beat: 160,
-  scene: 280,
-  episode: 400
+  beat: 140,
+  scene: 220,
+  episode: 300
 };
 
 export function narrationBeatTokens(length: TurnLength): number {
@@ -45,19 +46,22 @@ export function narrationSizeHint(length: TurnLength): string {
 export function speakSizeHint(length: TurnLength): string {
   if (length === 'beat') {
     return (
-      'Keep this reply short (about 20–50 words of speech, plus a brief *action* if needed). ' +
-      'One reaction only — no monologue, no restating what just happened.'
+      'Keep this reply short (about 15–35 words of speech, plus a brief *action* if needed). ' +
+      'One reaction only — no monologue, no restating what just happened, no repeating a question they just answered. ' +
+      'At most one question; if you ask, stop and wait for the player.'
     );
   }
   if (length === 'scene') {
     return (
-      'Aim for about 30–80 words of speech (plus a short *action*). ' +
-      'Say what this beat needs and stop — leave room for the player.'
+      'Aim for about 20–50 words of speech (plus a short *action*). ' +
+      'Say what this beat needs and stop. If they just answered you, do not ask it again. ' +
+      'At most one question; if you ask the player something, do not keep talking after it.'
     );
   }
   return (
-    'About 50–120 words of speech max (plus short *actions*). ' +
-    'Still one focused reply, not a speech; cut any filler or repeated points.'
+    'About 30–70 words of speech max (plus short *actions*). ' +
+    'Still one focused reply, not a speech; cut any filler or repeated points. ' +
+    'At most one question, then yield the floor.'
   );
 }
 
@@ -676,16 +680,17 @@ function threadsBlock(
 }
 
 /** Premise (+ optional plot targets). Threads stay separate so order stays premise → targets → … → threads. */
-function pressurePremise(ctx: PromptContext, opts?: { includeSeasonMeta?: boolean }): string {
+function situationPremise(ctx: PromptContext, opts?: { includeSeasonMeta?: boolean }): string {
   const { season } = ctx;
+  const live = season.premise || 'unwritten; discover it in play.';
   if (opts?.includeSeasonMeta) {
     return (
       `## This season\nSeason ${season.number}${season.title ? ` — ${season.title}` : ''}. ` +
-      `Premise (current pressure): ${season.premise || 'unwritten; discover it in play.'}` +
+      `What's live: ${live}` +
       `${season.timeGap ? ` It opens ${season.timeGap.toLowerCase()} after the previous season.` : ''}`
     );
   }
-  return `## This season\nPremise (current pressure): ${season.premise || 'unwritten; discover it in play.'}`;
+  return `## This season\nWhat's live: ${live}`;
 }
 
 function currentLocationBlock(
@@ -791,7 +796,7 @@ function seasonBibleSection(season: Season, recapCap = SEASON_BIBLE_RECAP_CAP): 
   return (
     `## Previously (season ${season.number - 1} recap)\n${clipText(season.bible.recap, recapCap)}` +
     (beats
-      ? `\n\nCarried beats — ambient pressure from the prior season (RAISE = hot background, KEEP = alive, SOFTEN = distant echo; not the author hit-list):\n${beats}`
+      ? `\n\nCarried beats — ambient situation from the prior season (RAISE = hot background, KEEP = alive, SOFTEN = distant echo; not the author hit-list):\n${beats}`
       : '') +
     (season.bible.offscreenChanges
       ? `\n\nWhat changed during the gap:\n${clipText(season.bible.offscreenChanges, 800)}`
@@ -844,7 +849,7 @@ function calendarEventsSection(
     const lines: string[] = [];
     if (due.length > 0) {
       lines.push(
-        'Calendar due now (texture / pressure — hard+large should land; soft+small only if natural):'
+        'Calendar due now (texture / situation — hard+large should land; soft+small only if natural):'
       );
       for (const ev of due) lines.push(formatCalendarEventLine(ev, { includeSummary: true }));
     }
@@ -902,7 +907,7 @@ function storyCacheSections(ctx: PromptContext, opts: PromptBuildOpts = {}): str
   sections.push(worldBibleSection(world, tight ? 1800 : WORLD_BIBLE_CAP));
   const bible = seasonBibleSection(season, tight ? 600 : SEASON_BIBLE_RECAP_CAP);
   if (bible) sections.push(bible);
-  sections.push(pressurePremise(ctx, { includeSeasonMeta: true }));
+  sections.push(situationPremise(ctx, { includeSeasonMeta: true }));
   sections.push(episodeHeader(episode));
 
   sections.push(...currentLocationBlock(ctx, {
@@ -952,8 +957,10 @@ function worldSpineSections(
 ): string[] {
   const tight = opts.pack === 'tight';
   const sections: string[] = [];
-  const targets = plotTargetsSection(ctx.episode, ctx.season);
-  if (targets) sections.push(targets);
+  if (agent === 'narrator') {
+    const targets = plotTargetsSection(ctx.episode, ctx.season);
+    if (targets) sections.push(targets);
+  }
 
   const priorEps = tight
     ? formatPriorEpisodesSection(ctx, {
@@ -965,7 +972,7 @@ function worldSpineSections(
 
   const factCap = tight ? 8 : FACT_CAPS[agent].facts;
   const threadCap = tight ? 4 : FACT_CAPS[agent].threads;
-  const tone = agent === 'narrator' ? 'hard' : 'plausible';
+  const tone = 'hard';
   const threadKind = agent === 'narrator' ? 'narrator' : 'speak';
   const cont = continuityBlock(ctx, agent, tone, factCap);
   const threads = threadsBlock(ctx, agent, threadKind, threadCap);
@@ -1038,11 +1045,11 @@ function speakSituationPressure(ctx: PromptContext): string | null {
     ...(ctx.season.plotTargets ?? [])
   ].filter((t) => t.status === 'pending' && t.text.trim()).slice(0, 4);
   for (const t of pending) {
-    lines.push(`- Aimed pressure: ${clipText(t.text.trim(), 160)}`);
+    lines.push(`- Aimed beat: ${clipText(t.text.trim(), 160)}`);
   }
   if (lines.length === 0) return null;
   return (
-    `## Situation pressure (ambient — react if it touches you; do not force or checklist)\n` +
+    `## Situation (ambient — react if it touches you; do not force or checklist)\n` +
     lines.join('\n')
   );
 }
@@ -1083,6 +1090,7 @@ export function buildNarratorSystemPrompt(ctx: PromptContext, opts: PromptBuildO
   const sections: string[] = [];
 
   sections.push(storyCachePrefix(ctx, opts));
+  sections.push(stancePlaybook(storyStanceOf(world)));
 
   sections.push(
     `You are the narrator of "${world.title}", a longform interactive story written in collaboration with one player. ` +
@@ -1114,7 +1122,7 @@ export function buildNarratorSystemPrompt(ctx: PromptContext, opts: PromptBuildO
     `- ${pacingLine(ai)}\n` +
     `- Never write the player's dialogue, decisions, or inner monologue. Leave space for them to act.\n` +
     `- NEVER write spoken dialogue, quoted speech, or lines in the form CharacterName: "…". Named characters speak in separate turns — do not stage mute pantomime, prolonged silence, or "about to answer" beats in place of their words; cover setting and physical action, then stop.\n` +
-    `- End every response on tension or an opening, never on a tidy resolution.` +
+    `- ${narratorCloseGuidance(storyStanceOf(world))}` +
     (rules.length > 0 ? `\n${rules.map((r) => `- ${r}`).join('\n')}` : '')
   );
 
@@ -1148,6 +1156,7 @@ export function buildCharacterSystemPrompt(
   const sections: string[] = [];
 
   sections.push(storyCachePrefix(ctx, opts));
+  sections.push(stancePlaybook(storyStanceOf(world)));
 
   sections.push(
     `You ARE ${character.name} in the story "${world.title}". You speak and act only as yourself. ` +
@@ -1184,11 +1193,13 @@ export function buildCharacterSystemPrompt(
     `- Speak as ${character.name}. Match your Voice and example-line rhythm exactly — that identity stays fixed.\n` +
     `- Let Current state (goal, emotion, condition) color *this* moment; do not invent a new personality because the plot moved.\n` +
     `- Be concise: one clear reaction for this beat. Do not ramble, lecture, recap the scene, or pad with filler.\n` +
-    `- Short *action* + spoken line(s). Blank line only if tone truly shifts.\n` +
-    `- Never prefix your reply with your name or "Name:". History may show "Name: …" for clarity — your output must be only *action* and "speech".\n` +
+    `- At most one question. If you ask the player something, stop and wait — do not add more dialogue after the question.\n` +
+    `- Short *action* + one spoken line (a second line only if it is the question). Blank line only if tone truly shifts.\n` +
+    `- Never prefix your reply with your name or "Name:". History may show "[Name]" then the line — your output must be only *action* and "speech".\n` +
     `- Mark vocal stress with *asterisks* or **double asterisks** inside your quoted lines. Physical beats stay in *asterisks* outside the quotes.\n` +
     `- No narration of the room, weather, or other people — only your body and your words.\n` +
     `- Honour behaviour anchors and MUST NOT KNOW. Never soften yourself to please the player.\n` +
+    `- If the player just answered you (or the room), take the answer as heard this beat. You may doubt it or act on it — you must not ask the same question again as if they said nothing.\n` +
     (character.speechStyle ? `- Voice guide: ${character.speechStyle}\n` : '') +
     (character.exampleLines.length > 0
       ? `- Example spoken rhythm (wording only — still emit *actions* and "quotes" as required):\n${character.exampleLines.map((l) => `  ${l}`).join('\n')}\n`
@@ -1219,6 +1230,7 @@ export function buildGuestSystemPrompt(
   const sections: string[] = [];
 
   sections.push(storyCachePrefix(ctx, opts));
+  sections.push(stancePlaybook(storyStanceOf(world)));
 
   sections.push(
     `You ARE ${guest.name}, a temporary walk-on in "${world.title}" (not a permanent cast member). ` +
@@ -1235,11 +1247,13 @@ export function buildGuestSystemPrompt(
   sections.push(
     `## How you respond\n` +
     `- Speak in a short, focused reply; one reaction for this beat — no monologue or scene-stealing speech.\n` +
-    (guest.voice ? `- Voice guide: ${guest.voice}\n` : '') +
+    `- At most one question. If you ask, stop and wait for the player.\n` +
+    (guest.voice ? `- Voice guide — match this exactly; it is your whole identity this scene: ${guest.voice}\n` : '') +
     `- Optional short physical beat of your own body. Blank line only if tone truly shifts.\n` +
     `- Never prefix your reply with your name or "Name:" — only *action* and "speech".\n` +
     `- Vocal stress: *word* or **word** inside quotes. Physical beats: *asterisks* outside quotes.\n` +
-    `- Do not steal the scene from the main cast; add pressure or texture.\n` +
+    `- Do not steal the scene from the main cast; add texture.\n` +
+    `- If the player just answered a question, take the answer as heard — do not ask it again.\n` +
     `- Stay in ${ai.tense} tense for physical beats.`
   );
   sections.push(ANTI_SLOP_PROSE);
@@ -1326,7 +1340,7 @@ function turnToChatContent(
   if (t.role === 'character') {
     const name = resolveSpeakerName(t, characters, guests);
     // Keep canonical *action* "speech" markers in history so models continue the format.
-    return { role: 'assistant', content: `${name}: ${t.text}` };
+    return { role: 'assistant', content: `[${name}]\n${t.text}` };
   }
   return { role: 'assistant', content: t.text };
 }
@@ -1360,12 +1374,13 @@ export function packTurnsDetailed(
 ): PackedTurns {
   const room = totalCap - Math.max(0, systemChars);
   const budget = Math.min(HISTORY_TAIL_CHAR_BUDGET, Math.max(0, room));
+  const minKeep = room <= 0 ? 1 : PACK_MIN_TURNS;
   let used = 0;
   const reversed = [...turns].reverse();
   const keptRev: Turn[] = [];
   for (const t of reversed) {
     used += t.text.length;
-    if (used > budget && keptRev.length >= PACK_MIN_TURNS) break;
+    if (used > budget && keptRev.length >= minKeep) break;
     keptRev.push(t);
   }
   keptRev.reverse();
@@ -1470,7 +1485,7 @@ export function buildNarrationBeatMessages(
   return mergeMessages([...messages, { role: 'user', content: userContent }]);
 }
 
-/** Extra rule when the player just spoke or acted — action-only replies are not enough. */
+/** Extra rule when the player just spoke (Speak/Play) — Act may stay silent. */
 export const SPEAK_MUST_DIALOGUE =
   'This reply MUST include at least one spoken line in "double quotes". ' +
   'Action-only (*gestures*) is not enough — answer the player aloud.';
@@ -1522,7 +1537,7 @@ export function injectedSpeakBrief(opts: {
   if (hold) bits.push(`hold: ${cueClip(hold, 44)}`);
   const situation = (opts.situation ?? '').trim();
   if (situation) bits.push(cueClip(situation, 88));
-  bits.push('do not soften; leave room for the player');
+  bits.push('do not soften; register their last line; do not re-ask what they just answered');
   return `${bits.join('; ')}.`;
 }
 
@@ -1559,6 +1574,19 @@ function speakVoiceReminder(speaking: Character): string {
   return parts.length > 0 ? `${parts.join('\n')}\n\n` : '';
 }
 
+/** When the last NPC line was a question, remind the speaker the player already answered. */
+function heardAnswerCue(turns: Turn[], characters: Character[], guests: EpisodeGuest[]): string {
+  const asked = lastOpenQuestion(
+    turns,
+    speakerCandidates(characters.filter((c) => !c.isPlayer), guests)
+  );
+  if (!asked) return '';
+  return (
+    `${asked.name} asked a question that the player's last line answers. ` +
+    `Take the answer as heard this beat — do not ask it again.\n\n`
+  );
+}
+
 /** History + a character-speak instruction. */
 export function buildCharacterSpeakMessages(
   turns: Turn[],
@@ -1576,6 +1604,7 @@ export function buildCharacterSpeakMessages(
   const userContent =
     `(You are ${speaking.name}. Respond now in character.)\n` +
     speakVoiceReminder(speaking) +
+    heardAnswerCue(turns, characters, guests) +
     `Intent for this line: ${brief}\n\n` +
     `Use the required *action* "dialogue" format. No other speakers.\n` +
     `${speakSizeHint(length)}\n\n` +
@@ -1605,6 +1634,7 @@ export function buildGuestSpeakMessages(
   const userContent =
     `(You are ${guest.name}, a walk-on. Respond now.)\n` +
     voiceLine +
+    heardAnswerCue(turns, characters, guests) +
     `Intent for this line: ${brief}\n\n` +
     `${speakSizeHint(length)}\n\n` +
     SPEAK_FORMAT_RULES +
@@ -1650,7 +1680,8 @@ export function planCapsForLength(length: TurnLength): { maxSpeak: number; maxTo
 export function directorSystemPrompt(
   mode: ComposeMode,
   hasSpeakers: boolean,
-  length: TurnLength = 'scene'
+  length: TurnLength = 'scene',
+  stance: StoryStance = 'longform'
 ): string {
   const { maxSpeak, maxTotal } = planCapsForLength(length);
   const sizeLabel = length === 'beat' ? 'Short' : length === 'scene' ? 'Medium' : 'Long';
@@ -1658,7 +1689,9 @@ export function directorSystemPrompt(
     hasSpeakers && isPlayerAgencyMode(mode)
       ? 'CRITICAL: The player just spoke or acted with at least one NPC/walk-on present. ' +
         'You MUST include at least one speak beat that responds directly to that move. ' +
-        'Narration-only plans are forbidden in this case. '
+        'Narration-only plans are forbidden in this case. ' +
+        'If the last NPC line asked a question and the player answered, the speak brief must take that answer as heard ' +
+        '(use it, doubt it with a new angle, or act). Never brief the same question again as if they stayed silent. '
       : 'Not everyone must speak on every turn. ';
 
   const sizeGuidance =
@@ -1670,6 +1703,7 @@ export function directorSystemPrompt(
 
   return (
     'You are the scene director for an interactive story. ' +
+    stancePlaybook(stance) + ' ' +
     'Call plan_turn. Do not write story prose. ' +
     'Fallback shape if tools are unavailable: ' +
     '{"castDelta":{' +
@@ -1692,6 +1726,7 @@ export function directorSystemPrompt(
     'Speak characterId may be the cast id OR the exact character name (never the player). ' +
     'Narration briefs name who moves in the room and one sensory job (sight, sound, smell, temperature, or touch) — never a weather catalogue, never finished dialogue. ' +
     'Speak briefs name want or friction (answer, refuse, deflect, bargain, stall) plus tone — a single intent, never the finished line, never "give a speech" or a multi-point monologue. ' +
+    'If a speak beat asks the player a question, it must be the last speak in the plan — do not pile another voice on after an unanswered question. ' +
     'The room is not a queue: the right voice is whoever has the most at stake, not whoever spoke last or stands first in the cast list. ' +
     'A brief may have someone answer for another, cut them off, or talk past the player — see Room dynamics below. ' +
     engageReply +
@@ -1699,7 +1734,7 @@ export function directorSystemPrompt(
     `Hard cap for ${sizeLabel}: at most ${maxSpeak} speak beat${maxSpeak === 1 ? '' : 's'} and at most ${maxTotal} beats total. ` +
     'Prefer fewer, sharper speak beats over several characters holding the floor. ' +
     'Always include at least one narration beat unless the player just spoke and an immediate reply is natural — then you may open with speak. ' +
-    'End the plan on tension or an opening for the player.'
+    directorCloseGuidance(stance)
   );
 }
 
@@ -1743,6 +1778,7 @@ export function directorUserPrompt(
   }
 ): string {
   const tight = opts?.pack === 'tight';
+  const stance = storyStanceOf(ctx.world);
   const inScene = ctx.characters.filter((c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer);
   const offScene = ctx.characters.filter((c) => !ctx.episode.castIds.includes(c.id) && !c.isPlayer);
   const guests = activeGuests(ctx.episode);
@@ -1864,7 +1900,9 @@ export function directorUserPrompt(
       'Earlier this episode (summary — glue only; Continuity facts outrank this): '
     )
     : '';
-  const targets = plotTargetsSection(ctx.episode, ctx.season);
+  const targets = (stance === 'wander' || stance === 'sandbox')
+    ? null
+    : plotTargetsSection(ctx.episode, ctx.season);
   const targetsCompact = targets
     ? targets
       .replace(
@@ -1884,7 +1922,7 @@ export function directorUserPrompt(
   return (
     `World: ${ctx.world.title}\n` +
     `${calendarBlock(ctx.world, ctx.episode, 'directorLine')}\n` +
-    `Premise (current pressure): ${ctx.season.premise || '(unwritten)'}\n` +
+    `What's live: ${ctx.season.premise || '(unwritten)'}\n` +
     targetsCompact +
     calEventsCompact +
     (seasonBibleClip ? `${seasonBibleClip}\n` : '') +

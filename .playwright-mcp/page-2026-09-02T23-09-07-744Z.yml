@@ -1,0 +1,112 @@
+- generic [ref=f6e3]:
+  - main [ref=f6e5]:
+    - generic [ref=f6e297]:
+      - generic [ref=f6e298]:
+        - generic [ref=f6e299]:
+          - generic [ref=f6e300]: Inhabitants · The Registrar
+          - button "+ new" [ref=f6e302] [cursor=pointer]
+        - generic [ref=f6e303] [cursor=pointer]:
+          - generic [ref=f6e305]:
+            - generic [ref=f6e306]: Ivo Tarrant
+            - generic [ref=f6e307]: brother · owes the guild · off-page
+          - button "add" [ref=f6e308]
+        - generic [ref=f6e309] [cursor=pointer]:
+          - generic [ref=f6e311]:
+            - generic [ref=f6e312]: The Cartwright
+            - generic [ref=f6e313]: unknown · speaks in trades · in scene
+          - button "in scene" [ref=f6e314]
+        - generic [ref=f6e315] [cursor=pointer]:
+          - generic [ref=f6e317]:
+            - generic [ref=f6e318]: Marisol Vey
+            - generic [ref=f6e319]: harbour registrar · reluctant ally · in scene
+          - button "in scene" [ref=f6e320]
+        - generic [ref=f6e323] [cursor=pointer]:
+          - generic [ref=f6e324]: you
+          - generic [ref=f6e325]: protagonist · second person
+        - generic [ref=f6e326] [cursor=pointer]:
+          - generic [ref=f6e328]:
+            - generic [ref=f6e329]: Emine
+            - generic [ref=f6e330]: child of the low quarter · off-page
+          - button "add" [ref=f6e331]
+      - generic [ref=f6e332]:
+        - generic [ref=f6e333]:
+          - generic [ref=f6e334]:
+            - generic [ref=f6e335]: portrait plate · no photo yet
+            - button "Upload photo" [ref=f6e338] [cursor=pointer]
+            - generic [ref=f6e339]:
+              - generic [ref=f6e340]: plate hue
+              - slider [ref=f6e341]: "210"
+            - button "✦ Flesh out with AI" [ref=f6e344] [cursor=pointer]
+            - button "tag as \"this is me\"" [ref=f6e345] [cursor=pointer]
+            - button "add to this scene" [ref=f6e346] [cursor=pointer]
+            - button "remove from world" [ref=f6e347] [cursor=pointer]
+          - generic:
+            - generic:
+              - generic: character
+              - textbox "Name": Ivo Tarrant
+              - textbox "role · relation to the protagonist": brother · owes the guild
+            - generic:
+              - generic [ref=f6e348]:
+                - generic: current goal
+                - textbox "—": pay off the favour before you learn of it
+              - generic [ref=f6e349]:
+                - generic: emotional state
+                - textbox "—": cornered but hiding it
+              - generic [ref=f6e350]:
+                - generic: location
+                - textbox "—": the low quarter
+              - generic [ref=f6e351]:
+                - generic: condition
+                - textbox "—": in debt to the guild
+            - generic: Live state updates lightly mid-episode and fully at wrap. Voice, anchors, and psyche stay who they are.
+        - generic [ref=f6e352]:
+          - button "Persona" [ref=f6e353] [cursor=pointer]
+          - button "Voice" [ref=f6e354] [cursor=pointer]
+          - button "Psyche" [ref=f6e355] [cursor=pointer]
+          - button "Secrets" [ref=f6e356] [cursor=pointer]
+          - button "Relations" [ref=f6e357] [cursor=pointer]
+          - button "Anchors" [ref=f6e358] [cursor=pointer]
+          - button "AI notes" [ref=f6e359] [cursor=pointer]
+        - generic [ref=f6e360]:
+          - generic [ref=f6e361]:
+            - generic [ref=f6e362]:
+              - generic [ref=f6e363]: Who they are
+              - generic [ref=f6e364]: prose, not bullet points — this is the core of the sheet
+            - textbox [ref=f6e365]: Your brother, who followed you to the harbour and found his own trouble. Took guild money to cover your debt without telling you the terms. Loves you in the way that creates problems.
+          - generic [ref=f6e366]:
+            - generic [ref=f6e367]: Age / read
+            - textbox "Late thirties. Tired in a competent way." [ref=f6e369]: Early thirties, looks younger when he lies.
+          - generic [ref=f6e370]:
+            - generic [ref=f6e371]:
+              - generic [ref=f6e372]: Appearance
+              - generic [ref=f6e373]: identity the narrator keeps consistent
+            - textbox [ref=f6e374]: Dock-worker’s shoulders, a gambler’s hands, your mother’s smile.
+          - generic [ref=f6e375]:
+            - generic [ref=f6e376]:
+              - generic [ref=f6e377]: Mannerisms
+              - generic [ref=f6e378]: recurring physical habits the narrator weaves in — never all at once
+            - textbox "Cracks her knuckles one at a time when stalling. Never sits with her back to a door." [ref=f6e379]
+          - generic [ref=f6e380]:
+            - generic [ref=f6e381]:
+              - generic [ref=f6e382]: Backstory
+              - generic [ref=f6e383]: informs behaviour; the narrator reveals it only in earned fragments
+            - textbox "Where they come from, what it cost, and what they had to become to survive it." [ref=f6e384]
+  - generic [ref=f6e14]:
+    - button "Worlds" [ref=f6e15] [cursor=pointer]:
+      - generic [ref=f6e16]: ◈
+      - text: Worlds
+    - button "Story" [ref=f6e17] [cursor=pointer]:
+      - generic [ref=f6e18]: ¶
+      - text: Story
+    - button "Cast" [active] [ref=f6e19] [cursor=pointer]:
+      - generic [ref=f6e20]: ◇
+      - text: Cast
+    - button "Places" [ref=f6e21] [cursor=pointer]:
+      - generic [ref=f6e22]: ⌂
+      - text: Places
+    - button "Settings" [ref=f6e23] [cursor=pointer]:
+      - generic [ref=f6e24]: ⚙
+      - text: Settings
+    - button "Profile" [ref=f6e25] [cursor=pointer]:
+      - generic [ref=f6e26]: ◎
+      - text: Profile

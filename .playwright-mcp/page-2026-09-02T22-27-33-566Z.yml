@@ -1,0 +1,46 @@
+- generic [ref=e4]:
+  - navigation [ref=e56]:
+    - generic [ref=e57]:
+      - generic [ref=e58]: Small Worlds
+      - generic [ref=e59]: Make a world. Live in it.
+    - generic [ref=e60]:
+      - button "01 Worlds" [ref=e61] [cursor=pointer]:
+        - generic [ref=e62]: "01"
+        - generic [ref=e63]: Worlds
+      - button "02 Story" [ref=e64] [cursor=pointer]:
+        - generic [ref=e65]: "02"
+        - generic [ref=e66]: Story
+      - button "03 Cast" [ref=e67] [cursor=pointer]:
+        - generic [ref=e68]: "03"
+        - generic [ref=e69]: Cast
+      - button "04 Places" [ref=e70] [cursor=pointer]:
+        - generic [ref=e71]: "04"
+        - generic [ref=e72]: Places
+      - button "05 Settings" [ref=e73] [cursor=pointer]:
+        - generic [ref=e74]: "05"
+        - generic [ref=e75]: Settings
+      - button "06 Profile" [ref=e76] [cursor=pointer]:
+        - generic [ref=e77]: "06"
+        - generic [ref=e78]: Profile
+      - button "07 New world" [ref=e79] [cursor=pointer]:
+        - generic [ref=e80]: "07"
+        - generic [ref=e81]: New world
+    - generic [ref=e83]:
+      - generic [ref=e84]: Instrument
+      - generic [ref=e85]: no model configured
+      - generic [ref=e86]: set one in Settings
+  - main [ref=e36]:
+    - generic [ref=e87]:
+      - generic [ref=e88]:
+        - generic [ref=e89]:
+          - heading "Small Worlds" [level=1] [ref=e90]
+          - paragraph [ref=e91]: Make a world. Live in it.
+        - generic [ref=e92]:
+          - button "Import" [ref=e93] [cursor=pointer]
+          - button "New world" [ref=e94] [cursor=pointer]
+      - generic [ref=e95]:
+        - generic [ref=e96]: An empty workbench.
+        - generic [ref=e97]: Create a world of your own, or open the starter — a harbour city, a false name, a debt in the public record — to see how cast, continuity and seasons work. Everything in it is editable.
+        - generic [ref=e98]:
+          - button "Create my world" [ref=e99] [cursor=pointer]
+          - button "Open the starter" [ref=e100] [cursor=pointer]

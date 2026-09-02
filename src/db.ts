@@ -1,5 +1,6 @@
 import Dexie, { type EntityTable } from 'dexie';
 import { formatUserError, logAppError } from './errors';
+import { useApp } from './store/app';
 import { decryptString, deriveKey, encryptString, randomSalt } from './security/crypto';
 import { isQuotaError, markStoragePressure } from './storage/quota';
 import type {
@@ -325,4 +326,5 @@ export async function deleteWorld(
         await db.calendarEvents.where('worldId').equals(worldId).delete();
       });
   });
+  useApp.getState().closeWorldIf(worldId);
 }

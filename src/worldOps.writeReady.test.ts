@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { carryScenePresentation, openingScenePresentation, evaluateWorldWriteReady, emptyCharacter, emptyLocation, latestEndedEpisode, preferExistingActiveEpisode, isVagueSpeechStyle } from './worldOps';
+import { carryScenePresentation, openingScenePresentation, evaluateWorldWriteReady, emptyCharacter, emptyLocation, latestEndedEpisode, preferExistingActiveEpisode, isVagueSpeechStyle, storyStanceOf, nextSceneCastIds, protagonistRoleForPov, sceneLocationNamePatches, sceneLocationClearPatches, pruneCharacterFromEpisodePatches } from './worldOps';
 import type { Episode, Season, World, WorldAISettings } from './types';
 
 const ai: WorldAISettings = {
@@ -75,6 +75,40 @@ describe('evaluateWorldWriteReady', () => {
     expect(result.missing.some((m) => /NPC/i.test(m))).toBe(true);
     expect(result.missing.some((m) => /hard rule/i.test(m))).toBe(true);
     expect(result.warnings.some((w) => /continuity/i.test(w))).toBe(true);
+  });
+
+  it('infers wander from a Shape instruction when storyStance is unset', () => {
+    expect(storyStanceOf(world({
+      ai: { ...ai, customInstructions: 'Shape: A world I want to wander' }
+    }))).toBe('wander');
+  });
+
+  it('does not require a season premise for wander when other gates pass', () => {
+    const player = emptyCharacter('w1', {
+      id: 'p1', isPlayer: true, name: 'you', summary: 'A smuggler with a false name.',
+      appearance: 'Steady hands', desires: 'Keep the name',
+      state: { goal: 'Clear the debt', emotion: 'wary', location: 'Quay', condition: '' }
+    });
+    const npc = emptyCharacter('w1', {
+      id: 'n1', name: 'Marisol', summary: 'Harbour registrar.',
+      speechStyle: 'Clipped.', exampleLines: ['Then write it again.'],
+      mannerisms: 'Taps the stamp twice before sealing.',
+      anchors: ['Never lies in writing']
+    });
+    const loc = emptyLocation('w1', {
+      id: 'loc1', name: 'Quay', atmosphere: 'Salt and ink.',
+      rules: ['No weapons past the gate']
+    });
+    const result = evaluateWorldWriteReady({
+      world: world({ storyStance: 'wander' }),
+      season: season({ premise: '' }),
+      episode: episode(['p1', 'n1'], 'loc1'),
+      characters: [player, npc],
+      locations: [loc],
+      continuityCount: 2
+    });
+    expect(result.ok).toBe(true);
+    expect(result.missing.some((m) => /premise/i.test(m))).toBe(false);
   });
 
   it('soft-warns on thin voice, generic place rule, and missing atmosphere without blocking', () => {
@@ -213,5 +247,60 @@ describe('evaluateWorldWriteReady episode copy', () => {
     });
     expect(result.missing.some((m) => /episode 3/i.test(m))).toBe(true);
     expect(result.missing.some((m) => /episode 1/i.test(m))).toBe(false);
+  });
+});
+
+describe('scene membership helpers', () => {
+  it('toggles NPCs and keeps the player in scene', () => {
+    expect(nextSceneCastIds(['p1'], 'n1', false)).toEqual(['p1', 'n1']);
+    expect(nextSceneCastIds(['p1', 'n1'], 'n1', false)).toEqual(['p1']);
+    expect(nextSceneCastIds(['n1'], 'p1', true)).toEqual(['n1', 'p1']);
+    expect(nextSceneCastIds(['p1'], 'p1', true)).toEqual(['p1']);
+  });
+
+  it('labels protagonist role from POV', () => {
+    expect(protagonistRoleForPov('first')).toBe('protagonist · first person');
+    expect(protagonistRoleForPov('third')).toBe('protagonist · third person');
+    expect(protagonistRoleForPov('second')).toBe('protagonist · second person');
+  });
+
+  it('renames linked scene episodes and leaves others alone', () => {
+    const patches = sceneLocationNamePatches(
+      [
+        { id: 'e1', locationId: 'loc1', location: 'Old quay' },
+        { id: 'e2', locationId: 'loc1', location: 'Harbour office' },
+        { id: 'e3', locationId: 'loc2', location: 'Old quay' },
+        { id: 'e4', locationId: null, location: 'Old quay' }
+      ],
+      'loc1',
+      'Harbour office'
+    );
+    expect(patches).toEqual([{ id: 'e1', location: 'Harbour office' }]);
+  });
+
+  it('clears every episode still pointing at a deleted place', () => {
+    expect(sceneLocationClearPatches(
+      [
+        { id: 'e1', locationId: 'loc1' },
+        { id: 'e2', locationId: 'loc2' },
+        { id: 'e3', locationId: 'loc1' },
+        { id: 'e4', locationId: null }
+      ],
+      'loc1'
+    )).toEqual(['e1', 'e3']);
+  });
+
+  it('strips a deleted character from episode cast lists only', () => {
+    expect(pruneCharacterFromEpisodePatches(
+      [
+        { id: 'e1', castIds: ['p1', 'n1'] },
+        { id: 'e2', castIds: ['p1'] },
+        { id: 'e3', castIds: ['n1', 'n2'] }
+      ],
+      'n1'
+    )).toEqual([
+      { id: 'e1', castIds: ['p1'] },
+      { id: 'e3', castIds: ['n2'] }
+    ]);
   });
 });

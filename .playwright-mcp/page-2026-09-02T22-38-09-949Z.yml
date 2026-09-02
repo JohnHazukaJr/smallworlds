@@ -1,0 +1,44 @@
+- generic [ref=f2e3]:
+  - main [ref=f2e36]:
+    - generic [ref=f2e883]:
+      - generic [ref=f2e884]:
+        - generic [ref=f2e885]:
+          - heading "Small Worlds" [level=1] [ref=f2e886]
+          - paragraph [ref=f2e887]: Make a world. Live in it.
+        - generic [ref=f2e888]:
+          - button "Import" [ref=f2e889] [cursor=pointer]
+          - button "New world" [ref=f2e890] [cursor=pointer]
+      - generic [ref=f2e891]: Worlds you have made
+      - generic [ref=f2e894] [cursor=pointer]:
+        - generic [ref=f2e895]:
+          - generic [ref=f2e896]: S1 · E1
+          - generic [ref=f2e897]: Private
+        - generic [ref=f2e898]:
+          - generic [ref=f2e899]: The Registrar
+          - generic [ref=f2e900]: A port where every debt is public record, and yours is written under a false name.
+          - generic [ref=f2e901]:
+            - generic [ref=f2e902]: 4 cast
+            - generic [ref=f2e903]: 0.1k words
+            - generic [ref=f2e904]:
+              - button "compact" [ref=f2e905]
+              - button "export" [ref=f2e906]
+              - button "delete" [ref=f2e907]
+  - generic [ref=f2e727]:
+    - button "◈ Worlds" [active] [ref=f2e728] [cursor=pointer]:
+      - generic [ref=f2e729]: ◈
+      - text: Worlds
+    - button "¶ Story" [ref=f2e730] [cursor=pointer]:
+      - generic [ref=f2e731]: ¶
+      - text: Story
+    - button "◇ Cast" [ref=f2e732] [cursor=pointer]:
+      - generic [ref=f2e733]: ◇
+      - text: Cast
+    - button "⌂ Places" [ref=f2e734] [cursor=pointer]:
+      - generic [ref=f2e735]: ⌂
+      - text: Places
+    - button "⚙ Settings" [ref=f2e736] [cursor=pointer]:
+      - generic [ref=f2e737]: ⚙
+      - text: Settings
+    - button "◎ Profile" [ref=f2e738] [cursor=pointer]:
+      - generic [ref=f2e739]: ◎
+      - text: Profile

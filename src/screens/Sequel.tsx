@@ -7,7 +7,7 @@ import { useApp } from '../store/app';
 import type {
   BeatDisposition, CharacterState, SeasonWrap, WrapCharacterOutcome
 } from '../types';
-import { Chip, ErrorNote, Mono, Spinner, useVw } from '../ui/bits';
+import { Chip, ErrorNote, Mono, Spinner, phoneChrome, tabBarInset, useViewport } from '../ui/bits';
 import { avatarStyle, GAP_EFFECTS, GAP_LABELS, ACCENT, ACCENT_RGBA } from '../ui/theme';
 
 const BEAT_OPTS: Array<[BeatDisposition, string]> = [
@@ -29,20 +29,28 @@ function patchCharacter(
 }
 
 export function Sequel() {
-  const vw = useVw();
-  const narrow = vw < 780;
+  const { band } = useViewport();
+  const phone = phoneChrome(band);
+  const compact = band === 'compact';
+  const narrow = phone;
   const { currentWorldId, go } = useApp();
   const [busy, setBusy] = useState<null | 'analyze' | 'evolve' | 'premise' | 'begin'>(null);
   const [error, setError] = useState('');
   const [draft, setDraft] = useState<SeasonWrap | null>(null);
 
   const world = useLiveQuery(
-    async () => (currentWorldId ? db.worlds.get(currentWorldId) : undefined),
+    async () => {
+      if (!currentWorldId) return null;
+      return (await db.worlds.get(currentWorldId)) ?? null;
+    },
     [currentWorldId]
   );
   const season = useLiveQuery(
-    async () => (world?.activeSeasonId ? db.seasons.get(world.activeSeasonId) : undefined),
-    [world?.activeSeasonId]
+    async () => {
+      if (!world?.activeSeasonId) return null;
+      return (await db.seasons.get(world.activeSeasonId)) ?? null;
+    },
+    [world?.id, world?.activeSeasonId]
   );
   const storedWrap = useLiveQuery(
     async () => season
@@ -114,32 +122,52 @@ export function Sequel() {
     }
   };
 
-  if (!world || !season) {
+  if (currentWorldId && world === undefined) {
+    return <div style={{ padding: 60 }}><Spinner label="opening the world" /></div>;
+  }
+  if (!world) {
     return (
       <div className="fade-in" style={{ padding: narrow ? '40px 20px' : '80px 60px', display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 560 }}>
         <Mono>no world open</Mono>
-        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: '#f8f6f2' }}>Open a world to review its season.</div>
+        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: 'var(--ink-heading)' }}>Open a world to review its season.</div>
         <div><button className="btn-primary" onClick={() => go('library')}>Go to Worlds</button></div>
       </div>
     );
   }
+  if (world.activeSeasonId && season === undefined) {
+    return <div style={{ padding: 60 }}><Spinner label="opening the season" /></div>;
+  }
+  if (!season) {
+    return (
+      <div className="fade-in" style={{ padding: narrow ? '40px 20px' : '80px 60px', display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 560 }}>
+        <Mono>no season</Mono>
+        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: 'var(--ink-heading)' }}>This world has no season to review.</div>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <button className="btn-primary" onClick={() => go('story')}>Back to story</button>
+          <button className="btn-ghost" onClick={() => go('library')}>Go to Worlds</button>
+        </div>
+      </div>
+    );
+  }
 
-  const pad = narrow ? '26px 18px 70px' : '42px 46px 70px';
-  const contentPadBottom = narrow && draft
-    ? `calc(${STICKY_BAR_RESERVE}px + env(safe-area-inset-bottom) + 58px)`
-    : undefined;
+  const pagePad = {
+    paddingTop: phone ? 'calc(26px + env(safe-area-inset-top))' : 42,
+    paddingRight: phone ? 18 : 46,
+    paddingBottom: (phone && draft ? STICKY_BAR_RESERVE : 70) as number | string,
+    paddingLeft: phone ? 18 : 46
+  };
 
   // ---------- stage 1: no analysis yet ----------
   if (!draft) {
     return (
-      <div className="fade-in" style={{ padding: pad, maxWidth: 1020 }}>
+      <div className="fade-in" style={{ ...pagePad, maxWidth: 1020 }}>
         <button className="btn-quiet" style={{ fontSize: 12, marginBottom: 16, alignSelf: 'flex-start' }}
           onClick={() => go('story')}>← Back to story</button>
         <Mono style={{ letterSpacing: '0.16em', marginBottom: 11 }}>season {season.number} · {episodeCount} episode{episodeCount === 1 ? '' : 's'} so far</Mono>
-        <h1 className="serif" style={{ fontWeight: 300, fontSize: narrow ? 30 : 40, lineHeight: 1.12, margin: '0 0 11px', color: '#f8f6f2' }}>
+        <h1 className="serif" style={{ fontWeight: 300, fontSize: compact ? 26 : phone ? 30 : 40, lineHeight: 1.12, margin: '0 0 11px', color: 'var(--ink-heading)' }}>
           When the season ends, tell me what mattered.
         </h1>
-        <div style={{ fontSize: 14.5, lineHeight: 1.65, color: 'rgba(236,234,230,0.58)', maxWidth: '62ch', marginBottom: 28 }}>
+        <div style={{ fontSize: 14.5, lineHeight: 1.65, color: 'var(--ink-muted)', maxWidth: '62ch', marginBottom: 28 }}>
           The review reads the whole season back and proposes the beats that will shape the next one. You mark each
           beat — drop it and it stays in the past, raise it and the cast arrives already carrying it. Then a time gap,
           who returns, and the premise the next season opens on.
@@ -180,21 +208,18 @@ export function Sequel() {
 
   return (
     <div className="fade-in" style={{ position: 'relative', maxWidth: 1020 }}>
-      <div style={{
-        padding: pad,
-        paddingBottom: contentPadBottom ?? (narrow ? 70 : 70)
-      }}>
+      <div style={pagePad}>
         <button className="btn-quiet" style={{ fontSize: 12, marginBottom: 16 }}
           onClick={() => go('story')}>← Back to story</button>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 11, marginBottom: 28 }}>
           <Mono style={{ letterSpacing: '0.16em' }}>season {season.number} closing · season {season.number + 1} setup</Mono>
-          <h1 className="serif" style={{ fontWeight: 300, fontSize: narrow ? 30 : 40, lineHeight: 1.12, margin: 0, color: '#f8f6f2' }}>
+          <h1 className="serif" style={{ fontWeight: 300, fontSize: compact ? 26 : phone ? 30 : 40, lineHeight: 1.12, margin: 0, color: 'var(--ink-heading)' }}>
             Before we go on, tell me what mattered.
           </h1>
-          <div style={{ fontSize: 14.5, lineHeight: 1.65, color: 'rgba(236,234,230,0.58)', maxWidth: '62ch' }}>
+          <div style={{ fontSize: 14.5, lineHeight: 1.65, color: 'var(--ink-muted)', maxWidth: '62ch' }}>
             I read the whole season back. Here is what I think happened. Mark what should shape the next one — anything
-            you drop stays in the past, anything you raise becomes pressure the characters carry into season {season.number + 1}.
+            you drop stays in the past, anything you raise becomes situation the characters carry into season {season.number + 1}.
           </div>
         </div>
 
@@ -230,8 +255,8 @@ export function Sequel() {
 
         {/* beats */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 11, marginBottom: 34 }}>
-          <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.5)', marginBottom: 4 }}>
-            Raised beats become season plot targets the director works toward. Keep/Soften stay as ambient pressure in the season bible.
+          <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-muted)', marginBottom: 4 }}>
+            Raised beats become season plot targets the director works toward. Keep/Soften stay as ambient situation in the season bible.
           </div>
           {draft.beats.map((b, i) => {
             const hot = b.disposition === 'raise';
@@ -255,12 +280,12 @@ export function Sequel() {
                     className="serif"
                     value={b.text}
                     onChange={(e) => patch({ beats: draft.beats.map((x, j) => (j === i ? { ...x, text: e.target.value } : x)) })}
-                    style={{ fontFamily: 'Spectral, serif', fontSize: 18, lineHeight: 1.45, color: '#f0eee9', background: 'transparent', border: 0, padding: 0, borderRadius: 0, width: '100%' }}
+                    style={{ fontFamily: 'Spectral, serif', fontSize: 18, lineHeight: 1.45, color: 'var(--ink-heading)', background: 'transparent', border: 0, padding: 0, borderRadius: 0, width: '100%' }}
                   />
                   <input
                     value={b.consequence}
                     onChange={(e) => patch({ beats: draft.beats.map((x, j) => (j === i ? { ...x, consequence: e.target.value } : x)) })}
-                    style={{ fontSize: 12.5, color: 'rgba(236,234,230,0.5)', lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, borderRadius: 0, width: '100%' }}
+                    style={{ fontSize: 12.5, color: 'var(--ink-muted)', lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, borderRadius: 0, width: '100%' }}
                   />
                 </div>
                 <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -287,13 +312,13 @@ export function Sequel() {
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 282px), 1fr))', gap: 15, marginBottom: 30 }}>
           <div className="craft-row" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 15, minWidth: 0 }}>
             <Mono style={{ fontSize: 9 }}>time between</Mono>
-            <div className="serif" style={{ fontWeight: 300, fontSize: 27, color: '#f8f6f2' }}>{gapLabel}</div>
+            <div className="serif" style={{ fontWeight: 300, fontSize: 27, color: 'var(--ink-heading)' }}>{gapLabel}</div>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
               {GAP_LABELS.map((label, i) => (
                 <Chip key={label} active={draft.gap === i} onClick={() => patch({ gap: i })}>{label}</Chip>
               ))}
             </div>
-            <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'rgba(236,234,230,0.55)', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 13 }}>
+            <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'var(--ink-muted)', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 13 }}>
               {GAP_EFFECTS[draft.gap]}
             </div>
             <button
@@ -367,7 +392,7 @@ export function Sequel() {
               return (
                 <div key={c.characterId} className="craft-row" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                    <div style={{ fontSize: 14, fontWeight: 600, color: '#f0eee9', flex: 1 }}>{c.name}</div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink-heading)', flex: 1 }}>{c.name}</div>
                     {hasSheet && (
                       <Chip
                         active={c.keepSheet !== false}
@@ -512,9 +537,9 @@ export function Sequel() {
 
             {(draft.plotArc?.length ?? 0) > 0 && (
               <div className="craft-row" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <Mono style={{ fontSize: 9 }}>extra plot pressures · Raise beats already seed targets</Mono>
+                <Mono style={{ fontSize: 9 }}>extra plot situations · Raise beats already seed targets</Mono>
                 {raised > 0 && (
-                  <div style={{ fontSize: 12, color: 'rgba(236,234,230,0.5)', lineHeight: 1.45 }}>
+                  <div style={{ fontSize: 12, color: 'var(--ink-muted)', lineHeight: 1.45 }}>
                     {raised} Raise beat{raised === 1 ? '' : 's'} will become season plot targets automatically.
                   </div>
                 )}
@@ -559,7 +584,7 @@ export function Sequel() {
             value={draft.premise}
             onChange={(e) => patch({ premise: e.target.value })}
             placeholder="Write it yourself, or have it drafted from your beat choices…"
-            style={{ fontFamily: 'Spectral, serif', fontSize: narrow ? 17 : 21, lineHeight: 1.55, color: '#f6f4f0', background: 'rgba(8,9,12,0.3)' }}
+            style={{ fontFamily: 'Spectral, serif', fontSize: narrow ? 17 : 21, lineHeight: 1.55, color: 'var(--ink-heading)', background: 'rgba(8,9,12,0.3)' }}
           />
           {!narrow && (
             <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', paddingTop: 6 }}>
@@ -592,17 +617,17 @@ export function Sequel() {
       </div>
 
       {/* Portrait sticky CTAs — always reachable above the tab bar */}
-      {narrow && (
+      {phone && (
         <div style={{
           position: 'fixed',
           left: 0,
           right: 0,
-          bottom: 0,
-          zIndex: 40,
+          bottom: tabBarInset(true),
+          zIndex: 30,
           borderTop: '1px solid rgba(255,255,255,0.14)',
           background: 'rgba(255,255,255,0.045)',
           backdropFilter: 'blur(14px) saturate(140%)',
-          padding: '12px 16px calc(12px + 58px + env(safe-area-inset-bottom))',
+          padding: '12px 16px',
           display: 'flex',
           flexDirection: 'column',
           gap: 8,

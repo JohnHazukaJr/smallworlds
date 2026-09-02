@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { presetFor } from '../ai/providers';
 import { formatUserError, logAppError } from '../errors';
 import type { AppSettings, ModelRef, ProviderConfig } from '../types';
 
@@ -50,7 +51,13 @@ export const useSettings = create<SettingsStore>()(
       vaultPersistError: '',
       clearVaultPersistError: () => set({ vaultPersistError: '' }),
       addProvider: (p) => {
-        set((s) => ({ providers: [...s.providers, p] }));
+        const suggested = presetFor(p)?.suggestedModels.find((m) => m.trim()) ?? '';
+        const ref: ModelRef | null = suggested ? { providerId: p.id, model: suggested } : null;
+        set((s) => ({
+          providers: [...s.providers, p],
+          proseModel: s.proseModel ?? ref,
+          utilityModel: s.utilityModel ?? ref
+        }));
         void syncVaultSafe(set);
       },
       updateProvider: (id, patch) => {

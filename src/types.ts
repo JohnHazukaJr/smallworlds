@@ -2,6 +2,9 @@
 
 export type Visibility = 'private' | 'invited' | 'public';
 
+/** How the world wants to play — not a crisis slider. */
+export type StoryStance = 'longform' | 'wander' | 'intimate' | 'sandbox';
+
 export interface WorldAISettings {
   /** narrator point of view */
   pov: 'second' | 'first' | 'third';
@@ -53,11 +56,16 @@ export interface World {
   title: string;
   /** one-line logline shown on the card */
   line: string;
-  /** the world bible: setting, rules, pressures — packed into narrator/character/guest prompts */
+  /** the world bible: setting, rules — packed into narrator/character/guest prompts */
   bible: string;
   hue: number;
   visibility: Visibility;
   ai: WorldAISettings;
+  /**
+   * How this world wants to play. Omitted on older worlds → storyStanceOf() infers
+   * from a generated Shape: customInstructions line, else longform.
+   */
+  storyStance?: StoryStance;
   /** provider/model override for prose; null = use global default */
   proseModel: ModelRef | null;
   /** provider/model override for utility tasks; null = use global default */
@@ -221,6 +229,11 @@ export type ComposeMode = 'continue' | 'steer' | 'speak' | 'act' | 'play';
 /** Speak, Act, or combined Speak+Act — player agency turns that expect a reply. */
 export function isPlayerAgencyMode(mode: ComposeMode): boolean {
   return mode === 'speak' || mode === 'act' || mode === 'play';
+}
+
+/** Speak / Play must land quoted NPC speech. Act may be a look, a nod, silence. */
+export function requiresSpokenReply(mode: ComposeMode): boolean {
+  return mode === 'speak' || mode === 'play';
 }
 
 /** Resolve Continue/Steer base + Speak/Act toggles into a single compose mode. */
@@ -543,7 +556,7 @@ export interface SeasonWrap {
   characters: WrapCharacterOutcome[];
   /** Relationship edges that shifted over the gap — staged until Begin. */
   relationshipUpdates?: SeasonWrapRelationshipUpdate[];
-  /** Extra season-arc pressures beyond Raise beats — staged until Begin. */
+  /** Extra season-arc situations beyond Raise beats — staged until Begin. */
   plotArc?: SeasonWrapPlotArc[];
   /** index into GAP_LABELS */
   gap: number;

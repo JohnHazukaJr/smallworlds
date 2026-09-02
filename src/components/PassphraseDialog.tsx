@@ -52,8 +52,8 @@ export function PassphraseDialog(p: PassphraseDialogProps) {
         display: 'flex', flexDirection: 'column', gap: 14
       }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <div className="serif" style={{ fontWeight: 300, fontSize: 22, color: '#f6f4f0' }}>{p.title}</div>
-          <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'rgba(236,234,230,0.6)' }}>{p.description}</div>
+          <div className="serif" style={{ fontWeight: 300, fontSize: 22, color: 'var(--ink-heading)' }}>{p.title}</div>
+          <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'var(--ink-muted)' }}>{p.description}</div>
         </div>
         <input
           type="password" autoFocus value={pass}

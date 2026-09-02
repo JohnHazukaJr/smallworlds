@@ -10,7 +10,7 @@ import { formatUserError } from '../errors';
 import { decryptDeviceExport } from '../sync/serialize';
 import { seedStarterWorld } from '../data/seed';
 import { useApp } from '../store/app';
-import { useVw, ErrorNote } from '../ui/bits';
+import { ErrorNote, phoneChrome, useViewport } from '../ui/bits';
 import { plateStyle, VIS } from '../ui/theme';
 
 function download(data: unknown, filename: string) {
@@ -28,11 +28,14 @@ function slug(title: string) {
 }
 
 export function Library() {
-  const vw = useVw();
-  const narrow = vw < 780;
+  const { band } = useViewport();
+  const phone = phoneChrome(band);
+  const compact = band === 'compact';
+  const narrow = compact;
   const openWorld = useApp((s) => s.openWorld);
   const go = useApp((s) => s.go);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [seeding, setSeeding] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -75,6 +78,7 @@ export function Library() {
   const finishImport = async (data: unknown) => {
     const ids = await importAnyFile(data);
     if (ids.length === 1) openWorld(ids[0]);
+    else setNotice(`Imported ${ids.length} world${ids.length === 1 ? '' : 's'}.`);
   };
 
   const onImportFile = async (file: File) => {
@@ -123,16 +127,18 @@ export function Library() {
 
   return (
     <div className="fade-in" style={{
-      padding: narrow ? '26px 18px 60px' : '42px 46px 70px',
-      paddingTop: narrow ? 'calc(26px + env(safe-area-inset-top))' : 42,
+      paddingTop: phone ? 'calc(26px + env(safe-area-inset-top))' : 42,
+      paddingRight: phone ? 18 : 46,
+      paddingBottom: phone ? 24 : 70,
+      paddingLeft: phone ? 18 : 46,
       maxWidth: 920
     }}>
       <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 24, flexWrap: 'wrap', marginBottom: 40 }}>
         <div style={{ maxWidth: 480 }}>
-          <h1 className="serif" style={{ fontWeight: 300, fontSize: narrow ? 40 : 56, lineHeight: 1.02, margin: 0, color: '#f2f4f5' }}>
+          <h1 className="serif" style={{ fontWeight: 300, fontSize: compact ? 32 : phone ? 40 : 56, lineHeight: 1.02, margin: 0, color: 'var(--ink-heading)' }}>
             Small Worlds
           </h1>
-          <p style={{ margin: '14px 0 0', fontSize: 15, lineHeight: 1.55, color: 'rgba(230,233,235,0.58)', maxWidth: '38ch' }}>
+          <p style={{ margin: '14px 0 0', fontSize: 15, lineHeight: 1.55, color: 'var(--ink-muted)', maxWidth: '38ch' }}>
             Make a world. Live in it.
           </p>
         </div>
@@ -147,13 +153,19 @@ export function Library() {
       </div>
 
       {error && <div style={{ marginBottom: 18 }}><ErrorNote error={error} onDismiss={() => setError('')} /></div>}
+      {notice && (
+        <div style={{ marginBottom: 18, fontSize: 13.5, lineHeight: 1.5, color: 'rgba(200,230,235,0.85)' }}>
+          {notice}
+          <button className="btn-quiet" style={{ marginLeft: 10, fontSize: 11 }} onClick={() => setNotice('')}>dismiss</button>
+        </div>
+      )}
 
       {worlds && worlds.length === 0 && (
         <div className="craft-row" style={{ padding: narrow ? 24 : 36, display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 560 }}>
-          <div className="serif" style={{ fontWeight: 300, fontSize: 28, color: '#f2f4f5', lineHeight: 1.15 }}>
+          <div className="serif" style={{ fontWeight: 300, fontSize: 28, color: 'var(--ink-heading)', lineHeight: 1.15 }}>
             An empty workbench.
           </div>
-          <div style={{ fontSize: 14, lineHeight: 1.65, color: 'rgba(230,233,235,0.58)', maxWidth: '42ch' }}>
+          <div style={{ fontSize: 14, lineHeight: 1.65, color: 'var(--ink-muted)', maxWidth: '42ch' }}>
             Create a world of your own, or open the starter — a harbour city, a false name, a debt in the public record —
             to see how cast, continuity and seasons work. Everything in it is editable.
           </div>
@@ -204,8 +216,8 @@ export function Library() {
                 </span>
               </div>
               <div style={{ padding: narrow ? '14px 16px 16px' : '16px 20px', display: 'flex', flexDirection: 'column', gap: 8, justifyContent: 'center' }}>
-                <div className="serif" style={{ fontSize: 20, color: '#f2f4f5', lineHeight: 1.2 }}>{w.title}</div>
-                <div style={{ fontSize: 13, lineHeight: 1.55, color: 'rgba(230,233,235,0.55)' }}>
+                <div className="serif" style={{ fontSize: 20, color: 'var(--ink-heading)', lineHeight: 1.2 }}>{w.title}</div>
+                <div style={{ fontSize: 13, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
                   {busy ? (compactProgress || 'Compacting…') : w.line}
                 </div>
                 <div style={{

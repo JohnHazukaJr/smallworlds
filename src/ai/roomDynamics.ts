@@ -125,6 +125,37 @@ export function lastSpeaker(
   return null;
 }
 
+/**
+ * Who asked the question the player's latest line answers.
+ * Later NPC lines in the same Write (Ben speaks after you answered Ada) do not
+ * clear this — the asker still has to take the answer as heard.
+ */
+export function lastOpenQuestion(
+  turns: Turn[],
+  candidates: SpeakerCandidate[]
+): SpeakerCandidate | null {
+  let userIdx = -1;
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].role === 'user') {
+      userIdx = i;
+      break;
+    }
+  }
+  if (userIdx < 0) return null;
+
+  let i = userIdx - 1;
+  while (i >= 0 && turns[i].role === 'narrator') i--;
+  if (i < 0 || turns[i].role !== 'character') return null;
+  if (!/\?/.test(turns[i].text)) return null;
+  const id = turns[i].guestId ?? turns[i].characterId;
+  if (!id) return null;
+  return candidates.find((c) => c.id === id) ?? {
+    id,
+    name: 'Someone',
+    kind: turns[i].guestId ? 'guest' : 'cast'
+  };
+}
+
 /** Who the player's latest move points at, if anyone. */
 export function detectAddressee(
   playerText: string,
@@ -222,6 +253,14 @@ export function roomDynamicsLines(opts: {
   const addressee = detectAddressee(opts.playerText, candidates);
   if (addressee) {
     lines.push(`The player's move appears aimed at: ${addressee.name}.`);
+  }
+
+  const asked = lastOpenQuestion(turns, candidates);
+  if (asked) {
+    lines.push(
+      `${asked.name} asked a question; the player's last move answers it. ` +
+      `Take the answer as heard — do not brief the same question again.`
+    );
   }
 
   return lines;

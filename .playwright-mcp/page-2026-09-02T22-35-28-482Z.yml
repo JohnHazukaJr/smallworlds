@@ -1,0 +1,132 @@
+- generic [ref=f2e4]:
+  - navigation [ref=f2e393]:
+    - generic [ref=f2e394]:
+      - generic [ref=f2e395]: Small Worlds
+      - generic [ref=f2e396]: Make a world. Live in it.
+    - generic [ref=f2e397]:
+      - button "01 Worlds" [ref=f2e398] [cursor=pointer]:
+        - generic [ref=f2e399]: "01"
+        - generic [ref=f2e400]: Worlds
+      - button "02 Story" [ref=f2e401] [cursor=pointer]:
+        - generic [ref=f2e402]: "02"
+        - generic [ref=f2e403]: Story
+      - button "03 Cast" [ref=f2e404] [cursor=pointer]:
+        - generic [ref=f2e405]: "03"
+        - generic [ref=f2e406]: Cast
+      - button "04 Places" [ref=f2e407] [cursor=pointer]:
+        - generic [ref=f2e408]: "04"
+        - generic [ref=f2e409]: Places
+      - button "05 Settings" [ref=f2e410] [cursor=pointer]:
+        - generic [ref=f2e411]: "05"
+        - generic [ref=f2e412]: Settings
+      - button "06 Profile" [ref=f2e413] [cursor=pointer]:
+        - generic [ref=f2e414]: "06"
+        - generic [ref=f2e415]: Profile
+      - button "07 New world" [ref=f2e416] [cursor=pointer]:
+        - generic [ref=f2e417]: "07"
+        - generic [ref=f2e418]: New world
+    - generic [ref=f2e419]:
+      - generic [ref=f2e420]:
+        - generic [ref=f2e421]: Instrument
+        - generic [ref=f2e422]: no model configured
+        - generic [ref=f2e423]: set one in Settings
+      - generic [ref=f2e424]: The Registrar
+  - main [ref=f2e36]:
+    - generic [ref=f2e477]:
+      - generic [ref=f2e478]:
+        - generic [ref=f2e479]:
+          - generic [ref=f2e480]: Inhabitants · The Registrar
+          - button "+ new" [ref=f2e482] [cursor=pointer]
+        - generic [ref=f2e483] [cursor=pointer]:
+          - generic [ref=f2e485]:
+            - generic [ref=f2e486]: Emine
+            - generic [ref=f2e487]: child of the low quarter · off-page
+          - button "add" [ref=f2e488]
+        - generic [ref=f2e489] [cursor=pointer]:
+          - generic [ref=f2e491]:
+            - generic [ref=f2e492]: Ivo Tarrant
+            - generic [ref=f2e493]: brother · owes the guild · off-page
+          - button "add" [ref=f2e494]
+        - generic [ref=f2e495] [cursor=pointer]:
+          - generic [ref=f2e497]:
+            - generic [ref=f2e498]: Marisol Vey
+            - generic [ref=f2e499]: harbour registrar · reluctant ally · in scene
+          - button "in scene" [ref=f2e500]
+        - generic [ref=f2e503] [cursor=pointer]:
+          - generic [ref=f2e504]: you
+          - generic [ref=f2e505]: protagonist · second person
+        - generic [ref=f2e506] [cursor=pointer]:
+          - generic [ref=f2e508]:
+            - generic [ref=f2e509]: The Cartwright
+            - generic [ref=f2e510]: unknown · speaks in trades · in scene
+          - button "in scene" [ref=f2e511]
+      - generic [ref=f2e512]:
+        - generic [ref=f2e513]:
+          - generic [ref=f2e514]:
+            - generic [ref=f2e515]: portrait plate · no photo yet
+            - button "Upload photo" [ref=f2e518] [cursor=pointer]
+            - generic [ref=f2e519]:
+              - generic [ref=f2e520]: plate hue
+              - slider [ref=f2e521]: "140"
+            - button "✦ Flesh out with AI" [ref=f2e524] [cursor=pointer]
+            - button "tag as \"this is me\"" [ref=f2e525] [cursor=pointer]
+            - button "add to this scene" [ref=f2e526] [cursor=pointer]
+            - button "remove from world" [active] [ref=f2e527] [cursor=pointer]
+            - alertdialog "Remove Emine from the world?" [ref=f2e580]:
+              - generic [ref=f2e581]:
+                - generic [ref=f2e582]: Remove Emine from the world?
+                - generic [ref=f2e583]: This cannot be undone.
+              - generic [ref=f2e584]:
+                - button "Remove" [ref=f2e585] [cursor=pointer]
+                - button "Cancel" [ref=f2e586] [cursor=pointer]
+          - generic [ref=f2e528]:
+            - generic [ref=f2e529]:
+              - generic [ref=f2e530]: character
+              - textbox "Name" [ref=f2e531]: Emine
+              - textbox "role · relation to the protagonist" [ref=f2e532]: child of the low quarter
+            - generic [ref=f2e533]:
+              - generic [ref=f2e534]:
+                - generic [ref=f2e535]: current goal
+                - textbox "—" [ref=f2e536]: figure out what her tide-stairs secret is worth
+              - generic [ref=f2e537]:
+                - generic [ref=f2e538]: emotional state
+                - textbox "—" [ref=f2e539]: curious
+              - generic [ref=f2e540]:
+                - generic [ref=f2e541]: location
+                - textbox "—" [ref=f2e542]: off-page — the low quarter
+              - generic [ref=f2e543]:
+                - generic [ref=f2e544]: condition
+                - textbox "—" [ref=f2e545]: watching
+            - generic [ref=f2e546]: Live state updates lightly mid-episode and fully at wrap. Voice, anchors, and psyche stay who they are.
+        - generic [ref=f2e547]:
+          - button "Persona" [ref=f2e548] [cursor=pointer]
+          - button "Voice" [ref=f2e549] [cursor=pointer]
+          - button "Psyche" [ref=f2e550] [cursor=pointer]
+          - button "Secrets" [ref=f2e551] [cursor=pointer]
+          - button "Relations" [ref=f2e552] [cursor=pointer]
+          - button "Anchors" [ref=f2e553] [cursor=pointer]
+          - button "AI notes" [ref=f2e554] [cursor=pointer]
+        - generic [ref=f2e555]:
+          - generic [ref=f2e556]:
+            - generic [ref=f2e557]:
+              - generic [ref=f2e558]: Who they are
+              - generic [ref=f2e559]: prose, not bullet points — this is the core of the sheet
+            - textbox [ref=f2e560]: Runs messages and watches everything. The low quarter’s memory. She saw you at the tide stairs the night the cargo came in, and she has told no one — yet.
+          - generic [ref=f2e561]:
+            - generic [ref=f2e562]: Age / read
+            - textbox "Late thirties. Tired in a competent way." [ref=f2e564]: Eleven, maybe twelve. Nobody has asked her.
+          - generic [ref=f2e565]:
+            - generic [ref=f2e566]:
+              - generic [ref=f2e567]: Appearance
+              - generic [ref=f2e568]: identity the narrator keeps consistent
+            - textbox [ref=f2e569]: Quick, small, always carrying something that isn’t hers.
+          - generic [ref=f2e570]:
+            - generic [ref=f2e571]:
+              - generic [ref=f2e572]: Mannerisms
+              - generic [ref=f2e573]: recurring physical habits the narrator weaves in — never all at once
+            - textbox "Cracks her knuckles one at a time when stalling. Never sits with her back to a door." [ref=f2e574]
+          - generic [ref=f2e575]:
+            - generic [ref=f2e576]:
+              - generic [ref=f2e577]: Backstory
+              - generic [ref=f2e578]: informs behaviour; the narrator reveals it only in earned fragments
+            - textbox "Where they come from, what it cost, and what they had to become to survive it." [ref=f2e579]

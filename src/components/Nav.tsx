@@ -3,14 +3,16 @@ import { db } from '../db';
 import { useApp, type Screen } from '../store/app';
 import { resolveModel, useSettings } from '../store/settings';
 import { useSyncMeta } from '../sync/engine';
+import { TAB_LABEL_MIN, useViewport } from '../ui/bits';
 
 const ITEMS: Array<[string, string, Screen]> = [
   ['01', 'Worlds', 'library'],
   ['02', 'Story', 'story'],
   ['03', 'Cast', 'cast'],
-  ['04', 'Locations', 'locations'],
+  ['04', 'Places', 'locations'],
   ['05', 'Settings', 'settings'],
-  ['06', 'New world', 'onboard']
+  ['06', 'Profile', 'profile'],
+  ['07', 'New world', 'onboard']
 ];
 
 const TABS: Array<[string, Screen]> = [
@@ -18,7 +20,8 @@ const TABS: Array<[string, Screen]> = [
   ['Story', 'story'],
   ['Cast', 'cast'],
   ['Places', 'locations'],
-  ['Settings', 'settings']
+  ['Settings', 'settings'],
+  ['Profile', 'profile']
 ];
 
 const TAB_GLYPHS: Partial<Record<Screen, string>> = {
@@ -26,7 +29,8 @@ const TAB_GLYPHS: Partial<Record<Screen, string>> = {
   story: '¶',
   cast: '◇',
   locations: '⌂',
-  settings: '⚙'
+  settings: '⚙',
+  profile: '◎'
 };
 
 export function Rail() {
@@ -35,7 +39,10 @@ export function Rail() {
   const currentWorldId = useApp((s) => s.currentWorldId);
   const proseModel = useSettings((s) => s.proseModel);
   const world = useLiveQuery(
-    async () => (currentWorldId ? db.worlds.get(currentWorldId) : undefined),
+    async () => {
+      if (!currentWorldId) return null;
+      return (await db.worlds.get(currentWorldId)) ?? null;
+    },
     [currentWorldId]
   );
   const resolved = resolveModel(world?.proseModel ?? proseModel);
@@ -43,12 +50,13 @@ export function Rail() {
 
   return (
     <nav className="glass-clear" style={{
-      borderRight: '1px solid rgba(255,255,255,0.12)', padding: '24px 14px',
-      display: 'flex', flexDirection: 'column', gap: 28, position: 'sticky', top: 0, height: '100vh',
+      borderRight: '1px solid var(--glass-rim)', padding: '24px 14px',
+      display: 'flex', flexDirection: 'column', gap: 28, position: 'sticky', top: 0, height: '100%',
+      minHeight: 0, overflow: 'auto',
       borderRadius: 0, borderTop: 0, borderBottom: 0, borderLeft: 0
     }}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8, paddingLeft: 6, paddingRight: 4 }}>
-        <div className="serif" style={{ fontSize: 26, fontWeight: 300, letterSpacing: '0.01em', color: '#f2f4f5', lineHeight: 1.05 }}>
+        <div className="serif" style={{ fontSize: 26, fontWeight: 300, letterSpacing: '0.01em', color: 'var(--ink-heading)', lineHeight: 1.05 }}>
           Small Worlds
         </div>
         <div className="label" style={{ fontSize: 12, lineHeight: 1.45, maxWidth: '18ch' }}>
@@ -79,7 +87,7 @@ export function Rail() {
       </div>
 
       <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 14 }}>
-        <div className="craft-row" style={{ borderRadius: 4, padding: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
+        <div className="craft-row" style={{ padding: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
           <div className="label">Instrument</div>
           <div style={{ fontSize: 13, color: 'rgba(230,233,235,0.9)', wordBreak: 'break-all' }}>
             {resolved ? resolved.model : 'no model configured'}
@@ -109,25 +117,28 @@ export function TabBar() {
   const screen = useApp((s) => s.screen);
   const go = useApp((s) => s.go);
   const currentWorldId = useApp((s) => s.currentWorldId);
+  const { width } = useViewport();
+  const showLabels = width >= TAB_LABEL_MIN;
   return (
-    <div className="tabbar">
+    <div className={`tabbar${showLabels ? '' : ' glyphs-only'}`}>
       {TABS.map(([label, key]) => {
-        const needsWorld = key === 'cast' || key === 'locations';
+        const needsWorld = key === 'story' || key === 'cast' || key === 'locations';
         const blocked = needsWorld && !currentWorldId;
         return (
           <button
             key={key}
             className={screen === key ? 'active' : ''}
             disabled={blocked}
+            aria-label={label}
             onClick={() => {
               if (blocked) return;
               go(key);
             }}
           >
-            <span style={{ fontSize: 14, fontFamily: 'Spectral, serif', textTransform: 'none', letterSpacing: 0 }}>
+            <span style={{ fontSize: showLabels ? 14 : 16, fontFamily: 'Spectral, serif', textTransform: 'none', letterSpacing: 0 }}>
               {TAB_GLYPHS[key] ?? '⚙'}
             </span>
-            {label}
+            {showLabels ? label : null}
           </button>
         );
       })}

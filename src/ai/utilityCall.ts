@@ -46,6 +46,51 @@ function withTimeoutSignal(outer: AbortSignal | undefined, ms: number): { signal
   };
 }
 
+/** True when parsed JSON is null/empty-object/empty-array — not a usable utility payload. */
+export function jsonValueIsEmpty(value: unknown): boolean {
+  if (value == null) return true;
+  if (typeof value !== 'object') return false;
+  if (Array.isArray(value)) return value.length === 0;
+  return Object.keys(value as Record<string, unknown>).length === 0;
+}
+
+function toolHasProperties(tool: ToolSpec | undefined): boolean {
+  if (!tool) return false;
+  const props = tool.parameters?.properties;
+  return !!props && typeof props === 'object' && Object.keys(props as object).length > 0;
+}
+
+function isRetryableUtilityFail(e: unknown): boolean {
+  if ((e as Error)?.name === 'AbortError') return false;
+  if (e instanceof AIError && e.status != null) return false;
+  const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
+  return (
+    msg.includes('did not return json') ||
+    msg.includes('malformed json') ||
+    msg.includes('empty response') ||
+    msg.includes('empty reply')
+  );
+}
+
+function parseUtilityResult<T>(
+  result: { text: string; toolCalls?: Array<{ name: string; arguments: string }> },
+  tool?: ToolSpec
+): T {
+  if (tool && result.toolCalls?.length) {
+    const match = result.toolCalls.find((c) => c.name === tool.name) ?? result.toolCalls[0];
+    const args = (match.arguments ?? '').trim();
+    if (args) {
+      try {
+        const parsed = parseToolArguments<T>(args);
+        if (!jsonValueIsEmpty(parsed)) return parsed;
+      } catch {
+        // Empty or invalid tool args — try the text body.
+      }
+    }
+  }
+  return extractJson<T>(result.text);
+}
+
 export async function utilityCall<T>(opts: {
   world: World | null;
   system: string;
@@ -62,27 +107,39 @@ export async function utilityCall<T>(opts: {
   const { provider, model } = utilityModelFor(opts.world);
   const profile = modelProfile(model);
   const { signal: timed, cancel } = withTimeoutSignal(opts.signal, timeoutMs);
-  const tool = opts.tool ?? RETURN_JSON_TOOL;
-  try {
-    const useTool = !!(profile.supportsTools && provider.kind === 'openai');
+  const structuredTool = toolHasProperties(opts.tool) ? opts.tool : undefined;
+  const canTool = !!(structuredTool && profile.supportsTools && provider.kind === 'openai');
+  const bumpTokens = Math.max(maxTokens + 2000, Math.floor(maxTokens * 1.5));
+
+  const run = async (useTool: boolean, tokens: number): Promise<T> => {
     const result = await streamChat({
       provider,
       model,
       system: opts.system,
       messages: [{ role: 'user', content: opts.user }],
-      maxTokens,
+      maxTokens: tokens,
       temperature: 0.4,
       signal: timed,
       job,
       jsonMode: !useTool && profile.supportsJsonObject,
-      tools: useTool ? [tool] : undefined,
-      toolChoice: useTool ? { name: tool.name } : undefined
+      tools: useTool && structuredTool ? [structuredTool] : undefined,
+      toolChoice: useTool && structuredTool ? { name: structuredTool.name } : undefined
     });
-    if (useTool && result.toolCalls?.length) {
-      const match = result.toolCalls.find((c) => c.name === tool.name) ?? result.toolCalls[0];
-      return parseToolArguments<T>(match.arguments);
+    const parsed = parseUtilityResult<T>(result, useTool ? structuredTool : undefined);
+    if (jsonValueIsEmpty(parsed)) {
+      throw new AIError('The model returned an empty reply. Try again or pick a different model in Settings.');
     }
-    return extractJson<T>(result.text);
+    return parsed;
+  };
+
+  try {
+    try {
+      return await run(canTool, maxTokens);
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') throw e;
+      if (!isRetryableUtilityFail(e)) throw e;
+    }
+    return await run(false, bumpTokens);
   } catch (e) {
     if ((e as Error).name === 'AbortError' && !opts.signal?.aborted) {
       throw new AIError(`Utility model timed out after ${timeoutMs / 1000}s.`);

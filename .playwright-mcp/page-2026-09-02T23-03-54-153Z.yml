@@ -1,0 +1,28 @@
+- generic [ref=f5e3]:
+  - main [ref=f5e5]:
+    - generic [ref=f5e7]:
+      - generic [ref=f5e8]:
+        - heading "Small Worlds" [level=1] [ref=f5e9]
+        - paragraph [ref=f5e10]: Make a world. Live in it.
+      - generic [ref=f5e11]:
+        - button "Import" [ref=f5e12] [cursor=pointer]
+        - button "New world" [ref=f5e13] [cursor=pointer]
+  - generic [ref=f5e14]:
+    - button "Worlds" [ref=f5e15] [cursor=pointer]:
+      - generic [ref=f5e16]: ◈
+      - text: Worlds
+    - button "Story" [ref=f5e17] [cursor=pointer]:
+      - generic [ref=f5e18]: ¶
+      - text: Story
+    - button "Cast" [ref=f5e19] [cursor=pointer]:
+      - generic [ref=f5e20]: ◇
+      - text: Cast
+    - button "Places" [ref=f5e21] [cursor=pointer]:
+      - generic [ref=f5e22]: ⌂
+      - text: Places
+    - button "Settings" [ref=f5e23] [cursor=pointer]:
+      - generic [ref=f5e24]: ⚙
+      - text: Settings
+    - button "Profile" [ref=f5e25] [cursor=pointer]:
+      - generic [ref=f5e26]: ◎
+      - text: Profile

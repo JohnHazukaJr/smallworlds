@@ -1,0 +1,46 @@
+- generic [ref=f2e4]:
+  - navigation [ref=f2e5]:
+    - generic [ref=f2e6]:
+      - generic [ref=f2e7]: Small Worlds
+      - generic [ref=f2e8]: Make a world. Live in it.
+    - generic [ref=f2e9]:
+      - button "01 Worlds" [active] [ref=f2e10] [cursor=pointer]:
+        - generic [ref=f2e11]: "01"
+        - generic [ref=f2e12]: Worlds
+      - button "02 Story" [ref=f2e13] [cursor=pointer]:
+        - generic [ref=f2e14]: "02"
+        - generic [ref=f2e15]: Story
+      - button "03 Cast" [ref=f2e16] [cursor=pointer]:
+        - generic [ref=f2e17]: "03"
+        - generic [ref=f2e18]: Cast
+      - button "04 Places" [ref=f2e19] [cursor=pointer]:
+        - generic [ref=f2e20]: "04"
+        - generic [ref=f2e21]: Places
+      - button "05 Settings" [ref=f2e22] [cursor=pointer]:
+        - generic [ref=f2e23]: "05"
+        - generic [ref=f2e24]: Settings
+      - button "06 Profile" [ref=f2e25] [cursor=pointer]:
+        - generic [ref=f2e26]: "06"
+        - generic [ref=f2e27]: Profile
+      - button "07 New world" [ref=f2e28] [cursor=pointer]:
+        - generic [ref=f2e29]: "07"
+        - generic [ref=f2e30]: New world
+    - generic [ref=f2e32]:
+      - generic [ref=f2e33]: Instrument
+      - generic [ref=f2e34]: no model configured
+      - generic [ref=f2e35]: set one in Settings
+  - main [ref=f2e36]:
+    - generic [ref=f2e304]:
+      - generic [ref=f2e305]:
+        - generic [ref=f2e306]:
+          - heading "Small Worlds" [level=1] [ref=f2e307]
+          - paragraph [ref=f2e308]: Make a world. Live in it.
+        - generic [ref=f2e309]:
+          - button "Import" [ref=f2e310] [cursor=pointer]
+          - button "New world" [ref=f2e311] [cursor=pointer]
+      - generic [ref=f2e312]:
+        - generic [ref=f2e313]: An empty workbench.
+        - generic [ref=f2e314]: Create a world of your own, or open the starter — a harbour city, a false name, a debt in the public record — to see how cast, continuity and seasons work. Everything in it is editable.
+        - generic [ref=f2e315]:
+          - button "Create my world" [ref=f2e316] [cursor=pointer]
+          - button "Open the starter" [ref=f2e317] [cursor=pointer]

@@ -1,0 +1,5 @@
+- main [ref=e36]:
+  - generic [ref=e51]:
+    - generic [ref=e52]: no world open
+    - generic [ref=e53]: Open a world to start writing.
+    - button "Go to Worlds" [ref=e55] [cursor=pointer]

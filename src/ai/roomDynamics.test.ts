@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   addressStrength,
   detectAddressee,
+  lastOpenQuestion,
   lastSpeaker,
   rankReplySpeakers,
   roomDynamicsLines,
@@ -173,5 +174,69 @@ describe('roomDynamicsLines', () => {
 
   it('returns nothing for an empty room', () => {
     expect(roomDynamicsLines({ candidates: [], playerText: 'Hello?' })).toEqual([]);
+  });
+
+  it('flags when the last NPC line was a question the player just answered', () => {
+    const turns = [
+      said('c1', '*looks up* "Where were you last night?"'),
+      player('At the quay. The tide was out.')
+    ];
+    const lines = roomDynamicsLines({
+      candidates: speakerCandidates(cast, guests),
+      playerText: 'At the quay. The tide was out.',
+      turns
+    }).join('\n');
+    expect(lines).toMatch(/Ada asked a question/);
+    expect(lines).toMatch(/Take the answer as heard/i);
+    expect(lines).toMatch(/do not brief the same question/i);
+  });
+
+  it('keeps the heard-answer cue on Continue when playerText is empty', () => {
+    const turns = [
+      said('c1', '*looks up* "Where were you last night?"'),
+      player('At the quay.')
+    ];
+    const lines = roomDynamicsLines({
+      candidates: speakerCandidates(cast, guests),
+      playerText: '',
+      turns
+    }).join('\n');
+    expect(lines).toMatch(/Ada asked a question/);
+  });
+});
+
+describe('lastOpenQuestion', () => {
+  it('skips a trailing player beat and reads a question mark', () => {
+    const turns = [said('c1', '"Who paid Ivo?"'), player('Marisol did.')];
+    expect(lastOpenQuestion(turns, trio)?.id).toBe('c1');
+  });
+
+  it('is null when the last NPC line was not a question', () => {
+    const turns = [said('c1', '"The ledger is closed."'), player('Alright.')];
+    expect(lastOpenQuestion(turns, trio)).toBeNull();
+  });
+
+  it('is null when a later NPC line moved on from the question', () => {
+    const turns = [
+      said('c1', '"Who paid Ivo?"'),
+      player('Marisol.'),
+      said('c2', '"We already knew that."'),
+      player('So what now?')
+    ];
+    expect(lastOpenQuestion(turns, trio)).toBeNull();
+  });
+
+  it('keeps the asker after later speak beats in the same Write', () => {
+    const turns = [
+      said('c1', '"Who paid Ivo?"'),
+      player('Marisol did.'),
+      said('c2', '"We already knew that."')
+    ];
+    expect(lastOpenQuestion(turns, trio)?.id).toBe('c1');
+  });
+
+  it('does not treat a question asked after the player as already answered', () => {
+    const turns = [player('Hello.'), said('c1', '"Where were you?"')];
+    expect(lastOpenQuestion(turns, trio)).toBeNull();
   });
 });

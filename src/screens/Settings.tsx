@@ -8,30 +8,38 @@ import { formatUserError } from '../errors';
 import { useVault } from '../security/vault';
 import { useApp } from '../store/app';
 import { useSettings } from '../store/settings';
-import type { ModelRef, ProviderConfig, World, WorldAISettings } from '../types';
-import { Bar, Chip, ErrorNote, Field, Mono, Toggle, useVw } from '../ui/bits';
+import type { ModelRef, ProviderConfig, StoryStance, World, WorldAISettings } from '../types';
+import { Bar, Chip, ErrorNote, Field, Mono, Toggle, phoneChrome, useViewport } from '../ui/bits';
+import { applyStanceToAi, STORY_STANCES, storyStanceOf } from '../worldOps';
 
 export function Settings() {
-  const vw = useVw();
-  const narrow = vw < 780;
+  const { band } = useViewport();
+  const phone = phoneChrome(band);
+  const compact = band === 'compact';
+  const narrow = phone;
   const s = useSettings();
   const { currentWorldId, go } = useApp();
   const world = useLiveQuery(
-    async () => (currentWorldId ? db.worlds.get(currentWorldId) : undefined),
+    async () => {
+      if (!currentWorldId) return null;
+      return (await db.worlds.get(currentWorldId)) ?? null;
+    },
     [currentWorldId]
   );
   const [addOpen, setAddOpen] = useState(false);
 
   return (
     <div className="fade-in" style={{
-      padding: narrow ? '26px 18px 70px' : '42px 46px 70px',
       paddingTop: narrow ? 'calc(26px + env(safe-area-inset-top))' : 42,
+      paddingRight: narrow ? 18 : 46,
+      paddingBottom: narrow ? 24 : 70,
+      paddingLeft: narrow ? 18 : 46,
       maxWidth: 960
     }}>
       <div style={{ marginBottom: 30, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
         <div>
           <Mono style={{ letterSpacing: '0.16em', marginBottom: 10 }}>preferences</Mono>
-          <h1 className="serif" style={{ fontWeight: 300, fontSize: narrow ? 32 : 40, margin: 0, color: '#f8f6f2' }}>Settings</h1>
+          <h1 className="serif" style={{ fontWeight: 300, fontSize: compact ? 28 : phone ? 32 : 40, margin: 0, color: 'var(--ink-heading)' }}>Settings</h1>
         </div>
         <button className="btn-ghost" style={{ fontSize: 12, marginTop: 8 }} onClick={() => go('profile')}>
           Profile &amp; backups
@@ -43,7 +51,7 @@ export function Settings() {
         title="Your AI providers"
         note="keys live in this device's storage, sent only to the endpoint you name"
       >
-        <div style={{ fontSize: 13, lineHeight: 1.6, color: 'rgba(236,234,230,0.58)', maxWidth: '68ch', marginBottom: 4 }}>
+        <div style={{ fontSize: 13, lineHeight: 1.6, color: 'var(--ink-muted)', maxWidth: '68ch', marginBottom: 4 }}>
           Small Worlds runs on your own keys. Any OpenAI-compatible endpoint, Anthropic, or Gemini — and any model ID,
           including ones released after this app was built. OpenRouter is the easiest start: one key, hundreds of
           models to compare.
@@ -60,24 +68,24 @@ export function Settings() {
 
       {/* default models */}
       <Section title="Default models" note="per-world overrides live below">
-        <div style={{ display: 'grid', gridTemplateColumns: narrow ? '1fr' : '1fr 1fr 1fr', gap: 14 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: band === 'wide' ? '1fr 1fr 1fr' : '1fr', gap: 14 }}>
           <div className="craft-row" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>Prose model</div>
-            <div style={{ fontSize: 12, lineHeight: 1.55, color: 'rgba(236,234,230,0.5)' }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>Prose model</div>
+            <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
               Writes the story. Recommended: glm-5.2 (or glm-5.3-flash if you want speed).
             </div>
             <ModelPicker value={s.proseModel} onChange={s.setProseModel} />
           </div>
           <div className="craft-row" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>Utility model</div>
-            <div style={{ fontSize: 12, lineHeight: 1.55, color: 'rgba(236,234,230,0.5)' }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>Utility model</div>
+            <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
               Director, wrap, drafts, live canon. Recommended: glm-5.2. Falls back to prose if unset.
             </div>
             <ModelPicker value={s.utilityModel} onChange={s.setUtilityModel} />
           </div>
           <div className="craft-row" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9' }}>Image model</div>
-            <div style={{ fontSize: 12, lineHeight: 1.55, color: 'rgba(236,234,230,0.5)' }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>Image model</div>
+            <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
               Scene backdrops. Recommended: glm-image. Falls back to prose if unset.
             </div>
             <ModelPicker value={s.imageModel ?? null} onChange={s.setImageModel} />
@@ -99,7 +107,7 @@ export function Settings() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap' }}>
             <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 5 }}>
               <div style={{ fontSize: 13.5, fontWeight: 600, color: 'rgba(236,234,230,0.92)' }}>Mature content on new worlds</div>
-              <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
+              <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
                 Unlocks graphic violence, sex, and darker themes for new worlds. Whether the model complies also
                 depends on the provider you point it at. Per-world override in each world's settings.
               </div>
@@ -156,7 +164,7 @@ function SecuritySection() {
                 }}>{vault.corrupt ? 'corrupt' : 'on'}</span>
               )}
             </div>
-            <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
+            <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
               Sets a passphrase that locks the app UI and encrypts your API keys at rest (AES-256-GCM; the key is
               derived from your passphrase and never stored). Story text in IndexedDB is not encrypted by this lock —
               only keys are. Anyone with device access can still read worlds via DevTools. If you forget the
@@ -191,7 +199,7 @@ function SecuritySection() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
           <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 5 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: 'oklch(0.75 0.12 25)' }}>Erase everything</div>
-            <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
+            <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
               Deletes all worlds, characters, settings and keys from this device. Export a backup first — this cannot
               be undone.
             </div>
@@ -232,9 +240,17 @@ function SecuritySection() {
         error={dialogError}
         onCancel={close}
         onSubmit={(pass) => {
-          setOldPass(pass);
+          setBusy(true);
           setDialogError('');
-          setDialog('change-new');
+          void vault.unlock(pass).then((ok) => {
+            if (!ok) {
+              setDialogError('Current passphrase was wrong.');
+              return;
+            }
+            setOldPass(pass);
+            setDialog('change-new');
+          }).catch((e) => setDialogError(formatUserError(e)))
+            .finally(() => setBusy(false));
         }}
       />
       <PassphraseDialog
@@ -264,7 +280,7 @@ function Section({ title, note, children }: { title: string; note?: string; chil
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 13, marginBottom: 34 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-        <div style={{ fontSize: 15, fontWeight: 600, color: '#f6f4f0' }}>{title}</div>
+        <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink-heading)' }}>{title}</div>
         {note && <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)' }}>{note}</div>}
       </div>
       {children}
@@ -289,7 +305,7 @@ function AddProvider({ onDone }: { onDone: () => void }) {
   return (
     <div className="craft-row" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <div style={{ fontSize: 14, fontWeight: 600, color: '#f6f4f0' }}>Add a provider</div>
+        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink-heading)' }}>Add a provider</div>
         <button className="btn-quiet" onClick={onDone}>cancel</button>
       </div>
       <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
@@ -312,7 +328,11 @@ function AddProvider({ onDone }: { onDone: () => void }) {
         </Field>
       </div>
       <div>
-        <button className="btn-primary" onClick={add} disabled={!baseUrl.trim()}>Save provider</button>
+        <button
+          className="btn-primary"
+          onClick={add}
+          disabled={!baseUrl.trim() || (preset.id !== 'ollama' && preset.id !== 'custom' && !key.trim())}
+        >Save provider</button>
       </div>
     </div>
   );
@@ -343,7 +363,7 @@ function ProviderCard({ config }: { config: ProviderConfig }) {
   return (
     <div className="craft-row" style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-        <div style={{ fontSize: 14.5, fontWeight: 600, color: '#f0eee9' }}>{config.label}</div>
+        <div style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--ink-heading)' }}>{config.label}</div>
         <div style={{
           fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: '0.1em', textTransform: 'uppercase',
           borderRadius: 6, padding: '3px 8px', border: '1px solid rgba(255,255,255,0.16)',
@@ -417,7 +437,7 @@ export function ModelPicker({ value, onChange }: { value: ModelRef | null; onCha
   const suggestions = [...new Set([...(preset?.suggestedModels ?? []), ...catalog])];
 
   if (providers.length === 0) {
-    return <div style={{ fontSize: 12.5, color: 'rgba(236,234,230,0.5)' }}>Add a provider above first.</div>;
+    return <div style={{ fontSize: 12.5, color: 'var(--ink-muted)' }}>Add a provider above first.</div>;
   }
 
   return (
@@ -482,6 +502,8 @@ function WorldSettings({ world }: { world: World }) {
     void safeWrite(() => db.worlds.update(world.id, { ...p, updatedAt: Date.now() }), setSaveError);
   const patchAI = (p: Partial<WorldAISettings>) =>
     patchWorld({ ai: { ...world.ai, ...p } });
+  const patchStance = (stance: StoryStance) =>
+    patchWorld({ storyStance: stance, ai: applyStanceToAi(world.ai, stance) });
 
   return (
     <Section title={`This world — ${world.title}`} note="instructions the narrator follows in this world only">
@@ -505,7 +527,7 @@ function WorldSettings({ world }: { world: World }) {
           <Field label="Mature content">
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <Toggle on={world.ai.mature} onClick={() => patchAI({ mature: !world.ai.mature })} />
-              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.5)' }}>
+              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)' }}>
                 {world.ai.mature ? 'adult world · unrestricted' : 'general audience'}
               </span>
             </div>
@@ -546,11 +568,24 @@ function WorldSettings({ world }: { world: World }) {
             onBlur={(e) => patchAI({ contentNotes: e.target.value })}
           />
         </Field>
+        <Field label="Story shape" note="how this world wants to play">
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            {STORY_STANCES.map((row) => (
+              <Chip
+                key={row.id}
+                active={storyStanceOf(world) === row.id}
+                onClick={() => patchStance(row.id)}
+              >
+                {row.label}
+              </Chip>
+            ))}
+          </div>
+        </Field>
         <Field label="World instructions" note="verbatim in narrator, character, and guest prompts (not the lean director plan)">
           <textarea
             rows={4}
             defaultValue={world.ai.customInstructions}
-            key={world.id + '-custom'}
+            key={world.id + '-custom-' + storyStanceOf(world)}
             onBlur={(e) => patchAI({ customInstructions: e.target.value })}
             placeholder="Anything else the narrator should hold: themes to circle, imagery to reuse, what the story is really about…"
           />
@@ -610,7 +645,7 @@ function SliderCard({ label, value, onChange, note, valueLabel }: {
         onChange={(e) => onChange(Number(e.target.value))}
         style={{ padding: 0, height: 4 }}
       />
-      <div style={{ fontSize: 12, lineHeight: 1.5, color: 'rgba(236,234,230,0.5)' }}>{note}</div>
+      <div style={{ fontSize: 12, lineHeight: 1.5, color: 'var(--ink-muted)' }}>{note}</div>
     </div>
   );
 }
@@ -618,7 +653,7 @@ function SliderCard({ label, value, onChange, note, valueLabel }: {
 function WorldBibleEditor({ world, onError }: { world: World; onError: (msg: string) => void }) {
   return (
     <div className="craft-row" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <Field label="World bible" note="setting, rules, pressures — packed into narrator, character, and guest prompts">
+      <Field label="World bible" note="setting, rules — packed into narrator, character, and guest prompts">
         <textarea
           rows={6}
           className="serif"

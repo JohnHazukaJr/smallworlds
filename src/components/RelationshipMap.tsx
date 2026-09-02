@@ -202,7 +202,7 @@ export function RelationshipMap({
     }
 
     return (
-      <div className="craft-row" style={{ borderRadius: 4, padding: narrow ? 8 : 10, overflow: 'hidden' }}>
+      <div className="craft-row" style={{ padding: narrow ? 8 : 10, overflow: 'hidden' }}>
         <svg
           width="100%"
           viewBox={`0 0 ${size} ${size}`}
@@ -297,7 +297,7 @@ export function RelationshipMap({
   }
 
   return (
-    <div className="craft-row" style={{ borderRadius: 4, padding: narrow ? 8 : 10, overflow: 'hidden' }}>
+    <div className="craft-row" style={{ padding: narrow ? 8 : 10, overflow: 'hidden' }}>
       <svg
         width="100%"
         viewBox={`0 0 ${size} ${size}`}

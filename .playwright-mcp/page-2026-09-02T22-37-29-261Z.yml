@@ -1,0 +1,97 @@
+- generic [ref=f2e3]:
+  - main [ref=f2e36]:
+    - generic [ref=f2e740]:
+      - generic [ref=f2e741]:
+        - button "+ new" [ref=f2e742] [cursor=pointer]
+        - generic [ref=f2e743] [cursor=pointer]:
+          - generic [ref=f2e745]: Ivo Tarrant
+          - button "add" [ref=f2e747]
+        - generic [ref=f2e748] [cursor=pointer]:
+          - generic [ref=f2e750]: Marisol Vey
+          - button "in scene" [ref=f2e752]
+        - generic [ref=f2e753] [cursor=pointer]: you
+        - generic [ref=f2e757] [cursor=pointer]:
+          - generic [ref=f2e759]: The Cartwright
+          - button "in scene" [ref=f2e761]
+      - generic [ref=f2e762]:
+        - generic [ref=f2e763]:
+          - generic [ref=f2e764]:
+            - generic [ref=f2e765]: portrait plate · no photo yet
+            - button "Upload photo" [ref=f2e768] [cursor=pointer]
+            - generic [ref=f2e769]:
+              - generic [ref=f2e770]: plate hue
+              - slider [ref=f2e771]: "210"
+            - button "✦ Flesh out with AI" [ref=f2e774] [cursor=pointer]
+            - button "tag as \"this is me\"" [ref=f2e775] [cursor=pointer]
+            - button "add to this scene" [ref=f2e776] [cursor=pointer]
+            - button "remove from world" [ref=f2e777] [cursor=pointer]
+          - generic [ref=f2e778]:
+            - generic [ref=f2e779]:
+              - generic [ref=f2e780]: character
+              - textbox "Name" [ref=f2e781]: Ivo Tarrant
+              - textbox "role · relation to the protagonist" [ref=f2e782]: brother · owes the guild
+            - generic [ref=f2e783]:
+              - generic [ref=f2e784]:
+                - generic [ref=f2e785]: current goal
+                - textbox "—" [ref=f2e786]: pay off the favour before you learn of it
+              - generic [ref=f2e787]:
+                - generic [ref=f2e788]: emotional state
+                - textbox "—" [ref=f2e789]: cornered but hiding it
+              - generic [ref=f2e790]:
+                - generic [ref=f2e791]: location
+                - textbox "—" [ref=f2e792]: the low quarter
+              - generic [ref=f2e793]:
+                - generic [ref=f2e794]: condition
+                - textbox "—" [ref=f2e795]: in debt to the guild
+            - generic [ref=f2e796]: Live state updates lightly mid-episode and fully at wrap. Voice, anchors, and psyche stay who they are.
+        - generic [ref=f2e797]:
+          - button "Persona" [ref=f2e798] [cursor=pointer]
+          - button "Voice" [ref=f2e799] [cursor=pointer]
+          - button "Psyche" [ref=f2e800] [cursor=pointer]
+          - button "Secrets" [ref=f2e801] [cursor=pointer]
+          - button "Relations" [ref=f2e802] [cursor=pointer]
+          - button "Anchors" [ref=f2e803] [cursor=pointer]
+          - button "AI notes" [ref=f2e804] [cursor=pointer]
+        - generic [ref=f2e805]:
+          - generic [ref=f2e806]:
+            - generic [ref=f2e807]:
+              - generic [ref=f2e808]: Who they are
+              - generic [ref=f2e809]: prose, not bullet points — this is the core of the sheet
+            - textbox [ref=f2e810]: Your brother, who followed you to the harbour and found his own trouble. Took guild money to cover your debt without telling you the terms. Loves you in the way that creates problems.
+          - generic [ref=f2e811]:
+            - generic [ref=f2e812]: Age / read
+            - textbox "Late thirties. Tired in a competent way." [ref=f2e814]: Early thirties, looks younger when he lies.
+          - generic [ref=f2e815]:
+            - generic [ref=f2e816]:
+              - generic [ref=f2e817]: Appearance
+              - generic [ref=f2e818]: identity the narrator keeps consistent
+            - textbox [ref=f2e819]: Dock-worker’s shoulders, a gambler’s hands, your mother’s smile.
+          - generic [ref=f2e820]:
+            - generic [ref=f2e821]:
+              - generic [ref=f2e822]: Mannerisms
+              - generic [ref=f2e823]: recurring physical habits the narrator weaves in — never all at once
+            - textbox "Cracks her knuckles one at a time when stalling. Never sits with her back to a door." [ref=f2e824]
+          - generic [ref=f2e825]:
+            - generic [ref=f2e826]:
+              - generic [ref=f2e827]: Backstory
+              - generic [ref=f2e828]: informs behaviour; the narrator reveals it only in earned fragments
+            - textbox "Where they come from, what it cost, and what they had to become to survive it." [ref=f2e829]
+  - generic [ref=f2e727]:
+    - button "◈ Worlds" [ref=f2e728] [cursor=pointer]:
+      - generic [ref=f2e729]: ◈
+      - text: Worlds
+    - button "¶ Story" [ref=f2e730] [cursor=pointer]:
+      - generic [ref=f2e731]: ¶
+      - text: Story
+    - button "◇ Cast" [active] [ref=f2e732] [cursor=pointer]:
+      - generic [ref=f2e733]: ◇
+      - text: Cast
+    - button "⌂ Places" [ref=f2e734] [cursor=pointer]:
+      - generic [ref=f2e735]: ⌂
+      - text: Places
+    - button "⚙ Settings" [ref=f2e736] [cursor=pointer]:
+      - generic [ref=f2e737]: ⚙
+      - text: Settings
+    - button "◎ Profile" [ref=f2e738] [cursor=pointer]:
+      - generic [ref=f2e739]: ◎
+      - text: Profile

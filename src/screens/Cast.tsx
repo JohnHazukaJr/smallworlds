@@ -10,10 +10,10 @@ import {
 } from '../relationships';
 import { useApp } from '../store/app';
 import type { Character, Relationship } from '../types';
-import { Chip, ErrorNote, Field, Mono, Spinner, useVw } from '../ui/bits';
+import { Chip, ConfirmBar, ErrorNote, Field, Mono, Spinner, editorsStacked, phoneChrome, useViewport } from '../ui/bits';
 import { fileToPortraitImage } from '../ui/image';
 import { avatarStyle, STRIPE, ACCENT, ACCENT_RGBA } from '../ui/theme';
-import { characterPortraits, emptyCharacter, MAX_CHARACTER_PORTRAITS, portraitsPatch } from '../worldOps';
+import { characterPortraits, emptyCharacter, MAX_CHARACTER_PORTRAITS, nextSceneCastIds, portraitsPatch, pruneDeletedCharacterFromEpisodes } from '../worldOps';
 
 type Tab = 'persona' | 'voice' | 'psyche' | 'secrets' | 'relations' | 'anchors' | 'ai';
 const TABS: Array<[Tab, string]> = [
@@ -55,8 +55,10 @@ function useAutosave(draft: Character | null, onError: (msg: string) => void) {
 }
 
 export function Cast() {
-  const vw = useVw();
-  const narrow = vw < 1000;
+  const { band } = useViewport();
+  const stacked = editorsStacked(band);
+  const phone = phoneChrome(band);
+  const narrow = stacked;
   const { currentWorldId, go, pendingCharacterId, clearPendingCharacter } = useApp();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>('persona');
@@ -71,15 +73,31 @@ export function Cast() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [portraitBusy, setPortraitBusy] = useState(false);
   const [portraitError, setPortraitError] = useState('');
+  const [confirmRemove, setConfirmRemove] = useState(false);
 
   const world = useLiveQuery(
-    async () => (currentWorldId ? db.worlds.get(currentWorldId) : undefined),
+    async () => {
+      if (!currentWorldId) return null;
+      return (await db.worlds.get(currentWorldId)) ?? null;
+    },
     [currentWorldId]
   );
-  const cast = useLiveQuery(
+  const episode = useLiveQuery(
+    async () => {
+      if (!world?.activeSeasonId) return null;
+      return (
+        (await db.episodes.where('seasonId').equals(world.activeSeasonId).filter((e) => e.status === 'active').first())
+        ?? (await db.episodes.where('seasonId').equals(world.activeSeasonId).first())
+        ?? null
+      );
+    },
+    [world?.id, world?.activeSeasonId]
+  );
+  const castRows = useLiveQuery(
     async () => (world ? db.characters.where('worldId').equals(world.id).toArray() : []),
     [world?.id]
-  ) ?? [];
+  );
+  const cast = castRows ?? [];
 
   const selected = cast.find((c) => c.id === selectedId)
     ?? (pendingCharacterId ? cast.find((c) => c.id === pendingCharacterId) : undefined)
@@ -88,12 +106,18 @@ export function Cast() {
 
   // Honor one-shot focus from World editor / other screens.
   useEffect(() => {
-    if (!pendingCharacterId || cast.length === 0) return;
+    if (!pendingCharacterId) return;
+    if (currentWorldId && world === undefined) return;
+    if (!world) {
+      clearPendingCharacter();
+      return;
+    }
+    if (castRows === undefined) return;
     if (cast.some((c) => c.id === pendingCharacterId)) {
       setSelectedId(pendingCharacterId);
-      clearPendingCharacter();
     }
-  }, [pendingCharacterId, cast, clearPendingCharacter]);
+    clearPendingCharacter();
+  }, [pendingCharacterId, currentWorldId, world, cast, castRows, clearPendingCharacter]);
 
   // Sync draft when the selected character changes.
   useEffect(() => {
@@ -102,6 +126,7 @@ export function Cast() {
     setFleshError('');
     setUndoSnapshot(null);
     setPortraitError('');
+    setConfirmRemove(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id]);
 
@@ -183,6 +208,12 @@ export function Cast() {
     if (!world) return;
     const c = emptyCharacter(world.id, { name: 'New character', ...fromAI });
     await db.characters.add(c);
+    if (episode && !c.isPlayer) {
+      await db.episodes.update(episode.id, {
+        castIds: nextSceneCastIds(episode.castIds, c.id, false),
+        updatedAt: Date.now()
+      });
+    }
     setSelectedId(c.id);
     setCreating(false);
     setAiDesc('');
@@ -202,11 +233,14 @@ export function Cast() {
     }
   };
 
+  if (currentWorldId && world === undefined) {
+    return <div style={{ padding: 60 }}><Spinner label="opening the world" /></div>;
+  }
   if (!world) {
     return (
-      <div className="fade-in" style={{ padding: narrow ? '40px 20px' : '80px 60px', display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 560 }}>
+      <div className="fade-in" style={{ padding: phone ? '40px 20px' : '80px 60px', display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 560 }}>
         <Mono>no world open</Mono>
-        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: '#f8f6f2' }}>Open a world to meet its inhabitants.</div>
+        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: 'var(--ink-heading)' }}>Open a world to meet its inhabitants.</div>
         <div><button className="btn-primary" onClick={() => go('library')}>Go to Worlds</button></div>
       </div>
     );
@@ -215,16 +249,27 @@ export function Cast() {
   const d = draft;
 
   return (
-    <div className="fade-in" style={{ display: 'grid', minHeight: '100vh', gridTemplateColumns: narrow ? 'minmax(0, 1fr)' : '264px minmax(0, 1fr)' }}>
+    <div className="fade-in" style={{
+      display: 'grid', flex: 1, height: '100%', minHeight: 0, overflow: 'hidden',
+      gridTemplateColumns: stacked ? 'minmax(0, 1fr)' : '264px minmax(0, 1fr)',
+      gridTemplateRows: stacked ? 'auto minmax(0, 1fr)' : 'minmax(0, 1fr)'
+    }}>
       {/* cast list */}
-      <div style={{
-        borderRight: narrow ? 'none' : '1px solid rgba(255,255,255,0.07)',
-        borderBottom: narrow ? '1px solid rgba(255,255,255,0.07)' : 'none',
-        padding: narrow ? '18px 16px 12px' : '26px 16px',
-        paddingTop: narrow ? 'calc(18px + env(safe-area-inset-top))' : 26,
-        display: 'flex', flexDirection: narrow ? 'row' : 'column', gap: narrow ? 8 : 16,
-        background: 'rgba(255,255,255,0.02)', overflowX: narrow ? 'auto' : undefined,
-        alignItems: narrow ? 'center' : undefined
+      <div className="glass-clear" style={{
+        borderRadius: 0,
+        borderTop: 0, borderLeft: 0,
+        borderRight: stacked ? 'none' : '1px solid var(--glass-rim)',
+        borderBottom: stacked ? '1px solid var(--glass-rim)' : 'none',
+        paddingTop: stacked ? 'calc(18px + env(safe-area-inset-top))' : 26,
+        paddingRight: 16,
+        paddingBottom: stacked ? 12 : 26,
+        paddingLeft: 16,
+        display: 'flex', flexDirection: stacked ? 'row' : 'column', gap: stacked ? 8 : 16,
+        overflowX: stacked ? 'auto' : 'hidden',
+        overflowY: stacked ? 'hidden' : 'auto',
+        minWidth: 0,
+        minHeight: 0,
+        alignItems: stacked ? 'center' : undefined
       }}>
         {!narrow && (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -240,47 +285,71 @@ export function Cast() {
         )}
         {cast.map((c) => {
           const active = selected?.id === c.id;
+          const inScene = !!c.isPlayer || !!episode?.castIds.includes(c.id);
           return (
-            <div key={c.id} onClick={() => { setSelectedId(c.id); setTab('persona'); }} style={{
-              display: 'flex', gap: 10, alignItems: 'center', padding: 9, borderRadius: 13, cursor: 'pointer',
-              flexShrink: 0,
+            <div
+              key={c.id}
+              onClick={() => { setSelectedId(c.id); setTab('persona'); }}
+              style={{
+              display: 'flex', gap: stacked ? 7 : 10, alignItems: 'center', padding: stacked ? '6px 7px' : 9, borderRadius: 12, cursor: 'pointer',
+              flexShrink: stacked ? 0 : 1,
+              minWidth: 0,
+              maxWidth: stacked ? 200 : undefined,
               background: active ? 'rgba(255,255,255,0.08)' : 'transparent',
-              border: `1px solid ${active ? 'rgba(255,255,255,0.14)' : 'transparent'}`,
-              backdropFilter: active ? 'blur(18px)' : undefined
+              border: `1px solid ${active ? 'var(--glass-rim)' : 'transparent'}`
             }}>
               {(() => {
                 const face = characterPortraits(c)[0];
                 return (
                   <div style={{
-                    ...avatarStyle(c.hue, 34),
+                    ...avatarStyle(c.hue, stacked ? 28 : 34),
+                    flexShrink: 0,
                     ...(face ? { backgroundImage: `url(${face})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {})
                   }} />
                 );
               })()}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f0eee9', whiteSpace: 'nowrap' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
+                <div style={{ fontSize: stacked ? 12.5 : 13.5, fontWeight: 600, color: 'var(--ink-heading)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {c.name || 'unnamed'}{c.selfTag ? ' · me' : ''}
                 </div>
                 {!narrow && (
                   <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.42)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {c.role || (c.isPlayer ? 'protagonist' : 'no role yet')}
+                    {episode && !c.isPlayer ? (inScene ? ' · in scene' : ' · off-page') : ''}
                   </div>
                 )}
               </div>
+              {episode && !c.isPlayer && !stacked && (
+                <button
+                  type="button"
+                  className="btn-quiet"
+                  style={{ fontSize: 10, padding: '2px 6px', flexShrink: 0 }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void safeWrite(
+                      () => db.episodes.update(episode.id, {
+                        castIds: nextSceneCastIds(episode.castIds, c.id, false),
+                        updatedAt: Date.now()
+                      }),
+                      setError
+                    );
+                  }}
+                >{inScene ? 'in scene' : 'add'}</button>
+              )}
             </div>
           );
         })}
       </div>
 
       {/* editor */}
-      <div style={{ padding: narrow ? '22px 18px 60px' : '34px 40px 60px', maxWidth: 1000 }}>
+      <div style={{ padding: stacked ? '22px 18px 24px' : '34px 40px 40px', maxWidth: 1000, minWidth: 0, minHeight: 0, overflow: 'auto' }}>
         {creating && (
           <div className="craft-row" style={{ padding: 20, marginBottom: 28, display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: '#f6f4f0' }}>New character</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink-heading)' }}>New character</div>
               <button className="btn-quiet" onClick={() => setCreating(false)}>cancel</button>
             </div>
-            <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'rgba(236,234,230,0.6)' }}>
+            <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'var(--ink-muted)' }}>
               Describe them in a sentence and the utility model drafts a full sheet you can edit — or start blank.
             </div>
             <textarea
@@ -413,16 +482,39 @@ export function Cast() {
                     onClick={() => void toggleSelfTag()}
                   >{d.selfTag ? '✓ tagged as me — untag' : 'tag as "this is me"'}</button>
                 )}
+                {!d.isPlayer && episode && (
+                  <button
+                    className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
+                    onClick={() => void safeWrite(
+                      () => db.episodes.update(episode.id, {
+                        castIds: nextSceneCastIds(episode.castIds, d.id, false),
+                        updatedAt: Date.now()
+                      }),
+                      setError
+                    )}
+                  >{episode.castIds.includes(d.id) ? '✓ in this scene — remove' : 'add to this scene'}</button>
+                )}
                 {!d.isPlayer && (
                   <button
                     className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
-                    onClick={async () => {
-                      if (confirm(`Remove ${d.name || 'this character'} from the world?`)) {
+                    onClick={() => setConfirmRemove(true)}
+                  >remove from world</button>
+                )}
+                {confirmRemove && d && !d.isPlayer && (
+                  <ConfirmBar
+                    title={`Remove ${d.name || 'this character'} from the world?`}
+                    body="This cannot be undone."
+                    confirmLabel="Remove"
+                    onCancel={() => setConfirmRemove(false)}
+                    onConfirm={() => {
+                      setConfirmRemove(false);
+                      void (async () => {
                         await recordTombstones([{ table: 'characters', id: d.id, worldId: d.worldId, payload: d }]);
                         const remaining = cast.filter((c) => c.id !== d.id);
                         const pruned = pruneRelationshipsToCast(remaining);
-                        await db.transaction('rw', db.characters, async () => {
+                        await db.transaction('rw', db.characters, db.episodes, async () => {
                           await db.characters.delete(d.id);
+                          await pruneDeletedCharacterFromEpisodes(d.worldId, d.id);
                           for (const c of pruned) {
                             const before = remaining.find((x) => x.id === c.id);
                             if (!before) continue;
@@ -435,9 +527,9 @@ export function Cast() {
                           }
                         });
                         setSelectedId(null);
-                      }
+                      })();
                     }}
-                  >remove from world</button>
+                  />
                 )}
               </div>
 
@@ -447,7 +539,7 @@ export function Cast() {
                   <input
                     value={d.name} onChange={(e) => patch({ name: e.target.value })} placeholder="Name"
                     className="serif"
-                    style={{ fontFamily: 'Spectral, serif', fontWeight: 300, fontSize: narrow ? 28 : 38, color: '#f8f6f2', lineHeight: 1.08, background: 'transparent', border: 0, padding: 0, borderRadius: 0 }}
+                    style={{ fontFamily: 'Spectral, serif', fontWeight: 300, fontSize: narrow ? 28 : 38, color: 'var(--ink-heading)', lineHeight: 1.08, background: 'transparent', border: 0, padding: 0, borderRadius: 0 }}
                   />
                   <input
                     value={d.role} onChange={(e) => patch({ role: e.target.value })}
@@ -462,7 +554,7 @@ export function Cast() {
                     ['location', d.state.location, (v: string) => patch({ state: { ...d.state, location: v } })],
                     ['condition', d.state.condition, (v: string) => patch({ state: { ...d.state, condition: v } })]
                   ] as Array<[string, string, (v: string) => void]>).map(([k, v, set]) => (
-                    <div key={k} className="craft-row" style={{ borderRadius: 4, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    <div key={k} className="craft-row" style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <Mono style={{ fontSize: 9, letterSpacing: '0.12em' }}>{k}</Mono>
                       <input
                         value={v} onChange={(e) => set(e.target.value)} placeholder="—"
@@ -471,7 +563,7 @@ export function Cast() {
                     </div>
                   ))}
                 </div>
-                <div style={{ fontSize: 12, lineHeight: 1.5, color: 'rgba(236,234,230,0.5)' }}>
+                <div style={{ fontSize: 12, lineHeight: 1.5, color: 'var(--ink-muted)' }}>
                   Live state updates lightly mid-episode and fully at wrap. Voice, anchors, and psyche stay who they are.
                 </div>
               </div>
@@ -481,7 +573,7 @@ export function Cast() {
               {TABS.map(([id, label]) => (
                 <button key={id} onClick={() => setTab(id)} style={{
                   border: 0, background: 'transparent',
-                  color: tab === id ? '#f8f6f2' : 'rgba(236,234,230,0.45)',
+                  color: tab === id ? 'var(--ink-heading)' : 'rgba(236,234,230,0.45)',
                   borderBottom: `2px solid ${tab === id ? ACCENT : 'transparent'}`,
                   padding: '10px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap'
                 }}>{label}</button>
@@ -549,8 +641,8 @@ export function Cast() {
                     <textarea rows={3} value={d.secrets} onChange={(e) => patch({ secrets: e.target.value })} />
                   </Field>
                   <div className="craft-row" style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: '#f6f4f0' }}>Must not know yet</div>
-                    <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'rgba(236,234,230,0.6)' }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-heading)' }}>Must not know yet</div>
+                    <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'var(--ink-muted)' }}>
                       Plot knowledge this character is walled off from. The narrator will never let them learn,
                       reference, or act on any of it until you remove it from this box.
                     </div>
@@ -592,12 +684,12 @@ export function Cast() {
                 <div className="craft-row" style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                     <div style={{ width: 6, height: 6, borderRadius: '50%', background: ACCENT }} />
-                    <div style={{ fontSize: 13, fontWeight: 600, color: '#f6f4f0' }}>Behaviour anchors</div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-heading)' }}>Behaviour anchors</div>
                     <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)', marginLeft: 'auto' }}>
                       what keeps them human
                     </div>
                   </div>
-                  <div style={{ fontSize: 13, lineHeight: 1.65, color: 'rgba(236,234,230,0.6)' }}>
+                  <div style={{ fontSize: 13, lineHeight: 1.65, color: 'var(--ink-muted)' }}>
                     Hard rules, rendered as a non-negotiable block when this character is in scene (narrator / speak).
                     One per line.
                   </div>
@@ -718,9 +810,9 @@ function RelationsEditor({
   return (
     <div style={{
       display: 'flex', flexDirection: 'column', gap: 16,
-      paddingBottom: narrow ? 'calc(72px + env(safe-area-inset-bottom))' : 0
+      paddingBottom: narrow ? 24 : 0
     }}>
-      <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'rgba(236,234,230,0.6)' }}>
+      <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'var(--ink-muted)' }}>
         Outbound links from <strong style={{ color: 'rgba(236,234,230,0.85)', fontWeight: 600 }}>{character.name || 'this character'}</strong>.
         Map shows the web; dashed edges are inbound-only. The cast card named “you” is the story protagonist — not you the author.
       </div>
@@ -905,12 +997,12 @@ function RelationsEditor({
         )}
         {inbound.map(({ from, rel }) => (
           <div key={from.id} className="craft-row" style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ fontSize: 13, color: '#f0eee9' }}>
+            <div style={{ fontSize: 13, color: 'var(--ink-heading)' }}>
               <strong>{from.name || 'unnamed'}</strong>
               <span style={{ opacity: 0.55 }}> · {rel.kind}</span>
             </div>
             {rel.note && (
-              <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.6)' }}>{rel.note}</div>
+              <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-muted)' }}>{rel.note}</div>
             )}
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <button className="btn-quiet" style={{ fontSize: 12, minHeight: 44 }} onClick={() => onSelectCharacter(from.id)}>

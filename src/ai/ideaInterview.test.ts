@@ -16,13 +16,13 @@ describe('idea interview packing', () => {
     const packed = packInterviewAnswers(
       [
         { id: 'who', question: 'Who are you?' },
-        { id: 'pressure', question: 'What pressure opens?' }
+        { id: 'situation', question: 'What is true as it opens?' }
       ],
       { who: 'A smuggler under a false name' }
     );
     expect(packed).toEqual([
       { question: 'Who are you?', answer: 'A smuggler under a false name' },
-      { question: 'What pressure opens?', answer: '' }
+      { question: 'What is true as it opens?', answer: '' }
     ]);
   });
 

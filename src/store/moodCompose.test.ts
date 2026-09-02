@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { moodFromHue, type MoodId } from './app';
-import { isPlayerAgencyMode, resolveComposeMode } from '../types';
+import { isPlayerAgencyMode, requiresSpokenReply, resolveComposeMode } from '../types';
 
 describe('moodFromHue', () => {
   it('maps hues across all eight climates', () => {
@@ -44,5 +44,9 @@ describe('resolveComposeMode', () => {
     expect(isPlayerAgencyMode('play')).toBe(true);
     expect(isPlayerAgencyMode('continue')).toBe(false);
     expect(isPlayerAgencyMode('steer')).toBe(false);
+    expect(requiresSpokenReply('speak')).toBe(true);
+    expect(requiresSpokenReply('play')).toBe(true);
+    expect(requiresSpokenReply('act')).toBe(false);
+    expect(requiresSpokenReply('continue')).toBe(false);
   });
 });

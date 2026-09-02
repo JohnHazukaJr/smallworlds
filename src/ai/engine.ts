@@ -9,19 +9,22 @@ import type {
   Turn, TurnLength, TurnRole, World, WrapBeat, WrapCharacterOutcome
 } from '../types';
 import {
-  CALENDAR_EVENT_CAP, defaultVisibilityForKind, isPlayerAgencyMode, worldCalendarEventPrefs
+  CALENDAR_EVENT_CAP, defaultVisibilityForKind, isPlayerAgencyMode, requiresSpokenReply, worldCalendarEventPrefs
 } from '../types';
 import { normalizeRelationships } from '../relationships';
 import {
   buildEpisodePlotTargets, buildNextSeasonPlotTargets, calendarPatch, emptyCharacter, emptyLocation,
-  formatEpisodeDateRange, formatStoryDate, nextEpisode, pendingPlotTargets, worldCalendar
+  formatEpisodeDateRange, formatStoryDate, inferStanceFromInstructions, nextEpisode, pendingPlotTargets,
+  povPersonLabel, storyStanceOf, worldCalendar, BIBLE_MIN_CHARS
 } from '../worldOps';
-import { AIError, streamChat, isContextOverflowError, type ChatMessage, type StreamRequest } from './client';
+import { AIError, streamChat, isPromptPackRetryError, type ChatMessage, type StreamRequest } from './client';
 import { imageModelFor, proseModelFor, utilityModelFor } from './models';
 import { ANALYZE_EPISODE_TOOL, FILE_CANON_TOOL, PLAN_TURN_TOOL, utilityCall, type ToolSpec } from './utilityCall';
 import { promptCharBudget } from './contextBudget';
 import { applyDeliveryTone, parseDeliveryTone } from './deliveryTone';
-import { hasSpokenDialogue, normalizeSpeakText } from './dialogueFormat';
+import { stancePlaybook } from './storyStance';
+import { hasSpokenDialogue, normalizeSpeakText, speakHoldsForPlayer, stitchSpeakRetry, stripNarratorEmbeddedDialogue } from './dialogueFormat';
+import { SPEAK_WALL_NUDGE, speakLeaksMustNotKnow } from './knowledgeWall';
 import {
   activeGuests,
   buildCharacterSpeakMessages,
@@ -47,7 +50,7 @@ import {
   narrationBeatTokens,
   planCapsForLength
 } from './prompts';
-import { rankReplySpeakers, speakerCandidates, type RankedSpeaker } from './roomDynamics';
+import { detectAddressee, rankReplySpeakers, speakerCandidates, type RankedSpeaker } from './roomDynamics';
 import {
   isNearDuplicate,
   knowledgeFactLine,
@@ -93,7 +96,7 @@ const SPEAK_DIALOGUE_NUDGE =
 /**
  * Stream a character/guest speak beat; if the provider stops for length, make one
  * continuation call and stitch before normalizing. When requireDialogue, retry once
- * if the cleaned text has no quoted speech.
+ * if the cleaned text has no quoted speech. When mustNotKnow leaks, retry once.
  */
 async function streamSpeakComplete(opts: {
   provider: StreamRequest['provider'];
@@ -103,6 +106,7 @@ async function streamSpeakComplete(opts: {
   length: TurnLength;
   signal?: AbortSignal;
   requireDialogue?: boolean;
+  mustNotKnow?: string;
   onProgress: (label: string) => void;
   onAccumulated: (text: string) => void;
 }): Promise<string> {
@@ -162,8 +166,31 @@ async function streamSpeakComplete(opts: {
       }
     });
     const retried = normalizeSpeakText(acc);
-    if (retried && hasSpokenDialogue(retried)) cleaned = retried;
+    if (retried && hasSpokenDialogue(retried)) cleaned = stitchSpeakRetry(cleaned, retried);
     else if (!hasSpokenDialogue(cleaned)) cleaned = '';
+  }
+  const wall = (opts.mustNotKnow ?? '').trim();
+  if (wall && cleaned && speakLeaksMustNotKnow(cleaned, wall)) {
+    opts.onProgress('honouring what they must not know…');
+    acc = '';
+    await streamChat({
+      provider: opts.provider,
+      model: opts.model,
+      system: opts.system,
+      messages: [
+        ...opts.messages,
+        { role: 'assistant', content: cleaned },
+        { role: 'user', content: SPEAK_WALL_NUDGE }
+      ],
+      maxTokens: continueTokens,
+      signal: opts.signal,
+      onDelta: (d) => {
+        acc += d;
+        opts.onAccumulated(acc);
+      }
+    });
+    const retried = normalizeSpeakText(acc);
+    if (retried) cleaned = retried;
   }
   return cleaned;
 }
@@ -212,7 +239,7 @@ async function streamNarrationComplete(opts: {
       }
     });
   }
-  return acc.trim();
+  return stripNarratorEmbeddedDialogue(acc.trim());
 }
 
 /** Retry once with a tight lore pack — never shortens the scene itself. */
@@ -224,9 +251,9 @@ async function withOverflowRetry<T>(
     return await run({ pack: 'normal' });
   } catch (e) {
     if ((e as Error).name === 'AbortError') throw e;
-    if (!isContextOverflowError(e)) throw e;
+    if (!isPromptPackRetryError(e)) throw e;
     onNotice?.('Prompt was too large for this model — sent a tighter pack of lore, not a shorter scene.');
-    return run({ pack: 'tight', skipOmittedDigest: true });
+    return run({ pack: 'tight' });
   }
 }
 
@@ -450,11 +477,63 @@ function ensurePlayerReplySpeak(
   }
 
   if (beats.some((b) => b.type === 'speak')) {
-    return beats.slice(0, caps.maxTotal);
+    return preferAddresseeSpeak(beats, playerText, inScene, guests, caps, turns).slice(0, caps.maxTotal);
   }
   const injected = pickReplySpeaker(inScene, guests, playerText, prefer, turns);
   if (!injected) return beats;
-  return [injected, ...beats].slice(0, caps.maxTotal);
+  return preferAddresseeSpeak([injected, ...beats], playerText, inScene, guests, caps, turns)
+    .slice(0, caps.maxTotal);
+}
+
+function speakKey(beat: DirectorBeat): string | null {
+  if (beat.type !== 'speak') return null;
+  if ('guestId' in beat && beat.guestId) return `g:${beat.guestId}`;
+  if ('characterId' in beat) return `c:${beat.characterId}`;
+  return null;
+}
+
+/** When the player named someone, that speaker should answer first. */
+function preferAddresseeSpeak(
+  beats: DirectorBeat[],
+  playerText: string,
+  inScene: Character[],
+  guests: EpisodeGuest[],
+  caps: { maxSpeak: number; maxTotal: number },
+  turns?: Turn[]
+): DirectorBeat[] {
+  const addressee = detectAddressee(playerText, speakerCandidates(inScene, guests));
+  if (!addressee) return beats;
+  const matches = (b: DirectorBeat) => {
+    if (b.type !== 'speak') return false;
+    if (addressee.kind === 'guest') return 'guestId' in b && b.guestId === addressee.id;
+    return 'characterId' in b && b.characterId === addressee.id;
+  };
+  const idx = beats.findIndex(matches);
+  const firstSpeak = beats.findIndex((b) => b.type === 'speak');
+  if (idx >= 0 && firstSpeak >= 0 && idx !== firstSpeak) {
+    const next = [...beats];
+    const tmp = next[firstSpeak];
+    next[firstSpeak] = next[idx];
+    next[idx] = tmp;
+    return next;
+  }
+  if (idx >= 0) return beats;
+  const injected = pickReplySpeaker(
+    inScene,
+    guests,
+    playerText,
+    addressee.kind === 'guest' ? { guestId: addressee.id } : { characterId: addressee.id },
+    turns
+  );
+  if (!injected) return beats;
+  const rest = beats.filter((b) => speakKey(b) !== speakKey(injected));
+  const speakN = rest.filter((b) => b.type === 'speak').length;
+  let trimmed = rest;
+  if (speakN >= caps.maxSpeak) {
+    const lastSpeak = rest.reduce((acc, b, i) => (b.type === 'speak' ? i : acc), -1);
+    if (lastSpeak >= 0) trimmed = rest.filter((_, i) => i !== lastSpeak);
+  }
+  return [injected, ...trimmed].slice(0, caps.maxTotal);
 }
 
 /** Normalize raw director JSON into executable beats (exported for tests). */
@@ -474,6 +553,7 @@ export function normalizeBeats(
   const caps = planCapsForLength(length);
   const allowedGuests = new Set(guests.map((g) => g.id));
   const beats: DirectorBeat[] = [];
+  const seenSpeak = new Set<string>();
   let speakCount = 0;
   for (const b of raw.beats ?? []) {
     if (beats.length >= caps.maxTotal) break;
@@ -486,11 +566,17 @@ export function normalizeBeats(
       if (guestRaw) {
         const byId = resolveGuestSpeakerId(guestRaw, guests, introduceNameToId);
         if (!byId || !allowedGuests.has(byId)) continue;
+        const key = `g:${byId}`;
+        if (seenSpeak.has(key)) continue;
+        seenSpeak.add(key);
         beats.push({ type: 'speak', guestId: byId, brief });
         speakCount++;
       } else if (castRaw) {
         const castId = resolveCastSpeakerId(castRaw, inScene);
         if (!castId) continue;
+        const key = `c:${castId}`;
+        if (seenSpeak.has(key)) continue;
+        seenSpeak.add(key);
         beats.push({ type: 'speak', characterId: castId, brief });
         speakCount++;
       }
@@ -729,7 +815,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
   const progress = opts.onProgress ?? (() => {});
 
   const playerText = opts.input.trim();
-  const requireDialogue = isPlayerAgencyMode(opts.mode);
+  const requireDialogue = requiresSpokenReply(opts.mode);
 
   // Director plans cast/guest changes + ordered narration / speak beats (utility model).
   // Resume path skips planning and runs leftover beats from a prior Stop/error.
@@ -753,7 +839,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         beats: Array<{ type?: string; brief?: string; characterId?: string; guestId?: string }>;
       }>(
         opts.world,
-        directorSystemPrompt(opts.mode, speakersPresent, opts.length),
+        directorSystemPrompt(opts.mode, speakersPresent, opts.length, storyStanceOf(opts.world)),
         directorUserPrompt(ctx, opts.mode, playerText, {
           preferCharacterId: opts.preferCharacterId,
           preferGuestId: opts.preferGuestId,
@@ -771,7 +857,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         plan = await planDirector('normal');
       } catch (first) {
         if ((first as Error).name === 'AbortError') asWriteAbort(first, beatsCompleted);
-        if (isContextOverflowError(first)) {
+        if (isPromptPackRetryError(first)) {
           opts.onNotice?.('Prompt was too large for this model — sent a tighter pack of lore, not a shorter scene.');
           plan = await planDirector('tight');
         } else {
@@ -780,7 +866,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
             plan = await planDirector('normal');
           } catch (second) {
             if ((second as Error).name === 'AbortError') asWriteAbort(second, beatsCompleted);
-            if (isContextOverflowError(second)) {
+            if (isPromptPackRetryError(second)) {
               opts.onNotice?.('Prompt was too large for this model — sent a tighter pack of lore, not a shorter scene.');
               plan = await planDirector('tight');
             } else {
@@ -869,6 +955,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
 
   let lastId = '';
   let speakTurnsSaved = 0;
+  let holdForPlayer = false;
   try {
     for (const beat of beats) {
       throwIfAborted(opts.signal, beatsCompleted, remainingFrom(beatsCompleted));
@@ -891,7 +978,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
             messages: buildNarrationBeatMessages(
               ctx.turns, ctx.characters, beat.brief, opts.length, sceneGuests(), ctx.episode,
               narrSystem.length,
-              { totalCap: narrCap, skipOmittedDigest: pack.skipOmittedDigest || pack.pack === 'tight' }
+              { totalCap: narrCap, skipOmittedDigest: pack.skipOmittedDigest }
             ),
             length: opts.length,
             signal: opts.signal,
@@ -916,6 +1003,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       }
 
       if ('guestId' in beat && beat.guestId) {
+        if (holdForPlayer) continue;
         const guest = (ctx.episode.guests ?? []).find((g) => g.id === beat.guestId);
         if (!guest) continue;
         const meta: StreamMeta = { role: 'character', guestId: guest.id };
@@ -939,7 +1027,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
                 systemChars: guestSystem.length,
                 length: opts.length,
                 totalCap: speakCap,
-                skipOmittedDigest: pack.skipOmittedDigest || pack.pack === 'tight'
+                skipOmittedDigest: pack.skipOmittedDigest
               }
             ),
             length: opts.length,
@@ -963,10 +1051,12 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         lastId = guestTurn.id;
         beatsCompleted++;
         speakTurnsSaved++;
+        if (speakHoldsForPlayer(cleaned)) holdForPlayer = true;
         opts.onDelta('', meta);
         continue;
       }
 
+      if (holdForPlayer) continue;
       const speaking = ctx.characters.find((c) => c.id === ('characterId' in beat ? beat.characterId : ''));
       if (!speaking || speaking.isPlayer) continue;
 
@@ -991,12 +1081,13 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
               systemChars: charSystem.length,
               length: opts.length,
               totalCap: speakCap,
-              skipOmittedDigest: pack.skipOmittedDigest || pack.pack === 'tight'
+              skipOmittedDigest: pack.skipOmittedDigest
             }
           ),
           length: opts.length,
           signal: opts.signal,
           requireDialogue,
+          mustNotKnow: speaking.mustNotKnow,
           onProgress: progress,
           onAccumulated: (acc) => opts.onDelta(acc, meta)
         });
@@ -1015,6 +1106,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       lastId = characterTurn.id;
       beatsCompleted++;
       speakTurnsSaved++;
+      if (speakHoldsForPlayer(cleaned)) holdForPlayer = true;
       opts.onDelta('', meta);
     }
   } catch (e) {
@@ -1055,7 +1147,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
     );
   }
 
-  // Speak/Act must land at least one spoken reply — narration-only is not enough.
+  // Speak/Play must land at least one spoken reply — narration-only is not enough.
   if (requireDialogue && speakTurnsSaved === 0) {
     await clearPendingPlan(opts.episode.id);
     const err = new AIError(
@@ -1131,7 +1223,7 @@ export async function regenerateBeat(opts: {
         messages: buildNarrationBeatMessages(
           historyTurns, ctx.characters, brief, opts.length, sceneGuests(), ctx.episode,
           narrSystem.length,
-          { totalCap: narrCap, skipOmittedDigest: pack.skipOmittedDigest || pack.pack === 'tight' }
+          { totalCap: narrCap, skipOmittedDigest: pack.skipOmittedDigest }
         ),
         length: opts.length,
         signal: opts.signal,
@@ -1181,7 +1273,7 @@ export async function regenerateBeat(opts: {
             systemChars: guestSystem.length,
             length: opts.length,
             totalCap: speakCap,
-            skipOmittedDigest: pack.skipOmittedDigest || pack.pack === 'tight'
+            skipOmittedDigest: pack.skipOmittedDigest
           }
         ),
         length: opts.length,
@@ -1202,12 +1294,13 @@ export async function regenerateBeat(opts: {
           systemChars: charSystem.length,
           length: opts.length,
           totalCap: speakCap,
-          skipOmittedDigest: pack.skipOmittedDigest || pack.pack === 'tight'
+          skipOmittedDigest: pack.skipOmittedDigest
         }
       ),
       length: opts.length,
       signal: opts.signal,
       requireDialogue: true,
+      mustNotKnow: speaking!.mustNotKnow,
       onProgress: progress,
       onAccumulated: (acc) => opts.onDelta(acc, meta)
     });
@@ -1360,8 +1453,8 @@ function matchByExactContainsOrTokens<T extends { id: string }>(
 }
 
 /**
- * Light mid-episode patch of in-scene cast state plus the scene's physical ledger.
- * Throttled so it does not run every Write — full relationship updates stay on wrap.
+ * Light mid-episode patch of in-scene cast state, scene ledger, and obvious tie shifts.
+ * Throttled so it does not run every Write — a full relationship graph still lands on wrap.
  * Runs after any saved beat, not just spoken ones: narration is what establishes
  * weather, damage, and props in the first place.
  */
@@ -1376,6 +1469,9 @@ async function maybeRefreshLiveSceneState(
   if (turnsSaved <= 0) return;
   const inScene = ctx.characters.filter(
     (c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer
+  );
+  const scenePeople = ctx.characters.filter(
+    (c) => c.isPlayer || ctx.episode.castIds.includes(c.id)
   );
 
   const chars = episodeHistoryChars(ctx.turns);
@@ -1413,6 +1509,19 @@ async function maybeRefreshLiveSceneState(
     .join('\n');
 
   const priorLedger = (ctx.episode.sceneLedger ?? []).map((d) => `- ${d}`).join('\n');
+  const tieLines = scenePeople
+    .flatMap((c) =>
+      c.relationships
+        .filter((r) => scenePeople.some((o) => o.id === r.targetId))
+        .slice(0, 3)
+        .map((r) => {
+          const to = scenePeople.find((o) => o.id === r.targetId);
+          return to ? `- ${c.name} → ${to.name}: ${r.kind || 'linked'}${r.note.trim() ? ` — ${r.note.trim().slice(0, 60)}` : ''}` : null;
+        })
+    )
+    .filter(Boolean)
+    .slice(0, 8)
+    .join('\n');
 
   try {
     progress('reading the room…');
@@ -1425,15 +1534,19 @@ async function maybeRefreshLiveSceneState(
         condition?: string;
       }>;
       scene?: string[];
+      ties?: Array<{ from?: string; to?: string; kind?: string; note?: string }>;
     }>(
       world,
       'You track live state in an interactive story. ' +
         'Call return_json with this shape: {"updates":[{"name":"<exact cast name>","goal":"...","emotion":"...","location":"...","condition":"..."}],' +
-        '"scene":["<physical detail now true in this room>"]}. ' +
+        '"scene":["<physical detail now true in this room>"],' +
+        '"ties":[{"from":"<exact name>","to":"<exact name>","kind":"ally|rival|lover|…","note":"<one line>"}]}. ' +
         'updates: only characters whose state clearly shifted in the recent beats. ' +
         'Omit unchanged fields. Use "none" for a field that no longer applies — a mood that ' +
         'has passed, a goal that was met or abandoned, an injury that healed. ' +
-        'Keep each field under 120 characters. No relationships.\n' +
+        'Keep each field under 120 characters.\n' +
+        'ties: at most 3, only when a relationship clearly shifted on the page (trust, betrayal, a new debt). ' +
+        'Use exact roster names. Do not invent people. Omit if nothing changed.\n' +
         'scene: 3–6 short phrases naming physical facts the prose has established and that later ' +
         'paragraphs must stay consistent with — weather and light, damage, objects in play, ' +
         'doors open or shut, what someone is holding or wearing. ' +
@@ -1443,6 +1556,7 @@ async function maybeRefreshLiveSceneState(
         `Place: ${ctx.episode.location || '(unnamed)'}\n` +
         `In-scene cast (current state):\n${castLines || '(nobody on stage)'}\n\n` +
         `Already established in this scene:\n${priorLedger || '(nothing yet)'}\n\n` +
+        `Ties in the room:\n${tieLines || '(none filed)'}\n\n` +
         `Recent beats:\n${digest.slice(0, 10000)}\n\n` +
         `Return updates JSON.`,
       900,
@@ -1453,6 +1567,7 @@ async function maybeRefreshLiveSceneState(
     const applied = inScene.length > 0
       ? await applyLiveCharacterStateUpdates(world.id, inScene, result.updates ?? [])
       : 0;
+    const tiesApplied = await applyLiveRelationshipUpdates(scenePeople, result.ties ?? []);
     const sceneLedger = capSceneLedger(result.scene);
     await db.episodes.update(ctx.episode.id, {
       liveStateAtChars: chars,
@@ -1464,7 +1579,7 @@ async function maybeRefreshLiveSceneState(
       liveStateAtChars: chars,
       ...(sceneLedger ? { sceneLedger } : {})
     };
-    if (applied > 0) {
+    if (applied > 0 || tiesApplied > 0) {
       // Refresh local character sheets for any follow-on work in this write.
       const refreshed = await db.characters.where('worldId').equals(world.id).toArray();
       ctx.characters = refreshed;
@@ -1708,6 +1823,56 @@ export async function applyLiveCharacterStateUpdates(
     applied++;
   }
   void worldId;
+  return applied;
+}
+
+/** Patch one outbound tie when live play makes it obvious. Null if nothing changed. */
+export function mergeLiveRelationshipPatch(
+  from: Character,
+  to: Character,
+  patch: { kind?: string; note?: string },
+  castIds: string[]
+): Relationship[] | null {
+  if (from.id === to.id) return null;
+  const kind = (patch.kind ?? '').trim();
+  const note = (patch.note ?? '').trim();
+  if (!kind && !note) return null;
+  const existing = from.relationships.find((r) => r.targetId === to.id);
+  const nextKind = kind || existing?.kind || 'linked';
+  const nextNote = note || existing?.note || '';
+  if (existing && existing.kind === nextKind && existing.note === nextNote) return null;
+  return normalizeRelationships(
+    [
+      ...from.relationships.filter((edge) => edge.targetId !== to.id),
+      { targetId: to.id, kind: nextKind, note: nextNote }
+    ],
+    castIds,
+    from.id
+  );
+}
+
+export async function applyLiveRelationshipUpdates(
+  people: Character[],
+  ties: Array<{ from?: string; to?: string; kind?: string; note?: string }>
+): Promise<number> {
+  let applied = 0;
+  const now = Date.now();
+  const ids = people.map((c) => c.id);
+  const byName = (raw?: string) => {
+    const key = (raw ?? '').trim().toLowerCase();
+    if (!key) return undefined;
+    return people.find((c) => c.name.trim().toLowerCase() === key);
+  };
+  for (const t of ties.slice(0, 3)) {
+    const from = byName(t.from);
+    const to = byName(t.to);
+    if (!from || !to) continue;
+    const next = mergeLiveRelationshipPatch(from, to, t, ids);
+    if (!next) continue;
+    await db.characters.update(from.id, { relationships: next, updatedAt: now });
+    from.relationships = next;
+    applied++;
+  }
   return applied;
 }
 
@@ -2394,7 +2559,7 @@ export async function analyzeEpisode(
     '"dateNote":"<one short sentence: how time passed — dawn, overnight, two days later, same afternoon, etc.>",' +
     '"meanwhile":"<2–4 sentences of off-screen life during the gap before the next episode opens — empty string if same day>"}\n' +
     'Rules:\n' +
-    '- Recap must be usable as "previously on": include proper names, calendar timing, place, decisive exchanges, open pressure.\n' +
+    '- Recap must be usable as "previously on": include proper names, calendar timing, place, decisive exchanges, what is still live.\n' +
     '- Beats: 3–7 events that matter later; never vague ("things escalated").\n' +
     '- Facts: 0–6 NEW durable facts; do NOT repeat Known facts; empty array if play already filed them; date when relevant.\n' +
     '- staleFacts: 0–8 Known facts this episode made false (a debt paid, an object no longer held, an injury healed). Near-exact wording. Omit if none.\n' +
@@ -2415,7 +2580,7 @@ export async function analyzeEpisode(
     '- Guest effects only for walk-ons, not Cast cards.\n' +
     '- Invent nothing that did not happen in the episode material — except meanwhile, which may cover the unshown gap.',
     `World: ${world.title} — ${world.line}\n` +
-    `Season ${season.number} premise (current pressure): ${season.premise || '(unwritten)'}\n` +
+    `Season ${season.number} what's live: ${season.premise || '(unwritten)'}\n` +
     `Episode ${episode.number}${episode.title ? ` — ${episode.title}` : ''}` +
     `${episode.location ? ` @ ${episode.location}` : ''}\n` +
     `Date range so far: ${formatEpisodeDateRange(cal, dayStart, dayNow)}\n\n` +
@@ -2577,7 +2742,7 @@ export interface CommitEpisodeWrapInput {
 }
 
 /**
- * Evolve the season premise into living plot pressure from an episode wrap.
+ * Evolve the season premise into what's live now from an episode wrap.
  * Present tense, 2–4 sentences; no spoilers beyond established events.
  */
 export async function evolveSeasonPremise(
@@ -2597,10 +2762,10 @@ export async function evolveSeasonPremise(
     provider,
     model,
     system:
-      'You update season premises for longform interactive fiction after an episode ends. ' +
-      'Rewrite the premise as living current pressure: where the plot is NOW, what hangs over the next episode. ' +
-      'One paragraph, 2–4 sentences, present tense, concrete and pressurized. ' +
-      'Carry forward unresolved stakes; do not invent events beyond the wrap. ' +
+      `You update season premises for longform interactive fiction after an episode ends. ${stancePlaybook(storyStanceOf(world))} ` +
+      'Rewrite the premise as what\'s live now: where things stand, what hangs over the next episode. ' +
+      'One paragraph, 2–4 sentences, present tense, concrete. ' +
+      'Carry forward unresolved situations; do not invent events beyond the wrap. ' +
       'No preamble — return only the premise.',
     messages: [{
       role: 'user',
@@ -3157,7 +3322,7 @@ export async function evolveCharacters(world: World, wrap: SeasonWrap, gapLabel:
     '"knowledge":{"nowKnows"?:string,"clearMustNotKnow"?:string}' +
     '}],' +
     '"relationshipUpdates":[{"from":"<exact name>","to":"<exact name>","kind":string,"note":string}],' +
-    '"plotArc":[{"text":"<season-arc pressure for next season>"}]}' +
+    '"plotArc":[{"text":"<season-arc situation for next season>"}]}' +
     '\nRules:\n' +
     '- Prefer omission over noise — omit unchanged fields entirely.\n' +
     '- Never rewrite speechStyle, example lines, anchors, or customInstructions.\n' +
@@ -3165,7 +3330,7 @@ export async function evolveCharacters(world: World, wrap: SeasonWrap, gapLabel:
     '- PLAYER characters: evolution + light statePatch only — no sheetPatch.\n' +
     '- statePatch: how they OPEN the next season, not a recap dump.\n' +
     '- relationshipUpdates: only edges that shifted; use exact cast names.\n' +
-    '- plotArc: 2-5 distinct arc pressures for season N+1; do not duplicate Raise beats already listed.\n' +
+    '- plotArc: 2-5 distinct arc situations for season N+1; do not duplicate Raise beats already listed.\n' +
     '- knowledge.clearMustNotKnow: substring of their wall they can now safely lose; nowKnows: what they learned.',
     `World: ${world.title}\nTime gap before next season: ${gapLabel}\n\n` +
     `Beats carried forward:\n${wrap.beats.filter((b) => b.disposition !== 'drop').map((b) => `- [${b.disposition}] ${b.text} → ${b.consequence}`).join('\n') || '(none)'}\n\n` +
@@ -3358,7 +3523,7 @@ export async function draftPremise(world: World, season: Season, wrap: SeasonWra
   const keptRels = (wrap.relationshipUpdates ?? []).filter((r) => r.keep !== false);
   const { text: premise } = await streamChat({
     provider, model,
-    system: 'You write season premises for longform interactive fiction. One paragraph, 2-4 sentences, present tense, concrete and pressurized. Open on the raised beats. No preamble — return only the premise.',
+    system: `You write season premises for longform interactive fiction. ${stancePlaybook(storyStanceOf(world))} One paragraph, 2-4 sentences, present tense, concrete situation. Open on the raised beats. No preamble — return only the premise.`,
     messages: [{
       role: 'user',
       content:
@@ -3369,7 +3534,7 @@ export async function draftPremise(world: World, season: Season, wrap: SeasonWra
           ? `\n\nRelationship shifts:\n${keptRels.map((r) => `- ${r.from} → ${r.to}: ${r.kind || 'linked'}${r.note ? ` — ${r.note}` : ''}`).join('\n')}`
           : '') +
         (keptArc.length
-          ? `\n\nExtra plot pressures:\n${keptArc.map((p) => `- ${p.text}`).join('\n')}`
+          ? `\n\nExtra plot situations:\n${keptArc.map((p) => `- ${p.text}`).join('\n')}`
           : '')
     }],
     maxTokens: 500, temperature: 0.9
@@ -3807,13 +3972,21 @@ export async function draftLocation(world: World | null, description: string): P
     history: string; inhabitants: string; rules: string[]; secrets: string; currentState: string;
   }>(
     world,
-    'You design deep location sheets for longform interactive fiction. Call return_json with this shape:\n{"name": string, "tagline": "<short tagline, e.g. \'harbour district · public square\'>", "summary": "<what the place is, first impression, 2-4 sentences of prose>", "atmosphere": "<sensory detail — sight, sound, smell, feel — the narrator leans on>", "features": "<notable landmarks, rooms, or geography within it>", "history": "<how it came to be / what happened here, 2-3 sentences>", "inhabitants": "<who or what is typically found here>", "rules": [<2-4 hazards, laws, or hard rules specific to this place that are never broken>], "secrets": "<something hidden here, not common knowledge>", "currentState": "<its condition right now, one sentence>"}\nMake it specific and concrete, with at least one pressure or danger, never generic.',
+    'You design deep location sheets for longform interactive fiction. Call return_json with this shape:\n{"name": string, "tagline": "<short tagline, e.g. \'harbour district · public square\'>", "summary": "<what the place is, first impression, 2-4 sentences of prose>", "atmosphere": "<sensory detail — sight, sound, smell, feel — the narrator leans on>", "features": "<notable landmarks, rooms, or geography within it>", "history": "<how it came to be / what happened here, 2-3 sentences>", "inhabitants": "<who or what is typically found here>", "rules": [<2-4 hazards, laws, or hard rules specific to this place that are never broken>], "secrets": "<something hidden here, not common knowledge>", "currentState": "<its condition right now, one sentence>"}\nMake it specific and concrete, never generic.' +
+    (world ? ` ${stancePlaybook(storyStanceOf(world))}` : ''),
     `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}Location to create: ${description}`
   );
   return result;
 }
 
 // ---------- AI-assisted flesh-out (enrich existing cards, never remove detail) ----------
+
+function playbookFor(world: World | null | undefined, shapeTag?: string): string {
+  const stance = world
+    ? storyStanceOf(world)
+    : (inferStanceFromInstructions(shapeTag ?? '') ?? 'longform');
+  return stancePlaybook(stance);
+}
 
 const NON_DESTRUCTIVE_RULE =
   'Fields that are empty: generate them fresh from the name/role and the world context provided. ' +
@@ -3833,7 +4006,7 @@ function worldFleshPreamble(world: World | null): string {
   if (!world) return '';
   return (
     `World: ${world.title}\n` +
-    `World logline (addresses the player protagonist in second person; does NOT describe the Subject): ${world.line}\n` +
+    `World logline (addresses the player protagonist in ${povPersonLabel(world.ai.pov)}; does NOT describe the Subject): ${world.line}\n` +
     `World bible: ${world.bible.slice(0, 1200)}\n\n`
   );
 }
@@ -3844,7 +4017,7 @@ function castRosterEntry(c: Character, summaryLen = 200) {
     role: c.role,
     isPlayer: !!c.isPlayer,
     label: c.isPlayer
-      ? 'player protagonist (second person in story — do not confuse with Subject)'
+      ? `player protagonist (${(c.role.match(/first|second|third/)?.[0] ?? 'second')} person in story — do not confuse with Subject)`
       : 'npc',
     summary: c.summary.slice(0, summaryLen),
     traits: c.traits.slice(0, 120)
@@ -3911,7 +4084,7 @@ export async function fleshOutCharacter(
 ): Promise<Partial<Character>> {
   const others = cast.filter((c) => c.id !== character.id && c.name.trim());
   const subjectFrame = character.isPlayer
-    ? 'SUBJECT is the player protagonist sheet (second person in play). Fill their card; relationships still use third-person notes about them as the protagonist.'
+    ? `SUBJECT is the player protagonist sheet (${povPersonLabel(world?.ai.pov ?? 'second')} in play). Fill their card; relationships still use third-person notes about them as the protagonist.`
     : 'SUBJECT is this NPC — not the player. Do not rewrite them as the reader or address them as "you".';
   const current = {
     isPlayer: !!character.isPlayer,
@@ -4082,9 +4255,9 @@ export async function fleshOutWorldLore(world: World): Promise<{
     title: string; line: string; bible: string; calendarSystem?: string;
   }>(
     world,
-    `You flesh out the lore of a story world for longform interactive fiction. ${NON_DESTRUCTIVE_RULE}\n` +
-    `Call return_json with this shape: {"title": string, "line": "<one-sentence logline in second person>", ` +
-    `"bible": "<setting, atmosphere, rules of the world, pressures at work — prose the narrator will follow>", ` +
+    `You flesh out the lore of a story world for longform interactive fiction. ${playbookFor(world)} ${NON_DESTRUCTIVE_RULE}\n` +
+    `Call return_json with this shape: {"title": string, "line": "<one-sentence logline in ${povPersonLabel(world.ai.pov)}>", ` +
+    `"bible": "<setting, atmosphere, rules of the world — prose the narrator will follow>", ` +
     `"calendarSystem": "<optional short flavor for how time is named here, e.g. 'harbor reckoning' — omit or empty if Earth-like>"}`,
     `Current world sheet (JSON, blank strings mean unset):\n${JSON.stringify({
       title: world.title, line: world.line, bible: world.bible,
@@ -4104,7 +4277,7 @@ export async function fleshOutPremise(world: World, season: Season): Promise<str
   const { provider, model } = utilityModelFor(world);
   const { text: premise } = await streamChat({
     provider, model,
-    system: `You flesh out season premises for longform interactive fiction. ${NON_DESTRUCTIVE_RULE} If the premise is blank, write one from the world context. One paragraph, 2-5 sentences, present tense, concrete and pressurized. Return only the premise.`,
+    system: `You flesh out season premises for longform interactive fiction. ${playbookFor(world)} ${NON_DESTRUCTIVE_RULE} If the premise is blank, write one from the world context. One paragraph, 2-5 sentences, present tense, concrete situation. Return only the premise.`,
     messages: [{
       role: 'user',
       content: `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\nSeason ${season.number} current premise (may be blank):\n${season.premise || '(blank)'}`
@@ -4139,10 +4312,11 @@ export async function interviewWorldIdea(
     questions?: Array<{ id?: string; question?: string; hint?: string }>;
   }>(
     null,
-    'You help authors lock a roleplay premise before world generation. Call return_json with this shape:\n' +
+    `You help authors lock a roleplay premise before world generation. ${playbookFor(null, shape)} Call return_json with this shape:\n` +
     '{"questions":[{"id":"<short_slug>","question":"<one concrete question>","hint":"<optional short example answer>"}]}\n' +
-    'Ask exactly 4 or 5 questions covering: who the player is / what they want, the opening pressure, ' +
+    'Ask exactly 4 or 5 questions covering: who the player is / what they want, what is true as it opens, ' +
     'who shares the opening scene, where it opens, and hard boundaries (tone, content, or plot lines that must never break). ' +
+    'Do not invent a crisis or a pressure that will not wait unless the idea already has one. ' +
     'Do not invent the world yet — only ask. Questions must be specific to THIS idea, never generic.',
     `Story shape the player wants: ${shape}\n\nPlayer's idea:\n${idea.trim()}`
   );
@@ -4167,16 +4341,36 @@ export interface WorldBriefFromInterview {
   customInstructions: string;
 }
 
-/** Turn idea + interview answers into a seed-quality brief for create/flesh. */
-export async function composeWorldBriefFromInterview(
-  idea: string,
-  shape: string,
-  answers: Array<{ question: string; answer: string }>
-): Promise<WorldBriefFromInterview> {
-  const answered = answers
-    .map((a) => ({ question: a.question.trim(), answer: a.answer.trim() }))
-    .filter((a) => a.question);
-  const result = await utilityJson<{
+function normalizeBriefText(s: string): string {
+  return s.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+/** True when generation produced no world — still the raw idea, no title, no premise. */
+export function isBlankWorldBrief(
+  brief: Pick<WorldBriefFromInterview, 'title' | 'bible' | 'premise'>,
+  idea: string
+): boolean {
+  const title = brief.title.trim();
+  const untitled = !title || title === 'Untitled world';
+  const bible = normalizeBriefText(brief.bible);
+  const raw = normalizeBriefText(idea);
+  const bibleIsIdea = !bible || bible === raw;
+  return untitled && bibleIsIdea && !brief.premise.trim();
+}
+
+export function isEmptyRosterProposal(
+  roster: Pick<WorldRosterProposal, 'characters' | 'locations'>,
+  counts: { characters: number; locations: number }
+): boolean {
+  if (counts.characters <= 0 && counts.locations <= 0) return false;
+  return roster.characters.length === 0 && roster.locations.length === 0;
+}
+
+const EMPTY_WORLD_DRAFT =
+  'The model did not draft a world. Try again or switch models.';
+
+function briefFromResult(
+  result: {
     title?: string;
     line?: string;
     bible?: string;
@@ -4185,21 +4379,10 @@ export async function composeWorldBriefFromInterview(
     narratorRules?: string[];
     mature?: boolean;
     customInstructions?: string;
-  }>(
-    null,
-    'You turn a roleplay idea and clarifying answers into a world brief for longform interactive fiction. Call return_json with this shape:\n' +
-    '{"title":"<1-4 evocative words>","line":"<one-sentence logline in second person>",' +
-    '"bible":"<150-350 words: setting, atmosphere, rules, pressures — narrator will follow this>",' +
-    '"premise":"<season 1 opening pressure, 2-5 sentences, present tense>",' +
-    '"contentNotes":"<hard content boundaries from the answers, or empty>",' +
-    '"narratorRules":["<2-5 hard narrator constraints>"],' +
-    '"mature":boolean,' +
-    '"customInstructions":"<themes, imagery, and author intent to keep verbatim in prompts>"}\n' +
-    'Be concrete and pressurized. Honor every answered constraint. Unanswered questions: invent carefully from the idea without contradicting it.',
-    `Story shape: ${shape}\n\nOriginal idea:\n${idea.trim()}\n\n` +
-    `Interview:\n${answered.map((a) => `Q: ${a.question}\nA: ${a.answer || '(skipped)'}`).join('\n\n')}`
-  );
-
+  },
+  idea: string,
+  shape: string
+): WorldBriefFromInterview {
   const bible = (result.bible ?? '').trim() || idea.trim();
   const line = (result.line ?? '').trim() || bible.slice(0, 140);
   return {
@@ -4212,6 +4395,49 @@ export async function composeWorldBriefFromInterview(
     mature: result.mature !== false,
     customInstructions: (result.customInstructions ?? '').trim() || `Shape: ${shape}`
   };
+}
+
+/** Turn idea + interview answers into a seed-quality brief for create/flesh. */
+export async function composeWorldBriefFromInterview(
+  idea: string,
+  shape: string,
+  answers: Array<{ question: string; answer: string }>
+): Promise<WorldBriefFromInterview> {
+  const answered = answers
+    .map((a) => ({ question: a.question.trim(), answer: a.answer.trim() }))
+    .filter((a) => a.question);
+  const ask = () => utilityJson<{
+    title?: string;
+    line?: string;
+    bible?: string;
+    premise?: string;
+    contentNotes?: string;
+    narratorRules?: string[];
+    mature?: boolean;
+    customInstructions?: string;
+  }>(
+    null,
+    `You turn a roleplay idea and clarifying answers into a world brief for longform interactive fiction. ${playbookFor(null, shape)} Call return_json with this shape:\n` +
+    '{"title":"<1-4 evocative words>","line":"<one-sentence logline addressing the player protagonist>",' +
+    '"bible":"<150-350 words: setting, atmosphere, rules, what is true as it opens — narrator will follow this>",' +
+    '"premise":"<season 1 what is live, 2-5 sentences, present tense — situation, not a manufactured crisis>",' +
+    '"contentNotes":"<hard content boundaries from the answers, or empty>",' +
+    '"narratorRules":["<2-5 hard narrator constraints>"],' +
+    '"mature":boolean,' +
+    '"customInstructions":"<themes, imagery, and author intent to keep verbatim in prompts>"}\n' +
+    'Be concrete. Honor every answered constraint. Unanswered questions: invent carefully from the idea without contradicting it. Do not invent a ticking crisis unless the idea already has one.',
+    `Story shape: ${shape}\n\nOriginal idea:\n${idea.trim()}\n\n` +
+    `Interview:\n${answered.map((a) => `Q: ${a.question}\nA: ${a.answer || '(skipped)'}`).join('\n\n')}`
+  );
+
+  let brief = briefFromResult(await ask(), idea, shape);
+  if (isBlankWorldBrief(brief, idea)) {
+    brief = briefFromResult(await ask(), idea, shape);
+  }
+  if (isBlankWorldBrief(brief, idea)) {
+    throw new AIError(EMPTY_WORLD_DRAFT);
+  }
+  return brief;
 }
 
 export interface WorldRosterProposal {
@@ -4231,26 +4457,37 @@ export async function proposeWorldRoster(
   if (nChars === 0 && nPlaces === 0) {
     return { characters: [], locations: [], openingLocationIndex: 0 };
   }
-  const result = await utilityJson<WorldRosterProposal>(
-    world,
-    `You propose an opening cast and places for a longform interactive story world. Call return_json with this shape:\n` +
-    `{"characters":[{"description":"<one specific sentence: who they are and their pressure on the protagonist>"}],` +
-    `"locations":[{"description":"<one specific sentence: what the place is and why it matters>"}],` +
-    `"openingLocationIndex":<0-based index into locations for where episode 1 opens>}\n` +
-    `Return exactly ${nChars} character description(s) and ${nPlaces} location description(s). ` +
-    `Use empty arrays when the count is 0. No player/protagonist. ` +
-    `Every description must be concrete and rooted in THIS world's weather, rules, and pressures — never generic fantasy filler.`,
-    `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1600)}\n` +
-    `Story shape the player wants: ${shape}\n\nPropose the roster.`
-  );
-  const characters = (result.characters ?? []).filter((c) => c.description?.trim()).slice(0, nChars);
-  const locations = (result.locations ?? []).filter((l) => l.description?.trim()).slice(0, nPlaces);
-  const openingLocationIndex = locations.length === 0
-    ? 0
-    : Number.isFinite(result.openingLocationIndex)
-      ? Math.max(0, Math.min(locations.length - 1, Math.floor(result.openingLocationIndex)))
-      : 0;
-  return { characters, locations, openingLocationIndex };
+  const pull = async (): Promise<WorldRosterProposal> => {
+    const result = await utilityJson<WorldRosterProposal>(
+      world,
+      `You propose an opening cast and places for a longform interactive story world. ${playbookFor(world, shape)} Call return_json with this shape:\n` +
+      `{"characters":[{"description":"<one specific sentence: who they are to the protagonist>"}],` +
+      `"locations":[{"description":"<one specific sentence: what the place is and why it matters>"}],` +
+      `"openingLocationIndex":<0-based index into locations for where episode 1 opens>}\n` +
+      `Return exactly ${nChars} character description(s) and ${nPlaces} location description(s). ` +
+      `Use empty arrays when the count is 0. No player/protagonist. ` +
+      `Every description must be concrete and rooted in THIS world's weather, rules, and situation — never generic fantasy filler.`,
+      `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1600)}\n` +
+      `Story shape the player wants: ${shape}\n\nPropose the roster.`
+    );
+    const characters = (result.characters ?? []).filter((c) => c.description?.trim()).slice(0, nChars);
+    const locations = (result.locations ?? []).filter((l) => l.description?.trim()).slice(0, nPlaces);
+    const openingLocationIndex = locations.length === 0
+      ? 0
+      : Number.isFinite(result.openingLocationIndex)
+        ? Math.max(0, Math.min(locations.length - 1, Math.floor(result.openingLocationIndex)))
+        : 0;
+    return { characters, locations, openingLocationIndex };
+  };
+
+  let roster = await pull();
+  if (isEmptyRosterProposal(roster, { characters: nChars, locations: nPlaces })) {
+    roster = await pull();
+  }
+  if (isEmptyRosterProposal(roster, { characters: nChars, locations: nPlaces })) {
+    throw new AIError(EMPTY_WORLD_DRAFT);
+  }
+  return roster;
 }
 
 export interface FleshOutEverythingOpts {
@@ -4308,11 +4545,11 @@ export async function seedOpeningMemory(
 
   const result = await utilityJson<{ facts: string[]; threads: string[] }>(
     world,
-    'You seed opening continuity for episode 1 of a longform interactive story. Call return_json with this shape:\n' +
+    `You seed opening continuity for episode 1 of a longform interactive story. ${playbookFor(world)} Call return_json with this shape:\n` +
     '{"facts":[<2-4 durable facts already true as the story opens>],' +
-    '"threads":[<2-4 unresolved tensions already live as the story opens>]}\n' +
+    '"threads":[<2-4 unresolved tensions or live situations already true as the story opens>]}\n' +
     'Facts are things that will still be true next episode (debts, alliances, injuries, public rules). ' +
-    'Threads are pressures already in motion, not resolved. Be concrete and rooted in THIS world — no generic filler.',
+    'Threads are unresolved tensions or live situations, not resolved. Be concrete and rooted in THIS world — no generic filler.',
     `World: ${world.title} — ${world.line}\nBible:\n${world.bible.slice(0, 1600)}\n\n` +
     `Season ${season.number} premise:\n${season.premise || '(blank)'}\n\n` +
     `Opening location: ${episode.location || '(unset)'}\n` +
@@ -4364,9 +4601,9 @@ export async function draftColdOpenNarration(
   const { text } = await streamChat({
     provider, model,
     system:
-      `You write the opening narrator beat for longform interactive fiction. ` +
+      `You write the opening narrator beat for longform interactive fiction. ${playbookFor(world)} ` +
       `POV: ${world.ai.pov}. Tense: ${world.ai.tense}. ` +
-      `80–150 words. Second-person when POV is second. No dialogue. Establish place and pressure; do not resolve anything. Return only the prose.`,
+      `80–150 words. Second-person when POV is second. No dialogue. Establish place and situation; do not resolve anything. Return only the prose.`,
     messages: [{
       role: 'user',
       content:
@@ -4518,14 +4755,16 @@ export async function fleshOutWorldEverything(
   allChars = await db.characters.where('worldId').equals(live.id).toArray();
   npcs = allChars.filter((c) => !c.isPlayer);
 
-  if (npcs.length > 0) {
-    progress('Linking relationships…');
-    for (const npc of npcs) {
-      const relationships = await fleshOutRelationships(live, npc, allChars);
-      await db.characters.update(npc.id, { relationships, updatedAt: Date.now() });
-    }
-    allChars = await db.characters.where('worldId').equals(live.id).toArray();
+  if (npcs.length === 0) {
+    throw new AIError(EMPTY_WORLD_DRAFT);
   }
+
+  progress('Linking relationships…');
+  for (const npc of npcs) {
+    const relationships = await fleshOutRelationships(live, npc, allChars);
+    await db.characters.update(npc.id, { relationships, updatedAt: Date.now() });
+  }
+  allChars = await db.characters.where('worldId').equals(live.id).toArray();
 
   progress('Seeding opening memory…');
   const memory = await seedOpeningMemory(live, liveSeason, liveEpisode, allChars);
@@ -4540,10 +4779,71 @@ export async function fleshOutWorldEverything(
   }
 
   await db.worlds.update(live.id, { updatedAt: Date.now() });
+
+  await repairWriteReadyFields(live, liveEpisode);
+
   return {
     characterIds: createdCharacterIds,
     locationIds: createdLocationIds,
     continuityIds: memory.continuityIds,
     threadIds: memory.threadIds
   };
+}
+
+/** Fill the three write-ready holes generation often leaves empty. */
+async function repairWriteReadyFields(world: World, episode: Episode): Promise<void> {
+  const now = Date.now();
+  const liveEpisode = (await db.episodes.get(episode.id)) ?? episode;
+  const row = await db.worlds.get(world.id);
+  if (row) {
+    const line = row.line.trim() || world.line.trim();
+    const patch: Partial<World> = { updatedAt: now };
+    const title = row.title.trim();
+    if (!title || title === 'Untitled world') {
+      patch.title = line.slice(0, 72) || 'New world';
+    }
+    let bible = row.bible.trim();
+    if (bible.length < BIBLE_MIN_CHARS) {
+      const extra = [line, world.line.trim()].filter(Boolean);
+      bible = [bible, ...extra].filter((s, i, arr) => s && arr.indexOf(s) === i).join('\n\n').trim();
+      if (bible.length < BIBLE_MIN_CHARS && !bible.includes('The first scene will name what this world holds.')) {
+        bible = `${bible}${bible ? '\n\n' : ''}The first scene will name what this world holds.`.trim();
+      }
+      const filler = 'What is true as it opens is already in the room.';
+      while (bible.length < BIBLE_MIN_CHARS) {
+        bible = `${bible}${bible ? ' ' : ''}${filler}`.trim();
+      }
+      patch.bible = bible;
+    }
+    if (patch.title || patch.bible) await db.worlds.update(row.id, patch);
+  }
+
+  const places = await db.locations.where('worldId').equals(world.id).toArray();
+  const open = liveEpisode.locationId
+    ? places.find((l) => l.id === liveEpisode.locationId)
+    : places[0];
+  if (open && open.rules.filter((r) => r.trim()).length === 0) {
+    const named = open.name.trim() || 'This place';
+    const rule = open.atmosphere.trim()
+      || (open.tagline.trim() ? `In ${named}, ${open.tagline.trim().replace(/\.$/, '')} is not optional.` : '')
+      || `${named} keeps what is said here — nothing leaves unnamed.`;
+    await db.locations.update(open.id, { rules: [rule], updatedAt: now });
+  }
+
+  const npcsAll = (await db.characters.where('worldId').equals(world.id).toArray())
+    .filter((c) => !c.isPlayer);
+  let castIds = [...liveEpisode.castIds];
+  if (castIds.length === 0 && npcsAll.length > 0) {
+    castIds = npcsAll.map((c) => c.id);
+    await db.episodes.update(liveEpisode.id, { castIds });
+  }
+  const inScene = new Set(castIds);
+  for (const npc of npcsAll.filter((c) => inScene.has(c.id))) {
+    if (npc.anchors.some((a) => a.trim())) continue;
+    const fromTrait = npc.traits.split(/[.;\n]/)[0]?.trim();
+    const fromDesire = npc.desires.split(/[.;\n]/)[0]?.trim();
+    const anchor = fromTrait || fromDesire
+      || `${npc.name.trim() || 'They'} will not break on a first meeting.`;
+    await db.characters.update(npc.id, { anchors: [anchor], updatedAt: now });
+  }
 }

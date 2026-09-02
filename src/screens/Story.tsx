@@ -17,6 +17,7 @@ import {
   parseInlineEmphasis,
   parseSpeakSegments,
   previewSpeakText,
+  stripNarratorEmbeddedDialogue,
   type SpeakSegment
 } from '../ai/dialogueFormat';
 import { collectSceneImageRefs, generateSceneImage, sceneHasPortraitRefs } from '../ai/image';
@@ -36,6 +37,7 @@ import {
   AVATAR_PX, DEFAULT_DISPLAY, moodFromHue, useApp,
   type AvatarSize, type DialogueStyle, type StoryLayout
 } from '../store/app';
+import { hasWritingModel } from '../ai/models';
 import { useSettings } from '../store/settings';
 import type {
   CalendarEvent, CalendarEventKind, CalendarEventScale, CalendarEventVisibility,
@@ -47,7 +49,10 @@ import {
   worldCalendarEventPrefs, CALENDAR_EVENT_CAP
 } from '../types';
 import { AppError, classifyError, formatUserError } from '../errors';
-import { Chip, ErrorNote, Mono, Sheet, Spinner, Toggle, useVw } from '../ui/bits';
+import {
+  Chip, ConfirmBar, ErrorNote, Mono, Sheet, Spinner, Toggle,
+  phoneChrome, sheetsFromBottom, shortStoryChrome, useViewport
+} from '../ui/bits';
 import { Face } from '../ui/Face';
 import { fileToSceneImage } from '../ui/image';
 import { attributionRun, isDialogueBlock, lastSpokenBy } from '../ui/attribution';
@@ -57,7 +62,7 @@ import {
 import { avatarStyle, speakerInk, BACKDROPS, MOODS, STRIPE, ACCENT, ACCENT_RGBA } from '../ui/theme';
 import {
   calendarPatch, characterPortraits, dayFromParts, emptyLocation, evaluateWorldWriteReady, formatStoryDate,
-  advanceMonths, buildEpisodePlotTargets, formatStoryDateShort, latestEndedEpisode, nextEpisode, partsForDay,
+  advanceMonths, buildEpisodePlotTargets, formatStoryDateShort, latestEndedEpisode, nextEpisode, nextSceneCastIds, partsForDay,
   PLOT_TARGET_CAP, weekdayForDay, worldCalendar
 } from '../worldOps';
 
@@ -191,12 +196,6 @@ interface ProseBlock {
   deliveryTone?: DeliveryTone | null;
 }
 
-const DIALOGUE_RE = /^([A-Z][^:\n]{0,48}?):\s*["“](.+?)["”]?\s*$/;
-
-function findByName(characters: Character[], name: string): Character | undefined {
-  return characters.find((c) => c.name.toLowerCase() === name.toLowerCase().trim());
-}
-
 function guestHue(guestId: string): number {
   let h = 0;
   for (let i = 0; i < guestId.length; i++) h = (h + guestId.charCodeAt(i) * 17) % 360;
@@ -247,26 +246,8 @@ function parseTurn(turn: Turn, characters: Character[], guests: EpisodeGuest[] =
       segments: parseSpeakSegments(turn.text)
     }];
   }
-  // Legacy narrator turns may still embed Name: "…" dialogue.
-  return turn.text
-    .split(/\n{2,}|\n(?=[A-Z][^:\n]{0,48}:\s*["“])/)
-    .map((p) => p.trim())
-    .filter(Boolean)
-    .map((p): ProseBlock => {
-      const m = p.match(DIALOGUE_RE);
-      if (m) {
-        const who = findByName(characters, m[1]);
-        return {
-          text: m[2],
-          speaker: m[1].trim(),
-          hue: who?.hue,
-          portrait: who ? characterPortraits(who)[0] : null,
-          kind: 'speak',
-          segments: [{ kind: 'speech', text: m[2] }]
-        };
-      }
-      return { text: p, kind: 'narration' };
-    });
+  const text = stripNarratorEmbeddedDialogue(turn.text) || turn.text;
+  return [{ text, kind: 'narration' }];
 }
 
 function EmphasizedText({ text }: { text: string }) {
@@ -597,11 +578,14 @@ function ProseBlockView({
 // ---------- main screen ----------
 
 export function Story() {
-  const vw = useVw();
-  const narrow = vw < 780;
-  const { currentWorldId, layout, setLayout, mood, setMood, backdrop, go, display, setDisplay, goLocations: openLocations, goCast: openCast } = useApp();
-  const providers = useSettings((s) => s.providers);
-  const hasAI = providers.length > 0;
+  const { band, height, keyboardOffset } = useViewport();
+  const phone = phoneChrome(band);
+  const compact = band === 'compact';
+  const short = shortStoryChrome(band, height);
+  const sheetBottom = sheetsFromBottom(band);
+  const narrow = phone;
+  const { currentWorldId, layout, setLayout, mood, setMood, backdrop, go, display, setDisplay, goLocations: openLocations, goCast: openCast, closeWorld } = useApp();
+  useSettings((s) => s.proseModel);
   const M = MOODS[mood];
   const BD = BACKDROPS[backdrop];
   const readMode = layout === 'read';
@@ -609,9 +593,13 @@ export function Story() {
   const fontPx = readMode ? display.textSize + 1 : display.textSize;
 
   const world = useLiveQuery(
-    async () => (currentWorldId ? db.worlds.get(currentWorldId) : undefined),
+    async () => {
+      if (!currentWorldId) return null;
+      return (await db.worlds.get(currentWorldId)) ?? null;
+    },
     [currentWorldId]
   );
+  const hasAI = hasWritingModel(world);
   const season = useLiveQuery(
     async () => {
       if (!world) return undefined;
@@ -697,6 +685,10 @@ export function Story() {
   const [turnWindow, setTurnWindow] = useState(60);
   useEffect(() => { setTurnWindow(60); }, [episode?.id]);
   useEffect(() => { setWriteAnyway(false); }, [episode?.id, world?.id]);
+  useEffect(() => {
+    if (!currentWorldId || world === undefined) return;
+    if (world === null) closeWorld();
+  }, [currentWorldId, world, closeWorld]);
   const [wrapOpen, setWrapOpen] = useState<null | 'episode'>(null);
   const [wrapBusy, setWrapBusy] = useState(false);
   const [wrapPhase, setWrapPhase] = useState<'ready' | 'analyzing' | 'review'>('ready');
@@ -705,11 +697,16 @@ export function Story() {
   const [worldEditOpen, setWorldEditOpen] = useState(false);
   const [displayOpen, setDisplayOpen] = useState(false);
   const [moreSheet, setMoreSheet] = useState(false);
+  const [confirmAsk, setConfirmAsk] = useState<null | {
+    kind: 'reroll' | 'delete' | 'deleteBelow' | 'retryFrom';
+    turn: Turn;
+  }>(null);
+  const [showReadCoach, setShowReadCoach] = useState(() => {
+    try { return localStorage.getItem('sw-read-coach') !== '1'; } catch { return false; }
+  });
   const [composerOpen, setComposerOpen] = useState(false);
-  const [composerFocused, setComposerFocused] = useState(false);
   const [composeMore, setComposeMore] = useState(false);
   const [hudTucked, setHudTucked] = useState(false);
-  const [keyboardOffset, setKeyboardOffset] = useState(0);
   const [sceneFadeKey, setSceneFadeKey] = useState(0);
   /** Context-pressure nudge: dismiss until chars rise ~10% of budget or location changes. */
   const [nudgeDismissedAtChars, setNudgeDismissedAtChars] = useState(0);
@@ -766,26 +763,6 @@ export function Story() {
     }
   }, [episode?.castIds, episode?.guests, episode?.activeGuestIds, preferSpeaker]);
 
-  useEffect(() => {
-    if (!narrow || !composerFocused) {
-      setKeyboardOffset(0);
-      return;
-    }
-    const vv = window.visualViewport;
-    if (!vv) return;
-    const sync = () => {
-      const covered = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
-      setKeyboardOffset(covered > 40 ? covered : 0);
-    };
-    sync();
-    vv.addEventListener('resize', sync);
-    vv.addEventListener('scroll', sync);
-    return () => {
-      vv.removeEventListener('resize', sync);
-      vv.removeEventListener('scroll', sync);
-    };
-  }, [narrow, composerFocused]);
-
   const activeLocation = locations.find((l) => l.id === episode?.locationId)
     ?? locations.find((l) => episode?.location && l.name && episode.location.toLowerCase().includes(l.name.toLowerCase()));
 
@@ -818,6 +795,7 @@ export function Story() {
 
   useEffect(() => {
     if (!readMode) return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
     const el = scrollRef.current;
     const tuck = () => { if (!composerOpen) setHudTucked(true); };
     const onScroll = () => tuck();
@@ -939,8 +917,24 @@ export function Story() {
     }
   };
 
+  const writeReady = useMemo(() => {
+    if (!storyRowsReady || turns.length > 0 || !world || !season || !episode) return null;
+    return evaluateWorldWriteReady({
+      world, season, episode, characters, locations, continuityCount: continuity.length
+    });
+  }, [storyRowsReady, turns.length, world, season, episode, characters, locations, continuity.length]);
+  const writeBlocked = !hasAI || !!(writeReady && writeReady.missing.length > 0 && !writeAnyway);
+
   const write = async () => {
     if (!world || !season || !episode || streaming) return;
+    if (!hasAI) {
+      setNotice('Add a writing model in Settings first.');
+      return;
+    }
+    if (writeReady && writeReady.missing.length > 0 && !writeAnyway) {
+      setNotice('Fix the checklist above, or press Write anyway.');
+      return;
+    }
     if (composeMode !== 'continue' && !input.trim()) return;
     const sceneNpcs = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
     const epGuests = episode.guests ?? [];
@@ -948,7 +942,7 @@ export function Story() {
       ? epGuests
       : epGuests.filter((g) => episode.activeGuestIds!.includes(g.id));
     if (agencyOn && sceneNpcs.length === 0 && activeGuests.length === 0) {
-      setNotice('Add a cast member or walk-on in Direct before Speak or Act.');
+      setNotice('Add someone to this scene on Cast, or open Direct.');
       return;
     }
     const tagged = agencyOn
@@ -980,7 +974,6 @@ export function Story() {
   const rerollBeat = async (turn: Turn) => {
     if (!world || !season || !episode || streaming) return;
     if (turn.role !== 'narrator' && turn.role !== 'character') return;
-    if (!confirm('Re-roll this line only? Later turns stay.')) return;
     setError('');
     setNotice('');
     setStreaming(true);
@@ -1077,14 +1070,7 @@ export function Story() {
     if (!episode || streaming) return;
     const idx = turns.findIndex((t) => t.id === turn.id);
     if (idx < 0) return;
-    const below = turns.length - idx - 1;
     const replaceSelf = turn.role === 'narrator' || turn.role === 'character';
-    if (below > 0) {
-      const msg = replaceSelf
-        ? `Rewrite this response? The ${below} turn${below > 1 ? 's' : ''} after it will be replaced.`
-        : `Retry from here? The ${below} turn${below > 1 ? 's' : ''} after this will be replaced.`;
-      if (!confirm(msg)) return;
-    }
     const snapshot = replaceSelf
       ? await snapshotTurnsFrom(turn.id, episode.id)
       : await snapshotTurnsAfter(turn.id, episode.id);
@@ -1118,7 +1104,6 @@ export function Story() {
     const idx = turns.findIndex((t) => t.id === turn.id);
     const below = turns.length - idx - 1;
     if (idx < 0 || below === 0) return;
-    if (!confirm(`Delete the ${below} turn${below > 1 ? 's' : ''} below this one? This cannot be undone.`)) return;
     const snapshot = await snapshotTurnsAfter(turn.id, episode.id);
     await deleteTurnsAfter(turn.id, episode.id);
     if (snapshot.length > 0) {
@@ -1130,6 +1115,29 @@ export function Story() {
         payload: t
       })));
     }
+  };
+
+  const deleteTurn = async (turn: Turn) => {
+    await recordTombstones([{
+      table: 'turns', id: turn.id, worldId: turn.worldId, episodeId: turn.episodeId, payload: turn
+    }]);
+    await db.turns.delete(turn.id);
+    if (turn.episodeId) await clearEpisodeRunningSummary(turn.episodeId);
+  };
+
+  const runConfirmAsk = () => {
+    if (!confirmAsk) return;
+    const ask = confirmAsk;
+    setConfirmAsk(null);
+    if (ask.kind === 'reroll') void rerollBeat(ask.turn);
+    else if (ask.kind === 'delete') void deleteTurn(ask.turn);
+    else if (ask.kind === 'retryFrom') void retryFrom(ask.turn);
+    else void deleteBelow(ask.turn);
+  };
+
+  const dismissReadCoach = () => {
+    setShowReadCoach(false);
+    try { localStorage.setItem('sw-read-coach', '1'); } catch { /* ignore */ }
   };
 
   const closeWrapSheet = () => {
@@ -1295,13 +1303,6 @@ export function Story() {
     return out;
   }, [turns, characters, episode?.guests]);
 
-  const writeReady = useMemo(() => {
-    if (!storyRowsReady || turns.length > 0 || !world || !season || !episode) return null;
-    return evaluateWorldWriteReady({
-      world, season, episode, characters, locations, continuityCount: continuity.length
-    });
-  }, [storyRowsReady, turns.length, world, season, episode, characters, locations, continuity.length]);
-
   const recoverPad: CSSProperties = {
     padding: narrow ? '40px 20px' : '80px 60px',
     display: 'flex',
@@ -1332,13 +1333,13 @@ export function Story() {
   };
 
   if (currentWorldId && world === undefined) {
-    return <div style={{ padding: 60 }}><Spinner label="opening the world" /></div>;
+    return <div key="story-opening" style={{ padding: 60 }}><Spinner label="opening the world" /></div>;
   }
   if (!world) {
     return (
-      <div className="fade-in" style={{ padding: narrow ? '40px 20px' : '80px 60px', display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 560 }}>
+      <div key="story-empty" className="fade-in" style={{ padding: narrow ? '40px 20px' : '80px 60px', display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 560 }}>
         <Mono>no world open</Mono>
-        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: '#f8f6f2' }}>Open a world to start writing.</div>
+        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: 'var(--ink-heading)' }}>Open a world to start writing.</div>
         <div style={{ display: 'flex', gap: 10 }}>
           <button className="btn-primary" onClick={() => go('library')}>Go to Worlds</button>
         </div>
@@ -1346,13 +1347,13 @@ export function Story() {
     );
   }
   if (season === undefined || (season !== null && seasonEpisodes === undefined)) {
-    return <div style={{ padding: 60 }}><Spinner label="opening the world" /></div>;
+    return <div key="story-season" style={{ padding: 60 }}><Spinner label="opening the world" /></div>;
   }
   if (season === null) {
     return (
       <div className="fade-in" style={recoverPad}>
         <Mono>no season</Mono>
-        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: '#f8f6f2' }}>This world has no season open.</div>
+        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: 'var(--ink-heading)' }}>This world has no season open.</div>
         {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           <button className="btn-primary" onClick={() => go('library')}>Worlds</button>
@@ -1364,7 +1365,7 @@ export function Story() {
     return (
       <div className="fade-in" style={recoverPad}>
         <Mono>episode filed</Mono>
-        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: '#f8f6f2' }}>
+        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: 'var(--ink-heading)' }}>
           {lastEndedEpisode
             ? `Episode ${lastEndedEpisode.number} is filed. Open the next, or review the season.`
             : 'No episodes in this season yet.'}
@@ -1383,7 +1384,7 @@ export function Story() {
     );
   }
   if (!storyRowsReady) {
-    return <div style={{ padding: 60 }}><Spinner label="opening the world" /></div>;
+    return <div key="story-rows" style={{ padding: 60 }}><Spinner label="opening the world" /></div>;
   }
 
   const inScene = characters.filter((c) => episode.castIds.includes(c.id));
@@ -1428,6 +1429,7 @@ export function Story() {
 
   return (
     <div
+      key="story-shell"
       className={readMode ? 'read-mode' : undefined}
       style={{
       position: 'relative',
@@ -1437,7 +1439,10 @@ export function Story() {
       display: 'flex',
       flexDirection: 'column',
       color: M.text,
-      paddingBottom: keyboardOffset > 0 ? keyboardOffset : undefined
+      paddingTop: 0,
+      paddingRight: 0,
+      paddingBottom: keyboardOffset > 0 ? keyboardOffset : 0,
+      paddingLeft: 0
     }}>
       {/* backdrop — the room fills the frame, under dim-wash glass */}
       {scrollPhoto ? (
@@ -1511,8 +1516,7 @@ export function Story() {
           paddingTop: narrow ? 'calc(10px + env(safe-area-inset-top))' : 11,
           paddingBottom: narrow ? 10 : 11,
           paddingLeft: narrow ? 14 : 22,
-          paddingRight: narrow ? 14 : 22,
-          background: 'transparent'
+          paddingRight: narrow ? 14 : 22
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
             <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -1522,21 +1526,19 @@ export function Story() {
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-            {showWrapNudge && (!readMode || !composerOpen) && (
-              <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 11 }}
-                onClick={() => setWrapOpen('episode')}>File episode?</button>
-            )}
             <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
               onClick={() => { setComposerOpen((o) => !o); setHudTucked(false); }}>
               {composerOpen ? 'Hide' : 'Write'}
             </button>
-            {narrow ? (
+            {short ? (
               <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
                 onClick={() => setMoreSheet(true)}>More</button>
             ) : (
               <>
                 <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
                   onClick={() => setDirectorSheet(true)}>Direct</button>
+                <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
+                  onClick={() => setWrapOpen('episode')}>End episode</button>
                 <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
                   onClick={() => setLayout('write')}>Exit read</button>
               </>
@@ -1577,9 +1579,13 @@ export function Story() {
                 }}>{label}</button>
               ))}
             </div>
-            <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setDirectorSheet(true)}>Direct</button>
-            <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setWrapOpen('episode')}>Wrap</button>
-            {narrow ? (
+            {!short && (
+              <>
+                <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setDirectorSheet(true)}>Direct</button>
+                <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setWrapOpen('episode')}>End episode</button>
+              </>
+            )}
+            {short ? (
               <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setMoreSheet(true)}>More</button>
             ) : (
               <>
@@ -1623,6 +1629,14 @@ export function Story() {
         gridTemplateColumns: 'minmax(0, 1fr)'
       }}>
         <section ref={scrollRef} style={{ overflow: 'auto', display: 'flex', flexDirection: 'column', position: 'relative' }}>
+          {readMode && showReadCoach && (
+            <div className="glass-nudge" style={{ margin: narrow ? '12px 16px 0' : '16px 28px 0', display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+              <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.78)' }}>
+                End episode and Direct are in this bar. Switch to Write to compose. Turn tools appear when you hover a line.
+              </div>
+              <button type="button" className="btn-quiet" style={{ fontSize: 11 }} onClick={dismissReadCoach}>Got it</button>
+            </div>
+          )}
           {climateLine && (
             <div className="climate-breath" style={{
               padding: narrow ? '18px 20px 0' : '22px 28px 0',
@@ -1633,7 +1647,7 @@ export function Story() {
           )}
 
           <div
-            className="page-plane glass-scroll"
+            className={`page-plane glass-scroll${readMode && display.textScrim > 0 ? ' read-scrim' : ''}`}
             style={{
               maxWidth: '40rem',
               margin: readMode ? '8px auto 28px' : '8px auto 18px',
@@ -1641,9 +1655,13 @@ export function Story() {
               padding: narrow
                 ? (readMode ? '28px 22px 48px' : '22px 18px 40px')
                 : (readMode ? '40px 36px 80px' : '32px 32px 68px'),
-              ...(display.textScrim > 0 ? {
-                background: `linear-gradient(180deg, rgba(8,9,12,${(display.textScrim / 100 * 0.35).toFixed(2)}), rgba(8,9,12,${(display.textScrim / 100).toFixed(2)}) 16%, rgba(8,9,12,${(display.textScrim / 100).toFixed(2)}) 84%, rgba(8,9,12,${(display.textScrim / 100 * 0.4).toFixed(2)}))`
-              } : {})
+              ...(readMode && display.textScrim > 0
+                ? { ['--text-scrim' as string]: (display.textScrim / 100).toFixed(2) }
+                : !readMode && display.textScrim > 0
+                  ? {
+                    background: `linear-gradient(180deg, rgba(8,9,12,${(display.textScrim / 100 * 0.35).toFixed(2)}), rgba(8,9,12,${(display.textScrim / 100).toFixed(2)}) 16%, rgba(8,9,12,${(display.textScrim / 100).toFixed(2)}) 84%, rgba(8,9,12,${(display.textScrim / 100 * 0.4).toFixed(2)}))`
+                  }
+                  : {})
             }}
           >
             <header style={{ marginBottom: turns.length === 0 ? 28 : 22 }}>
@@ -1783,7 +1801,7 @@ export function Story() {
                       <button className="btn-ghost" style={{ fontSize: 11, padding: '7px 12px' }}
                         onClick={goCast}>Cast</button>
                       <button className="btn-ghost" style={{ fontSize: 11, padding: '7px 12px' }}
-                        onClick={goLocations}>Locations</button>
+                        onClick={goLocations}>Places</button>
                       <button className="btn-quiet" style={{ fontSize: 11 }}
                         onClick={() => setWriteAnyway(true)}>Write anyway</button>
                     </div>
@@ -1877,13 +1895,19 @@ export function Story() {
                 streaming={streaming}
                 hasBelow={ti < visible.length - 1 || streaming}
                 opening={blocks.length <= turnWindow && ti === 0}
-                onRetry={() => void retryFrom(turn)}
+                onRetry={() => {
+                  const idx = turns.findIndex((t) => t.id === turn.id);
+                  const below = idx < 0 ? 0 : turns.length - idx - 1;
+                  if (below > 0) setConfirmAsk({ kind: 'retryFrom', turn });
+                  else void retryFrom(turn);
+                }}
                 onReroll={
                   turn.role === 'narrator' || turn.role === 'character'
-                    ? () => void rerollBeat(turn)
+                    ? () => setConfirmAsk({ kind: 'reroll', turn })
                     : undefined
                 }
-                onDeleteBelow={() => void deleteBelow(turn)}
+                onDeleteBelow={() => setConfirmAsk({ kind: 'deleteBelow', turn })}
+                onDelete={() => setConfirmAsk({ kind: 'delete', turn })}
               />
             ))}
 
@@ -1955,69 +1979,63 @@ export function Story() {
         </section>
       </div>
 
-      {/* composer — collapses to a handle in Read mode */}
-      {readMode && !composerOpen ? (
+      {(confirmAsk || error || notice || ((episode.pendingPlan?.beats?.length ?? 0) > 0 && !streaming)) && (
         <div style={{
-          position: 'relative', zIndex: 2, display: 'flex', justifyContent: 'center',
-          padding: '8px 16px calc(12px + env(safe-area-inset-bottom))',
-          background: 'linear-gradient(180deg, transparent, rgba(8,9,12,0.4))'
-        }}>
-          <button
-            onClick={() => { setComposerOpen(true); setHudTucked(false); }}
-            className="serif"
-            style={{
-              border: 0, background: 'transparent',
-              color: 'inherit', padding: '10px 18px', cursor: 'pointer',
-              fontSize: 16, fontStyle: 'italic', opacity: 0.7
-            }}
-          >
-            Continue
-          </button>
-        </div>
-      ) : (
-        <div className="compose-air" style={{
-          position: 'relative', zIndex: 2,
-          padding: narrow
-            ? (readMode ? '10px 16px calc(12px + env(safe-area-inset-bottom))' : '11px 12px 12px')
-            : '12px 24px 16px',
+          position: 'relative', zIndex: 3,
+          padding: narrow ? '10px 12px 0' : '12px 24px 0',
           display: 'flex', flexDirection: 'column', gap: 10
         }}>
-          {showWrapNudge && (
-            <div style={{
-              display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
-              border: '1px solid rgba(255,255,255,0.12)', borderRadius: 6, padding: '12px 14px',
-              background: pressure === 'escalate' ? ACCENT_RGBA.a12 : 'rgba(255,255,255,0.04)'
-            }}>
-              <div style={{ flex: 1, minWidth: narrow ? 0 : 200, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.78)' }}>
-                {pressure === 'escalate'
-                  ? 'This chapter is getting long. Close it so the season can move — facts from play are already on file.'
-                  : locationShiftNudge && (pressure === 'ok' || pressure === 'warm')
-                    ? 'The scene moved. Close the chapter when you are ready; memory from play is already on file.'
-                    : 'This chapter is getting long. Close it so the season can move.'}
-              </div>
-              <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
-                <button className="btn-primary" style={{ padding: '7px 12px', fontSize: 12 }}
-                  disabled={wrapBusy} onClick={() => setWrapOpen('episode')}>End episode</button>
-                <button className="btn-quiet" style={{ fontSize: 11 }} onClick={dismissWrapNudge}>Not yet</button>
-              </div>
-            </div>
+          {confirmAsk && (
+            <ConfirmBar
+              title={
+                confirmAsk.kind === 'reroll'
+                  ? 'Re-roll this line only?'
+                  : confirmAsk.kind === 'deleteBelow'
+                    ? 'Delete the turns below this one?'
+                    : confirmAsk.kind === 'retryFrom'
+                      ? (confirmAsk.turn.role === 'narrator' || confirmAsk.turn.role === 'character'
+                        ? 'Rewrite this response?'
+                        : 'Retry from here?')
+                      : 'Delete this turn?'
+              }
+              body={
+                confirmAsk.kind === 'reroll'
+                  ? 'Later turns stay. This line is rewritten in place.'
+                  : confirmAsk.kind === 'deleteBelow'
+                    ? 'This cannot be undone.'
+                    : confirmAsk.kind === 'retryFrom'
+                      ? 'Turns after this one will be replaced. This cannot be undone.'
+                      : 'Turns after it are kept. This cannot be undone.'
+              }
+              confirmLabel={
+                confirmAsk.kind === 'reroll' ? 'Re-roll'
+                  : confirmAsk.kind === 'retryFrom' ? 'Rewrite'
+                    : 'Delete'
+              }
+              onConfirm={runConfirmAsk}
+              onCancel={() => setConfirmAsk(null)}
+            />
           )}
           {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
           {notice && (
-            <div style={{
-              border: `1px solid ${ACCENT_RGBA.a35}`, borderRadius: 6, padding: '11px 14px',
+            <div className="glass-nudge" style={{
+              border: `1px solid ${ACCENT_RGBA.a35}`,
               background: ACCENT_RGBA.a08, display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap'
             }}>
               <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(200,230,235,0.95)', flex: 1, minWidth: 0 }}>{notice}</div>
               <button className="btn-quiet" style={{ fontSize: 11, minHeight: 28 }}
-                onClick={() => { setNotice(''); go('sequel'); }}>Season review</button>
+                onClick={() => {
+                  setNotice('');
+                  go(notice === 'Add someone to this scene on Cast, or open Direct.' ? 'cast' : 'sequel');
+                }}>
+                {notice === 'Add someone to this scene on Cast, or open Direct.' ? 'Open Cast' : 'Season review'}
+              </button>
               <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 14 }} onClick={() => setNotice('')}>×</button>
             </div>
           )}
           {(episode.pendingPlan?.beats?.length ?? 0) > 0 && !streaming && (
-            <div style={{
-              border: '1px solid rgba(255,255,255,0.16)', borderRadius: 12, padding: '11px 14px',
-              background: 'rgba(255,255,255,0.05)', display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap'
+            <div className="glass-nudge" style={{
+              display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap'
             }}>
               <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.8)', flex: 1, minWidth: 0 }}>
                 <div>
@@ -2044,11 +2062,82 @@ export function Story() {
               })}>Dismiss</button>
             </div>
           )}
+        </div>
+      )}
+
+      {/* composer — collapses to a handle in Read mode */}
+      {readMode && !composerOpen ? (
+        <div
+          className="compose-air"
+          style={{
+            position: 'relative', zIndex: 2, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10,
+            padding: '8px 16px 12px'
+          }}
+        >
+          {showWrapNudge && (
+            <div className="glass-nudge" style={{
+              width: '100%',
+              display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
+              background: pressure === 'escalate' ? ACCENT_RGBA.a12 : undefined
+            }}>
+              <div style={{ flex: 1, minWidth: narrow ? 0 : 200, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.78)' }}>
+                {pressure === 'escalate'
+                  ? 'This chapter is getting long. Close it so the season can move — facts from play are already on file.'
+                  : locationShiftNudge && (pressure === 'ok' || pressure === 'warm')
+                    ? 'The scene moved. Close the chapter when you are ready; memory from play is already on file.'
+                    : 'This chapter is getting long. Close it so the season can move.'}
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                <button className="btn-primary" style={{ padding: '7px 12px', fontSize: 12 }}
+                  disabled={wrapBusy} onClick={() => setWrapOpen('episode')}>End episode</button>
+                <button className="btn-quiet" style={{ fontSize: 11 }} onClick={dismissWrapNudge}>Not yet</button>
+              </div>
+            </div>
+          )}
+          <button
+            onClick={() => { setComposerOpen(true); setHudTucked(false); }}
+            className="serif"
+            style={{
+              border: 0, background: 'transparent',
+              color: 'inherit', padding: '10px 18px', cursor: 'pointer',
+              fontSize: 16, fontStyle: 'italic', opacity: 0.7
+            }}
+          >
+            Continue
+          </button>
+        </div>
+      ) : (
+        <div className="compose-air" style={{
+          position: 'relative', zIndex: 2,
+          padding: narrow
+            ? (readMode ? '10px 16px 12px' : '11px 12px 12px')
+            : '12px 24px 16px',
+          display: 'flex', flexDirection: 'column', gap: 10
+        }}>
+          {showWrapNudge && (
+            <div className="glass-nudge" style={{
+              display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
+              background: pressure === 'escalate' ? ACCENT_RGBA.a12 : undefined
+            }}>
+              <div style={{ flex: 1, minWidth: narrow ? 0 : 200, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.78)' }}>
+                {pressure === 'escalate'
+                  ? 'This chapter is getting long. Close it so the season can move — facts from play are already on file.'
+                  : locationShiftNudge && (pressure === 'ok' || pressure === 'warm')
+                    ? 'The scene moved. Close the chapter when you are ready; memory from play is already on file.'
+                    : 'This chapter is getting long. Close it so the season can move.'}
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+                <button className="btn-primary" style={{ padding: '7px 12px', fontSize: 12 }}
+                  disabled={wrapBusy} onClick={() => setWrapOpen('episode')}>End episode</button>
+                <button className="btn-quiet" style={{ fontSize: 11 }} onClick={dismissWrapNudge}>Not yet</button>
+              </div>
+            </div>
+          )}
           {(!readMode || composeMore) && (
           <>
           <div style={{
             display: 'grid',
-            gridTemplateColumns: narrow ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))',
+            gridTemplateColumns: compact ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))',
             gap: 0,
             border: '1px solid rgba(255,255,255,0.12)',
             borderRadius: 4,
@@ -2070,7 +2159,7 @@ export function Story() {
                   borderRight: i < arr.length - 1 ? '1px solid rgba(255,255,255,0.08)' : 0,
                   minHeight: 44,
                   padding: '8px 4px',
-                  fontSize: narrow ? 12 : 13,
+                  fontSize: compact ? 12 : 13,
                   fontWeight: m.active ? 600 : 500,
                   cursor: 'pointer',
                   color: m.active ? '#0a1416' : 'rgba(230,233,235,0.65)',
@@ -2080,8 +2169,11 @@ export function Story() {
               >
                 {m.label}
               </button>
-            ))}
-          </div>
+              ))}
+            </div>
+          {composeMode === 'play' && (
+            <Mono style={{ fontSize: 10, opacity: 0.55 }}>Play · you speak and act in one move</Mono>
+          )}
           {agencyOn && (
             <DeliveryPicker value={deliveryTone} onChange={setDeliveryTone} />
           )}
@@ -2178,6 +2270,7 @@ export function Story() {
                 <button
                   className="btn-primary"
                   style={{ padding: '10px 19px', minHeight: 44 }}
+                  disabled={writeBlocked}
                   onClick={() => void write()}
                 >
                   Write on
@@ -2193,8 +2286,6 @@ export function Story() {
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              onFocus={() => setComposerFocused(true)}
-              onBlur={() => setComposerFocused(false)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void write(); }
               }}
@@ -2214,11 +2305,14 @@ export function Story() {
                 className="btn-primary"
                 style={{ alignSelf: 'flex-end', padding: '10px 19px', minHeight: 44 }}
                 disabled={
-                  agencyOn
-                  && inScene.filter((c) => !c.isPlayer).length === 0
-                  && (episode.activeGuestIds == null
-                    ? guests.length === 0
-                    : guests.filter((g) => episode.activeGuestIds!.includes(g.id)).length === 0)
+                  writeBlocked
+                  || (
+                    agencyOn
+                    && inScene.filter((c) => !c.isPlayer).length === 0
+                    && (episode.activeGuestIds == null
+                      ? guests.length === 0
+                      : guests.filter((g) => episode.activeGuestIds!.includes(g.id)).length === 0)
+                  )
                 }
                 onClick={() => void write()}
               >
@@ -2231,7 +2325,7 @@ export function Story() {
             <div style={{ display: 'flex', gap: 16, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.4, flexWrap: 'wrap' }}>
               <span>memory: {continuity.length} facts · {threads.length} open threads</span>
               {!narrow && <span>{world.ai.mature ? 'adult world · unrestricted' : 'general audience'}</span>}
-              {!narrow && <span>⌘↵ write on</span>}
+              {!narrow && <span>{/Mac|iPhone|iPad/i.test(typeof navigator !== 'undefined' ? navigator.platform || navigator.userAgent : '') ? '⌘↵ write on' : 'Ctrl+Enter write on'}</span>}
             </div>
           )}
         </div>
@@ -2241,7 +2335,7 @@ export function Story() {
       <Sheet
         open={wrapOpen !== null}
         onClose={closeWrapSheet}
-        narrow={narrow}
+        narrow={sheetBottom}
         footer={
           wrapPhase === 'review' ? (
             <>
@@ -2312,7 +2406,7 @@ export function Story() {
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: '0.14em', textTransform: 'uppercase', opacity: 0.5 }}>
               season {season.number} · episode {episode.number}
             </div>
-            <div className="serif" style={{ fontWeight: 300, fontSize: 27, lineHeight: 1.15, color: '#f6f4f0' }}>
+            <div className="serif" style={{ fontWeight: 300, fontSize: 27, lineHeight: 1.15, color: 'var(--ink-heading)' }}>
               End the episode.
             </div>
             <div style={{ fontSize: 13, lineHeight: 1.6, opacity: 0.62, maxWidth: '48ch', color: '#eceae6' }}>
@@ -2321,7 +2415,7 @@ export function Story() {
                 : 'The utility model proposes a previously-on recap, how time passed, and only new or stale memory — you review before the next episode opens. Skipping still keeps a short recap.'}
             </div>
           </div>
-          <button className="btn-ghost" style={{ width: 30, height: 30, padding: 0, flexShrink: 0 }} onClick={closeWrapSheet}>×</button>
+          <button className="btn-ghost" aria-label="Close" style={{ width: 30, height: 30, padding: 0, flexShrink: 0 }} onClick={closeWrapSheet}>×</button>
         </div>
 
         <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -2366,7 +2460,7 @@ export function Story() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
               <Mono style={{ fontSize: 9 }}>already held in continuity</Mono>
               {continuity.slice(-6).map((f) => (
-                <div key={f.id} className="craft-row" style={{ borderRadius: 4, padding: '12px 14px', fontSize: 13, lineHeight: 1.5, color: 'rgba(236,234,230,0.8)' }}>
+                <div key={f.id} className="craft-row" style={{ padding: '12px 14px', fontSize: 13, lineHeight: 1.5, color: 'var(--ink-muted)' }}>
                   {f.text}
                 </div>
               ))}
@@ -2384,7 +2478,7 @@ export function Story() {
       <Sheet
         open={directorSheet}
         onClose={() => setDirectorSheet(false)}
-        narrow={narrow}
+        narrow={sheetBottom}
         footer={
           <button className="btn-primary" style={{ width: '100%', minHeight: 44 }} onClick={() => setDirectorSheet(false)}>
             Done
@@ -2392,33 +2486,33 @@ export function Story() {
         }
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div className="serif" style={{ fontWeight: 300, fontSize: 24, color: '#f6f4f0' }}>Director</div>
-          <button className="btn-ghost" style={{ width: 44, height: 44, padding: 0, fontSize: 18 }} onClick={() => setDirectorSheet(false)}>×</button>
+          <div className="serif" style={{ fontWeight: 300, fontSize: 24, color: 'var(--ink-heading)' }}>Director</div>
+          <button className="btn-ghost" aria-label="Close" style={{ width: 44, height: 44, padding: 0, fontSize: 18 }} onClick={() => setDirectorSheet(false)}>×</button>
         </div>
         {directorContent}
       </Sheet>
 
       {/* narrow overflow: display / edit / mood */}
-      <Sheet open={moreSheet} onClose={() => setMoreSheet(false)} narrow={narrow}
+      <Sheet open={moreSheet} onClose={() => setMoreSheet(false)} narrow={sheetBottom}
         footer={
           <button className="btn-primary" style={{ width: '100%', minHeight: 44 }} onClick={() => setMoreSheet(false)}>Done</button>
         }
       >
-        <div className="serif" style={{ fontWeight: 300, fontSize: 24, color: '#f6f4f0' }}>More</div>
+        <div className="serif" style={{ fontWeight: 300, fontSize: 24, color: 'var(--ink-heading)' }}>More</div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {readMode && (
+          {(readMode || short) && (
             <>
-              {showWrapNudge && (
-                <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setWrapOpen('episode'); }}>
-                  File episode?
-                </button>
-              )}
+              <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setWrapOpen('episode'); }}>
+                End episode
+              </button>
               <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setDirectorSheet(true); }}>
                 Direct
               </button>
-              <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setLayout('write'); }}>
-                Exit read
-              </button>
+              {readMode && (
+                <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setLayout('write'); }}>
+                  Exit read
+                </button>
+              )}
             </>
           )}
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setDisplayOpen(true); }}>
@@ -2439,7 +2533,7 @@ export function Story() {
             Cast
           </button>
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); goLocations(); }}>
-            Locations
+            Places
           </button>
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); go('profile'); }}>
             Profile
@@ -2470,7 +2564,7 @@ export function Story() {
       <WorldEditorSheet
         open={worldEditOpen}
         onClose={() => setWorldEditOpen(false)}
-        narrow={narrow}
+        narrow={sheetBottom}
         world={world}
         season={season}
         episode={episode}
@@ -2480,7 +2574,7 @@ export function Story() {
 
       {/* display settings */}
       <DisplaySheet
-        open={displayOpen} onClose={() => setDisplayOpen(false)} narrow={narrow}
+        open={displayOpen} onClose={() => setDisplayOpen(false)} narrow={sheetBottom}
         episode={episode} world={world} locations={locations} characters={characters}
       />
     </div>
@@ -2574,7 +2668,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
     <Sheet open={open} onClose={onClose} narrow={narrow}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-          <div className="serif" style={{ fontWeight: 300, fontSize: 24, color: '#f6f4f0' }}>Display</div>
+          <div className="serif" style={{ fontWeight: 300, fontSize: 24, color: 'var(--ink-heading)' }}>Display</div>
           <Mono style={{ fontSize: 9 }}>sizes & plate settings stay on this device · the image stays with the episode</Mono>
         </div>
         <button className="btn-ghost" style={{ width: 30, height: 30, padding: 0, flexShrink: 0 }} onClick={onClose}>×</button>
@@ -2627,6 +2721,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
               mood {episode.moodPinned ? 'pinned' : 'follows location'}
             </span>
             <Toggle
+              label="Pin mood to this episode"
               on={!!episode.moodPinned}
               onClick={() => {
                 const next = !episode.moodPinned;
@@ -2678,6 +2773,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
               AI may set the scene photo
             </span>
             <Toggle
+              label="AI may set the scene photo"
               on={display.aiSetsScrollBg}
               onClick={() => setDisplay({ aiSetsScrollBg: !display.aiSetsScrollBg })}
             />
@@ -2700,7 +2796,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
           {imgError && <ErrorNote error={imgError} onDismiss={() => setImgError('')} />}
           {canMatchFaces && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <Toggle on={matchCast} onClick={() => setMatchCast((v) => !v)} />
+              <Toggle label="Match faces in the scene image" on={matchCast} onClick={() => setMatchCast((v) => !v)} />
               <div style={{ fontSize: 12.5, lineHeight: 1.45, color: 'rgba(236,234,230,0.7)' }}>
                 Match cast photos — keep uploaded faces when the image model accepts references.
               </div>
@@ -2787,7 +2883,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
 
 // ---------- turn row with edit / retry / delete-below ----------
 
-function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, dialogueStyle, prevSpeaker, streaming, hasBelow, opening, onRetry, onReroll, onDeleteBelow }: {
+function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, dialogueStyle, prevSpeaker, streaming, hasBelow, opening, onRetry, onReroll, onDeleteBelow, onDelete }: {
   turn: Turn;
   blocks: ProseBlock[];
   characters: Character[];
@@ -2804,6 +2900,7 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, di
   onRetry: () => void;
   onReroll?: () => void;
   onDeleteBelow: () => void;
+  onDelete: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
@@ -2885,15 +2982,7 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, di
             onClick={onDeleteBelow}>Delete below</button>
         )}
         <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
-          onClick={async () => {
-            if (confirm('Delete this turn? The turns after it are kept.')) {
-              await recordTombstones([{
-                table: 'turns', id: turn.id, worldId: turn.worldId, episodeId: turn.episodeId, payload: turn
-              }]);
-              await db.turns.delete(turn.id);
-              if (turn.episodeId) await clearEpisodeRunningSummary(turn.episodeId);
-            }
-          }}>Delete</button>
+          onClick={onDelete}>Delete</button>
       </div>
     </div>
   );
@@ -2918,9 +3007,7 @@ function SceneCastPanel({ episode, characters, accent, onGoCast }: {
 
   const toggleCast = async (id: string, isPlayer: boolean) => {
     if (isPlayer) return;
-    const castIds = episode.castIds.includes(id)
-      ? episode.castIds.filter((x) => x !== id)
-      : [...episode.castIds, id];
+    const castIds = nextSceneCastIds(episode.castIds, id, isPlayer);
     await safeWrite(
       () => db.episodes.update(episode.id, { castIds, updatedAt: Date.now() }),
       setCastError
@@ -3259,7 +3346,7 @@ function SceneLocationsPanel({ episode, locations, accent, world, characters, on
             {genBusy ? 'generating…' : 'generate scene image'}
           </button>
         )}
-        <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} onClick={onGoLocations}>full editor → Locations</button>
+        <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} onClick={onGoLocations}>full editor → Places</button>
       </div>
     </div>
   );
@@ -4069,14 +4156,14 @@ function CalendarSeasonEventsPanel({ world, season }: { world: World; season: Se
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}>
-          <Toggle on={prefs.enabled} onClick={() => patchPrefs({ enabled: !prefs.enabled })} />
+          <Toggle label="Enable calendar events" on={prefs.enabled} onClick={() => patchPrefs({ enabled: !prefs.enabled })} />
           enable calendar events
         </label>
         {!prefs.enabled && (
           <Mono style={{ fontSize: 10, opacity: 0.5 }}>Ignored by narrator while off.</Mono>
         )}
         <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}>
-          <Toggle on={prefs.aiSeedOnSeasonStart} onClick={() => patchPrefs({ aiSeedOnSeasonStart: !prefs.aiSeedOnSeasonStart })} />
+          <Toggle label="AI-seed calendar on season start" on={prefs.aiSeedOnSeasonStart} onClick={() => patchPrefs({ aiSeedOnSeasonStart: !prefs.aiSeedOnSeasonStart })} />
           AI-seed on season start
         </label>
         <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -4725,7 +4812,7 @@ function WrapReviewBody({
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <Mono style={{ fontSize: 9 }}>premise (current pressure) → next episode</Mono>
+        <Mono style={{ fontSize: 9 }}>what's live → next episode</Mono>
         <textarea
           className="serif"
           rows={4}

@@ -13,12 +13,14 @@ import {
   packTurnsDetailed,
   sceneLedgerSection,
   storyCachePrefix,
+  buildCharacterSpeakMessages,
+  buildGuestSystemPrompt,
   type PromptContext
 } from './prompts';
 import { inferContextWindowTokens, promptCharBudget } from './contextBudget';
-import { isContextOverflowError } from './client';
+import { AIError, isContextOverflowError, isEmptyModelResponse, isPromptPackRetryError } from './client';
 import { DEFAULT_AI } from '../worldOps';
-import type { CalendarEvent, Character, ContinuityFact, Episode, Location, OpenThread, Season, Turn, World } from '../types';
+import type { CalendarEvent, Character, ContinuityFact, Episode, EpisodeGuest, Location, OpenThread, Season, Turn, World } from '../types';
 
 const npc = (id: string, name: string, extras: Partial<Character> = {}): Character => ({
   id, worldId: 'w', name, role: 'registrar', age: '', appearance: '', mannerisms: '', summary: 'Keeps the books.',
@@ -137,13 +139,55 @@ describe('compressOmittedTurns', () => {
 });
 
 describe('speak agent context frame', () => {
-  it('includes calendar texture and aimed situation pressure', () => {
+  it('includes calendar texture and aimed situation beats', () => {
     const prompt = buildCharacterSystemPrompt(ctx(), npc('c1', 'Ada'));
-    expect(prompt).toMatch(/Situation pressure/i);
+    expect(prompt).toMatch(/## Situation/i);
+    expect(prompt).not.toMatch(/Aimed pressure/i);
     expect(prompt).toMatch(/Harbour Feast/);
-    expect(prompt).toMatch(/Aimed pressure/i);
+    expect(prompt).toMatch(/Aimed beat/i);
     expect(prompt).toMatch(/harbour ledger/i);
     expect(prompt).toMatch(/Never prefix your reply with your name/i);
+    expect(prompt).toMatch(/At most one question/i);
+    expect(prompt).toMatch(/stop and wait/i);
+    expect(prompt).toMatch(/take the answer as heard/i);
+    expect(prompt).toMatch(/Story stance:/i);
+    expect(prompt).not.toMatch(/## Plot targets/i);
+  });
+
+  it('uses hard established-facts continuity for speak agents', () => {
+    const prompt = buildCharacterSystemPrompt(ctx({
+      continuity: [{
+        id: 'f1', worldId: 'w', seasonId: 's', episodeId: 'e',
+        text: 'Ada still has the brass office key',
+        source: 'auto', createdAt: 1
+      }]
+    }), npc('c1', 'Ada'));
+    expect(prompt).toMatch(/## Continuity — established facts, never contradict these/);
+    expect(prompt).toContain('Ada still has the brass office key');
+    expect(prompt).not.toMatch(/plausibly know them/);
+  });
+
+  it('labels character history as [Name] not Name:', () => {
+    const ada = npc('c1', 'Ada');
+    const turns: Turn[] = [{
+      id: 't1', episodeId: 'e', worldId: 'w', role: 'character', mode: null,
+      characterId: 'c1', text: '*nods* "Ledger."', createdAt: 1
+    }];
+    const joined = buildCharacterSpeakMessages(turns, [ada], ada, 'press them', [])
+      .map((m) => m.content)
+      .join('\n');
+    expect(joined).toMatch(/\[Ada\]/);
+    expect(joined).not.toMatch(/(?:^|\n)Ada: /);
+  });
+
+  it('puts guest voice as a hard identity guide', () => {
+    const guest: EpisodeGuest = { id: 'g1', name: 'Clerk', brief: 'tired', voice: 'dry harbour rasp' };
+    const prompt = buildGuestSystemPrompt(
+      ctx({ episode: { ...episode(), guests: [guest], activeGuestIds: ['g1'] } }),
+      guest
+    );
+    expect(prompt).toMatch(/Voice guide — match this exactly/);
+    expect(prompt).toMatch(/dry harbour rasp/);
   });
 });
 
@@ -214,6 +258,63 @@ describe('director prompt budgets', () => {
     expect(user).toMatch(/Ben → Ada: rival — after the same ledger/);
   });
 
+  it('tells the director to register an answer to the last NPC question', () => {
+    const turns: Turn[] = [
+      {
+        id: 't0', episodeId: 'e', worldId: 'w', role: 'character', mode: null,
+        characterId: 'c1', text: '*looks up* "Where were you last night?"', createdAt: 0
+      },
+      {
+        id: 't1', episodeId: 'e', worldId: 'w', role: 'user', mode: 'speak',
+        text: 'At the quay.', createdAt: 1
+      }
+    ];
+    const user = directorUserPrompt(ctx({ turns }), 'speak', 'At the quay.');
+    expect(user).toMatch(/Ada asked a question/);
+    expect(user).toMatch(/Take the answer as heard/i);
+  });
+
+  it('tells the speaking character the player already answered', () => {
+    const ada = npc('c1', 'Ada');
+    const turns: Turn[] = [
+      {
+        id: 't0', episodeId: 'e', worldId: 'w', role: 'character', mode: null,
+        characterId: 'c1', text: '"Who paid Ivo?"', createdAt: 0
+      },
+      {
+        id: 't1', episodeId: 'e', worldId: 'w', role: 'user', mode: 'speak',
+        text: 'Marisol did.', createdAt: 1
+      }
+    ];
+    const msgs = buildCharacterSpeakMessages(turns, [ada], ada, 'press them', []);
+    const last = msgs.at(-1)?.content ?? '';
+    expect(last).toMatch(/Ada asked a question/);
+    expect(last).toMatch(/do not ask it again/i);
+  });
+
+  it('keeps the heard-answer cue after a later NPC speak beat', () => {
+    const ada = npc('c1', 'Ada');
+    const ben = npc('c2', 'Ben');
+    const turns: Turn[] = [
+      {
+        id: 't0', episodeId: 'e', worldId: 'w', role: 'character', mode: null,
+        characterId: 'c1', text: '"Who paid Ivo?"', createdAt: 0
+      },
+      {
+        id: 't1', episodeId: 'e', worldId: 'w', role: 'user', mode: 'speak',
+        text: 'Marisol did.', createdAt: 1
+      },
+      {
+        id: 't2', episodeId: 'e', worldId: 'w', role: 'character', mode: null,
+        characterId: 'c2', text: '"We already knew that."', createdAt: 2
+      }
+    ];
+    const msgs = buildCharacterSpeakMessages(turns, [ada, ben], ada, 'press them', []);
+    const last = msgs.at(-1)?.content ?? '';
+    expect(last).toMatch(/Ada asked a question/);
+    expect(last).toMatch(/do not ask it again/i);
+  });
+
   it('omits the dynamics block when nobody is on stage', () => {
     const user = directorUserPrompt(
       ctx({ characters: [], episode: { ...episode(), castIds: [] } }),
@@ -243,6 +344,24 @@ describe('director prompt budgets', () => {
     expect(factAt).toBeGreaterThan(0);
     expect(glueAt).toBeGreaterThan(factAt);
     expect(user).toMatch(/outrank any running summary/);
+  });
+
+  it('includes compact plot targets for longform director', () => {
+    const user = directorUserPrompt(ctx(), 'continue', '');
+    expect(user).toMatch(/Plot targets/);
+    expect(user).toMatch(/stolen harbour ledger/i);
+  });
+
+  it('skips compact plot targets for wander and sandbox director', () => {
+    for (const stance of ['wander', 'sandbox'] as const) {
+      const user = directorUserPrompt(
+        ctx({ world: { ...world(), storyStance: stance } }),
+        'continue',
+        ''
+      );
+      expect(user).not.toMatch(/Plot targets/);
+      expect(user).not.toMatch(/stolen harbour ledger/i);
+    }
   });
 });
 
@@ -401,7 +520,18 @@ describe('isContextOverflowError', () => {
     expect(isContextOverflowError(new Error('context_length_exceeded'))).toBe(true);
     expect(isContextOverflowError(new Error('This model\'s maximum context length is 8192'))).toBe(true);
     expect(isContextOverflowError(new Error('prompt is too long'))).toBe(true);
+    expect(isContextOverflowError(new Error('input tokens exceed the limit'))).toBe(true);
+    expect(isContextOverflowError(new Error('max prompt size exceeded'))).toBe(true);
+    expect(isContextOverflowError(new Error('HTTP 413'))).toBe(true);
+    expect(isContextOverflowError(new AIError('payload too large', 413))).toBe(true);
     expect(isContextOverflowError(new Error('rate limited'))).toBe(false);
+  });
+
+  it('retries a tight pack on empty model replies', () => {
+    const empty = new AIError('The model returned an empty response (stop: stop).');
+    expect(isEmptyModelResponse(empty)).toBe(true);
+    expect(isPromptPackRetryError(empty)).toBe(true);
+    expect(isPromptPackRetryError(new Error('rate limited'))).toBe(false);
   });
 });
 
@@ -413,6 +543,21 @@ describe('narration brief contract', () => {
     expect(sys).toMatch(/never a weather catalogue/i);
     expect(sys).toMatch(/want or friction/i);
     expect(sys).toMatch(/room is not a queue/i);
+    expect(sys).toMatch(/End the plan on an opening/i);
+    expect(sys).not.toMatch(/End the plan on tension/i);
+    expect(sys).toMatch(/take that answer as heard/i);
+    expect(sys).toMatch(/same question/i);
+    expect(sys).toMatch(/last speak in the plan/i);
+    expect(sys).toMatch(/unanswered question/i);
+  });
+
+  it('steers wander stance away from a plot clock', () => {
+    const sys = directorSystemPrompt('speak', true, 'scene', 'wander');
+    expect(sys).toMatch(/Story stance: wander/i);
+    expect(sys).not.toMatch(/End the plan on tension/i);
+    const prompt = buildNarratorSystemPrompt(ctx({ world: { ...world(), storyStance: 'wander' } }));
+    expect(prompt).toMatch(/Story stance: wander/i);
+    expect(prompt).not.toMatch(/End every response on tension/i);
   });
 
   it('tells the narrator not to recap and to use named bodies', () => {
@@ -449,6 +594,16 @@ describe('token-efficient packing', () => {
       0, { totalCap: 12_000 }
     );
     expect(withoutSummary.map((m) => m.content).join('\n')).toMatch(/Compressed earlier beats/);
+  });
+
+  it('keeps omitted-turn digest unless skipOmittedDigest is set', () => {
+    const history = manyTurns();
+    const ep = { ...episode(), runningSummary: null };
+    const skipped = buildNarrationBeatMessages(
+      history, [npc('c1', 'Ada')], 'Look around.', 'scene', [], ep, 0,
+      { totalCap: 12_000, skipOmittedDigest: true }
+    );
+    expect(skipped.map((m) => m.content).join('\n')).not.toMatch(/Compressed earlier beats/);
   });
 
   it('keeps the cached prefix stable when only turns change', () => {

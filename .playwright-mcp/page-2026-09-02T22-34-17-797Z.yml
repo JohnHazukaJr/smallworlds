@@ -1,0 +1,31 @@
+- main [ref=f2e36]:
+  - generic [ref=f2e352]:
+    - generic [ref=f2e378]:
+      - generic [ref=f2e379]: The Registrar · the long room
+      - generic [ref=f2e382]:
+        - button "Hide" [ref=f2e383] [cursor=pointer]
+        - button "Direct" [ref=f2e384] [cursor=pointer]
+        - button "End episode" [ref=f2e385] [cursor=pointer]
+        - button "Exit read" [ref=f2e386] [cursor=pointer]
+    - generic [ref=f2e356]:
+      - generic: Lamp oil, salt damp, and the low grind of the harbour through the floor
+      - generic [ref=f2e360]:
+        - generic [ref=f2e361]:
+          - generic [ref=f2e362]: The long room · Monday, 1 January, Year 1 · day 1
+          - button "Marisol Vey · you · The Cartwright" [ref=f2e366] [cursor=pointer]
+        - generic [ref=f2e367]:
+          - paragraph [ref=f2e369]:
+            - generic [ref=f2e370]: T
+            - text: he long room keeps its own weather. Lamp-smoke gathers along the ceiling beams and stays there, and the tide sound comes up through the floor rather than the windows, so that every conversation held here has the shape of something overheard. The Cartwright has not touched the cup you poured. That is the first thing you notice. The second is that he has arranged the manifest pages so the false signature faces you. You could tell him the truth. You could tell him a better lie. Marisol is on the tide stairs outside and will hear either one, because the long room keeps its own weather and gives nothing back.
+          - generic [ref=f2e371]:
+            - button "Edit" [ref=f2e372] [cursor=pointer]
+            - button "Retry from here" [ref=f2e373] [cursor=pointer]
+            - button "Re-roll line" [ref=f2e374] [cursor=pointer]
+            - button "Delete" [ref=f2e375] [cursor=pointer]
+    - generic [ref=f2e376]:
+      - generic [ref=f2e387]:
+        - button "More" [ref=f2e388] [cursor=pointer]
+        - button "collapse" [ref=f2e389] [cursor=pointer]
+      - generic [ref=f2e390]:
+        - paragraph [ref=f2e391]: the scene continues
+        - button "Write on" [disabled] [ref=f2e392]

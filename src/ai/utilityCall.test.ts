@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { AIError } from './client';
-import { extractJson, parseToolArguments } from './utilityCall';
+import { extractJson, jsonValueIsEmpty, parseToolArguments } from './utilityCall';
 
 describe('extractJson', () => {
   it('parses a bare object', () => {
@@ -20,5 +20,15 @@ describe('parseToolArguments', () => {
   it('parses tool args or falls back to extractJson', () => {
     expect(parseToolArguments<{ beats: number }>('{"beats":2}')).toEqual({ beats: 2 });
     expect(parseToolArguments<{ beats: number }>('noise {"beats":3}')).toEqual({ beats: 3 });
+  });
+});
+
+describe('jsonValueIsEmpty', () => {
+  it('treats empty objects and arrays as empty', () => {
+    expect(jsonValueIsEmpty({})).toBe(true);
+    expect(jsonValueIsEmpty([])).toBe(true);
+    expect(jsonValueIsEmpty(null)).toBe(true);
+    expect(jsonValueIsEmpty({ title: 'Harbour' })).toBe(false);
+    expect(jsonValueIsEmpty({ characters: [] })).toBe(false);
   });
 });

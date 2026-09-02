@@ -767,7 +767,7 @@ async function distillLore(
   const lore = await withOverflowRetry((tight) => utilityJson<VolumeLore>(
     world,
     VOLUME_LORE_SYSTEM +
-    `\n{"line":"<one-sentence logline>","bible":"<800-1500 words: setting as it is NOW, lived history as fact, pressures>","premise":"<new volume pressure, 2-5 sentences>","timeGap":"<human gap label>","storyDay":<int>,"dateNote":"<optional>","openingLocationName":"<exact existing place name>","openingCastNames":["<exact existing names>"],"atmosphereNote":"<sensory note for the opening scene>","offscreenChanges":"<what shifted during the gap>","plotTargets":["<aimed pressures>"]}`,
+    `\n{"line":"<one-sentence logline>","bible":"<800-1500 words: setting as it is NOW, lived history as fact>","premise":"<new volume situation, 2-5 sentences>","timeGap":"<human gap label>","storyDay":<int>,"dateNote":"<optional>","openingLocationName":"<exact existing place name>","openingCastNames":["<exact existing names>"],"atmosphereNote":"<sensory note for the opening scene>","offscreenChanges":"<what shifted during the gap>","plotTargets":["<aimed beats>"]}`,
     `Canon digest:\n${clip(digest, tight ? 20_000 : CORPUS_HARD_CHARS)}`,
     3500,
     signal,
