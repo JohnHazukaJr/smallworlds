@@ -1,14 +1,19 @@
 import { describe, expect, it } from 'vitest';
-import { buildOpenAIChatBody } from './client';
+import { bumpMaxTokens, buildOpenAIChatBody, type StreamRequest } from './client';
 import {
   inferContextWindowTokens,
   promptCharBudget
 } from './contextBudget';
 import {
   modelProfile,
+  alwaysReasons,
+  paddedMaxTokens,
+  proseCompletionTokens,
+  REASONING_COMPLETION_PAD,
   shouldReserveReasoningTokens,
   thinkingOnForJob
 } from './modelProfile';
+import { characterSpeakTokens, narrationBeatTokens } from './prompts';
 import type { ProviderConfig } from '../types';
 
 const openai = (model: string, job: 'prose' | 'utility' | 'wrap' | 'test' = 'prose') =>
@@ -60,6 +65,17 @@ describe('modelProfile', () => {
     const on = promptCharBudget('deepseek-reasoner', 400, { thinking: true });
     expect(on).toBeLessThan(off);
   });
+
+  it('pads completion tokens for models that hide reasoning in the output budget', () => {
+    expect(alwaysReasons('deepseek-reasoner')).toBe(true);
+    expect(alwaysReasons('o1')).toBe(true);
+    expect(alwaysReasons('glm-5.2')).toBe(false);
+    expect(paddedMaxTokens('gpt-4o', 450)).toBe(450);
+    expect(paddedMaxTokens('glm-5.2', 450)).toBe(450 + REASONING_COMPLETION_PAD);
+    expect(paddedMaxTokens('gpt-5', 450)).toBe(450 + REASONING_COMPLETION_PAD);
+    expect(proseCompletionTokens('deepseek-reasoner', 450)).toBe(450 + REASONING_COMPLETION_PAD);
+    expect(proseCompletionTokens('claude-haiku-4-5', 450)).toBe(450);
+  });
 });
 
 describe('buildOpenAIChatBody', () => {
@@ -81,5 +97,26 @@ describe('buildOpenAIChatBody', () => {
     const body = openai('gpt-5', 'prose');
     expect(body.max_completion_tokens).toBe(200);
     expect(body.max_tokens).toBeUndefined();
+  });
+});
+
+describe('output token retry math', () => {
+  it('grows the completion ceiling on empty/length-stop retries', () => {
+    const req: StreamRequest = {
+      provider: {
+        id: 'p', kind: 'openai', label: 't', baseUrl: 'https://example.test', apiKey: 'k'
+      },
+      model: 'gpt-4o',
+      system: 's',
+      messages: [],
+      maxTokens: 450
+    };
+    expect(bumpMaxTokens(req).maxTokens).toBeGreaterThanOrEqual(2450);
+  });
+
+  it('keeps speak/narration floors large enough for a short finished line', () => {
+    expect(characterSpeakTokens('beat')).toBeGreaterThanOrEqual(250);
+    expect(characterSpeakTokens('scene')).toBeGreaterThanOrEqual(400);
+    expect(narrationBeatTokens('scene')).toBeGreaterThanOrEqual(700);
   });
 });

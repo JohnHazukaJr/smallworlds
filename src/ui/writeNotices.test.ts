@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   abortWriteNotice,
+  unfinishedWriteNotice,
   NOTICE_ADD_CAST,
   NOTICE_ADD_MODEL,
   noticeNavAction
@@ -24,6 +25,20 @@ describe('abortWriteNotice', () => {
   it('keeps the existing partial-save copy when some lines landed', () => {
     expect(abortWriteNotice(2, 1)).toMatch(/Stopped after 2 lines/);
     expect(abortWriteNotice(2, 1)).toMatch(/1 left in the plan/);
+  });
+});
+
+describe('unfinishedWriteNotice', () => {
+  it('points at Continue plan after a failed first beat', () => {
+    const copy = unfinishedWriteNotice(0, 3);
+    expect(copy).toMatch(/couldn't finish/i);
+    expect(copy).toMatch(/Continue plan/);
+    expect(copy).not.toMatch(/Stopped/);
+  });
+
+  it('is empty when nothing remains to resume', () => {
+    expect(unfinishedWriteNotice(0, 0)).toBe('');
+    expect(unfinishedWriteNotice(2, 0)).toBe('');
   });
 });
 

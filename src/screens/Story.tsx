@@ -56,7 +56,7 @@ import {
 import { Face } from '../ui/Face';
 import { fileToSceneImage } from '../ui/image';
 import { attributionRun, isDialogueBlock, lastSpokenBy } from '../ui/attribution';
-import { abortWriteNotice, NOTICE_ADD_CAST, NOTICE_ADD_MODEL, noticeNavAction } from '../ui/writeNotices';
+import { abortWriteNotice, unfinishedWriteNotice, NOTICE_ADD_CAST, NOTICE_ADD_MODEL, noticeNavAction } from '../ui/writeNotices';
 import {
   SCROLL_BACKDROP_LABEL, SCROLL_BACKDROPS, resolveScrollBackdrop
 } from '../ui/scrollBackdrop';
@@ -961,13 +961,17 @@ export function Story() {
       const left = typeof e === 'object' && e && 'remainingBeats' in e
         ? Math.max(0, ((e as { remainingBeats?: unknown[] }).remainingBeats ?? []).length)
         : 0;
-      setError(classifyError(e));
-      if (n > 0 || left > 0) {
-        setNotice(
-          left > 0
-            ? abortWriteNotice(n, left)
-            : `${n} line${n === 1 ? '' : 's'} saved — Continue plan if lines remain, or retry from the last reply.`
-        );
+      if (left > 0) {
+        // Some beats are recoverable — surface the continue-plan notice as the
+        // primary action and suppress the error banner so they aren't competing.
+        setNotice(unfinishedWriteNotice(n, left));
+      } else {
+        setError(classifyError(e));
+        if (n > 0) {
+          setNotice(
+            `${n} line${n === 1 ? '' : 's'} saved — retry from the last reply.`
+          );
+        }
       }
       return { status: 'error', beatsCompleted: n, remaining: left };
     } finally {

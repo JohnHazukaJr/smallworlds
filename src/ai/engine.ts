@@ -21,6 +21,7 @@ import { AIError, streamChat, isPromptPackRetryError, type ChatMessage, type Str
 import { imageModelFor, proseModelFor, utilityModelFor } from './models';
 import { ANALYZE_EPISODE_TOOL, LIVE_MEMORY_TOOL, PLAN_TURN_TOOL, utilityCall, type ToolSpec } from './utilityCall';
 import { promptCharBudget } from './contextBudget';
+import { proseCompletionTokens } from './modelProfile';
 import { applyDeliveryTone, parseDeliveryTone } from './deliveryTone';
 import { stancePlaybook } from './storyStance';
 import { hasSpokenDialogue, normalizeSpeakText, speakHoldsForPlayer, stitchSpeakRetry, stripNarratorEmbeddedDialogue } from './dialogueFormat';
@@ -111,9 +112,7 @@ async function streamSpeakComplete(opts: {
   onProgress: (label: string) => void;
   onAccumulated: (text: string) => void;
 }): Promise<string> {
-  const maxTokens = characterSpeakTokens(opts.length);
-  // Continuation only finishes a cut-off line — smaller budget so it cannot balloon.
-  const continueTokens = Math.min(160, Math.max(80, Math.floor(maxTokens / 2)));
+  const maxTokens = proseCompletionTokens(opts.model, characterSpeakTokens(opts.length));
   let acc = '';
   const first = await streamChat({
     provider: opts.provider,
@@ -122,6 +121,7 @@ async function streamSpeakComplete(opts: {
     messages: opts.messages,
     maxTokens,
     signal: opts.signal,
+    job: 'prose',
     onDelta: (d) => {
       acc += d;
       opts.onAccumulated(acc);
@@ -138,8 +138,9 @@ async function streamSpeakComplete(opts: {
         { role: 'assistant', content: acc },
         { role: 'user', content: SPEAK_CONTINUE_NUDGE }
       ],
-      maxTokens: continueTokens,
+      maxTokens,
       signal: opts.signal,
+      job: 'prose',
       onDelta: (d) => {
         acc += d;
         opts.onAccumulated(acc);
@@ -159,8 +160,9 @@ async function streamSpeakComplete(opts: {
         { role: 'assistant', content: cleaned },
         { role: 'user', content: SPEAK_DIALOGUE_NUDGE }
       ],
-      maxTokens: continueTokens,
+      maxTokens,
       signal: opts.signal,
+      job: 'prose',
       onDelta: (d) => {
         acc += d;
         opts.onAccumulated(cleaned + (cleaned && acc ? ' ' : '') + acc);
@@ -168,7 +170,10 @@ async function streamSpeakComplete(opts: {
     });
     const retried = normalizeSpeakText(acc);
     if (retried && hasSpokenDialogue(retried)) cleaned = stitchSpeakRetry(cleaned, retried);
-    else if (!hasSpokenDialogue(cleaned)) cleaned = '';
+    // If the nudge didn't add spoken dialogue either, keep the original prose
+    // rather than returning '' — the beat-loop's requireDialogue guard will
+    // skip the beat properly and the user sees a partial reply instead of nothing.
+    // (Returning '' here caused silent empty beats that looked like AI failure.)
   }
   const wall = (opts.mustNotKnow ?? '').trim();
   if (wall && cleaned && speakLeaksMustNotKnow(cleaned, wall)) {
@@ -183,8 +188,9 @@ async function streamSpeakComplete(opts: {
         { role: 'assistant', content: cleaned },
         { role: 'user', content: SPEAK_WALL_NUDGE }
       ],
-      maxTokens: continueTokens,
+      maxTokens,
       signal: opts.signal,
+      job: 'prose',
       onDelta: (d) => {
         acc += d;
         opts.onAccumulated(acc);
@@ -207,7 +213,7 @@ async function streamNarrationComplete(opts: {
   onProgress: (label: string) => void;
   onAccumulated: (text: string) => void;
 }): Promise<string> {
-  const maxTokens = narrationBeatTokens(opts.length);
+  const maxTokens = proseCompletionTokens(opts.model, narrationBeatTokens(opts.length));
   let acc = '';
   const first = await streamChat({
     provider: opts.provider,
@@ -216,6 +222,7 @@ async function streamNarrationComplete(opts: {
     messages: opts.messages,
     maxTokens,
     signal: opts.signal,
+    job: 'prose',
     onDelta: (d) => {
       acc += d;
       opts.onAccumulated(acc);
@@ -234,6 +241,7 @@ async function streamNarrationComplete(opts: {
       ],
       maxTokens,
       signal: opts.signal,
+      job: 'prose',
       onDelta: (d) => {
         acc += d;
         opts.onAccumulated(acc);
@@ -241,6 +249,14 @@ async function streamNarrationComplete(opts: {
     });
   }
   return stripNarratorEmbeddedDialogue(acc.trim());
+}
+
+function speakOutTokens(model: string, length: TurnLength): number {
+  return proseCompletionTokens(model, characterSpeakTokens(length));
+}
+
+function narrOutTokens(model: string, length: TurnLength): number {
+  return proseCompletionTokens(model, narrationBeatTokens(length));
 }
 
 function historyPackFor(
@@ -999,7 +1015,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         const meta: StreamMeta = { role: 'narrator' };
         progress('narrating…');
         opts.onDelta('', meta);
-        const narrCap = promptCharBudget(model, narrationBeatTokens(opts.length));
+        const narrCap = promptCharBudget(model, narrOutTokens(model, opts.length));
         const narrText = await withOverflowRetry(async (pack) => {
           const focus = focusFromBeat(beat, ctx.characters, sceneGuests(), enterIds);
           const narrSystem = buildNarratorSystemPrompt(ctx, {
@@ -1044,7 +1060,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         const meta: StreamMeta = { role: 'character', guestId: guest.id };
         progress(`${guest.name} speaking…`);
         opts.onDelta('', meta);
-        const speakCap = promptCharBudget(model, characterSpeakTokens(opts.length));
+        const speakCap = promptCharBudget(model, speakOutTokens(model, opts.length));
         const cleaned = await withOverflowRetry(async (pack) => {
           const focus = focusFromBeat(beat, ctx.characters, sceneGuests(), enterIds);
           const guestSystem = buildGuestSystemPrompt(ctx, guest, {
@@ -1097,7 +1113,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       const meta: StreamMeta = { role: 'character', characterId: speaking.id };
       progress(`${speaking.name} speaking…`);
       opts.onDelta('', meta);
-      const speakCap = promptCharBudget(model, characterSpeakTokens(opts.length));
+      const speakCap = promptCharBudget(model, speakOutTokens(model, opts.length));
       const cleaned = await withOverflowRetry(async (pack) => {
         const focus = focusFromBeat(beat, ctx.characters, sceneGuests(), enterIds);
         const charSystem = buildCharacterSystemPrompt(ctx, speaking, {
@@ -1152,9 +1168,14 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         // Pause: leftover beats resume via Continue plan. Keep the player line
         // and any cast/guest the director already applied.
         await savePendingPlan(opts.episode.id, keep, opts.length);
-      } else if (beatsCompleted === 0) {
+      } else {
+        // Nothing to resume — roll back scene and remove the player turn so
+        // the scene looks untouched. (beatsCompleted may be 0 or >0 here;
+        // either way there are no beats left to continue.)
         await rollbackSceneIfNeeded();
-        if (userTurnId) {
+        if (userTurnId && beatsCompleted === 0) {
+          // Only delete the user turn when no beat landed — if some beats
+          // completed there may already be AI replies after it.
           await db.turns.delete(userTurnId).catch(() => undefined);
           ctx.turns = ctx.turns.filter((t) => t.id !== userTurnId);
         }
@@ -1176,10 +1197,20 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
       await db.turns.delete(userTurnId).catch(() => undefined);
       ctx.turns = ctx.turns.filter((t) => t.id !== userTurnId);
     }
-    await clearPendingPlan(opts.episode.id);
-    throw new AIError(
+    // When this is a resume run (resumeBeats provided), beats were real but all
+    // got skipped at runtime — preserve the plan so the user can try again via
+    // Continue plan.  On a fresh run there is nothing to preserve.
+    if (opts.resumeBeats?.length) {
+      await savePendingPlan(opts.episode.id, opts.resumeBeats, opts.length);
+    } else {
+      await clearPendingPlan(opts.episode.id);
+    }
+    const err = new AIError(
       'The model produced no usable narration or dialogue. Try again, or choose a shorter reply size.'
-    );
+    ) as AIError & { beatsCompleted?: number; remainingBeats?: DirectorBeat[] };
+    err.beatsCompleted = 0;
+    err.remainingBeats = opts.resumeBeats ?? [];
+    throw err;
   }
 
   // Speak/Play must land at least one spoken reply — narration-only is not enough.
@@ -1255,7 +1286,7 @@ export async function regenerateBeat(opts: {
       'Rewrite this narration beat with fresh wording and the same dramatic function. ' +
       'Do not jump ahead of the scene. Prior wording for reference (do not copy):\n' +
       opts.turn.text.slice(0, 900);
-    const narrCap = promptCharBudget(model, narrationBeatTokens(opts.length));
+    const narrCap = promptCharBudget(model, narrOutTokens(model, opts.length));
     const narrText = await withOverflowRetry(async (pack) => {
       const narrSystem = buildNarratorSystemPrompt(ctx, pack);
       return streamNarrationComplete({
@@ -1298,7 +1329,7 @@ export async function regenerateBeat(opts: {
   progress(`${(guest?.name ?? speaking!.name)} re-rolling…`);
   opts.onDelta('', meta);
 
-  const speakCap = promptCharBudget(model, characterSpeakTokens(opts.length));
+  const speakCap = promptCharBudget(model, speakOutTokens(model, opts.length));
   const focusIds = speaking ? [speaking.id] : [];
   const focusGuestIds = guest ? [guest.id] : [];
   const cleaned = await withOverflowRetry(async (pack) => {

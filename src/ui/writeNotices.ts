@@ -23,6 +23,21 @@ export function abortWriteNotice(beatsCompleted: number, remaining: number): str
   return `Stopped after ${beatsCompleted} line${beatsCompleted === 1 ? '' : 's'}; incomplete line discarded.`;
 }
 
+/** Copy after a provider error when leftover beats can still be resumed. */
+export function unfinishedWriteNotice(beatsCompleted: number, remaining: number): string {
+  if (remaining <= 0) return '';
+  if (beatsCompleted === 0) {
+    return (
+      `The model couldn't finish that reply — ${remaining} line${remaining === 1 ? '' : 's'} ` +
+      `left in the plan. Use Continue plan to retry.`
+    );
+  }
+  return (
+    `The model stopped after ${beatsCompleted} line${beatsCompleted === 1 ? '' : 's'} — ` +
+    `${remaining} left in the plan. Use Continue plan to finish.`
+  );
+}
+
 /** Only attach a nav chip when the notice is about that destination. */
 export function noticeNavAction(notice: string): { label: string; screen: Screen } | null {
   if (notice === NOTICE_ADD_CAST) return { label: 'Open Cast', screen: 'cast' };

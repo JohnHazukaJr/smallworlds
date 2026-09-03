@@ -13,19 +13,20 @@ import { directorCloseGuidance, narratorCloseGuidance, stancePlaybook } from './
 
 /** Shorter budgets when a narrator beat is one slice of a multi-agent turn. */
 const NARRATION_BEAT_TOKENS: Record<TurnLength, number> = {
-  beat: 400,
-  scene: 700,
-  episode: 1100
+  beat: 500,
+  scene: 900,
+  episode: 1400
 };
 
 /**
- * Character/guest speak budgets — sized for tight *action* + "dialogue".
+ * Character/guest speak budgets — sized for *action* + "dialogue".
  * Soft word hints in speak messages do the real anti-ramble work; tokens are a hard ceiling.
+ * These are visible-line floors. Reasoning models get extra headroom via proseCompletionTokens.
  */
 const CHARACTER_SPEAK_TOKENS: Record<TurnLength, number> = {
-  beat: 140,
-  scene: 220,
-  episode: 300
+  beat: 280,
+  scene: 450,
+  episode: 700
 };
 
 export function narrationBeatTokens(length: TurnLength): number {

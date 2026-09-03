@@ -1,6 +1,6 @@
 import type { World } from '../types';
 import { AIError, streamChat, type ChatJob, type ToolSpec } from './client';
-import { modelProfile } from './modelProfile';
+import { modelProfile, paddedMaxTokens, thinkingOnForJob } from './modelProfile';
 import { utilityModelFor } from './models';
 
 export type { ToolSpec };
@@ -102,10 +102,14 @@ export async function utilityCall<T>(opts: {
   tool?: ToolSpec;
 }): Promise<T> {
   const job = opts.job ?? 'utility';
-  const maxTokens = opts.maxTokens ?? 3000;
-  const timeoutMs = opts.timeoutMs ?? (job === 'wrap' ? 90_000 : DEFAULT_UTILITY_TIMEOUT_MS);
   const { provider, model } = utilityModelFor(opts.world);
   const profile = modelProfile(model);
+  const maxTokens = paddedMaxTokens(
+    model,
+    opts.maxTokens ?? 3000,
+    thinkingOnForJob(model, job)
+  );
+  const timeoutMs = opts.timeoutMs ?? (job === 'wrap' ? 90_000 : DEFAULT_UTILITY_TIMEOUT_MS);
   const { signal: timed, cancel } = withTimeoutSignal(opts.signal, timeoutMs);
   const structuredTool = toolHasProperties(opts.tool) ? opts.tool : undefined;
   const canTool = !!(structuredTool && profile.supportsTools && provider.kind === 'openai');

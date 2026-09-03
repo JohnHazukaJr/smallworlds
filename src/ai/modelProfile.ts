@@ -130,3 +130,33 @@ export function thinkingOnForJob(model: string, job: ChatJob): boolean {
 export function shouldReserveReasoningTokens(model: string, thinkingOn: boolean): boolean {
   return thinkingOn && modelProfile(model).reasoningCapable;
 }
+
+/**
+ * Models that spend completion tokens on hidden reasoning even when we send
+ * thinking: disabled (o-series, R1, “reasoner” slugs — no toggle).
+ */
+export function alwaysReasons(model: string): boolean {
+  const p = modelProfile(model);
+  return p.reasoningCapable && !p.supportsThinkingToggle;
+}
+
+/**
+ * Headroom so hidden reasoning cannot eat the whole visible-line budget.
+ * max_tokens is a ceiling — models still stop at EOS, so this does not force long replies.
+ */
+export const REASONING_COMPLETION_PAD = 2048;
+
+/** Completion budget for a call: visible-line base plus reasoning headroom when needed. */
+export function paddedMaxTokens(model: string, base: number, thinkingOn = false): number {
+  const n = Math.max(0, base);
+  const p = modelProfile(model);
+  if (p.reasoningCapable || p.usesMaxCompletionTokens || thinkingOn) {
+    return n + REASONING_COMPLETION_PAD;
+  }
+  return n;
+}
+
+/** Story speak/narration never turns thinking on; still pad models that always reason, and GLM-5. */
+export function proseCompletionTokens(model: string, base: number): number {
+  return paddedMaxTokens(model, base, thinkingOnForJob(model, 'prose'));
+}

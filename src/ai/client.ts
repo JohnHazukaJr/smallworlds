@@ -39,6 +39,7 @@ export interface StreamRequest {
 export interface StreamResult {
   text: string;
   truncated: boolean;
+  finishReason?: string;
   toolCalls?: Array<{ name: string; arguments: string }>;
   sawReasoning?: boolean;
 }
@@ -231,18 +232,25 @@ function resultEmpty(r: StreamResult): boolean {
   return !r.text.trim() && !(r.toolCalls && r.toolCalls.length > 0);
 }
 
-function bumpMaxTokens(req: StreamRequest): StreamRequest {
+/** Grow the completion ceiling when a stream came back empty or length-stopped. */
+export function bumpMaxTokens(req: StreamRequest): StreamRequest {
   return {
     ...req,
     maxTokens: Math.max(req.maxTokens + 2000, Math.floor(req.maxTokens * 1.5))
   };
 }
 
+function emptyStopHint(r: StreamResult): string {
+  if (r.truncated) return 'length';
+  if (r.sawReasoning) return 'reasoning';
+  return r.finishReason ?? '';
+}
+
 /**
  * Stream a chat completion from any configured provider.
  * One automatic retry on 429 / transient 5xx / network failure.
- * Empty utility/wrap replies retry once with more output tokens even when thinking is off.
- * Empty thinking streams retry once (thinking off for prose/test).
+ * Empty replies retry once with a larger completion budget (all jobs).
+ * Empty thinking streams also retry with thinking off for prose/test.
  */
 export async function streamChat(req: StreamRequest): Promise<StreamResult> {
   const run = (next: StreamRequest) => streamChatOnce(next);
@@ -250,22 +258,29 @@ export async function streamChat(req: StreamRequest): Promise<StreamResult> {
 
   const retryEmpty = async (first: StreamResult): Promise<StreamResult> => {
     if (!resultEmpty(first)) return first;
-    if (req.signal?.aborted) throwEmptyResponse('');
-    if (job === 'utility' || job === 'wrap') {
-      const second = await run(bumpMaxTokens(req));
-      if (!resultEmpty(second)) return second;
-      throwEmptyResponse('');
+    if (req.signal?.aborted) throwEmptyResponse(emptyStopHint(first));
+
+    let attempt = req;
+    if (resolveThinking(req) && (job === 'prose' || job === 'test')) {
+      attempt = { ...req, thinking: false };
+      const off = await run(attempt);
+      if (!resultEmpty(off)) return off;
+      first = {
+        ...off,
+        truncated: first.truncated || off.truncated,
+        sawReasoning: first.sawReasoning || off.sawReasoning,
+        finishReason: off.finishReason || first.finishReason
+      };
     }
-    const thinking = resolveThinking(req);
-    if (thinking) {
-      if (job === 'prose' || job === 'test') {
-        return run({ ...req, thinking: false });
-      }
-      const second = await run(bumpMaxTokens(req));
-      if (!resultEmpty(second)) return second;
-      throwEmptyResponse('');
-    }
-    throwEmptyResponse('');
+
+    const second = await run(bumpMaxTokens(attempt));
+    if (!resultEmpty(second)) return second;
+    throwEmptyResponse(emptyStopHint({
+      ...second,
+      truncated: first.truncated || second.truncated,
+      sawReasoning: first.sawReasoning || second.sawReasoning,
+      finishReason: second.finishReason || first.finishReason
+    }));
   };
 
   try {
@@ -275,17 +290,6 @@ export async function streamChat(req: StreamRequest): Promise<StreamResult> {
     if (req.signal?.aborted) throw e;
     if ((e as Error)?.name === 'AbortError') throw e;
 
-    if (isEmptyModelResponse(e) && (job === 'utility' || job === 'wrap') && !req.signal?.aborted) {
-      try {
-        const second = await run(bumpMaxTokens(req));
-        if (!resultEmpty(second)) return second;
-        throwEmptyResponse('');
-      } catch (second) {
-        if (isEmptyModelResponse(second)) throwEmptyResponse('');
-        throw second;
-      }
-    }
-
     const status = e instanceof AIError ? e.status : undefined;
     const network =
       e instanceof TypeError ||
@@ -294,7 +298,7 @@ export async function streamChat(req: StreamRequest): Promise<StreamResult> {
 
     const fromHeader = (e as AIError & { retryAfterMs?: number }).retryAfterMs;
     await sleep(fromHeader ?? 800, req.signal);
-    return run(req);
+    return retryEmpty(await run(req));
   }
 }
 
@@ -355,6 +359,7 @@ async function streamOpenAI(req: StreamRequest): Promise<StreamResult> {
   if (!res.ok) await throwHttpError(res);
   let full = '';
   let truncated = false;
+  let finishReason = '';
   let sawReasoning = false;
   const toolBuf: Record<number, { name: string; arguments: string }> = {};
   await readSSE(res, (data) => {
@@ -383,16 +388,18 @@ async function streamOpenAI(req: StreamRequest): Promise<StreamResult> {
         }
       }
       const reason: string | undefined = choice?.finish_reason;
+      if (reason) finishReason = reason;
       if (isLengthStop(reason)) truncated = true;
     } catch { /* keep-alive or malformed chunk */ }
   });
   const toolCalls = Object.values(toolBuf).filter((t) => t.name || t.arguments);
   if (!full.trim() && toolCalls.length === 0) {
-    return { text: '', truncated, sawReasoning };
+    return { text: '', truncated, finishReason, sawReasoning };
   }
   return {
     text: full,
     truncated,
+    finishReason,
     sawReasoning,
     ...(toolCalls.length ? { toolCalls } : {})
   };
@@ -422,6 +429,7 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
   if (!res.ok) await throwHttpError(res);
   let full = '';
   let truncated = false;
+  let finishReason = '';
   await readSSE(res, (data) => {
     try {
       const json = JSON.parse(data);
@@ -431,6 +439,7 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
       }
       if (json.type === 'message_delta') {
         const reason: string | undefined = json.delta?.stop_reason ?? json.stop_reason;
+        if (reason) finishReason = reason;
         if (isLengthStop(reason)) truncated = true;
       }
       if (json.type === 'error') throw new AIError(json.error?.message ?? 'Provider error');
@@ -438,8 +447,8 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
       if (e instanceof AIError) throw e;
     }
   });
-  if (!full.trim()) return { text: '', truncated };
-  return { text: full, truncated };
+  if (!full.trim()) return { text: '', truncated, finishReason };
+  return { text: full, truncated, finishReason };
 }
 
 async function streamGemini(req: StreamRequest): Promise<StreamResult> {
@@ -462,6 +471,7 @@ async function streamGemini(req: StreamRequest): Promise<StreamResult> {
   if (!res.ok) await throwHttpError(res);
   let full = '';
   let truncated = false;
+  let finishReason = '';
   let sawThought = false;
   await readSSE(res, (data) => {
     try {
@@ -483,11 +493,12 @@ async function streamGemini(req: StreamRequest): Promise<StreamResult> {
         req.onDelta?.(text);
       }
       const reason: string | undefined = json.candidates?.[0]?.finishReason;
+      if (reason) finishReason = reason;
       if (isLengthStop(reason)) truncated = true;
     } catch { /* ignore malformed chunk */ }
   });
-  if (!full.trim()) return { text: '', truncated, sawReasoning: sawThought };
-  return { text: full, truncated, sawReasoning: sawThought };
+  if (!full.trim()) return { text: '', truncated, finishReason, sawReasoning: sawThought };
+  return { text: full, truncated, finishReason, sawReasoning: sawThought };
 }
 
 export async function testConnection(provider: ProviderConfig, model: string): Promise<{ ok: true; ms: number }> {
