@@ -180,6 +180,27 @@ export function classifyError(e: unknown): AppError {
     });
   }
 
+  const empty = isEmptyModelResponse(e) || msg.toLowerCase().includes('empty response');
+  if (empty) {
+    return new AppError({
+      code: 'provider',
+      userMessage: 'The model returned an empty reply. Try again or pick a different model in Settings.',
+      detail: msg,
+      status,
+      cause: e
+    });
+  }
+
+  if (isContextOverflowError(e)) {
+    return new AppError({
+      code: 'provider',
+      userMessage: 'The prompt is too large for this model. Wrap the episode or try a larger-context model.',
+      detail: msg,
+      status,
+      cause: e
+    });
+  }
+
   if (status != null && status >= 400) {
     return new AppError({
       code: 'provider',
@@ -262,31 +283,10 @@ export function classifyError(e: unknown): AppError {
     });
   }
 
-  const empty = isEmptyModelResponse(e) || msg.toLowerCase().includes('empty response');
-  if (empty) {
-    return new AppError({
-      code: 'provider',
-      userMessage: 'The model returned an empty reply. Try again or pick a different model in Settings.',
-      detail: msg,
-      status,
-      cause: e
-    });
-  }
-
   if (msg.toLowerCase().includes('did not draft a world')) {
     return new AppError({
       code: 'provider',
       userMessage: 'The model did not draft a world. Try again or switch models.',
-      detail: msg,
-      status,
-      cause: e
-    });
-  }
-
-  if (isContextOverflowError(e)) {
-    return new AppError({
-      code: 'provider',
-      userMessage: 'The prompt is too large for this model. Wrap the episode or try a larger-context model.',
       detail: msg,
       status,
       cause: e

@@ -14,7 +14,7 @@ export type { ScrollBackdrop };
 export interface DisplayPrefs {
   /** prose = novel page with inline attribution; staged = avatar + name plate per line */
   dialogueStyle: DialogueStyle;
-  /** circular face size in the story scroll */
+  /** portrait plate height in the story scroll */
   avatarSize: AvatarSize;
   /** prose font size in px */
   textSize: number;
@@ -45,7 +45,14 @@ export const DEFAULT_DISPLAY: DisplayPrefs = {
   aiSetsScrollBg: true
 };
 
-export const AVATAR_PX: Record<AvatarSize, number> = { S: 40, M: 52, L: 68 };
+export const AVATAR_PX: Record<AvatarSize, number> = { S: 56, M: 80, L: 104 };
+/** Compact story scroll — keep a line of prose beside the plate. */
+export const COMPACT_AVATAR_MAX = 72;
+
+export function storyAvatarHeight(size: AvatarSize, compact: boolean): number {
+  const raw = AVATAR_PX[size];
+  return compact ? Math.min(raw, COMPACT_AVATAR_MAX) : raw;
+}
 
 /** Write = full chrome + composer; Read = distraction-free. Director is always an overlay. */
 export type StoryLayout = 'write' | 'read';

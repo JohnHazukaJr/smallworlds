@@ -19,7 +19,7 @@ import {
 } from '../worldOps';
 import { AIError, streamChat, isPromptPackRetryError, type ChatMessage, type StreamRequest } from './client';
 import { imageModelFor, proseModelFor, utilityModelFor } from './models';
-import { ANALYZE_EPISODE_TOOL, FILE_CANON_TOOL, PLAN_TURN_TOOL, utilityCall, type ToolSpec } from './utilityCall';
+import { ANALYZE_EPISODE_TOOL, LIVE_MEMORY_TOOL, PLAN_TURN_TOOL, utilityCall, type ToolSpec } from './utilityCall';
 import { promptCharBudget } from './contextBudget';
 import { applyDeliveryTone, parseDeliveryTone } from './deliveryTone';
 import { stancePlaybook } from './storyStance';
@@ -34,16 +34,17 @@ import {
   buildNarrationBeatMessages,
   buildNarratorSystemPrompt,
   characterSpeakTokens,
+  chooseHistoryTail,
   compressOmittedTurns,
   directorSystemPrompt,
   directorUserPrompt,
   episodeContextPressure,
   episodeHistoryChars,
+  omittedTurnsForNarratorTail,
   focusFromBeat,
   HISTORY_CHAR_BUDGET,
   injectedSpeakBriefForCharacter,
   injectedSpeakBriefForGuest,
-  packTurnsDetailed,
   resolveSpeakerName,
   type DirectorBeat,
   type PromptBuildOpts,
@@ -240,6 +241,22 @@ async function streamNarrationComplete(opts: {
     });
   }
   return stripNarratorEmbeddedDialogue(acc.trim());
+}
+
+function historyPackFor(
+  model: string,
+  agent: 'narrator' | 'speak',
+  episode: Episode,
+  pack: PromptBuildOpts,
+  totalCap: number
+): Pick<PromptBuildOpts, 'totalCap' | 'skipOmittedDigest' | 'historyTailChars' | 'historyTailMaxTurns'> {
+  const tail = chooseHistoryTail(model, agent);
+  return {
+    totalCap,
+    skipOmittedDigest: pack.skipOmittedDigest ?? !!episode.runningSummary?.trim(),
+    historyTailChars: tail.charBudget,
+    historyTailMaxTurns: tail.maxTurns
+  };
 }
 
 /** Retry once with a tight lore pack — never shortens the scene itself. */
@@ -758,6 +775,11 @@ async function clearPendingPlan(episodeId: string): Promise<void> {
   await db.episodes.update(episodeId, { pendingPlan: null, updatedAt: Date.now() }).catch(() => undefined);
 }
 
+/** Leftover director beats to persist after Stop/error — kept even if nothing has saved yet. */
+export function pendingBeatsToKeep(remaining: DirectorBeat[]): DirectorBeat[] {
+  return remaining.length > 0 ? remaining : [];
+}
+
 /**
  * Core writing loop: persist the user turn (unless continue), plan beats with
  * the director, then stream narrator (narration-only) and character agents.
@@ -817,6 +839,12 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
   const playerText = opts.input.trim();
   const requireDialogue = requiresSpokenReply(opts.mode);
 
+  // File glue before planning so the first long Write is not tail-only.
+  await maybeRefreshRunningSummary(opts.world, ctx, opts.signal, progress, opts.onNotice, {
+    phase: 'pre',
+    proseModel: model
+  });
+
   // Director plans cast/guest changes + ordered narration / speak beats (utility model).
   // Resume path skips planning and runs leftover beats from a prior Stop/error.
   let beats: DirectorBeat[];
@@ -824,7 +852,6 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
   if (opts.resumeBeats && opts.resumeBeats.length > 0) {
     progress('continuing plan…');
     beats = opts.resumeBeats;
-    await clearPendingPlan(opts.episode.id);
   } else {
     try {
       progress('planning…');
@@ -833,18 +860,26 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
         characterId: opts.preferCharacterId,
         guestId: opts.preferGuestId
       };
-      const directorCap = promptCharBudget(utilityModelFor(opts.world).model, 2500);
+      const utilityModel = utilityModelFor(opts.world).model;
+      const directorCap = promptCharBudget(utilityModel, 2500);
+      const directorTail = chooseHistoryTail(utilityModel, 'director');
+      const directorSystem = directorSystemPrompt(
+        opts.mode, speakersPresent, opts.length, storyStanceOf(opts.world)
+      );
       const planDirector = (pack: PromptBuildOpts['pack'] = 'normal') => utilityJson<{
         castDelta?: { enter?: string[]; leave?: string[]; introduce?: IntroduceSpec[] };
         beats: Array<{ type?: string; brief?: string; characterId?: string; guestId?: string }>;
       }>(
         opts.world,
-        directorSystemPrompt(opts.mode, speakersPresent, opts.length, storyStanceOf(opts.world)),
+        directorSystem,
         directorUserPrompt(ctx, opts.mode, playerText, {
           preferCharacterId: opts.preferCharacterId,
           preferGuestId: opts.preferGuestId,
           pack,
-          totalCap: directorCap
+          totalCap: directorCap,
+          systemChars: directorSystem.length,
+          historyTailChars: directorTail.charBudget,
+          historyTailMaxTurns: directorTail.maxTurns
         }),
         2500,
         opts.signal,
@@ -978,7 +1013,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
             messages: buildNarrationBeatMessages(
               ctx.turns, ctx.characters, beat.brief, opts.length, sceneGuests(), ctx.episode,
               narrSystem.length,
-              { totalCap: narrCap, skipOmittedDigest: pack.skipOmittedDigest }
+              historyPackFor(model, 'narrator', ctx.episode, pack, narrCap)
             ),
             length: opts.length,
             signal: opts.signal,
@@ -1026,8 +1061,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
                 ...speakOpts,
                 systemChars: guestSystem.length,
                 length: opts.length,
-                totalCap: speakCap,
-                skipOmittedDigest: pack.skipOmittedDigest
+                ...historyPackFor(model, 'speak', ctx.episode, pack, speakCap)
               }
             ),
             length: opts.length,
@@ -1080,8 +1114,7 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
               ...speakOpts,
               systemChars: charSystem.length,
               length: opts.length,
-              totalCap: speakCap,
-              skipOmittedDigest: pack.skipOmittedDigest
+              ...historyPackFor(model, 'speak', ctx.episode, pack, speakCap)
             }
           ),
           length: opts.length,
@@ -1114,16 +1147,18 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
     try {
       asWriteAbort(e, beatsCompleted, remaining);
     } catch (abortErr) {
-      // Orphan player line with no reply — remove so the composer can restore cleanly.
-      if (beatsCompleted === 0) {
+      const keep = pendingBeatsToKeep(remaining);
+      if (keep.length > 0) {
+        // Pause: leftover beats resume via Continue plan. Keep the player line
+        // and any cast/guest the director already applied.
+        await savePendingPlan(opts.episode.id, keep, opts.length);
+      } else if (beatsCompleted === 0) {
         await rollbackSceneIfNeeded();
         if (userTurnId) {
           await db.turns.delete(userTurnId).catch(() => undefined);
           ctx.turns = ctx.turns.filter((t) => t.id !== userTurnId);
         }
         await clearPendingPlan(opts.episode.id);
-      } else if (remaining.length > 0) {
-        await savePendingPlan(opts.episode.id, remaining, opts.length);
       }
       if (abortErr instanceof WriteAbortedError) throw abortErr;
       // Non-abort: attach beatsCompleted so UI can keep partial replies.
@@ -1149,11 +1184,17 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
 
   // Speak/Play must land at least one spoken reply — narration-only is not enough.
   if (requireDialogue && speakTurnsSaved === 0) {
-    await clearPendingPlan(opts.episode.id);
+    const leftover = pendingBeatsToKeep(remainingFrom(beatsCompleted));
+    if (leftover.length > 0) {
+      await savePendingPlan(opts.episode.id, leftover, opts.length);
+    } else {
+      await clearPendingPlan(opts.episode.id);
+    }
     const err = new AIError(
       'No character replied aloud. Try again, pin who should answer, or add cast to the scene.'
-    ) as AIError & { beatsCompleted?: number };
+    ) as AIError & { beatsCompleted?: number; remainingBeats?: DirectorBeat[] };
     err.beatsCompleted = beatsCompleted;
+    err.remainingBeats = leftover;
     throw err;
   }
 
@@ -1162,11 +1203,11 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
   // Summary + light cast-state refresh are best-effort after beats are saved —
   // abort here must not look like a zero-beat stop.
   try {
-    await maybeRefreshRunningSummary(opts.world, ctx, opts.signal, progress, opts.onNotice);
-    await maybeRefreshLiveSceneState(
-      opts.world, ctx, beatsCompleted, opts.signal, progress, opts.onNotice
-    );
-    await maybeFileLiveCanon(
+    await maybeRefreshRunningSummary(opts.world, ctx, opts.signal, progress, opts.onNotice, {
+      phase: 'post',
+      proseModel: model
+    });
+    await maybeRefreshLiveMemory(
       opts.world, ctx, beatsCompleted, opts.signal, progress, opts.onNotice
     );
   } catch (e) {
@@ -1223,7 +1264,7 @@ export async function regenerateBeat(opts: {
         messages: buildNarrationBeatMessages(
           historyTurns, ctx.characters, brief, opts.length, sceneGuests(), ctx.episode,
           narrSystem.length,
-          { totalCap: narrCap, skipOmittedDigest: pack.skipOmittedDigest }
+          historyPackFor(model, 'narrator', ctx.episode, pack, narrCap)
         ),
         length: opts.length,
         signal: opts.signal,
@@ -1272,8 +1313,7 @@ export async function regenerateBeat(opts: {
             episode: ctx.episode,
             systemChars: guestSystem.length,
             length: opts.length,
-            totalCap: speakCap,
-            skipOmittedDigest: pack.skipOmittedDigest
+            ...historyPackFor(model, 'speak', ctx.episode, pack, speakCap)
           }
         ),
         length: opts.length,
@@ -1293,8 +1333,7 @@ export async function regenerateBeat(opts: {
           episode: ctx.episode,
           systemChars: charSystem.length,
           length: opts.length,
-          totalCap: speakCap,
-          skipOmittedDigest: pack.skipOmittedDigest
+          ...historyPackFor(model, 'speak', ctx.episode, pack, speakCap)
         }
       ),
       length: opts.length,
@@ -1321,12 +1360,19 @@ async function maybeRefreshRunningSummary(
   ctx: Awaited<ReturnType<typeof loadContext>>,
   signal: AbortSignal | undefined,
   progress: (label: string) => void,
-  onNotice?: (message: string) => void
+  onNotice?: (message: string) => void,
+  opts?: { phase?: 'pre' | 'post'; proseModel?: string }
 ): Promise<void> {
   const chars = episodeHistoryChars(ctx.turns);
   const pressure = episodeContextPressure(chars);
-  // Warm early so the summary is ready before packing starts dropping turns.
-  if (pressure === 'ok') return;
+  const omitted = omittedTurnsForNarratorTail(ctx.turns, opts?.proseModel ?? '');
+  if (opts?.phase === 'pre') {
+    // Only spend a utility call when this model's tail will drop turns,
+    // or the chapter is already long enough that glue must exist.
+    if (omitted.length === 0 && pressure !== 'warn' && pressure !== 'escalate') return;
+  } else if (pressure === 'ok') {
+    return;
+  }
 
   const lastAt = ctx.episode.runningSummaryAtChars ?? 0;
   const growthNeeded = pressure === 'warm'
@@ -1334,9 +1380,6 @@ async function maybeRefreshRunningSummary(
     : HISTORY_CHAR_BUDGET * 0.08;
   if (ctx.episode.runningSummary && chars < lastAt + growthNeeded) return;
 
-  const { omitted } = packTurnsDetailed(ctx.turns);
-  // Summarize on warm/warn/escalate even if nothing is omitted yet —
-  // packing will start soon and the summary should already be ready.
   const sourceTurns = omitted.length > 0
     ? omitted
     : ctx.turns.slice(0, Math.max(4, Math.floor(ctx.turns.length * 0.45)));
@@ -1453,12 +1496,10 @@ function matchByExactContainsOrTokens<T extends { id: string }>(
 }
 
 /**
- * Light mid-episode patch of in-scene cast state, scene ledger, and obvious tie shifts.
- * Throttled so it does not run every Write — a full relationship graph still lands on wrap.
- * Runs after any saved beat, not just spoken ones: narration is what establishes
- * weather, damage, and props in the first place.
+ * One post-write pass: live cast/ledger/ties plus durable canon.
+ * Throttled so it does not run every Write — wrap still reconciles.
  */
-async function maybeRefreshLiveSceneState(
+async function maybeRefreshLiveMemory(
   world: World,
   ctx: Awaited<ReturnType<typeof loadContext>>,
   turnsSaved: number,
@@ -1476,11 +1517,14 @@ async function maybeRefreshLiveSceneState(
 
   const chars = episodeHistoryChars(ctx.turns);
   const pressure = episodeContextPressure(chars);
-  const lastAt = ctx.episode.liveStateAtChars ?? 0;
+  const lastState = ctx.episode.liveStateAtChars ?? 0;
+  const lastCanon = ctx.episode.liveCanonAtChars ?? 0;
+  const lastAt = lastState === 0 || lastCanon === 0
+    ? 0
+    : Math.min(lastState, lastCanon);
   const growthNeeded = pressure === 'ok' || pressure === 'warm'
     ? HISTORY_CHAR_BUDGET * 0.14
     : HISTORY_CHAR_BUDGET * 0.1;
-  // First patch once the scene has some meat; then throttle by transcript growth.
   if (lastAt === 0 && ctx.turns.length < 4) return;
   if (lastAt > 0 && chars < lastAt + growthNeeded) return;
 
@@ -1523,8 +1567,19 @@ async function maybeRefreshLiveSceneState(
     .slice(0, 8)
     .join('\n');
 
+  const inSceneNames = new Set(inScene.map((c) => c.name.trim().toLowerCase()).filter(Boolean));
+  const existingFactTexts = ctx.continuity.map((f) => f.text);
+  const existingThreadTexts = ctx.threads.map((t) => t.text);
+  const episodeFactCount = ctx.continuity.filter((f) => f.episodeId === ctx.episode.id).length;
+  const knownBlock = existingFactTexts.slice(-24).map((t) => `- ${t}`).join('\n');
+  const threadBlock = existingThreadTexts.slice(0, 16).map((t) => `- ${t}`).join('\n');
+  const placeLine = ctx.episode.location || '(unnamed)';
+  const loc = ctx.episode.locationId
+    ? ctx.locations.find((l) => l.id === ctx.episode.locationId)
+    : ctx.locations.find((l) => l.name.toLowerCase() === placeLine.trim().toLowerCase());
+
   try {
-    progress('reading the room…');
+    progress('updating the room…');
     const result = await utilityJson<{
       updates?: Array<{
         name?: string;
@@ -1535,33 +1590,39 @@ async function maybeRefreshLiveSceneState(
       }>;
       scene?: string[];
       ties?: Array<{ from?: string; to?: string; kind?: string; note?: string }>;
+      facts?: string[];
+      threads?: string[];
+      place?: { name?: string; currentState?: string; atmosphere?: string };
+      knowledge?: Array<{ name?: string; nowKnows?: string }>;
     }>(
       world,
-      'You track live state in an interactive story. ' +
-        'Call return_json with this shape: {"updates":[{"name":"<exact cast name>","goal":"...","emotion":"...","location":"...","condition":"..."}],' +
-        '"scene":["<physical detail now true in this room>"],' +
-        '"ties":[{"from":"<exact name>","to":"<exact name>","kind":"ally|rival|lover|…","note":"<one line>"}]}. ' +
-        'updates: only characters whose state clearly shifted in the recent beats. ' +
-        'Omit unchanged fields. Use "none" for a field that no longer applies — a mood that ' +
-        'has passed, a goal that was met or abandoned, an injury that healed. ' +
-        'Keep each field under 120 characters.\n' +
-        'ties: at most 3, only when a relationship clearly shifted on the page (trust, betrayal, a new debt). ' +
-        'Use exact roster names. Do not invent people. Omit if nothing changed.\n' +
-        'scene: 3–6 short phrases naming physical facts the prose has established and that later ' +
-        'paragraphs must stay consistent with — weather and light, damage, objects in play, ' +
-        'doors open or shut, what someone is holding or wearing. ' +
-        'Rewrite the whole list each time: carry forward what still holds, drop what has stopped ' +
-        'being true, add what the latest beats established. Concrete nouns, no plot summary, no feelings.',
+      'You update live room state and file hard canon WHILE the episode is still open. ' +
+        'Call update_live_memory. Do not write story prose. ' +
+        'updates: only characters whose state clearly shifted. Omit unchanged fields. ' +
+        'Use "none" for a field that no longer applies. Keep each field under 120 characters.\n' +
+        'ties: at most 3, only when a relationship clearly shifted. Exact roster names. Omit if none.\n' +
+        'scene: 3–6 short physical facts now true in this room. Rewrite the whole list: ' +
+        'carry forward what still holds, drop what stopped being true. Concrete nouns, no feelings.\n' +
+        `facts: 0–${LIVE_CANON_FACT_CAP} durable facts (debts, promises, objects, injuries, who saw what). ` +
+        'Not weather, not mood, not a plot recap. Do not repeat Known facts.\n' +
+        `threads: 0–${LIVE_CANON_THREAD_CAP} NEW open tensions not already listed.\n` +
+        'place: lasting room condition and optional weather/light; omit if unchanged.\n' +
+        'knowledge: only in-scene named cast who clearly learned something; omit if none.\n' +
+        'Omit any key that has nothing new. Each canon line under 220 characters.',
       `World: ${world.title}. Episode ${ctx.episode.number}.\n` +
-        `Place: ${ctx.episode.location || '(unnamed)'}\n` +
+        `Place: ${placeLine}${loc?.currentState ? ` (now: ${loc.currentState})` : ''}\n` +
         `In-scene cast (current state):\n${castLines || '(nobody on stage)'}\n\n` +
-        `Already established in this scene:\n${priorLedger || '(nothing yet)'}\n\n` +
+        `Already established in this scene (do not refile as facts):\n${priorLedger || '(nothing yet)'}\n\n` +
         `Ties in the room:\n${tieLines || '(none filed)'}\n\n` +
+        `Known facts (do not repeat):\n${knownBlock || '(none)'}\n\n` +
+        `Open threads (do not repeat):\n${threadBlock || '(none)'}\n\n` +
         `Recent beats:\n${digest.slice(0, 10000)}\n\n` +
-        `Return updates JSON.`,
-      900,
+        `Call update_live_memory.`,
+      1100,
       signal,
-      25_000
+      25_000,
+      'utility',
+      LIVE_MEMORY_TOOL
     );
 
     const applied = inScene.length > 0
@@ -1569,112 +1630,6 @@ async function maybeRefreshLiveSceneState(
       : 0;
     const tiesApplied = await applyLiveRelationshipUpdates(scenePeople, result.ties ?? []);
     const sceneLedger = capSceneLedger(result.scene);
-    await db.episodes.update(ctx.episode.id, {
-      liveStateAtChars: chars,
-      ...(sceneLedger ? { sceneLedger } : {}),
-      updatedAt: Date.now()
-    });
-    ctx.episode = {
-      ...ctx.episode,
-      liveStateAtChars: chars,
-      ...(sceneLedger ? { sceneLedger } : {})
-    };
-    if (applied > 0 || tiesApplied > 0) {
-      // Refresh local character sheets for any follow-on work in this write.
-      const refreshed = await db.characters.where('worldId').equals(world.id).toArray();
-      ctx.characters = refreshed;
-    }
-  } catch (e) {
-    if ((e as Error).name === 'AbortError') throw e;
-    logAppError(e, 'live scene state');
-    onNotice?.('Couldn’t refresh live cast state — sheets will catch up at episode wrap.');
-  }
-}
-
-/**
- * File hard facts / threads / place / knowledge while the episode is still open.
- * Same throttle as live scene state. Errors must not block a successful write.
- */
-async function maybeFileLiveCanon(
-  world: World,
-  ctx: Awaited<ReturnType<typeof loadContext>>,
-  turnsSaved: number,
-  signal: AbortSignal | undefined,
-  progress: (label: string) => void,
-  onNotice?: (message: string) => void
-): Promise<void> {
-  if (turnsSaved <= 0) return;
-  const chars = episodeHistoryChars(ctx.turns);
-  const pressure = episodeContextPressure(chars);
-  const lastAt = ctx.episode.liveCanonAtChars ?? 0;
-  const growthNeeded = pressure === 'ok' || pressure === 'warm'
-    ? HISTORY_CHAR_BUDGET * 0.14
-    : HISTORY_CHAR_BUDGET * 0.1;
-  if (lastAt === 0 && ctx.turns.length < 4) return;
-  if (lastAt > 0 && chars < lastAt + growthNeeded) return;
-
-  const recent = ctx.turns.slice(-14);
-  const guests = ctx.episode.guests ?? [];
-  const digest = recent
-    .map((t) => {
-      if (t.role === 'user') return `[player]: ${t.text.slice(0, 280)}`;
-      if (t.role === 'character') {
-        const name = resolveSpeakerName(t, ctx.characters, guests);
-        return `[${name}]: ${t.text.slice(0, 320)}`;
-      }
-      return `[narrator]: ${t.text.slice(0, 320)}`;
-    })
-    .join('\n\n');
-  if (!digest.trim()) return;
-
-  const inScene = ctx.characters.filter(
-    (c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer
-  );
-  const inSceneNames = new Set(inScene.map((c) => c.name.trim().toLowerCase()).filter(Boolean));
-  const existingFactTexts = ctx.continuity.map((f) => f.text);
-  const existingThreadTexts = ctx.threads.map((t) => t.text);
-  const episodeFactCount = ctx.continuity.filter((f) => f.episodeId === ctx.episode.id).length;
-  const knownBlock = existingFactTexts.slice(-24).map((t) => `- ${t}`).join('\n');
-  const threadBlock = existingThreadTexts.slice(0, 16).map((t) => `- ${t}`).join('\n');
-  const ledger = (ctx.episode.sceneLedger ?? []).map((d) => `- ${d}`).join('\n');
-  const placeLine = ctx.episode.location || '(unnamed)';
-  const loc = ctx.episode.locationId
-    ? ctx.locations.find((l) => l.id === ctx.episode.locationId)
-    : ctx.locations.find((l) => l.name.toLowerCase() === placeLine.trim().toLowerCase());
-
-  try {
-    progress('filing what happened…');
-    const result = await utilityJson<{
-      facts?: string[];
-      threads?: string[];
-      place?: { name?: string; currentState?: string; atmosphere?: string };
-      knowledge?: Array<{ name?: string; nowKnows?: string }>;
-    }>(
-      world,
-      'You file hard canon for an interactive story WHILE the episode is still open. Call file_canon. Do not write story prose. Shape: ' +
-        '{"facts":["..."],"threads":["..."],"place":{"name":"<scene place>","currentState":"...","atmosphere":"..."},' +
-        '"knowledge":[{"name":"<exact in-scene name>","nowKnows":"..."}]}. ' +
-        'Do not invent. Omit any key that has nothing new. ' +
-        `facts: 2–${LIVE_CANON_FACT_CAP} durable facts that must stay true later (debts, promises, objects held, injuries, who saw what). ` +
-        'Not weather, not mood, not a plot recap. Do not repeat Known facts. ' +
-        `threads: 0–${LIVE_CANON_THREAD_CAP} NEW open tensions not already listed. ` +
-        'place: lasting room condition and optional weather/light now true; omit if unchanged. ' +
-        'knowledge: only in-scene named cast who clearly learned something; omit if none. ' +
-        'Each line under 220 characters.',
-      `World: ${world.title}. Episode ${ctx.episode.number}.\n` +
-        `Place: ${placeLine}${loc?.currentState ? ` (now: ${loc.currentState})` : ''}\n` +
-        `In-scene cast: ${inScene.map((c) => c.name).join(', ') || '(none)'}\n\n` +
-        `Known facts (do not repeat):\n${knownBlock || '(none)'}\n\n` +
-        `Open threads (do not repeat):\n${threadBlock || '(none)'}\n\n` +
-        `Physical ledger (do not refile as facts):\n${ledger || '(none)'}\n\n` +
-        `Recent beats:\n${digest.slice(0, 10000)}\n\n` +
-        `Call file_canon.`,
-      900,
-      signal,
-      25_000,
-      'utility',
-      FILE_CANON_TOOL
-    );
 
     const extract = normalizeLiveCanonExtract(result, {
       existingFacts: existingFactTexts,
@@ -1725,12 +1680,21 @@ async function maybeFileLiveCanon(
       }
     }
 
-    const epPatch: Partial<Episode> = { liveCanonAtChars: chars, updatedAt: now };
+    const epPatch: Partial<Episode> = {
+      liveStateAtChars: chars,
+      liveCanonAtChars: chars,
+      updatedAt: now
+    };
+    if (sceneLedger) epPatch.sceneLedger = sceneLedger;
     if (extract.place?.atmosphere?.trim()) {
       epPatch.atmosphereNote = extract.place.atmosphere.trim();
     }
     await db.episodes.update(ctx.episode.id, epPatch);
     ctx.episode = { ...ctx.episode, ...epPatch };
+    if (applied > 0 || tiesApplied > 0) {
+      const refreshed = await db.characters.where('worldId').equals(world.id).toArray();
+      ctx.characters = refreshed;
+    }
     if (newFacts.length > 0 || knowledgeFacts.length > 0) {
       ctx.continuity = [...ctx.continuity, ...newFacts, ...knowledgeFacts];
     }
@@ -1739,8 +1703,8 @@ async function maybeFileLiveCanon(
     }
   } catch (e) {
     if ((e as Error).name === 'AbortError') throw e;
-    logAppError(e, 'live canon');
-    onNotice?.('Couldn’t file live memory — writing still saved; wrap can catch up.');
+    logAppError(e, 'live memory');
+    onNotice?.('Couldn’t update the room — sheets and live memory will catch up at wrap.');
   }
 }
 

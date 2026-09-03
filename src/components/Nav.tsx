@@ -78,12 +78,24 @@ export function Rail() {
       </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        {ITEMS.map(([num, label, key]) => (
-          <button key={key} className={`nav-btn${screen === key ? ' active' : ''}`} onClick={() => go(key)}>
-            <span className="mono meta" style={{ width: 18, opacity: 0.4 }}>{num}</span>
-            <span style={{ whiteSpace: 'nowrap' }}>{label}</span>
-          </button>
-        ))}
+        {ITEMS.map(([num, label, key]) => {
+          const needsWorld = key === 'story' || key === 'cast' || key === 'locations';
+          const blocked = needsWorld && !currentWorldId;
+          return (
+            <button
+              key={key}
+              className={`nav-btn${screen === key ? ' active' : ''}`}
+              disabled={blocked}
+              onClick={() => {
+                if (blocked) return;
+                go(key);
+              }}
+            >
+              <span className="mono meta" style={{ width: 18, opacity: 0.4 }}>{num}</span>
+              <span style={{ whiteSpace: 'nowrap' }}>{label}</span>
+            </button>
+          );
+        })}
       </div>
 
       <div style={{ marginTop: 'auto', display: 'flex', flexDirection: 'column', gap: 14 }}>

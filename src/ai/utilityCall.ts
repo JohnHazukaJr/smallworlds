@@ -240,3 +240,61 @@ export const FILE_CANON_TOOL: ToolSpec = {
     }
   }
 };
+
+/** Live scene state + canon in one post-write pass. */
+export const LIVE_MEMORY_TOOL: ToolSpec = {
+  name: 'update_live_memory',
+  description: 'Update live cast state, the room ledger, and file new durable canon from recent play.',
+  parameters: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      updates: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            goal: { type: 'string' },
+            emotion: { type: 'string' },
+            location: { type: 'string' },
+            condition: { type: 'string' }
+          }
+        }
+      },
+      scene: { type: 'array', items: { type: 'string' } },
+      ties: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            from: { type: 'string' },
+            to: { type: 'string' },
+            kind: { type: 'string' },
+            note: { type: 'string' }
+          }
+        }
+      },
+      facts: { type: 'array', items: { type: 'string' } },
+      threads: { type: 'array', items: { type: 'string' } },
+      place: {
+        type: ['object', 'null'],
+        properties: {
+          name: { type: 'string' },
+          currentState: { type: 'string' },
+          atmosphere: { type: 'string' }
+        }
+      },
+      knowledge: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            nowKnows: { type: 'string' }
+          }
+        }
+      }
+    }
+  }
+};

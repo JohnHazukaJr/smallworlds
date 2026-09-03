@@ -2,13 +2,18 @@ import { describe, expect, it } from 'vitest';
 import {
   matchPlotTargets, mergeStateField, mergeLiveRelationshipPatch, normalizeBeats, capSceneLedger, capSoftWrapExtract,
   dedupeSoftWrapExtract, directorFallbackNarrationBrief, softWrapAlreadyFiled, SCENE_LEDGER_CAP,
-  isBlankWorldBrief, isEmptyRosterProposal
+  isBlankWorldBrief, isEmptyRosterProposal, pendingBeatsToKeep
 } from './engine';
 import {
   episodeContextPressure,
   episodeHistoryChars,
   HISTORY_CHAR_BUDGET,
   HISTORY_TAIL_CHAR_BUDGET,
+  HISTORY_TAIL_MAX_TURNS,
+  SPEAK_HISTORY_TAIL_CHAR_BUDGET,
+  SPEAK_HISTORY_TAIL_MAX_TURNS,
+  chooseHistoryTail,
+  omittedTurnsForNarratorTail,
   injectedSpeakBrief,
   injectedSpeakBriefForCharacter,
   packTurnsDetailed,
@@ -19,6 +24,7 @@ import {
   selectThreadsPinnedFirst
 } from './prompts';
 import { SPEAK_FORMAT_RULES } from './dialogueFormat';
+import { LIVE_MEMORY_TOOL } from './utilityCall';
 import type { Character, ContinuityFact, EpisodeGuest, OpenThread, PlotTarget, Turn } from '../types';
 
 const npc = (id: string, name: string): Character => ({
@@ -321,6 +327,52 @@ describe('packTurnsDetailed / pressure', () => {
     expect(kept.at(-1)?.id).toBe(turns.at(-1)?.id);
   });
 
+  it('scales verbatim tails with the model window', () => {
+    expect(chooseHistoryTail('some-local-chat', 'narrator')).toEqual({
+      charBudget: HISTORY_TAIL_CHAR_BUDGET,
+      maxTurns: HISTORY_TAIL_MAX_TURNS
+    });
+    expect(chooseHistoryTail('some-local-chat', 'speak')).toEqual({
+      charBudget: SPEAK_HISTORY_TAIL_CHAR_BUDGET,
+      maxTurns: SPEAK_HISTORY_TAIL_MAX_TURNS
+    });
+    expect(chooseHistoryTail('claude-haiku-4-5', 'narrator')).toEqual({
+      charBudget: 32_000,
+      maxTurns: 32
+    });
+    expect(chooseHistoryTail('gpt-4o', 'speak').maxTurns).toBe(12);
+    expect(chooseHistoryTail('gpt-4o', 'speak').charBudget).toBeLessThan(
+      chooseHistoryTail('gpt-4o', 'narrator').charBudget
+    );
+    expect(chooseHistoryTail('my-model-64k', 'narrator')).toEqual({
+      charBudget: 24_000,
+      maxTurns: 24
+    });
+    expect(chooseHistoryTail('claude-sonnet-4', 'director').maxTurns).toBe(12);
+    expect(chooseHistoryTail('unknown-chat', 'director').maxTurns).toBe(8);
+  });
+
+  it('omits running-summary source turns with the narrator tail', () => {
+    const turns = mk(40, 800);
+    const small = omittedTurnsForNarratorTail(turns, 'some-local-chat');
+    const large = omittedTurnsForNarratorTail(turns, 'claude-haiku-4-5');
+    expect(small.length).toBe(turns.length - HISTORY_TAIL_MAX_TURNS);
+    expect(large.length).toBe(turns.length - 32);
+    expect(large.length).toBeLessThan(small.length);
+    expect(small.at(-1)?.id).not.toBe(turns.at(-1)?.id);
+  });
+
+  it('caps speak history tighter than narrator', () => {
+    const turns = mk(20, 600);
+    const { kept } = packTurnsDetailed(turns, 0, 110_000, {
+      charBudget: SPEAK_HISTORY_TAIL_CHAR_BUDGET,
+      maxTurns: SPEAK_HISTORY_TAIL_MAX_TURNS
+    });
+    expect(kept.length).toBeLessThanOrEqual(SPEAK_HISTORY_TAIL_MAX_TURNS);
+    expect(episodeHistoryChars(kept)).toBeLessThanOrEqual(SPEAK_HISTORY_TAIL_CHAR_BUDGET + 600);
+    expect(kept.at(-1)?.id).toBe(turns.at(-1)?.id);
+  });
+
   it('escalates pressure near budget', () => {
     expect(episodeContextPressure(HISTORY_CHAR_BUDGET * 0.2)).toBe('ok');
     expect(episodeContextPressure(HISTORY_CHAR_BUDGET * 0.4)).toBe('warm');
@@ -506,6 +558,16 @@ describe('SPEAK_FORMAT_RULES immersion', () => {
   });
 });
 
+describe('LIVE_MEMORY_TOOL', () => {
+  it('accepts live state and canon keys in one schema', () => {
+    const props = LIVE_MEMORY_TOOL.parameters.properties as Record<string, unknown>;
+    expect(LIVE_MEMORY_TOOL.name).toBe('update_live_memory');
+    for (const key of ['updates', 'scene', 'ties', 'facts', 'threads', 'place', 'knowledge']) {
+      expect(props[key]).toBeTruthy();
+    }
+  });
+});
+
 describe('softWrapAlreadyFiled', () => {
   it('is true only when a recap is already on the episode', () => {
     expect(softWrapAlreadyFiled({ wrap: null })).toBe(false);
@@ -575,5 +637,20 @@ describe('isBlankWorldBrief / isEmptyRosterProposal', () => {
       { characters: 4, locations: 3 }
     )).toBe(false);
     expect(isEmptyRosterProposal({ characters: [], locations: [] }, { characters: 0, locations: 0 })).toBe(false);
+  });
+});
+
+describe('pendingBeatsToKeep', () => {
+  const leftover = [
+    { type: 'narration' as const, brief: 'Rain on glass.' },
+    { type: 'speak' as const, characterId: 'c1', brief: 'greet coldly' }
+  ];
+
+  it('keeps leftover beats when nothing has saved yet', () => {
+    expect(pendingBeatsToKeep(leftover)).toEqual(leftover);
+  });
+
+  it('clears when nothing remains', () => {
+    expect(pendingBeatsToKeep([])).toEqual([]);
   });
 });

@@ -1,0 +1,39 @@
+- generic [ref=f23e4]:
+  - navigation [ref=f23e5]:
+    - generic [ref=f23e6]:
+      - generic [ref=f23e7]: Small Worlds
+      - generic [ref=f23e8]: Make a world. Live in it.
+    - generic [ref=f23e9]:
+      - button "01 Worlds" [ref=f23e10] [cursor=pointer]:
+        - generic [ref=f23e11]: "01"
+        - generic [ref=f23e12]: Worlds
+      - button "02 Story" [ref=f23e13] [cursor=pointer]:
+        - generic [ref=f23e14]: "02"
+        - generic [ref=f23e15]: Story
+      - button "03 Cast" [ref=f23e16] [cursor=pointer]:
+        - generic [ref=f23e17]: "03"
+        - generic [ref=f23e18]: Cast
+      - button "04 Places" [ref=f23e19] [cursor=pointer]:
+        - generic [ref=f23e20]: "04"
+        - generic [ref=f23e21]: Places
+      - button "05 Settings" [ref=f23e22] [cursor=pointer]:
+        - generic [ref=f23e23]: "05"
+        - generic [ref=f23e24]: Settings
+      - button "06 Profile" [ref=f23e25] [cursor=pointer]:
+        - generic [ref=f23e26]: "06"
+        - generic [ref=f23e27]: Profile
+      - button "07 New world" [ref=f23e28] [cursor=pointer]:
+        - generic [ref=f23e29]: "07"
+        - generic [ref=f23e30]: New world
+    - generic [ref=f23e32]:
+      - generic [ref=f23e33]: Instrument
+      - generic [ref=f23e34]: no model configured
+      - generic [ref=f23e35]: set one in Settings
+  - main [ref=f23e36]:
+    - generic [ref=f23e38]:
+      - generic [ref=f23e39]:
+        - heading "Small Worlds" [level=1] [ref=f23e40]
+        - paragraph [ref=f23e41]: Make a world. Live in it.
+      - generic [ref=f23e42]:
+        - button "Import" [ref=f23e43] [cursor=pointer]
+        - button "New world" [ref=f23e44] [cursor=pointer]

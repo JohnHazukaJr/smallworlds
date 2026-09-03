@@ -1,0 +1,142 @@
+- generic [ref=f11e3]:
+  - main [ref=f11e5]:
+    - generic [ref=f11e44]:
+      - generic [ref=f11e46]:
+        - generic [ref=f11e49]:
+          - generic [ref=f11e50]: The Registrar
+          - generic [ref=f11e51]: Season 1 · episode 1 · the long room · Monday, 1 January, Year 1 · day 1 · Bloom
+        - generic [ref=f11e52]:
+          - generic [ref=f11e53]:
+            - button "Write" [ref=f11e54] [cursor=pointer]
+            - button "Read" [ref=f11e55] [cursor=pointer]
+          - button "More" [ref=f11e56] [cursor=pointer]
+      - generic [ref=f11e58]:
+        - generic: Lamp oil, salt damp, and the low grind of the harbour through the floor
+        - generic [ref=f11e59]:
+          - generic [ref=f11e60]:
+            - generic [ref=f11e61]: The long room · Monday, 1 January, Year 1 · day 1
+            - button "The Cartwright · Marisol Vey · you" [ref=f11e65] [cursor=pointer]:
+              - generic [ref=f11e66]:
+                - generic [ref=f11e67]: T
+                - generic [ref=f11e70]: M
+                - generic [ref=f11e73]: "Y"
+          - generic [ref=f11e77]:
+            - paragraph [ref=f11e79]:
+              - generic [ref=f11e80]: T
+              - text: he long room keeps its own weather. Lamp-smoke gathers along the ceiling beams and stays there, and the tide sound comes up through the floor rather than the windows, so that every conversation held here has the shape of something overheard. The Cartwright has not touched the cup you poured. That is the first thing you notice. The second is that he has arranged the manifest pages so the false signature faces you. You could tell him the truth. You could tell him a better lie. Marisol is on the tide stairs outside and will hear either one, because the long room keeps its own weather and gives nothing back.
+            - generic [ref=f11e81]:
+              - button "Edit" [ref=f11e82] [cursor=pointer]
+              - button "Retry from here" [ref=f11e83] [cursor=pointer]
+              - button "Re-roll line" [ref=f11e84] [cursor=pointer]
+              - button "Delete" [ref=f11e85] [cursor=pointer]
+      - generic [ref=f11e86]:
+        - generic [ref=f11e87]:
+          - button "Continue" [ref=f11e88] [cursor=pointer]
+          - button "Steer" [ref=f11e89] [cursor=pointer]
+          - button "Speak" [ref=f11e90] [cursor=pointer]
+          - button "Act" [ref=f11e91] [cursor=pointer]
+        - generic [ref=f11e93]:
+          - generic "How long each narration or spoken reply runs — not story structure" [ref=f11e94]: reply size
+          - button "Short" [ref=f11e95] [cursor=pointer]
+          - button "Medium" [ref=f11e96] [cursor=pointer]
+          - button "Long" [ref=f11e97] [cursor=pointer]
+        - generic [ref=f11e98]:
+          - paragraph [ref=f11e99]: the scene continues
+          - button "Write on" [disabled] [ref=f11e100]
+        - generic [ref=f11e101]: "memory: 3 facts · 3 open threads"
+      - complementary [ref=f11e144]:
+        - generic [ref=f11e145]:
+          - generic [ref=f11e146]:
+            - generic [ref=f11e147]:
+              - generic [ref=f11e148]: Display
+              - generic [ref=f11e149]: sizes & plate settings stay on this device · the image stays with the episode
+            - button "×" [ref=f11e150] [cursor=pointer]
+          - generic [ref=f11e151]:
+            - generic [ref=f11e152]:
+              - generic [ref=f11e153]: atmosphere for this scene
+              - generic [ref=f11e154]: Weather, time of day, or a sensory note the narrator should keep returning to. Location hue also suggests mood unless you pin it.
+              - textbox "rain on the glass · late afternoon · cold iron smell…" [ref=f11e155]
+              - generic [ref=f11e156]:
+                - generic [ref=f11e157]: mood follows location
+                - switch "Pin mood to this episode" [ref=f11e158] [cursor=pointer]
+                - button "Ember" [ref=f11e160] [cursor=pointer]
+                - button "Ash" [ref=f11e162] [cursor=pointer]
+                - button "Frost" [ref=f11e164] [cursor=pointer]
+                - button "Rot" [ref=f11e166] [cursor=pointer]
+                - button "Dusk" [ref=f11e168] [cursor=pointer]
+                - button "Bloom" [ref=f11e170] [cursor=pointer]
+                - button "Storm" [ref=f11e172] [cursor=pointer]
+                - button "Brine" [ref=f11e174] [cursor=pointer]
+            - generic [ref=f11e176]:
+              - generic [ref=f11e177]: scroll background — under the glass
+              - generic [ref=f11e178]: What you see behind the story. Auto uses a scene photo you or the AI set, then the place photo, then climate. Dim wash keeps the type readable without hiding the room.
+              - generic [ref=f11e179]:
+                - button "Auto" [ref=f11e180] [cursor=pointer]
+                - button "Scene photo" [ref=f11e181] [cursor=pointer]
+                - button "Place photo" [ref=f11e182] [cursor=pointer]
+                - button "Climate" [ref=f11e183] [cursor=pointer]
+                - button "Off" [ref=f11e184] [cursor=pointer]
+              - generic [ref=f11e185]:
+                - generic [ref=f11e186]: AI may set the scene photo
+                - switch "AI may set the scene photo" [checked] [ref=f11e187] [cursor=pointer]
+            - generic [ref=f11e189]:
+              - generic [ref=f11e190]: scene image — episode 1
+              - generic [ref=f11e191]: A picture of what's happening right now, shown behind the story text. Swap it whenever the scene changes; each episode keeps its own.
+              - generic [ref=f11e192]:
+                - button "Generate from The long room" [ref=f11e193] [cursor=pointer]
+                - button "Upload image" [ref=f11e194] [cursor=pointer]
+              - generic [ref=f11e195]:
+                - generic [ref=f11e196]:
+                  - generic [ref=f11e197]: dim wash
+                  - generic [ref=f11e198]: 22%
+                - slider [ref=f11e199]: "22"
+              - generic [ref=f11e200]:
+                - generic [ref=f11e201]:
+                  - generic [ref=f11e202]: image blur
+                  - generic [ref=f11e203]: 0px
+                - slider [ref=f11e204]: "0"
+            - generic [ref=f11e205]:
+              - generic [ref=f11e206]: text
+              - generic [ref=f11e207]:
+                - generic [ref=f11e208]:
+                  - generic [ref=f11e209]: air behind text
+                  - generic [ref=f11e210]: 22%
+                - slider [ref=f11e211]: "22"
+              - generic [ref=f11e212]:
+                - generic [ref=f11e213]:
+                  - generic [ref=f11e214]: text size
+                  - generic [ref=f11e215]: 20px
+                - slider [ref=f11e216]: "20"
+            - generic [ref=f11e217]:
+              - generic [ref=f11e218]: how dialogue sits on the page
+              - generic [ref=f11e219]:
+                - button "Prose" [ref=f11e220] [cursor=pointer]
+                - button "Staged" [ref=f11e221] [cursor=pointer]
+              - generic [ref=f11e222]: Speech sits with a portrait plate and the speaker’s name in their colour. A speaker who keeps talking is not re-announced.
+            - generic [ref=f11e223]:
+              - generic [ref=f11e224]: plate size in the scroll
+              - generic [ref=f11e225]:
+                - button "Small" [ref=f11e226] [cursor=pointer]
+                - button "Medium" [ref=f11e227] [cursor=pointer]
+                - button "Large" [ref=f11e228] [cursor=pointer]
+                - generic [ref=f11e229]: A
+            - button "reset display to defaults" [ref=f11e232] [cursor=pointer]
+  - generic [ref=f11e14]:
+    - button "Worlds" [ref=f11e15] [cursor=pointer]:
+      - generic [ref=f11e16]: ◈
+      - text: Worlds
+    - button "Story" [ref=f11e17] [cursor=pointer]:
+      - generic [ref=f11e18]: ¶
+      - text: Story
+    - button "Cast" [ref=f11e19] [cursor=pointer]:
+      - generic [ref=f11e20]: ◇
+      - text: Cast
+    - button "Places" [ref=f11e21] [cursor=pointer]:
+      - generic [ref=f11e22]: ⌂
+      - text: Places
+    - button "Settings" [ref=f11e23] [cursor=pointer]:
+      - generic [ref=f11e24]: ⚙
+      - text: Settings
+    - button "Profile" [ref=f11e25] [cursor=pointer]:
+      - generic [ref=f11e26]: ◎
+      - text: Profile

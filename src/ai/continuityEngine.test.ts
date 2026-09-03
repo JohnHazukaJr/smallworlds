@@ -147,9 +147,8 @@ describe('speak agent context frame', () => {
     expect(prompt).toMatch(/Aimed beat/i);
     expect(prompt).toMatch(/harbour ledger/i);
     expect(prompt).toMatch(/Never prefix your reply with your name/i);
-    expect(prompt).toMatch(/At most one question/i);
-    expect(prompt).toMatch(/stop and wait/i);
     expect(prompt).toMatch(/take the answer as heard/i);
+    expect(prompt).toMatch(/MUST NOT KNOW/i);
     expect(prompt).toMatch(/Story stance:/i);
     expect(prompt).not.toMatch(/## Plot targets/i);
   });
@@ -178,6 +177,8 @@ describe('speak agent context frame', () => {
       .join('\n');
     expect(joined).toMatch(/\[Ada\]/);
     expect(joined).not.toMatch(/(?:^|\n)Ada: /);
+    expect(joined).toMatch(/At most one question/i);
+    expect(joined).toMatch(/Output format \(required\)/);
   });
 
   it('puts guest voice as a hard identity guide', () => {
@@ -256,6 +257,28 @@ describe('director prompt budgets', () => {
     expect(user).toMatch(/Has not spoken this episode: Ben\./);
     expect(user).toMatch(/aimed at: Ben\./);
     expect(user).toMatch(/Ben → Ada: rival — after the same ledger/);
+  });
+
+  it('does not double-wrap the latest player line in the director transcript', () => {
+    const turns: Turn[] = [
+      {
+        id: 't0', episodeId: 'e', worldId: 'w', role: 'user', mode: 'speak',
+        text: 'First line.', createdAt: 0
+      },
+      {
+        id: 't1', episodeId: 'e', worldId: 'w', role: 'narrator', mode: null,
+        text: 'Ada waits.', createdAt: 1
+      },
+      {
+        id: 't2', episodeId: 'e', worldId: 'w', role: 'user', mode: 'speak',
+        text: 'Second line.', createdAt: 2
+      }
+    ];
+    const user = directorUserPrompt(ctx({ turns }), 'speak', 'Second line.');
+    expect(user).toMatch(/\[player speak\]: "First line\."/);
+    expect(user).toMatch(/do not add words to their mouth/);
+    expect(user).not.toMatch(/\[player speak\]: \(The player says/);
+    expect(user).not.toMatch(/\[player speak\]:[^\n]*do not add words to their mouth/);
   });
 
   it('tells the director to register an answer to the last NPC question', () => {
@@ -399,6 +422,7 @@ describe('beat-scoped character layers', () => {
     expect(prompt).not.toContain('Ben UNIQUE_DESIRE');
     expect(prompt).toContain('Ada UNIQUE_GOAL');
     expect(prompt).toContain('Ben UNIQUE_GOAL');
+    expect((prompt.match(/Ada appearance mark/g) ?? []).length).toBe(1);
     expect(prompt).toContain('Never describe the sea as wine-dark.');
     expect(prompt).toContain('salt-rot wood and wet wool');
     expect(prompt).toContain('Against generic prose');
@@ -527,11 +551,18 @@ describe('isContextOverflowError', () => {
     expect(isContextOverflowError(new Error('rate limited'))).toBe(false);
   });
 
-  it('retries a tight pack on empty model replies', () => {
+  it('does not treat empty replies as overflow', () => {
     const empty = new AIError('The model returned an empty response (stop: stop).');
     expect(isEmptyModelResponse(empty)).toBe(true);
-    expect(isPromptPackRetryError(empty)).toBe(true);
+    expect(isPromptPackRetryError(empty)).toBe(false);
+    expect(isContextOverflowError(empty)).toBe(false);
     expect(isPromptPackRetryError(new Error('rate limited'))).toBe(false);
+  });
+
+  it('does not treat generic token or timeout copy as overflow', () => {
+    expect(isContextOverflowError(new Error('used 500 input tokens'))).toBe(false);
+    expect(isContextOverflowError(new Error('The request took too long'))).toBe(false);
+    expect(isPromptPackRetryError(new Error('context_length_exceeded'))).toBe(true);
   });
 });
 
@@ -612,11 +643,13 @@ describe('token-efficient packing', () => {
     expect(a).toBe(b);
   });
 
-  it('shares the same prefix bytes across narrator and speak in one Write', () => {
+  it('keeps a stable prefix per agent across turns in one Write', () => {
     const frame = ctx({ turns: manyTurns().slice(0, 4) });
-    const prefix = storyCachePrefix(frame);
-    expect(buildNarratorSystemPrompt(frame).startsWith(prefix)).toBe(true);
-    expect(buildCharacterSystemPrompt(frame, npc('c1', 'Ada')).startsWith(prefix)).toBe(true);
+    const narrPrefix = storyCachePrefix(frame, { agent: 'narrator' });
+    const speakPrefix = storyCachePrefix(frame, { agent: 'character' });
+    expect(buildNarratorSystemPrompt(frame).startsWith(narrPrefix)).toBe(true);
+    expect(buildCharacterSystemPrompt(frame, npc('c1', 'Ada')).startsWith(speakPrefix)).toBe(true);
+    expect(speakPrefix.length).toBeLessThan(narrPrefix.length);
   });
 
   it('sends a smaller director payload than the narrator frame', () => {
@@ -629,5 +662,144 @@ describe('token-efficient packing', () => {
     const { kept } = packTurnsDetailed(manyTurns());
     expect(kept.length).toBeLessThanOrEqual(16);
     expect(kept.at(-1)?.id).toBe('t39');
+  });
+});
+
+describe('engine context pack', () => {
+  it('does not re-list the room or walk-ons on speak', () => {
+    const guest: EpisodeGuest = { id: 'g1', name: 'Clerk', brief: 'tired', voice: 'dry' };
+    const ada = npc('c1', 'Ada');
+    const ben = npc('c2', 'Ben');
+    const prompt = buildCharacterSystemPrompt(
+      ctx({
+        characters: [ada, ben],
+        episode: {
+          ...episode(),
+          castIds: ['c1', 'c2'],
+          guests: [guest],
+          activeGuestIds: ['g1']
+        }
+      }),
+      ada
+    );
+    expect(prompt).toMatch(/## Characters in the scene/);
+    expect(prompt).not.toMatch(/## Others present/);
+    expect(prompt).not.toMatch(/## Walk-ons present/);
+    expect((prompt.match(/Walk-ons in this episode/g) ?? []).length).toBe(1);
+    expect(prompt).toContain('Clerk');
+    expect(prompt).toContain('Ben');
+  });
+
+  it('keeps speak leaner than narrator on the same fixture', () => {
+    const extraLoc = { ...loc(), id: 'loc2', name: 'The quay', summary: 'Wet stone.', history: 'QUAY_HISTORY' };
+    const facts: ContinuityFact[] = Array.from({ length: 20 }, (_, i) => ({
+      id: `f${i}`, worldId: 'w', seasonId: 's', episodeId: 'e',
+      text: `Durable fact ${i} about the harbour`,
+      source: 'auto', createdAt: i
+    }));
+    const frame = ctx({
+      world: { ...world(), bible: `${'Ledger ink. '.repeat(400)}END_BIBLE` },
+      locations: [loc(), extraLoc],
+      continuity: facts
+    });
+    const narr = buildNarratorSystemPrompt(frame);
+    const speak = buildCharacterSystemPrompt(frame, npc('c1', 'Ada'));
+    expect(speak.length).toBeLessThan(narr.length);
+    expect(narr).not.toMatch(/Other established locations/);
+    expect(speak).not.toMatch(/Other established locations/);
+    expect(narr).toContain('END_BIBLE');
+    expect(speak).not.toContain('END_BIBLE');
+    expect(narr).toContain('Durable fact 19');
+    expect(speak).not.toContain('Durable fact 0');
+    expect(narr).not.toMatch(/Week cycle:/);
+    expect(narr).not.toMatch(/^Months:/m);
+    expect((narr.match(/^## Calendar\b/gm) ?? []).length).toBe(1);
+    expect((speak.match(/^## Calendar\b/gm) ?? []).length).toBe(1);
+    expect(narr).not.toMatch(/## Calendar events/);
+    expect(speak).not.toMatch(/## Calendar texture/);
+  });
+
+  it('uses short labels on older player turns and full MODE_PREFIX on the latest', () => {
+    const ada = npc('c1', 'Ada');
+    const turns: Turn[] = [
+      {
+        id: 't0', episodeId: 'e', worldId: 'w', role: 'user', mode: 'speak',
+        text: 'First line.', createdAt: 0
+      },
+      {
+        id: 't1', episodeId: 'e', worldId: 'w', role: 'narrator', mode: null,
+        text: 'Ada waits.', createdAt: 1
+      },
+      {
+        id: 't2', episodeId: 'e', worldId: 'w', role: 'user', mode: 'speak',
+        text: 'Second line.', createdAt: 2
+      }
+    ];
+    const blob = buildCharacterSpeakMessages(turns, [ada], ada, 'press them', [])
+      .map((m) => m.content)
+      .join('\n---\n');
+    expect(blob).toMatch(/\[player speak\]: "First line\."/);
+    expect(blob).toMatch(/do not add words to their mouth/);
+    expect(blob).toMatch(/Second line/);
+    const mouth = blob.match(/do not add words to their mouth/g) ?? [];
+    expect(mouth.length).toBe(1);
+  });
+
+  it('drops oldest director turns first when systemChars eat the window', () => {
+    const turns: Turn[] = Array.from({ length: 20 }, (_, i) => ({
+      id: `t${i}`, episodeId: 'e', worldId: 'w',
+      role: 'narrator' as const, mode: null,
+      text: `Turn ${i} unique-token-${i} ${'z'.repeat(200)}`,
+      createdAt: i
+    }));
+    const without = directorUserPrompt(ctx({ turns }), 'speak', 'Hello?', {
+      totalCap: 8_000,
+      systemChars: 0
+    });
+    const withSys = directorUserPrompt(ctx({ turns }), 'speak', 'Hello?', {
+      totalCap: 8_000,
+      systemChars: 5_000
+    });
+    expect(withSys).toMatch(/unique-token-19/);
+    expect(withSys).not.toMatch(/unique-token-0/);
+    expect(withSys.length).toBeLessThan(without.length);
+  });
+
+  it('does not reprint Latest player move on the director prompt', () => {
+    const user = directorUserPrompt(ctx(), 'speak', 'Hello?');
+    expect(user).not.toMatch(/Latest player move:/);
+    expect(user).toMatch(/Recent transcript:/);
+  });
+
+  it('lists the week cycle only for a custom calendar', () => {
+    const custom = buildNarratorSystemPrompt(ctx({
+      world: {
+        ...world(),
+        calendar: {
+          currentDay: 12,
+          system: 'Tide-time',
+          weekdays: ['Moonday', 'Saleday'],
+          months: ['Firstflood', 'Lowwater']
+        }
+      }
+    }));
+    expect(custom).toMatch(/Week cycle:/);
+    expect(custom).toMatch(/Months:/);
+    expect(custom).toContain('Tide-time');
+    expect(buildNarratorSystemPrompt(ctx())).not.toMatch(/Week cycle:/);
+  });
+
+  it('clips the world bible after a running summary exists', () => {
+    const fatBible = `${'Ledger ink. '.repeat(400)}END_BIBLE`;
+    const cold = buildNarratorSystemPrompt(ctx({
+      world: { ...world(), bible: fatBible }
+    }));
+    const glued = buildNarratorSystemPrompt(ctx({
+      world: { ...world(), bible: fatBible },
+      episode: { ...episode(), runningSummary: 'Ada already took the key.' }
+    }));
+    expect(cold).toContain('END_BIBLE');
+    expect(glued).not.toContain('END_BIBLE');
+    expect(glued).toContain('Ada already took the key.');
   });
 });

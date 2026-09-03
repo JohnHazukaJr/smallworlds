@@ -1,0 +1,65 @@
+- generic [ref=f11e3]:
+  - main [ref=f11e5]:
+    - generic [ref=f11e44]:
+      - generic [ref=f11e46]:
+        - generic [ref=f11e49]:
+          - generic [ref=f11e50]: The Registrar
+          - generic [ref=f11e51]: Season 1 · episode 1 · the long room · Monday, 1 January, Year 1 · day 1 · Bloom
+        - generic [ref=f11e52]:
+          - generic [ref=f11e53]:
+            - button "Write" [ref=f11e54] [cursor=pointer]
+            - button "Read" [ref=f11e55] [cursor=pointer]
+          - button "More" [ref=f11e56] [cursor=pointer]
+      - generic [ref=f11e58]:
+        - generic: Lamp oil, salt damp, and the low grind of the harbour through the floor
+        - generic [ref=f11e59]:
+          - generic [ref=f11e60]:
+            - generic [ref=f11e61]: The long room · Monday, 1 January, Year 1 · day 1
+            - button "The Cartwright · Marisol Vey · you" [ref=f11e65] [cursor=pointer]:
+              - generic [ref=f11e66]:
+                - generic [ref=f11e67]: T
+                - generic [ref=f11e70]: M
+                - generic [ref=f11e73]: "Y"
+          - generic [ref=f11e77]:
+            - paragraph [ref=f11e79]:
+              - generic [ref=f11e80]: T
+              - text: he long room keeps its own weather. Lamp-smoke gathers along the ceiling beams and stays there, and the tide sound comes up through the floor rather than the windows, so that every conversation held here has the shape of something overheard. The Cartwright has not touched the cup you poured. That is the first thing you notice. The second is that he has arranged the manifest pages so the false signature faces you. You could tell him the truth. You could tell him a better lie. Marisol is on the tide stairs outside and will hear either one, because the long room keeps its own weather and gives nothing back.
+            - generic [ref=f11e81]:
+              - button "Edit" [ref=f11e82] [cursor=pointer]
+              - button "Retry from here" [ref=f11e83] [cursor=pointer]
+              - button "Re-roll line" [ref=f11e84] [cursor=pointer]
+              - button "Delete" [ref=f11e85] [cursor=pointer]
+      - generic [ref=f11e86]:
+        - generic [ref=f11e87]:
+          - button "Continue" [ref=f11e88] [cursor=pointer]
+          - button "Steer" [ref=f11e89] [cursor=pointer]
+          - button "Speak" [ref=f11e90] [cursor=pointer]
+          - button "Act" [ref=f11e91] [cursor=pointer]
+        - generic [ref=f11e93]:
+          - generic "How long each narration or spoken reply runs — not story structure" [ref=f11e94]: reply size
+          - button "Short" [ref=f11e95] [cursor=pointer]
+          - button "Medium" [ref=f11e96] [cursor=pointer]
+          - button "Long" [ref=f11e97] [cursor=pointer]
+        - generic [ref=f11e98]:
+          - paragraph [ref=f11e99]: the scene continues
+          - button "Write on" [disabled] [ref=f11e100]
+        - generic [ref=f11e101]: "memory: 3 facts · 3 open threads"
+  - generic [ref=f11e14]:
+    - button "Worlds" [ref=f11e15] [cursor=pointer]:
+      - generic [ref=f11e16]: ◈
+      - text: Worlds
+    - button "Story" [active] [ref=f11e17] [cursor=pointer]:
+      - generic [ref=f11e18]: ¶
+      - text: Story
+    - button "Cast" [ref=f11e19] [cursor=pointer]:
+      - generic [ref=f11e20]: ◇
+      - text: Cast
+    - button "Places" [ref=f11e21] [cursor=pointer]:
+      - generic [ref=f11e22]: ⌂
+      - text: Places
+    - button "Settings" [ref=f11e23] [cursor=pointer]:
+      - generic [ref=f11e24]: ⚙
+      - text: Settings
+    - button "Profile" [ref=f11e25] [cursor=pointer]:
+      - generic [ref=f11e26]: ◎
+      - text: Profile

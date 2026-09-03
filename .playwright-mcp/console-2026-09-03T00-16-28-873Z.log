@@ -1,0 +1,20 @@
+[     272ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=f21f1a56:14333
+[  129699ms] [LOG] [vite] server connection lost. Polling for restart... @ http://localhost:5173/@vite/client:998
+[  369623ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=f21f1a56:14333
+[  717362ms] [LOG] [vite] server connection lost. Polling for restart... @ http://localhost:5173/@vite/client:998
+[  758323ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:5173/node_modules/.vite/deps/react-dom_client.js?v=f21f1a56:14333
+[  797292ms] [ERROR] Failed to load resource: the server responded with a status of 500 (Internal Server Error) @ http://localhost:5173/src/errors.ts?t=1788395385876:0
+[  797292ms] [ERROR] [vite] Failed to reload /src/screens/Cast.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://localhost:5173/@vite/client:528
+[  797293ms] [ERROR] [vite] Failed to reload /src/components/LockScreen.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://localhost:5173/@vite/client:528
+[  797293ms] [ERROR] [vite] Failed to reload /src/screens/Sequel.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://localhost:5173/@vite/client:528
+[  797293ms] [ERROR] [vite] Failed to reload /src/screens/Profile.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://localhost:5173/@vite/client:528
+[  797293ms] [ERROR] [vite] Failed to reload /src/screens/Settings.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://localhost:5173/@vite/client:528
+[  797293ms] [ERROR] [vite] Failed to reload /src/App.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://localhost:5173/@vite/client:528
+[  797293ms] [ERROR] [vite] Failed to reload /src/ui/bits.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://localhost:5173/@vite/client:528
+[  797293ms] [ERROR] [vite] Failed to reload /src/screens/Library.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://localhost:5173/@vite/client:528
+[  797294ms] [ERROR] [vite] Failed to reload /src/screens/Locations.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://localhost:5173/@vite/client:528
+[  797298ms] [ERROR] [vite] Failed to reload /src/screens/Onboard.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://localhost:5173/@vite/client:528
+[  797298ms] [ERROR] [vite] Failed to reload /src/components/RelationshipMap.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://localhost:5173/@vite/client:528
+[  797321ms] [ERROR] [vite] Failed to reload /src/screens/Story.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://localhost:5173/@vite/client:528
+[  797321ms] [ERROR] [vite] Failed to reload /src/components/Nav.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://localhost:5173/@vite/client:528
+[  797321ms] [ERROR] [vite] Failed to reload /src/components/WorldEditorSheet.tsx. This could be due to syntax errors or importing non-existent modules. (see errors above) @ http://localhost:5173/@vite/client:528

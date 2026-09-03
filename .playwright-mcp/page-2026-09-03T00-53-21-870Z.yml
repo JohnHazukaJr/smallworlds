@@ -1,0 +1,85 @@
+- generic [ref=f21e4]:
+  - navigation [ref=f21e5]:
+    - generic [ref=f21e6]:
+      - generic [ref=f21e7]: Small Worlds
+      - generic [ref=f21e8]: Make a world. Live in it.
+    - generic [ref=f21e9]:
+      - button "01 Worlds" [ref=f21e10] [cursor=pointer]:
+        - generic [ref=f21e11]: "01"
+        - generic [ref=f21e12]: Worlds
+      - button "02 Story" [ref=f21e13] [cursor=pointer]:
+        - generic [ref=f21e14]: "02"
+        - generic [ref=f21e15]: Story
+      - button "03 Cast" [ref=f21e16] [cursor=pointer]:
+        - generic [ref=f21e17]: "03"
+        - generic [ref=f21e18]: Cast
+      - button "04 Places" [active] [ref=f21e19] [cursor=pointer]:
+        - generic [ref=f21e20]: "04"
+        - generic [ref=f21e21]: Places
+      - button "05 Settings" [ref=f21e22] [cursor=pointer]:
+        - generic [ref=f21e23]: "05"
+        - generic [ref=f21e24]: Settings
+      - button "06 Profile" [ref=f21e25] [cursor=pointer]:
+        - generic [ref=f21e26]: "06"
+        - generic [ref=f21e27]: Profile
+      - button "07 New world" [ref=f21e28] [cursor=pointer]:
+        - generic [ref=f21e29]: "07"
+        - generic [ref=f21e30]: New world
+    - generic [ref=f21e31]:
+      - generic [ref=f21e32]:
+        - generic [ref=f21e33]: Instrument
+        - generic [ref=f21e34]: no model configured
+        - generic [ref=f21e35]: set one in Settings
+      - generic [ref=f21e45]: The Registrar
+  - main [ref=f21e36]:
+    - generic [ref=f21e257]:
+      - generic [ref=f21e258]:
+        - generic [ref=f21e259]:
+          - generic [ref=f21e260]: Places · The Registrar
+          - button "+ new" [ref=f21e262] [cursor=pointer]
+        - generic [ref=f21e263] [cursor=pointer]:
+          - generic [ref=f21e265]:
+            - generic [ref=f21e266]: The long room
+            - generic [ref=f21e267]: this scene
+          - button "this scene — clear" [ref=f21e268]
+      - generic [ref=f21e269]:
+        - generic [ref=f21e270]:
+          - generic [ref=f21e271]:
+            - generic [ref=f21e272]: location plate · no photo yet
+            - button "Upload photo" [ref=f21e275] [cursor=pointer]
+            - generic [ref=f21e276]:
+              - generic [ref=f21e277]: plate hue
+              - slider [ref=f21e278]: "32"
+            - button "✦ Flesh out with AI" [ref=f21e281] [cursor=pointer]
+            - generic [ref=f21e282]:
+              - button "✓ this scene — clear" [ref=f21e283] [cursor=pointer]
+              - button "remove from world" [ref=f21e284] [cursor=pointer]
+          - generic [ref=f21e285]:
+            - generic [ref=f21e286]:
+              - generic [ref=f21e287]: location
+              - textbox "Name" [ref=f21e288]: The long room
+              - textbox "tagline · e.g. harbour district · public square" [ref=f21e289]: above the customs house · lamplit · one door
+            - generic [ref=f21e290]:
+              - generic [ref=f21e291]:
+                - generic [ref=f21e292]: current state
+                - textbox "—" [ref=f21e293]: The Cartwright has arranged the manifest so the false signature faces you.
+              - generic [ref=f21e294]:
+                - generic [ref=f21e295]: typically found here
+                - textbox "—" [ref=f21e296]: Whoever holds the current trade — clerks do not enter unbidden.
+        - generic [ref=f21e297]:
+          - button "Overview" [ref=f21e298] [cursor=pointer]
+          - button "Atmosphere" [ref=f21e299] [cursor=pointer]
+          - button "History" [ref=f21e300] [cursor=pointer]
+          - button "Rules & secrets" [ref=f21e301] [cursor=pointer]
+          - button "AI notes" [ref=f21e302] [cursor=pointer]
+        - generic [ref=f21e303]:
+          - generic [ref=f21e304]:
+            - generic [ref=f21e305]:
+              - generic [ref=f21e306]: What it is
+              - generic [ref=f21e307]: prose, not bullet points — this is the core of the sheet
+            - textbox [ref=f21e308]: A private deal room above the customs house floor. Tide sound comes up through the boards; lamp-smoke gathers along the ceiling beams and stays there. Conversations here have the shape of something overheard.
+          - generic [ref=f21e309]:
+            - generic [ref=f21e310]:
+              - generic [ref=f21e311]: Notable features
+              - generic [ref=f21e312]: landmarks, rooms, or geography within it
+            - textbox [ref=f21e313]: One long table, one door, a window that does not open onto the quay.

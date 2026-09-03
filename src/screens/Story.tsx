@@ -34,7 +34,7 @@ import {
   emptyCalendarEvent, evaluateCalendarEvents
 } from '../calendarEvents';
 import {
-  AVATAR_PX, DEFAULT_DISPLAY, moodFromHue, useApp,
+  AVATAR_PX, DEFAULT_DISPLAY, moodFromHue, storyAvatarHeight, useApp,
   type AvatarSize, type DialogueStyle, type StoryLayout
 } from '../store/app';
 import { hasWritingModel } from '../ai/models';
@@ -56,6 +56,7 @@ import {
 import { Face } from '../ui/Face';
 import { fileToSceneImage } from '../ui/image';
 import { attributionRun, isDialogueBlock, lastSpokenBy } from '../ui/attribution';
+import { abortWriteNotice, NOTICE_ADD_CAST, NOTICE_ADD_MODEL, noticeNavAction } from '../ui/writeNotices';
 import {
   SCROLL_BACKDROP_LABEL, SCROLL_BACKDROPS, resolveScrollBackdrop
 } from '../ui/scrollBackdrop';
@@ -200,6 +201,63 @@ function guestHue(guestId: string): number {
   let h = 0;
   for (let i = 0; i < guestId.length; i++) h = (h + guestId.charCodeAt(i) * 17) % 360;
   return h;
+}
+
+function SceneCastStrip({
+  cast, guests, empty, onOpen
+}: {
+  cast: Character[];
+  guests: EpisodeGuest[];
+  empty: boolean;
+  onOpen: () => void;
+}) {
+  const names = [
+    ...cast.map((c) => c.name || 'unnamed'),
+    ...guests.map((g) => g.name)
+  ];
+  const size = empty ? 44 : 32;
+  const overlap = empty ? -12 : -10;
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="serif"
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'flex-start',
+        gap: empty ? 10 : 7,
+        marginTop: empty ? 14 : 8,
+        padding: 0,
+        border: 0,
+        background: 'transparent',
+        cursor: 'pointer',
+        textAlign: 'left',
+        width: '100%'
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center' }}>
+        {cast.map((c, i) => (
+          <div key={c.id} style={{ marginLeft: i === 0 ? 0 : overlap, zIndex: i + 1 }}>
+            <Face hue={c.hue} size={size} portrait={characterPortraits(c)[0]} name={c.name} />
+          </div>
+        ))}
+        {guests.map((g, i) => (
+          <div key={g.id} style={{ marginLeft: cast.length + i === 0 ? 0 : overlap, zIndex: cast.length + i + 1 }}>
+            <Face hue={guestHue(g.id)} size={size} name={g.name} />
+          </div>
+        ))}
+      </div>
+      <div style={{
+        fontSize: empty ? 13.5 : 12,
+        fontStyle: 'italic',
+        lineHeight: 1.4,
+        color: 'rgba(230,233,235,0.38)'
+      }}>
+        {names.join(' · ')}
+      </div>
+    </button>
+  );
 }
 
 function parseTurn(turn: Turn, characters: Character[], guests: EpisodeGuest[] = []): ProseBlock[] {
@@ -445,6 +503,7 @@ function ProseBlockView({
       size={continues ? Math.max(32, Math.round(avatarPx * 0.82)) : avatarPx}
       portrait={b.portrait}
       name={b.speaker}
+      glow={!continues}
     />
   ) : null;
 
@@ -519,7 +578,7 @@ function ProseBlockView({
 
   return (
     <div
-      className={isDialog ? `speak-row${fromPlayer ? ' player' : ''}` : undefined}
+      className={isDialog ? `speak-row${fromPlayer ? ' player' : ''}${continues ? ' continues' : ''}` : undefined}
       style={{
         display: 'flex',
         gap: 14,
@@ -589,7 +648,7 @@ export function Story() {
   const M = MOODS[mood];
   const BD = BACKDROPS[backdrop];
   const readMode = layout === 'read';
-  const avatarPx = AVATAR_PX[display.avatarSize];
+  const avatarPx = storyAvatarHeight(display.avatarSize, compact);
   const fontPx = readMode ? display.textSize + 1 : display.textSize;
 
   const world = useLiveQuery(
@@ -856,8 +915,8 @@ export function Story() {
     text: string,
     resumeBeats?: DirectorBeat[],
     lengthOverride?: TurnLength
-  ): Promise<{ status: 'ok' | 'error' | 'aborted'; beatsCompleted: number }> => {
-    if (!world || !season || !episode) return { status: 'error', beatsCompleted: 0 };
+  ): Promise<{ status: 'ok' | 'error' | 'aborted'; beatsCompleted: number; remaining: number }> => {
+    if (!world || !season || !episode) return { status: 'error', beatsCompleted: 0, remaining: 0 };
     setError('');
     setNotice('');
     setStreaming(true);
@@ -887,29 +946,30 @@ export function Story() {
         }
       });
       setPartial('');
-      return { status: 'ok', beatsCompleted: 1 };
+      return { status: 'ok', beatsCompleted: 1, remaining: 0 };
     } catch (e) {
       setPartial('');
       if (e instanceof WriteAbortedError || (e as Error).name === 'AbortError') {
         const n = e instanceof WriteAbortedError ? e.beatsCompleted : 0;
         const left = e instanceof WriteAbortedError ? e.remainingBeats.length : 0;
-        setNotice(
-          n === 0
-            ? 'Stopped before any reply — your line was not applied.'
-            : left > 0
-              ? `Stopped after ${n} line${n === 1 ? '' : 's'} — ${left} left in the plan. Use Continue plan to finish.`
-              : `Stopped after ${n} line${n === 1 ? '' : 's'}; incomplete line discarded.`
-        );
-        return { status: 'aborted', beatsCompleted: n };
+        setNotice(abortWriteNotice(n, left));
+        return { status: 'aborted', beatsCompleted: n, remaining: left };
       }
       const n = typeof e === 'object' && e && 'beatsCompleted' in e
         ? Math.max(0, Number((e as { beatsCompleted: number }).beatsCompleted) || 0)
         : 0;
+      const left = typeof e === 'object' && e && 'remainingBeats' in e
+        ? Math.max(0, ((e as { remainingBeats?: unknown[] }).remainingBeats ?? []).length)
+        : 0;
       setError(classifyError(e));
-      if (n > 0) {
-        setNotice(`${n} line${n === 1 ? '' : 's'} saved — Continue plan if lines remain, or retry from the last reply.`);
+      if (n > 0 || left > 0) {
+        setNotice(
+          left > 0
+            ? abortWriteNotice(n, left)
+            : `${n} line${n === 1 ? '' : 's'} saved — Continue plan if lines remain, or retry from the last reply.`
+        );
       }
-      return { status: 'error', beatsCompleted: n };
+      return { status: 'error', beatsCompleted: n, remaining: left };
     } finally {
       setStreaming(false);
       setProgressLabel('');
@@ -928,11 +988,15 @@ export function Story() {
   const write = async () => {
     if (!world || !season || !episode || streaming) return;
     if (!hasAI) {
-      setNotice('Add a writing model in Settings first.');
+      setNotice(NOTICE_ADD_MODEL);
       return;
     }
     if (writeReady && writeReady.missing.length > 0 && !writeAnyway) {
       setNotice('Fix the checklist above, or press Write anyway.');
+      return;
+    }
+    if (composeMode === 'continue' && !input.trim() && (episode.pendingPlan?.beats?.length ?? 0) > 0) {
+      await continuePlan();
       return;
     }
     if (composeMode !== 'continue' && !input.trim()) return;
@@ -942,7 +1006,7 @@ export function Story() {
       ? epGuests
       : epGuests.filter((g) => episode.activeGuestIds!.includes(g.id));
     if (agencyOn && sceneNpcs.length === 0 && activeGuests.length === 0) {
-      setNotice('Add someone to this scene on Cast, or open Direct.');
+      setNotice(NOTICE_ADD_CAST);
       return;
     }
     const tagged = agencyOn
@@ -957,7 +1021,7 @@ export function Story() {
     // Keep Speak/Act/Steer so back-and-forth RP does not need re-tapping mode.
     // Delivery tone stays selected for the next line unless the player clears it.
     const result = await runNarration(composeMode, text);
-    if (result.status !== 'ok' && result.beatsCompleted === 0) {
+    if (result.status !== 'ok' && result.beatsCompleted === 0 && result.remaining === 0) {
       // Restore composer when nothing was applied (orphan user turn removed).
       setInput(parseDeliveryTone(text).body);
       setDeliveryTone(savedTone);
@@ -966,6 +1030,10 @@ export function Story() {
 
   const continuePlan = async () => {
     if (!world || !season || !episode || streaming) return;
+    if (!hasAI) {
+      setNotice(NOTICE_ADD_MODEL);
+      return;
+    }
     const pending = episode.pendingPlan;
     if (!pending?.beats?.length) return;
     await runNarration('continue', '', pending.beats as DirectorBeat[], pending.length);
@@ -1496,15 +1564,6 @@ export function Story() {
         </>
       )}
 
-      {readMode && hudTucked && !composerOpen && (
-        <div
-          className="scene-hud-hotzone"
-          onMouseEnter={() => setHudTucked(false)}
-          onClick={() => setHudTucked(false)}
-          aria-hidden
-        />
-      )}
-
       {/* header — thin strip in Read mode */}
       {readMode ? (
         <div
@@ -1714,28 +1773,12 @@ export function Story() {
                 </div>
               </div>
               {(stageCast.length > 0 || stageGuests.length > 0) && (
-                <button
-                  type="button"
-                  onClick={() => setDirectorSheet(true)}
-                  className="serif"
-                  style={{
-                    display: 'block',
-                    marginTop: turns.length === 0 ? 14 : 8,
-                    padding: 0,
-                    border: 0,
-                    background: 'transparent',
-                    cursor: 'pointer',
-                    fontSize: 13.5,
-                    fontStyle: 'italic',
-                    color: 'rgba(230,233,235,0.38)',
-                    textAlign: 'left'
-                  }}
-                >
-                  {[
-                    ...stageCast.map((c) => c.name || 'unnamed'),
-                    ...stageGuests.map((g) => g.name)
-                  ].join(' · ')}
-                </button>
+                <SceneCastStrip
+                  cast={stageCast}
+                  guests={stageGuests}
+                  empty={turns.length === 0}
+                  onOpen={() => setDirectorSheet(true)}
+                />
               )}
               {turns.length === 0 && (
                 <div style={{
@@ -2023,13 +2066,16 @@ export function Story() {
               background: ACCENT_RGBA.a08, display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap'
             }}>
               <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(200,230,235,0.95)', flex: 1, minWidth: 0 }}>{notice}</div>
-              <button className="btn-quiet" style={{ fontSize: 11, minHeight: 28 }}
-                onClick={() => {
-                  setNotice('');
-                  go(notice === 'Add someone to this scene on Cast, or open Direct.' ? 'cast' : 'sequel');
-                }}>
-                {notice === 'Add someone to this scene on Cast, or open Direct.' ? 'Open Cast' : 'Season review'}
-              </button>
+              {noticeNavAction(notice) && (
+                <button className="btn-quiet" style={{ fontSize: 11, minHeight: 28 }}
+                  onClick={() => {
+                    const nav = noticeNavAction(notice);
+                    setNotice('');
+                    if (nav) go(nav.screen);
+                  }}>
+                  {noticeNavAction(notice)?.label}
+                </button>
+              )}
               <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 14 }} onClick={() => setNotice('')}>×</button>
             </div>
           )}
@@ -2056,6 +2102,7 @@ export function Story() {
                 </ul>
               </div>
               <button className="btn-primary" style={{ padding: '7px 12px', fontSize: 12, minHeight: 40 }}
+                disabled={!hasAI}
                 onClick={() => void continuePlan()}>Continue plan</button>
               <button className="btn-quiet" style={{ fontSize: 11 }} onClick={() => void safeWrite(async () => {
                 await db.episodes.update(episode.id, { pendingPlan: null, updatedAt: Date.now() });
@@ -2614,6 +2661,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
   const [note, setNote] = useState(episode.atmosphereNote ?? '');
   const canMatchFaces = sceneHasPortraitRefs(characters, episode.castIds);
   const [matchCast, setMatchCast] = useState(canMatchFaces);
+  const previewFace = characters.find((c) => characterPortraits(c)[0]);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { setNote(episode.atmosphereNote ?? ''); }, [episode.id, episode.atmosphereNote]);
@@ -2854,14 +2902,14 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
           </div>
           <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.45)' }}>
             {display.dialogueStyle === 'prose'
-              ? 'Speech sits with a circular photo and the speaker’s name in their colour. A speaker who keeps talking is not re-announced.'
-              : 'Every line gets a circular photo and a name — a conversation, not a chip list.'}
+              ? 'Speech sits with a portrait plate and the speaker’s name in their colour. A speaker who keeps talking is not re-announced.'
+              : 'Every line gets a portrait plate and a name — a conversation, not a chip list.'}
           </div>
         </div>
 
         {/* avatars */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
-            <Mono style={{ fontSize: 9 }}>face size in the scroll</Mono>
+            <Mono style={{ fontSize: 9 }}>plate size in the scroll</Mono>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               {(['S', 'M', 'L'] as AvatarSize[]).map((s) => (
                 <Chip key={s} active={display.avatarSize === s} onClick={() => setDisplay({ avatarSize: s })}>
@@ -2869,7 +2917,13 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
                 </Chip>
               ))}
               <div style={{ marginLeft: 'auto' }}>
-                <Face hue={200} size={AVATAR_PX[display.avatarSize]} name="Ada" />
+                <Face
+                  hue={previewFace?.hue ?? 200}
+                  size={AVATAR_PX[display.avatarSize]}
+                  portrait={previewFace ? characterPortraits(previewFace)[0] : null}
+                  name={previewFace?.name || 'Ada'}
+                  glow
+                />
               </div>
             </div>
           </div>

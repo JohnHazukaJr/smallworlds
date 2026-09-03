@@ -1,0 +1,29 @@
+- main [ref=f14e36]:
+  - generic [ref=f14e65]:
+    - generic [ref=f14e67]:
+      - generic [ref=f14e68]: The Registrar · the long room
+      - generic [ref=f14e71]:
+        - button "Write" [ref=f14e72] [cursor=pointer]
+        - button "Direct" [ref=f14e73] [cursor=pointer]
+        - button "End episode" [ref=f14e74] [cursor=pointer]
+        - button "Exit read" [ref=f14e75] [cursor=pointer]
+    - generic [ref=f14e77]:
+      - generic: Lamp oil, salt damp, and the low grind of the harbour through the floor
+      - generic [ref=f14e78]:
+        - generic [ref=f14e79]:
+          - generic [ref=f14e80]: The long room · Monday, 1 January, Year 1 · day 1
+          - button "The Cartwright · Marisol Vey · you" [ref=f14e84] [cursor=pointer]:
+            - generic [ref=f14e85]:
+              - generic [ref=f14e86]: T
+              - generic [ref=f14e89]: M
+              - generic [ref=f14e92]: "Y"
+        - generic [ref=f14e96]:
+          - paragraph [ref=f14e98]:
+            - generic [ref=f14e99]: T
+            - text: he long room keeps its own weather. Lamp-smoke gathers along the ceiling beams and stays there, and the tide sound comes up through the floor rather than the windows, so that every conversation held here has the shape of something overheard. The Cartwright has not touched the cup you poured. That is the first thing you notice. The second is that he has arranged the manifest pages so the false signature faces you. You could tell him the truth. You could tell him a better lie. Marisol is on the tide stairs outside and will hear either one, because the long room keeps its own weather and gives nothing back.
+          - generic [ref=f14e100]:
+            - button "Edit" [ref=f14e101] [cursor=pointer]
+            - button "Retry from here" [ref=f14e102] [cursor=pointer]
+            - button "Re-roll line" [ref=f14e103] [cursor=pointer]
+            - button "Delete" [ref=f14e104] [cursor=pointer]
+    - button "Continue" [ref=f14e106] [cursor=pointer]

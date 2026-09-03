@@ -1,0 +1,201 @@
+- generic [ref=f11e3]:
+  - main [ref=f11e5]:
+    - generic [ref=f11e44]:
+      - generic [ref=f11e46]:
+        - generic [ref=f11e49]:
+          - generic [ref=f11e50]: The Registrar
+          - generic [ref=f11e51]: Season 1 · episode 1 · the long room · Monday, 1 January, Year 1 · day 1 · Bloom
+        - generic [ref=f11e52]:
+          - generic [ref=f11e53]:
+            - button "Write" [ref=f11e54] [cursor=pointer]
+            - button "Read" [ref=f11e55] [cursor=pointer]
+          - button "More" [ref=f11e56] [cursor=pointer]
+      - generic [ref=f11e58]:
+        - generic: Lamp oil, salt damp, and the low grind of the harbour through the floor
+        - generic [ref=f11e59]:
+          - generic [ref=f11e60]:
+            - generic [ref=f11e61]: The long room · Monday, 1 January, Year 1 · day 1
+            - button "The Cartwright · Marisol Vey · you" [active] [ref=f11e65] [cursor=pointer]:
+              - generic [ref=f11e66]:
+                - generic [ref=f11e67]: T
+                - generic [ref=f11e70]: M
+                - generic [ref=f11e73]: "Y"
+          - generic [ref=f11e77]:
+            - paragraph [ref=f11e233]:
+              - generic [ref=f11e234]: T
+              - text: he long room keeps its own weather. Lamp-smoke gathers along the ceiling beams and stays there, and the tide sound comes up through the floor rather than the windows, so that every conversation held here has the shape of something overheard. The Cartwright has not touched the cup you poured. That is the first thing you notice. The second is that he has arranged the manifest pages so the false signature faces you. You could tell him the truth. You could tell him a better lie. Marisol is on the tide stairs outside and will hear either one, because the long room keeps its own weather and gives nothing back.
+            - generic [ref=f11e81]:
+              - button "Edit" [ref=f11e82] [cursor=pointer]
+              - button "Retry from here" [ref=f11e83] [cursor=pointer]
+              - button "Re-roll line" [ref=f11e84] [cursor=pointer]
+              - button "Delete" [ref=f11e85] [cursor=pointer]
+      - generic [ref=f11e86]:
+        - generic [ref=f11e87]:
+          - button "Continue" [ref=f11e88] [cursor=pointer]
+          - button "Steer" [ref=f11e89] [cursor=pointer]
+          - button "Speak" [ref=f11e90] [cursor=pointer]
+          - button "Act" [ref=f11e91] [cursor=pointer]
+        - generic [ref=f11e93]:
+          - generic "How long each narration or spoken reply runs — not story structure" [ref=f11e94]: reply size
+          - button "Short" [ref=f11e95] [cursor=pointer]
+          - button "Medium" [ref=f11e96] [cursor=pointer]
+          - button "Long" [ref=f11e97] [cursor=pointer]
+        - generic [ref=f11e98]:
+          - paragraph [ref=f11e99]: the scene continues
+          - button "Write on" [disabled] [ref=f11e100]
+        - generic [ref=f11e101]: "memory: 3 facts · 3 open threads"
+      - complementary [ref=f11e236]:
+        - generic [ref=f11e237]:
+          - generic [ref=f11e238]:
+            - generic [ref=f11e239]: Director
+            - button "Close" [ref=f11e240] [cursor=pointer]: ×
+          - generic [ref=f11e241]:
+            - generic [ref=f11e242]:
+              - button "calendar −" [ref=f11e243] [cursor=pointer]:
+                - generic [ref=f11e244]: calendar
+                - generic [ref=f11e245]: −
+              - generic [ref=f11e246]:
+                - generic [ref=f11e247]: calendar tracker
+                - generic [ref=f11e248]:
+                  - generic [ref=f11e249]: Monday, 1 January Y1
+                  - generic [ref=f11e250]: Absolute day 1 · S1 · E1 · The long room, above the customs house. Lamplit, tide-loud, one door.Episode opened Monday, 1 January Y1
+                  - generic [ref=f11e251]:
+                    - button "−1" [ref=f11e252] [cursor=pointer]
+                    - button "+1 day" [ref=f11e253] [cursor=pointer]
+                    - button "+7" [ref=f11e254] [cursor=pointer]
+                    - button "+1 month" [ref=f11e255] [cursor=pointer]
+                  - generic [ref=f11e256]:
+                    - generic [ref=f11e257]:
+                      - generic [ref=f11e258]: day
+                      - spinbutton "day" [ref=f11e259]: "1"
+                    - generic [ref=f11e260]:
+                      - generic [ref=f11e261]: month
+                      - combobox "month" [ref=f11e262] [cursor=pointer]:
+                        - option "January" [selected]
+                        - option "February"
+                        - option "March"
+                        - option "April"
+                        - option "May"
+                        - option "June"
+                        - option "July"
+                        - option "August"
+                        - option "September"
+                        - option "October"
+                        - option "November"
+                        - option "December"
+                    - generic [ref=f11e263]:
+                      - generic [ref=f11e264]: year
+                      - spinbutton "year" [ref=f11e265]: "1"
+                  - generic [ref=f11e266]:
+                    - text: absolute day
+                    - spinbutton "absolute day" [ref=f11e267]: "1"
+                  - generic [ref=f11e268]:
+                    - generic [ref=f11e269]: days to advance when episode ends
+                    - generic [ref=f11e270]:
+                      - button "days to advance when episode ends +1 day +2 +7 +14 1" [ref=f11e271] [cursor=pointer]: same day
+                      - button "+1 day" [ref=f11e272] [cursor=pointer]
+                      - button "+2" [ref=f11e273] [cursor=pointer]
+                      - button "+7" [ref=f11e274] [cursor=pointer]
+                      - button "+14" [ref=f11e275] [cursor=pointer]
+                      - spinbutton "Custom advance days" [ref=f11e276]: "1"
+                  - button "Calendar setup" [ref=f11e277] [cursor=pointer]
+                - generic [ref=f11e278]:
+                  - generic [ref=f11e279]: season calendar · 0 due · 0 scheduled
+                  - generic [ref=f11e280]: Dated texture as the calendar ticks. Peek shows a summary once; visibility is the lasting spoil policy. The narrator always gets the full beat when due.
+                  - generic [ref=f11e281]:
+                    - generic [ref=f11e282]:
+                      - switch "Enable calendar events" [checked] [ref=f11e283] [cursor=pointer]
+                      - text: enable calendar events
+                    - generic [ref=f11e285]:
+                      - switch "AI-seed calendar on season start" [ref=f11e286] [cursor=pointer]
+                      - text: AI-seed on season start
+                    - generic [ref=f11e288]:
+                      - generic [ref=f11e289]: default visibility
+                      - combobox "default visibility" [ref=f11e290] [cursor=pointer]:
+                        - option "spoiler"
+                        - option "title" [selected]
+                        - option "hidden"
+                  - generic [ref=f11e291]:
+                    - button "Add event" [ref=f11e292] [cursor=pointer]
+                    - button "Generate season texture" [ref=f11e293] [cursor=pointer]
+                  - generic [ref=f11e294]:
+                    - text: No events yet this season.
+                    - button "Add event" [ref=f11e295] [cursor=pointer]
+                    - text: ·
+                    - button "Generate…" [ref=f11e296] [cursor=pointer]
+            - generic [ref=f11e297]:
+              - button "scene −" [ref=f11e298] [cursor=pointer]:
+                - generic [ref=f11e299]: scene
+                - generic [ref=f11e300]: −
+              - generic [ref=f11e301]:
+                - generic [ref=f11e302]:
+                  - generic [ref=f11e303]:
+                    - generic [ref=f11e304]: in the scene
+                    - button "full editor → Cast" [ref=f11e305] [cursor=pointer]
+                  - generic [ref=f11e306] [cursor=pointer]:
+                    - generic [ref=f11e308]: I
+                    - generic [ref=f11e309]:
+                      - generic [ref=f11e310]: Ivo Tarrant
+                      - generic [ref=f11e311]: off-page
+                  - generic [ref=f11e313] [cursor=pointer]:
+                    - generic [ref=f11e315]: T
+                    - generic [ref=f11e316]:
+                      - generic [ref=f11e317]: The Cartwright
+                      - generic [ref=f11e318]: entertained
+                  - generic [ref=f11e320] [cursor=pointer]:
+                    - generic [ref=f11e322]: M
+                    - generic [ref=f11e323]:
+                      - generic [ref=f11e324]: Marisol Vey
+                      - generic [ref=f11e325]: careful
+                  - generic [ref=f11e327]:
+                    - generic [ref=f11e329]: "Y"
+                    - generic [ref=f11e330]:
+                      - generic [ref=f11e331]: you
+                      - generic [ref=f11e332]: player · always in scene
+                  - generic [ref=f11e334] [cursor=pointer]:
+                    - generic [ref=f11e336]: E
+                    - generic [ref=f11e337]:
+                      - generic [ref=f11e338]: Emine
+                      - generic [ref=f11e339]: off-page
+                  - generic [ref=f11e341]: walk-ons · this episode only
+                  - button "+ Add walk-on" [ref=f11e342] [cursor=pointer]
+                - generic [ref=f11e343]:
+                  - generic [ref=f11e344]: locations
+                  - generic [ref=f11e347] [cursor=pointer]:
+                    - generic [ref=f11e348]: The long room
+                    - generic [ref=f11e349]: above the customs house · lamplit · one door
+                  - generic [ref=f11e351]:
+                    - button "+ new" [ref=f11e352] [cursor=pointer]
+                    - button "generate scene image" [ref=f11e353] [cursor=pointer]
+                    - button "full editor → Places" [ref=f11e354] [cursor=pointer]
+                - generic [ref=f11e355]:
+                  - generic [ref=f11e356]: scene note — free text
+                  - generic [ref=f11e357]:
+                    - generic [ref=f11e358]: scene plate
+                    - generic [ref=f11e360] [cursor=pointer]: The long room, above the customs house. Lamplit, tide-loud, one door.
+            - button "memory +" [ref=f11e362] [cursor=pointer]:
+              - generic [ref=f11e363]: memory
+              - generic [ref=f11e364]: +
+            - button "nudges +" [ref=f11e366] [cursor=pointer]:
+              - generic [ref=f11e367]: nudges
+              - generic [ref=f11e368]: +
+        - button "Done" [ref=f11e370] [cursor=pointer]
+  - generic [ref=f11e14]:
+    - button "Worlds" [ref=f11e15] [cursor=pointer]:
+      - generic [ref=f11e16]: ◈
+      - text: Worlds
+    - button "Story" [ref=f11e17] [cursor=pointer]:
+      - generic [ref=f11e18]: ¶
+      - text: Story
+    - button "Cast" [ref=f11e19] [cursor=pointer]:
+      - generic [ref=f11e20]: ◇
+      - text: Cast
+    - button "Places" [ref=f11e21] [cursor=pointer]:
+      - generic [ref=f11e22]: ⌂
+      - text: Places
+    - button "Settings" [ref=f11e23] [cursor=pointer]:
+      - generic [ref=f11e24]: ⚙
+      - text: Settings
+    - button "Profile" [ref=f11e25] [cursor=pointer]:
+      - generic [ref=f11e26]: ◎
+      - text: Profile

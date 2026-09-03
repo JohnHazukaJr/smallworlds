@@ -5,6 +5,7 @@ import { isPlayerAgencyMode, worldCalendarEventPrefs } from '../types';
 import { selectCalendarEventsForPrompt } from '../calendarEvents';
 import { formatEpisodeDateRange, formatStoryDate, PLOT_TARGET_CAP, storyStanceOf, worldCalendar } from '../worldOps';
 import type { ChatMessage } from './client';
+import { inferContextWindowTokens } from './contextBudget';
 import { deliveryPhrase, parseDeliveryTone } from './deliveryTone';
 import { SPEAK_FORMAT_RULES } from './dialogueFormat';
 import { lastOpenQuestion, roomDynamicsLines, speakerCandidates } from './roomDynamics';
@@ -85,6 +86,10 @@ export interface PromptBuildOpts {
   pack?: PromptPack;
   totalCap?: number;
   skipOmittedDigest?: boolean;
+  /** Narrator keeps a richer prefix; speak/guest stay lean. */
+  agent?: 'narrator' | 'character' | 'guest';
+  historyTailChars?: number;
+  historyTailMaxTurns?: number;
 }
 
 function playerRelLine(c: Character, all: Character[]): string | null {
@@ -130,10 +135,9 @@ export function presenceSheet(c: Character, all: Character[]): string {
   return lines.filter(Boolean).join('\n');
 }
 
-/** Presence plus want / fear / anchors for the beat's focus. */
-export function psycheSheet(c: Character, all: Character[]): string {
+/** Want / fear / anchors — add after presence; never reprint the body. */
+export function psycheExtras(c: Character): string {
   const lines = [
-    presenceSheet(c, all),
     c.summary && `Who they are: ${c.summary}`,
     c.desires && `Desires: ${c.desires}`,
     c.fears && `Fears: ${c.fears}`,
@@ -145,8 +149,13 @@ export function psycheSheet(c: Character, all: Character[]): string {
   return lines.filter(Boolean).join('\n');
 }
 
-/** Speak-agent self: psyche plus voice, example lines, backstory. */
-export function voiceSheet(c: Character, all: Character[]): string {
+/** Presence plus want / fear / anchors for the beat's focus. */
+export function psycheSheet(c: Character, all: Character[]): string {
+  return [presenceSheet(c, all), psycheExtras(c)].filter(Boolean).join('\n');
+}
+
+/** Voice, backstory, ties — add after presence; never reprint the body. */
+export function voiceExtras(c: Character, all: Character[]): string {
   const rel = c.relationships
     .map((r) => {
       const target = all.find((x) => x.id === r.targetId);
@@ -164,7 +173,6 @@ export function voiceSheet(c: Character, all: Character[]): string {
     .slice(0, 4)
     .join('\n');
   const lines = [
-    psycheSheet(c, all),
     c.backstory && `Backstory (informs behaviour; reveal only in earned fragments, never as exposition): ${c.backstory}`,
     c.speechStyle && `Voice (stable identity — keep this cadence even as mood/goals shift): ${c.speechStyle}`,
     c.exampleLines.length > 0 &&
@@ -177,6 +185,16 @@ export function voiceSheet(c: Character, all: Character[]): string {
     c.customInstructions && `Author's directives for this character (follow verbatim): ${c.customInstructions}`
   ];
   return lines.filter(Boolean).join('\n');
+}
+
+/** Speak-agent self: psyche plus voice, example lines, backstory. */
+export function voiceSheet(c: Character, all: Character[]): string {
+  return [psycheSheet(c, all), voiceExtras(c, all)].filter(Boolean).join('\n');
+}
+
+/** Speak self-sheet when presence already listed the body. */
+function speakSelfSheet(c: Character, all: Character[]): string {
+  return [psycheExtras(c), voiceExtras(c, all)].filter(Boolean).join('\n');
 }
 
 function locationHardRules(l: Location): string | null {
@@ -321,7 +339,7 @@ function pacingLine(ai: World['ai']): string {
 }
 
 /** Cap for continuity bullets in narrator / speak frames. */
-const CONTINUITY_FACT_CAP = 24;
+const CONTINUITY_FACT_CAP = 16;
 /** Cap open threads so the system frame does not drown the transcript. */
 const THREAD_CAP = 12;
 /** Tighter caps for the director utility prompt. */
@@ -364,10 +382,14 @@ const PRIOR_CAPS: Record<PromptAgent, PriorCapPreset> = {
 
 const FACT_CAPS: Record<PromptAgent, { facts: number; threads: number }> = {
   narrator: { facts: CONTINUITY_FACT_CAP, threads: THREAD_CAP },
-  character: { facts: CONTINUITY_FACT_CAP, threads: THREAD_CAP },
-  guest: { facts: CONTINUITY_FACT_CAP, threads: THREAD_CAP },
+  character: { facts: 8, threads: 4 },
+  guest: { facts: 8, threads: 4 },
   director: { facts: DIRECTOR_FACT_CAP, threads: DIRECTOR_THREAD_CAP }
 };
+
+function isSpeakAgent(opts: PromptBuildOpts): boolean {
+  return opts.agent === 'character' || opts.agent === 'guest';
+}
 
 /**
  * Pick up to `cap` items while keeping coverage across episode buckets
@@ -520,6 +542,15 @@ export function episodeSceneDay(episode: Episode, cal: ReturnType<typeof worldCa
   return cal.currentDay;
 }
 
+/** Custom clock schema — default Gregorian week/months do not need a dump. */
+function calendarSchemaIsCustom(world: World): boolean {
+  const c = world.calendar;
+  if (c?.system?.trim()) return true;
+  if ((c?.weekdays ?? []).some((w) => w.trim())) return true;
+  if ((c?.months ?? []).some((m) => m.trim())) return true;
+  return false;
+}
+
 /**
  * Unified calendar / "now" lines.
  * - full: narrator calendar section (owns all dates)
@@ -539,11 +570,15 @@ function calendarBlock(
     const worldClock = cal.currentDay !== scene
       ? `\nWorld clock (not this scene): ${formatStoryDate(cal, cal.currentDay)}.`
       : '';
+    const custom = calendarSchemaIsCustom(world);
+    const schema = custom
+      ? `Week cycle: ${cal.weekdays.join(', ')} (day 1 of the story was a ${cal.weekdays[cal.dayOneWeekday]}).\n` +
+        `Months: ${cal.months.join(', ')}.\n`
+      : '';
     return (
       `## Calendar\n` +
       (cal.system ? `${cal.system}\n` : '') +
-      `Week cycle: ${cal.weekdays.join(', ')} (day 1 of the story was a ${cal.weekdays[cal.dayOneWeekday]}).\n` +
-      `Months: ${cal.months.join(', ')}.\n` +
+      schema +
       `Today (this scene) is ${formatStoryDate(cal, scene)}.\n` +
       `This episode's date: ${dateLine}.` +
       worldClock +
@@ -876,6 +911,28 @@ function calendarEventsSection(
   return parts.join('\n');
 }
 
+/** Date clock plus due/upcoming events under a single Calendar heading. */
+function calendarSpineSection(
+  ctx: PromptContext,
+  agent: Exclude<PromptAgent, 'director'>,
+  tight: boolean
+): string | null {
+  const events = calendarEventsSection(ctx, agent === 'narrator' ? 'full' : 'compact', {
+    includeUpcoming: !tight
+  });
+  if (agent === 'narrator') {
+    const dates = calendarBlock(ctx.world, ctx.episode, 'full');
+    if (!events) return dates;
+    const eventBody = events.replace(/^##[^\n]*\n/, '');
+    return `${dates}\n${eventBody}`;
+  }
+  const cal = worldCalendar(ctx.world);
+  const scene = episodeSceneDay(ctx.episode, cal);
+  const dateLine = `Today (this scene): ${formatStoryDate(cal, scene)}.`;
+  if (!events) return `## Calendar\n${dateLine}`;
+  return `## Calendar\n${dateLine}\n${events}`;
+}
+
 function resolveCurrentLocations(episode: Episode, locations: Location[]): Location[] {
   if (locations.length === 0) return [];
   const byId = episode.locationId
@@ -890,8 +947,8 @@ function resolveCurrentLocations(episode: Episode, locations: Location[]): Locat
 
 /**
  * Byte-stable prefix for one episode/cast snapshot.
- * Shared by narrator and speak so later beats in a Write can hit implicit cache.
- * Presence sheets only — focused psyche / off-scene names go after this.
+ * Narrator and speak use different caps (speak is leaner); same agent + pack
+ * stays stable across beats so later calls can hit implicit cache.
  */
 export function storyCachePrefix(ctx: PromptContext, opts: PromptBuildOpts = {}): string {
   return storyCacheSections(ctx, opts).join('\n\n');
@@ -900,19 +957,29 @@ export function storyCachePrefix(ctx: PromptContext, opts: PromptBuildOpts = {})
 function storyCacheSections(ctx: PromptContext, opts: PromptBuildOpts = {}): string[] {
   const { world, season, episode, characters } = ctx;
   const tight = opts.pack === 'tight';
+  const speak = isSpeakAgent(opts);
   const inScene = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
   const player = characters.find((c) => c.isPlayer);
   const sections: string[] = [];
 
-  sections.push(worldBibleSection(world, tight ? 1800 : WORLD_BIBLE_CAP));
-  const bible = seasonBibleSection(season, tight ? 600 : SEASON_BIBLE_RECAP_CAP);
+  sections.push(worldBibleSection(
+    world,
+    speak
+      ? WORLD_BIBLE_SPEAK_CAP
+      : tight
+        ? 1800
+        : episode.runningSummary?.trim()
+          ? WORLD_BIBLE_AFTER_SUMMARY_CAP
+          : WORLD_BIBLE_CAP
+  ));
+  const bible = seasonBibleSection(season, speak ? 400 : (tight ? 600 : SEASON_BIBLE_RECAP_CAP));
   if (bible) sections.push(bible);
   sections.push(situationPremise(ctx, { includeSeasonMeta: true }));
   sections.push(episodeHeader(episode));
 
   sections.push(...currentLocationBlock(ctx, {
-    includeOthers: !tight,
-    atmosphereOnly: tight
+    includeOthers: false,
+    atmosphereOnly: tight || speak
   }));
 
   const sensoryBits = [
@@ -979,13 +1046,8 @@ function worldSpineSections(
   if (cont) sections.push(cont);
   if (threads) sections.push(threads);
 
-  sections.push(calendarBlock(ctx.world, ctx.episode, agent === 'narrator' ? 'full' : 'compact'));
-  const calEvents = calendarEventsSection(ctx, agent === 'narrator' ? 'full' : 'compact', {
-    includeUpcoming: !tight
-  });
-  if (calEvents) {
-    sections.push(calEvents.startsWith('##') ? calEvents : `## Calendar texture\n${calEvents}`);
-  }
+  const calendar = calendarSpineSection(ctx, agent, tight);
+  if (calendar) sections.push(calendar);
 
   const ledger = sceneLedgerSection(ctx.episode, tight ? 4 : agent === 'narrator' ? 8 : 5);
   if (ledger) sections.push(ledger);
@@ -1005,10 +1067,15 @@ function narratorFocusTail(ctx: PromptContext, opts: PromptBuildOpts = {}): stri
     (c) => !c.isPlayer && episode.castIds.includes(c.id) && focus.has(c.id)
   );
   if (focusedInScene.length > 0) {
-    sections.push(
-      `## This beat (deeper sheet)\n` +
-      focusedInScene.map((c) => psycheSheet(c, characters)).join('\n\n')
-    );
+    const deeper = focusedInScene
+      .map((c) => {
+        const extras = psycheExtras(c);
+        return extras ? `### ${c.name}\n${extras}` : '';
+      })
+      .filter(Boolean);
+    if (deeper.length > 0) {
+      sections.push(`## This beat (deeper sheet)\n${deeper.join('\n\n')}`);
+    }
   }
   const offSceneFocused = characters.filter(
     (c) => !episode.castIds.includes(c.id) && !c.isPlayer && focus.has(c.id)
@@ -1027,30 +1094,14 @@ function narratorFocusTail(ctx: PromptContext, opts: PromptBuildOpts = {}): stri
  * narrator-style checklist. Characters react if it touches them; they do not force it.
  */
 function speakSituationPressure(ctx: PromptContext): string | null {
-  const lines: string[] = [];
-  if (worldCalendarEventPrefs(ctx.world).enabled) {
-    const cal = worldCalendar(ctx.world);
-    const scene = episodeSceneDay(ctx.episode, cal);
-    const { due } = selectCalendarEventsForPrompt(ctx.calendarEvents ?? [], { sceneDay: scene });
-    for (const ev of due.slice(0, 6)) {
-      const hard = ev.promptPolicy === 'hard' || ev.scale === 'large';
-      lines.push(
-        `- Calendar${hard ? ' (should be felt)' : ''}: ${ev.title.trim() || '(untitled)'}` +
-        (ev.summary.trim() ? ` — ${clipText(ev.summary.trim(), 120)}` : '')
-      );
-    }
-  }
   const pending = [
     ...(ctx.episode.plotTargets ?? []),
     ...(ctx.season.plotTargets ?? [])
   ].filter((t) => t.status === 'pending' && t.text.trim()).slice(0, 4);
-  for (const t of pending) {
-    lines.push(`- Aimed beat: ${clipText(t.text.trim(), 160)}`);
-  }
-  if (lines.length === 0) return null;
+  if (pending.length === 0) return null;
   return (
     `## Situation (ambient — react if it touches you; do not force or checklist)\n` +
-    lines.join('\n')
+    pending.map((t) => `- Aimed beat: ${clipText(t.text.trim(), 160)}`).join('\n')
   );
 }
 
@@ -1089,7 +1140,7 @@ export function buildNarratorSystemPrompt(ctx: PromptContext, opts: PromptBuildO
   const ai = world.ai;
   const sections: string[] = [];
 
-  sections.push(storyCachePrefix(ctx, opts));
+  sections.push(storyCachePrefix(ctx, { ...opts, agent: 'narrator' }));
   sections.push(stancePlaybook(storyStanceOf(world)));
 
   sections.push(
@@ -1146,16 +1197,13 @@ export function buildCharacterSystemPrompt(
   const { world, characters } = ctx;
   const ai = world.ai;
   const focus = new Set(opts.focusIds ?? []);
-  const others = characters.filter(
-    (c) => c.id !== character.id && ctx.episode.castIds.includes(c.id)
-  );
+  const frameOpts: PromptBuildOpts = { ...opts, agent: 'character' };
   const namedOff = characters.filter(
     (c) => c.id !== character.id && !ctx.episode.castIds.includes(c.id) && focus.has(c.id)
   );
-  const guests = activeGuests(ctx.episode);
   const sections: string[] = [];
 
-  sections.push(storyCachePrefix(ctx, opts));
+  sections.push(storyCachePrefix(ctx, frameOpts));
   sections.push(stancePlaybook(storyStanceOf(world)));
 
   sections.push(
@@ -1164,47 +1212,24 @@ export function buildCharacterSystemPrompt(
     `Reply in your own voice — looks/mannerisms plus what you say aloud.`
   );
 
-  sections.push(...leanAgentFrame(ctx, 'character', opts));
+  sections.push(...leanAgentFrame(ctx, 'character', frameOpts));
 
-  sections.push(`## You\n${voiceSheet(character, characters)}`);
+  const self = speakSelfSheet(character, characters);
+  if (self) sections.push(`## You\n${self}`);
 
-  if (others.length > 0) {
-    sections.push(
-      `## Others present\n` +
-      others.map((c) => presenceSheet(c, characters)).join('\n\n')
-    );
-  }
   if (namedOff.length > 0) {
     sections.push(
       `## Named off-scene (this beat only)\n` +
       namedOff.map((c) => presenceSheet(c, characters)).join('\n\n')
     );
   }
-  if (guests.length > 0) {
-    sections.push(
-      `## Walk-ons present\n` +
-      guests.map((g) => `- ${g.name}: ${g.brief}`).join('\n')
-    );
-  }
 
   // Speak format lives on the user message only (buildCharacterSpeakMessages).
   sections.push(
     `## How you respond\n` +
-    `- Speak as ${character.name}. Match your Voice and example-line rhythm exactly — that identity stays fixed.\n` +
-    `- Let Current state (goal, emotion, condition) color *this* moment; do not invent a new personality because the plot moved.\n` +
-    `- Be concise: one clear reaction for this beat. Do not ramble, lecture, recap the scene, or pad with filler.\n` +
-    `- At most one question. If you ask the player something, stop and wait — do not add more dialogue after the question.\n` +
-    `- Short *action* + one spoken line (a second line only if it is the question). Blank line only if tone truly shifts.\n` +
-    `- Never prefix your reply with your name or "Name:". History may show "[Name]" then the line — your output must be only *action* and "speech".\n` +
-    `- Mark vocal stress with *asterisks* or **double asterisks** inside your quoted lines. Physical beats stay in *asterisks* outside the quotes.\n` +
-    `- No narration of the room, weather, or other people — only your body and your words.\n` +
     `- Honour behaviour anchors and MUST NOT KNOW. Never soften yourself to please the player.\n` +
     `- If the player just answered you (or the room), take the answer as heard this beat. You may doubt it or act on it — you must not ask the same question again as if they said nothing.\n` +
-    (character.speechStyle ? `- Voice guide: ${character.speechStyle}\n` : '') +
-    (character.exampleLines.length > 0
-      ? `- Example spoken rhythm (wording only — still emit *actions* and "quotes" as required):\n${character.exampleLines.map((l) => `  ${l}`).join('\n')}\n`
-      : '') +
-    `- Stay in ${ai.tense} tense for any physical beat.`
+    `- Never prefix your reply with your name or "Name:". History may show "[Name]" then the line — your output must be only *action* and "speech".`
   );
 
   sections.push(ANTI_SLOP_PROSE);
@@ -1224,12 +1249,12 @@ export function buildGuestSystemPrompt(
   guest: EpisodeGuest,
   opts: PromptBuildOpts = {}
 ): string {
-  const { world, characters } = ctx;
+  const { world } = ctx;
   const ai = world.ai;
-  const inScene = characters.filter((c) => ctx.episode.castIds.includes(c.id));
+  const frameOpts: PromptBuildOpts = { ...opts, agent: 'guest' };
   const sections: string[] = [];
 
-  sections.push(storyCachePrefix(ctx, opts));
+  sections.push(storyCachePrefix(ctx, frameOpts));
   sections.push(stancePlaybook(storyStanceOf(world)));
 
   sections.push(
@@ -1237,24 +1262,16 @@ export function buildGuestSystemPrompt(
     `You speak and act only as yourself for this scene.`
   );
 
-  sections.push(...leanAgentFrame(ctx, 'guest', opts));
+  sections.push(...leanAgentFrame(ctx, 'guest', frameOpts));
 
-  sections.push(`## Who you are this scene\n${guest.brief}${guest.voice ? `\nVoice: ${guest.voice}` : ''}`);
-  if (inScene.length > 0) {
-    sections.push(`## Others present\n${inScene.map((c) => presenceSheet(c, characters)).join('\n\n')}`);
-  }
+  sections.push(`## Who you are this scene\n${guest.brief}`);
 
   sections.push(
     `## How you respond\n` +
-    `- Speak in a short, focused reply; one reaction for this beat — no monologue or scene-stealing speech.\n` +
-    `- At most one question. If you ask, stop and wait for the player.\n` +
     (guest.voice ? `- Voice guide — match this exactly; it is your whole identity this scene: ${guest.voice}\n` : '') +
-    `- Optional short physical beat of your own body. Blank line only if tone truly shifts.\n` +
-    `- Never prefix your reply with your name or "Name:" — only *action* and "speech".\n` +
-    `- Vocal stress: *word* or **word** inside quotes. Physical beats: *asterisks* outside quotes.\n` +
-    `- Do not steal the scene from the main cast; add texture.\n` +
     `- If the player just answered a question, take the answer as heard — do not ask it again.\n` +
-    `- Stay in ${ai.tense} tense for physical beats.`
+    `- Never prefix your reply with your name or "Name:" — only *action* and "speech".\n` +
+    `- Do not steal the scene from the main cast; add texture.`
   );
   sections.push(ANTI_SLOP_PROSE);
   sections.push(contentSection(ai));
@@ -1297,6 +1314,49 @@ export const HISTORY_CHAR_BUDGET = 56000;
 /** Verbatim tail shipped on each Write. Spine + glue cover the rest. */
 export const HISTORY_TAIL_CHAR_BUDGET = 16_000;
 export const HISTORY_TAIL_MAX_TURNS = 16;
+/** Speak/guest: a 40-word line does not need the narrator tail. */
+export const SPEAK_HISTORY_TAIL_CHAR_BUDGET = 8_000;
+export const SPEAK_HISTORY_TAIL_MAX_TURNS = 8;
+
+export type HistoryTailAgent = 'narrator' | 'speak' | 'director';
+
+export interface HistoryTail {
+  charBudget: number;
+  maxTurns: number;
+}
+
+/**
+ * Verbatim tail by model window. Large windows get more recent prose for
+ * immersion; speak stays leaner than narrator so a short line does not
+ * resend the chapter. Unknown / 32k models keep the conservative floor.
+ */
+export function chooseHistoryTail(model: string, agent: HistoryTailAgent): HistoryTail {
+  const window = inferContextWindowTokens(model);
+  const large = window >= 128_000;
+  const mid = window >= 64_000;
+  if (agent === 'speak') {
+    if (large) return { charBudget: 12_000, maxTurns: 12 };
+    if (mid) return { charBudget: 10_000, maxTurns: 10 };
+    return { charBudget: SPEAK_HISTORY_TAIL_CHAR_BUDGET, maxTurns: SPEAK_HISTORY_TAIL_MAX_TURNS };
+  }
+  if (agent === 'director') {
+    if (large) return { charBudget: 16_000, maxTurns: 12 };
+    if (mid) return { charBudget: 12_000, maxTurns: 10 };
+    return { charBudget: 10_000, maxTurns: DIRECTOR_TRANSCRIPT_TURNS };
+  }
+  if (large) return { charBudget: 32_000, maxTurns: 32 };
+  if (mid) return { charBudget: 24_000, maxTurns: 24 };
+  return { charBudget: HISTORY_TAIL_CHAR_BUDGET, maxTurns: HISTORY_TAIL_MAX_TURNS };
+}
+
+/** Turns the narrator tail will drop — used to decide when to file a running summary. */
+export function omittedTurnsForNarratorTail(turns: Turn[], model: string): Turn[] {
+  const tail = chooseHistoryTail(model, 'narrator');
+  return packTurnsDetailed(turns, 0, TOTAL_PROMPT_CHAR_SOFT_CAP, {
+    charBudget: tail.charBudget,
+    maxTurns: tail.maxTurns
+  }).omitted;
+}
 
 /** Soft ceiling for system + history chars when no model budget is passed. */
 export const TOTAL_PROMPT_CHAR_SOFT_CAP = 110_000;
@@ -1306,6 +1366,9 @@ const PACK_MIN_TURNS = 4;
 
 /** Cap world bible / season bible slices in agent frames. */
 const WORLD_BIBLE_CAP = 6000;
+/** After a running summary exists the cold-open bible can shrink. */
+const WORLD_BIBLE_AFTER_SUMMARY_CAP = 3000;
+const WORLD_BIBLE_SPEAK_CAP = 800;
 const SEASON_BIBLE_RECAP_CAP = 1600;
 /** Target size for deterministic omitted-turn digests (head / mid / tail). */
 const OMITTED_DIGEST_CHARS = 1800;
@@ -1326,15 +1389,36 @@ export function episodeContextPressure(chars: number): 'ok' | 'warm' | 'warn' | 
   return 'ok';
 }
 
+function shortPlayerHistory(t: Turn): string {
+  const mode = t.mode ?? 'steer';
+  const { body } = parseDeliveryTone(t.text);
+  if (mode === 'speak') {
+    const spoken = body.replace(/^"|"$/g, '');
+    return `[player speak]: "${spoken}"`;
+  }
+  if (mode === 'continue') return '[player continue]';
+  return `[player ${mode}]: ${body}`;
+}
+
+function latestUserTurnId(turns: Turn[]): string | null {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].role === 'user') return turns[i].id;
+  }
+  return null;
+}
+
 function turnToChatContent(
   t: Turn,
   characters: Character[],
-  guests: EpisodeGuest[] = []
+  guests: EpisodeGuest[] = [],
+  fullPlayerPrefix = false
 ): { role: 'user' | 'assistant'; content: string } {
   if (t.role === 'user') {
     return {
       role: 'user',
-      content: t.mode ? MODE_PREFIX[t.mode](t.text) : t.text
+      content: t.mode
+        ? (fullPlayerPrefix ? MODE_PREFIX[t.mode](t.text) : shortPlayerHistory(t))
+        : t.text
     };
   }
   if (t.role === 'character') {
@@ -1370,10 +1454,13 @@ export interface PackedTurns {
 export function packTurnsDetailed(
   turns: Turn[],
   systemChars = 0,
-  totalCap = TOTAL_PROMPT_CHAR_SOFT_CAP
+  totalCap = TOTAL_PROMPT_CHAR_SOFT_CAP,
+  tail?: { charBudget?: number; maxTurns?: number }
 ): PackedTurns {
+  const tailChars = tail?.charBudget ?? HISTORY_TAIL_CHAR_BUDGET;
+  const tailTurns = tail?.maxTurns ?? HISTORY_TAIL_MAX_TURNS;
   const room = totalCap - Math.max(0, systemChars);
-  const budget = Math.min(HISTORY_TAIL_CHAR_BUDGET, Math.max(0, room));
+  const budget = Math.min(tailChars, Math.max(0, room));
   const minKeep = room <= 0 ? 1 : PACK_MIN_TURNS;
   let used = 0;
   const reversed = [...turns].reverse();
@@ -1384,8 +1471,8 @@ export function packTurnsDetailed(
     keptRev.push(t);
   }
   keptRev.reverse();
-  const kept = keptRev.length > HISTORY_TAIL_MAX_TURNS
-    ? keptRev.slice(-HISTORY_TAIL_MAX_TURNS)
+  const kept = keptRev.length > tailTurns
+    ? keptRev.slice(-tailTurns)
     : keptRev;
   const omitCount = turns.length - kept.length;
   const omitted = omitCount > 0 ? turns.slice(0, omitCount) : [];
@@ -1441,10 +1528,16 @@ function historyMessages(
   guests: EpisodeGuest[] = [],
   episode?: Episode,
   systemChars = 0,
-  pack?: Pick<PromptBuildOpts, 'totalCap' | 'skipOmittedDigest'>
+  pack?: Pick<PromptBuildOpts, 'totalCap' | 'skipOmittedDigest' | 'historyTailChars' | 'historyTailMaxTurns'>
 ): ChatMessage[] {
-  const { kept, omitted } = packTurnsDetailed(turns, systemChars, pack?.totalCap ?? TOTAL_PROMPT_CHAR_SOFT_CAP);
-  const messages: ChatMessage[] = kept.map((t) => turnToChatContent(t, characters, guests));
+  const { kept, omitted } = packTurnsDetailed(
+    turns, systemChars, pack?.totalCap ?? TOTAL_PROMPT_CHAR_SOFT_CAP,
+    { charBudget: pack?.historyTailChars, maxTurns: pack?.historyTailMaxTurns }
+  );
+  const latestUser = latestUserTurnId(turns);
+  const messages: ChatMessage[] = kept.map((t) =>
+    turnToChatContent(t, characters, guests, t.role === 'user' && t.id === latestUser)
+  );
   if (!pack?.skipOmittedDigest) {
     const prefix = earlierEpisodePrefix(episode, omitted, characters, guests);
     if (prefix) messages.unshift(prefix);
@@ -1474,7 +1567,7 @@ export function buildNarrationBeatMessages(
   guests: EpisodeGuest[] = [],
   episode?: Episode,
   systemChars = 0,
-  pack?: Pick<PromptBuildOpts, 'totalCap' | 'skipOmittedDigest'>
+  pack?: Pick<PromptBuildOpts, 'totalCap' | 'skipOmittedDigest' | 'historyTailChars' | 'historyTailMaxTurns'>
 ): ChatMessage[] {
   const messages = historyMessages(turns, characters, guests, episode, systemChars, pack);
   const userContent =
@@ -1497,6 +1590,8 @@ export type SpeakMessageOpts = {
   length?: TurnLength;
   totalCap?: number;
   skipOmittedDigest?: boolean;
+  historyTailChars?: number;
+  historyTailMaxTurns?: number;
 };
 
 /** Clip helper for speak cues (mirrors clipText; kept local so this stays near callers). */
@@ -1598,7 +1693,12 @@ export function buildCharacterSpeakMessages(
 ): ChatMessage[] {
   const messages = historyMessages(
     turns, characters, guests, opts?.episode, opts?.systemChars ?? 0,
-    { totalCap: opts?.totalCap, skipOmittedDigest: opts?.skipOmittedDigest }
+    {
+      totalCap: opts?.totalCap,
+      skipOmittedDigest: opts?.skipOmittedDigest,
+      historyTailChars: opts?.historyTailChars ?? SPEAK_HISTORY_TAIL_CHAR_BUDGET,
+      historyTailMaxTurns: opts?.historyTailMaxTurns ?? SPEAK_HISTORY_TAIL_MAX_TURNS
+    }
   );
   const length = opts?.length ?? 'scene';
   const userContent =
@@ -1624,7 +1724,12 @@ export function buildGuestSpeakMessages(
 ): ChatMessage[] {
   const messages = historyMessages(
     turns, characters, guests, opts?.episode, opts?.systemChars ?? 0,
-    { totalCap: opts?.totalCap, skipOmittedDigest: opts?.skipOmittedDigest }
+    {
+      totalCap: opts?.totalCap,
+      skipOmittedDigest: opts?.skipOmittedDigest,
+      historyTailChars: opts?.historyTailChars ?? SPEAK_HISTORY_TAIL_CHAR_BUDGET,
+      historyTailMaxTurns: opts?.historyTailMaxTurns ?? SPEAK_HISTORY_TAIL_MAX_TURNS
+    }
   );
   const length = opts?.length ?? 'scene';
   const guestVoice = (guest.voice ?? '').trim();
@@ -1767,7 +1872,7 @@ export function inSceneDyadLines(inScene: Character[], cap: number): string[] {
 
 export function directorUserPrompt(
   ctx: PromptContext,
-  mode: ComposeMode,
+  _mode: ComposeMode,
   input: string,
   opts?: {
     preferCharacterId?: string;
@@ -1775,6 +1880,9 @@ export function directorUserPrompt(
     pack?: PromptPack;
     totalCap?: number;
     enterIds?: string[];
+    systemChars?: number;
+    historyTailChars?: number;
+    historyTailMaxTurns?: number;
   }
 ): string {
   const tight = opts?.pack === 'tight';
@@ -1834,16 +1942,22 @@ export function directorUserPrompt(
       ? `Player preference: the speak reply should be from walk-on ${preferGuest.name} (${preferGuest.id}) unless they have left.\n`
       : '';
 
+  const directorTurns = opts?.historyTailMaxTurns ?? DIRECTOR_TRANSCRIPT_TURNS;
   const recentPacked = packTurnsDetailed(
     ctx.turns,
-    0,
-    Math.max(4000, (opts?.totalCap ?? 80_000) - 24_000)
-  ).kept.slice(-DIRECTOR_TRANSCRIPT_TURNS);
+    opts?.systemChars ?? 0,
+    Math.max(4000, (opts?.totalCap ?? 80_000) - 24_000),
+    {
+      charBudget: opts?.historyTailChars,
+      maxTurns: directorTurns
+    }
+  ).kept;
   const allGuests = ctx.episode.guests ?? [];
+  const latestUser = latestUserTurnId(ctx.turns);
   const transcript = recentPacked.map((t) => {
     if (t.role === 'user') {
       const mode = t.mode ?? 'steer';
-      return `[player ${mode}]: ${MODE_PREFIX[mode](t.text)}`;
+      return t.id === latestUser ? MODE_PREFIX[mode](t.text) : shortPlayerHistory(t);
     }
     if (t.role === 'character') {
       const name = resolveSpeakerName(t, ctx.characters, allGuests);
@@ -1939,7 +2053,6 @@ export function directorUserPrompt(
     dynamicsBlock +
     preferLine +
     `Knowledge walls:\n${knowledgeWalls || '(none)'}\n\n` +
-    `Latest player move: ${MODE_PREFIX[mode](input)}\n\n` +
     `Recent transcript:\n${transcript || '(episode just opened)'}\n\n` +
     `Plan castDelta and beats as JSON.`
   );

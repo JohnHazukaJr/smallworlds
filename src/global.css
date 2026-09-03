@@ -216,16 +216,7 @@ select { appearance: none; cursor: pointer; }
 }
 .scene-hud.tucked {
   opacity: 0;
-  pointer-events: none;
   transform: translateY(-10px);
-}
-.scene-hud-hotzone {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 52px;
-  z-index: 4;
 }
 
 .compose-air {
@@ -249,11 +240,22 @@ select { appearance: none; cursor: pointer; }
 .face-glass {
   isolation: isolate;
 }
+.face-plate::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background: radial-gradient(ellipse at 50% 36%, transparent 38%, rgba(8, 9, 12, 0.42) 100%);
+}
 
 .speak-row {
   display: flex;
-  gap: 12px;
+  gap: 16px;
   align-items: flex-start;
+}
+.speak-row.continues {
+  gap: 12px;
 }
 .speak-row.player {
   flex-direction: row-reverse;

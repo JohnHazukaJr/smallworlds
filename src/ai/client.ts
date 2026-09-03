@@ -52,6 +52,8 @@ export class AIError extends Error {
 
 export function isContextOverflowError(e: unknown): boolean {
   if (e instanceof AIError && e.status === 413) return true;
+  // Empty replies sometimes mention length; they are not a context-window error.
+  if (isEmptyModelResponse(e)) return false;
   const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
   if (msg.includes('413')) return true;
   if (msg.includes('context_length_exceeded')) return true;
@@ -60,9 +62,15 @@ export function isContextOverflowError(e: unknown): boolean {
   if (msg.includes('prompt is too long')) return true;
   if (msg.includes('too many tokens')) return true;
   if (msg.includes('token limit')) return true;
-  if (msg.includes('input tokens')) return true;
   if (msg.includes('max prompt')) return true;
-  if (msg.includes('too long') && (msg.includes('context') || msg.includes('prompt') || msg.includes('request'))) {
+  if (
+    msg.includes('input tokens') &&
+    (msg.includes('exceed') || msg.includes('limit') || msg.includes('over') ||
+      msg.includes('too many') || msg.includes('too long') || msg.includes('maximum'))
+  ) {
+    return true;
+  }
+  if (msg.includes('too long') && (msg.includes('context') || msg.includes('prompt'))) {
     return true;
   }
   return false;
@@ -74,7 +82,7 @@ export function isEmptyModelResponse(e: unknown): boolean {
 }
 
 export function isPromptPackRetryError(e: unknown): boolean {
-  return isContextOverflowError(e) || isEmptyModelResponse(e);
+  return isContextOverflowError(e);
 }
 
 function throwEmptyResponse(finishReason: string): never {

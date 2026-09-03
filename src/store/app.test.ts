@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { useApp } from './app';
+import { COMPACT_AVATAR_MAX, storyAvatarHeight, useApp } from './app';
 
 describe('closeWorldIf', () => {
   afterEach(() => {
@@ -22,5 +22,19 @@ describe('closeWorldIf', () => {
     useApp.setState({ currentWorldId: 'world-a' });
     useApp.getState().closeWorld();
     expect(useApp.getState().currentWorldId).toBeNull();
+  });
+});
+
+describe('storyAvatarHeight', () => {
+  it('uses the full plate height off compact', () => {
+    expect(storyAvatarHeight('S', false)).toBe(56);
+    expect(storyAvatarHeight('M', false)).toBe(80);
+    expect(storyAvatarHeight('L', false)).toBe(104);
+  });
+
+  it('caps height on compact so prose still has room', () => {
+    expect(storyAvatarHeight('S', true)).toBe(56);
+    expect(storyAvatarHeight('M', true)).toBe(COMPACT_AVATAR_MAX);
+    expect(storyAvatarHeight('L', true)).toBe(COMPACT_AVATAR_MAX);
   });
 });

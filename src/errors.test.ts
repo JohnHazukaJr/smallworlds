@@ -39,6 +39,19 @@ describe('classifyError', () => {
     expect(err.userMessage).toMatch(/too large|wrap the episode/i);
   });
 
+  it('uses overflow copy for HTTP 400 context_length_exceeded', () => {
+    const err = classifyError(new AIError('context_length_exceeded', 400));
+    expect(err.userMessage).toMatch(/too large|wrap the episode/i);
+    expect(err.userMessage).not.toMatch(/rejected the request/i);
+  });
+
+  it('keeps empty-reply copy when the provider returns HTTP 400', () => {
+    const err = classifyError(new AIError('The model returned an empty reply.', 400));
+    expect(err.userMessage).toMatch(/empty reply/i);
+    expect(err.userMessage).not.toMatch(/rejected the request/i);
+    expect(err.userMessage).not.toMatch(/wrap the episode/i);
+  });
+
   it('keeps write-loop AIError copy instead of generic Settings', () => {
     const spoken = classifyError(new AIError(
       'No character replied aloud. Try again, pin who should answer, or add cast to the scene.'
