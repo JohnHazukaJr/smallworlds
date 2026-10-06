@@ -52,6 +52,16 @@ describe('classifyError', () => {
     expect(err.userMessage).not.toMatch(/wrap the episode/i);
   });
 
+  it('maps hosted credit and sign-in failures to their own copy', () => {
+    const credits = classifyError(new AIError('Not enough Small Worlds credits. Subscribe or buy a pack in Profile.', 402));
+    expect(credits.userMessage).toMatch(/credits/i);
+    expect(credits.userMessage).toMatch(/Profile/);
+
+    const signedOut = classifyError(new AIError('401 — Sign in required.', 401));
+    expect(signedOut.userMessage).toMatch(/Sign in/i);
+    expect(signedOut.userMessage).not.toMatch(/API key/);
+  });
+
   it('keeps write-loop AIError copy instead of generic Settings', () => {
     const spoken = classifyError(new AIError(
       'No character replied aloud. Try again, pin who should answer, or add cast to the scene.'

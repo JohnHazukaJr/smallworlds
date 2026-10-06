@@ -71,11 +71,16 @@ export function omitsSamplingParams(model: string): boolean {
   return false;
 }
 
+function isHostedSlug(model: string): boolean {
+  return slug(model).startsWith('small-worlds/');
+}
+
 function inferWindow(model: string): number {
   const fromSuffix = windowFromSuffix(model);
   if (fromSuffix) return fromSuffix;
 
   const m = slug(model);
+  if (isHostedSlug(model)) return 128_000;
   if (m.includes('gemini')) return 1_048_576;
   if (isGlm5(model) || /\bglm[-_.]?5(?:\.\d)?/.test(m)) return 1_048_576;
   if (m.includes('claude')) return 200_000;
@@ -110,8 +115,8 @@ export function modelProfile(model: string): ModelProfile {
     windowTokens: inferWindow(model),
     reasoningCapable: reasoningCapable(model),
     supportsThinkingToggle: glm5,
-    supportsJsonObject: glm || gpt5 || m.includes('gpt-4o') || m.includes('gpt-4.1') || m.includes('deepseek'),
-    supportsTools: glm || gpt5 || m.includes('gpt-4') || m.includes('deepseek') || m.includes('claude'),
+    supportsJsonObject: glm || gpt5 || m.includes('gpt-4o') || m.includes('gpt-4.1') || m.includes('deepseek') || isHostedSlug(model),
+    supportsTools: glm || gpt5 || m.includes('gpt-4') || m.includes('deepseek') || m.includes('claude') || isHostedSlug(model),
     usesMaxCompletionTokens: gpt5 || oSeries,
     omitsSampling: omitsSamplingParams(model),
     isGlm: glm,

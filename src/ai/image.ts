@@ -136,6 +136,15 @@ export async function generateSceneImage(opts: {
   return { dataUrl, warning };
 }
 
+async function imageHttpError(res: Response): Promise<AIError> {
+  let detail = '';
+  try {
+    const body = await res.json();
+    detail = body?.error?.message ?? body?.message ?? '';
+  } catch { /* ignore */ }
+  return new AIError(detail || `Image request failed (${res.status}).`, res.status);
+}
+
 async function requestImage(opts: {
   provider: ProviderConfig;
   model: string;
@@ -179,11 +188,13 @@ async function requestImage(opts: {
         signal: opts.signal,
         body: JSON.stringify(body)
       });
+      if (res.status === 401 || res.status === 402) throw await imageHttpError(res);
       if (res.ok) {
         const parsed = await readImagePayload(res);
         if (parsed) return parsed;
       }
-    } catch {
+    } catch (e) {
+      if (e instanceof AIError && (e.status === 401 || e.status === 402)) throw e;
       // try next body / chat path
     }
   }
@@ -221,6 +232,7 @@ async function requestImageViaChat(opts: {
     })
   });
   if (!res.ok) {
+    if (res.status === 401 || res.status === 402) throw await imageHttpError(res);
     let detail = '';
     try {
       const body = await res.json();

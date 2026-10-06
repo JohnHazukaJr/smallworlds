@@ -7,6 +7,7 @@ import {
 } from '../db';
 import { compactWorldToVolume } from '../ai/compactWorld';
 import { formatUserError } from '../errors';
+import { IMPORT_TOO_LARGE, importTooLarge } from '../security/importLimit';
 import { decryptDeviceExport } from '../sync/serialize';
 import { seedStarterWorld } from '../data/seed';
 import { useApp } from '../store/app';
@@ -83,6 +84,10 @@ export function Library() {
 
   const onImportFile = async (file: File) => {
     try {
+      if (importTooLarge(file)) {
+        setError(IMPORT_TOO_LARGE);
+        return;
+      }
       const data = JSON.parse(await file.text());
       if (isEncryptedExport(data)) {
         setPendingImport(data); // ask for the passphrase first
@@ -260,7 +265,7 @@ export function Library() {
       <PassphraseDialog
         open={pendingExport !== null}
         title={`Export "${pendingExport?.title ?? ''}"`}
-        description="Add a passphrase to encrypt the file (AES-256), or leave it blank for a plain-text JSON you can read and edit."
+        description="Add a passphrase to encrypt the file (AES-256), or leave it blank. While the app lock is on, story text in the file is sealed either way."
         mode="set"
         allowEmpty
         emptyLabel="blank = plain, readable JSON"

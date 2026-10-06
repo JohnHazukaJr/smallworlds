@@ -1,4 +1,5 @@
 import { db, guardStorage, recordTombstones, uid } from '../db';
+import { beginAppWrite, endAppWrite } from '../security/writeGate';
 import { emptyCalendarEvent, evaluateCalendarEvents } from '../calendarEvents';
 import { logAppError } from '../errors';
 import { GAP_DAYS, GAP_LABELS } from '../ui/theme';
@@ -801,7 +802,12 @@ export function pendingBeatsToKeep(remaining: DirectorBeat[]): DirectorBeat[] {
  * the director, then stream narrator (narration-only) and character agents.
  * Each completed beat is persisted immediately. Returns the last turn id.
  */
-export async function writeTurn(opts: WriteOptions): Promise<string> {
+export function writeTurn(opts: WriteOptions): Promise<string> {
+  beginAppWrite();
+  return writeTurnInner(opts).finally(endAppWrite);
+}
+
+async function writeTurnInner(opts: WriteOptions): Promise<string> {
   const { provider, model } = proseModelFor(opts.world);
   const ctx = await loadContext(opts.world, opts.season, opts.episode);
   let castIds = [...opts.episode.castIds];
@@ -1258,7 +1264,21 @@ export async function writeTurn(opts: WriteOptions): Promise<string> {
 /**
  * Re-roll a single narrator or character beat in place — siblings stay.
  */
-export async function regenerateBeat(opts: {
+export function regenerateBeat(opts: {
+  world: World;
+  season: Season;
+  episode: Episode;
+  turn: Turn;
+  length: TurnLength;
+  signal?: AbortSignal;
+  onDelta: (partial: string, meta: StreamMeta) => void;
+  onProgress?: (label: string) => void;
+}): Promise<void> {
+  beginAppWrite();
+  return regenerateBeatInner(opts).finally(endAppWrite);
+}
+
+async function regenerateBeatInner(opts: {
   world: World;
   season: Season;
   episode: Episode;

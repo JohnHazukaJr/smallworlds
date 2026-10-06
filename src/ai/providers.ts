@@ -1,3 +1,4 @@
+import { HOSTED_IMAGE_MODEL, HOSTED_PROSE_MODEL, HOSTED_UTILITY_MODEL } from '../billing/plans';
 import type { ProviderConfig, ProviderKind } from '../types';
 
 export interface ProviderPreset {
@@ -12,6 +13,15 @@ export interface ProviderPreset {
 }
 
 export const PROVIDER_PRESETS: ProviderPreset[] = [
+  {
+    id: 'smallworlds',
+    label: 'Small Worlds',
+    kind: 'openai',
+    baseUrl: 'https://hosted.invalid/functions/v1/hosted-ai',
+    keyUrl: '',
+    suggestedModels: [HOSTED_PROSE_MODEL, HOSTED_UTILITY_MODEL, HOSTED_IMAGE_MODEL],
+    note: 'Hosted models billed in credits. Sign in on Profile — no API key. Your own providers stay free.'
+  },
   {
     id: 'openrouter',
     label: 'OpenRouter',
@@ -123,9 +133,23 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   }
 ];
 
+/** Presets a person adds with their own key. Hosted is enabled from Settings, not this list. */
+export const BYOK_PRESETS = PROVIDER_PRESETS.filter((p) => p.id !== 'smallworlds');
+
+export function isHostedProvider(config: ProviderConfig): boolean {
+  return config.baseUrl.includes('/functions/v1/hosted-ai');
+}
+
+export function hostedBaseUrl(): string | null {
+  const base = (import.meta.env.VITE_SUPABASE_URL as string | undefined)?.replace(/\/$/, '');
+  if (!base) return null;
+  return `${base}/functions/v1/hosted-ai`;
+}
+
 export function presetFor(config: ProviderConfig): ProviderPreset | undefined {
-  return PROVIDER_PRESETS.find((p) => config.baseUrl.startsWith(p.baseUrl.replace(/\/v1.*$/, ''))) ||
-    PROVIDER_PRESETS.find((p) => p.kind === config.kind && p.id === 'custom');
+  if (isHostedProvider(config)) return PROVIDER_PRESETS.find((p) => p.id === 'smallworlds');
+  return BYOK_PRESETS.find((p) => config.baseUrl.startsWith(p.baseUrl.replace(/\/v1.*$/, ''))) ||
+    BYOK_PRESETS.find((p) => p.kind === config.kind && p.id === 'custom');
 }
 
 export interface ListModelsResult {
@@ -136,6 +160,9 @@ export interface ListModelsResult {
 /** Fetch the live model catalog from a provider, where supported. */
 export async function listModels(config: ProviderConfig): Promise<ListModelsResult> {
   try {
+    if (isHostedProvider(config)) {
+      return { models: [HOSTED_PROSE_MODEL, HOSTED_UTILITY_MODEL, HOSTED_IMAGE_MODEL] };
+    }
     if (config.kind === 'gemini') {
       const res = await fetch(`${config.baseUrl}/models?key=${encodeURIComponent(config.apiKey)}`);
       if (!res.ok) {

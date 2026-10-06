@@ -1,48 +1,40 @@
 /**
  * Allowlisted SSE/HTTP relay for AI hosts that block browser CORS (Z.ai, BigModel).
- * Forwards the caller's Authorization. Does not store keys or run inference.
+ * Forwards the caller's upstream Authorization. Does not store keys or run inference.
+ * Requires a signed-in Supabase user — the anon key is not enough.
  */
-const ALLOWED_HOSTS = ['api.z.ai', 'open.bigmodel.cn'];
+import { CORS, handleOptions, json, MAX_CHAT_BODY, readLimitedJson, requireUser } from '../_shared/http.ts';
 
-const CORS: Record<string, string> = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS'
-};
+const ALLOWED_HOSTS = ['api.z.ai', 'open.bigmodel.cn'];
 
 function hostAllowed(url: string): boolean {
   try {
     const host = new URL(url).hostname.toLowerCase();
-    return ALLOWED_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+    return ALLOWED_HOSTS.some((h) => host === h);
   } catch {
     return false;
   }
 }
 
 Deno.serve(async (req) => {
-  if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: CORS });
-  }
-  if (req.method !== 'POST') {
-    return new Response('method not allowed', { status: 405, headers: CORS });
-  }
+  const opt = handleOptions(req);
+  if (opt) return opt;
+  if (req.method !== 'POST') return json(405, { error: { message: 'method not allowed' } });
 
-  let payload: {
+  const user = await requireUser(req);
+  if (user instanceof Response) return user;
+
+  const limited = await readLimitedJson(req, MAX_CHAT_BODY);
+  if (!limited.ok) return limited.response;
+  const payload = limited.value as {
     url?: string;
     method?: string;
     headers?: Record<string, string>;
     body?: string;
   };
-  try {
-    payload = await req.json();
-  } catch {
-    return new Response('invalid json', { status: 400, headers: CORS });
-  }
 
   const target = payload.url ?? '';
-  if (!hostAllowed(target)) {
-    return new Response('host not allowlisted', { status: 403, headers: CORS });
-  }
+  if (!hostAllowed(target)) return json(403, { error: { message: 'host not allowlisted' } });
 
   const fwdHeaders = new Headers();
   for (const [k, v] of Object.entries(payload.headers ?? {})) {

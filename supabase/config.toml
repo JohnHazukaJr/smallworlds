@@ -1,0 +1,25 @@
+# Function gateway JWT checks. stripe-webhook is called by Stripe, not a user.
+# Each function still verifies the caller itself (user JWT or Stripe signature).
+
+project_id = "smallworlds"
+
+[functions.ai-proxy]
+verify_jwt = true
+
+[functions.delete-account]
+verify_jwt = true
+
+[functions.ensure-billing]
+verify_jwt = true
+
+[functions.create-checkout-session]
+verify_jwt = true
+
+[functions.create-portal-session]
+verify_jwt = true
+
+[functions.hosted-ai]
+verify_jwt = true
+
+[functions.stripe-webhook]
+verify_jwt = false

@@ -1,5 +1,6 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef, useState } from 'react';
+import { BillingPanel } from '../components/BillingPanel';
 import { PassphraseDialog } from '../components/PassphraseDialog';
 import { useAuth } from '../cloud/authStore';
 import { isCloudConfigured } from '../cloud/supabase';
@@ -14,8 +15,10 @@ import {
 } from '../sync/serialize';
 import { pullEncryptedSecrets, pushEncryptedSecrets, syncNow, useSyncMeta } from '../sync/engine';
 import { formatUserError } from '../errors';
+import { IMPORT_TOO_LARGE, importTooLarge } from '../security/importLimit';
 import { ErrorNote, Mono, phoneChrome, useViewport } from '../ui/bits';
 import { avatarStyle, plateStyle, VIS } from '../ui/theme';
+import { LegalLinks } from './Legal';
 import type { Visibility } from '../types';
 
 function download(data: unknown, filename: string) {
@@ -91,6 +94,10 @@ export function Profile() {
     setError('');
     setNotice('');
     try {
+      if (importTooLarge(file)) {
+        setError(IMPORT_TOO_LARGE);
+        return;
+      }
       const data = JSON.parse(await file.text());
       if (isEncryptedExport(data)) {
         setPendingRestore(data);
@@ -225,7 +232,7 @@ export function Profile() {
           {[
             ['All stories & cast', 'IndexedDB, this device'],
             ['API keys', vaultEnabled ? 'encrypted at rest (AES-256, your passphrase)' : 'localStorage — add a passphrase in Settings'],
-            ['Used for model training', 'never — requests go straight to your provider'],
+            ['Used for model training', 'never by this app — your provider’s policy applies'],
             ['Cloud sync', isCloudConfigured() ? 'optional — sign in above' : 'configure VITE_SUPABASE_* to enable']
           ].map(([label, value]) => (
             <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'space-between' }}>
@@ -248,13 +255,14 @@ export function Profile() {
           <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.4)' }}>
             Device backup includes worlds, settings, and the encrypted key vault. Prefer a passphrase whenever keys are present.
           </div>
+          <LegalLinks />
         </div>
       </div>
 
       <PassphraseDialog
         open={backupDialog}
         title="Back up this device"
-        description="Encrypts worlds, settings, and API keys (AES-256). Required when keys are present. Leave blank only for a worlds+settings JSON with no secrets."
+        description="Encrypts worlds, settings, and API keys (AES-256). While the app lock is on, worlds are sealed and the vault blob holds the wrapped story key. Leave blank only for a worlds+settings JSON with no secrets."
         mode="set"
         allowEmpty
         emptyLabel="blank = plain JSON (only if no keys)"
@@ -431,6 +439,8 @@ function AccountSection({
           {sync.busy ? 'Syncing…' : 'Sync now'}
         </button>
       </div>
+
+      <BillingPanel userId={auth.user.id} onError={onError} />
 
       <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
         <Mono style={{ fontSize: 9 }}>encrypted API keys (E2E)</Mono>

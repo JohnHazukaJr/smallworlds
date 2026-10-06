@@ -8,8 +8,8 @@ import { VitePWA } from 'vite-plugin-pwa';
 const CSP = [
   "default-src 'self'",
   "script-src 'self'",
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-  'font-src https://fonts.gstatic.com',
+  "style-src 'self' 'unsafe-inline'",
+  "font-src 'self'",
   "img-src 'self' data: blob:",
   "connect-src https: wss: http://localhost:* http://127.0.0.1:* ws://localhost:*",
   "manifest-src 'self'",

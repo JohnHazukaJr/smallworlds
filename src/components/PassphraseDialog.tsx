@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { newPassphraseError } from '../security/passphrase';
 import { ErrorNote, Mono } from '../ui/bits';
 
 export interface PassphraseDialogProps {
@@ -33,7 +34,13 @@ export function PassphraseDialog(p: PassphraseDialogProps) {
       setLocalError('Passphrases do not match.');
       return;
     }
-    if (!pass && !p.allowEmpty) {
+    if (p.mode === 'set') {
+      const lengthError = newPassphraseError(pass, !!p.allowEmpty);
+      if (lengthError) {
+        setLocalError(lengthError);
+        return;
+      }
+    } else if (!pass && !p.allowEmpty) {
       setLocalError('Enter a passphrase.');
       return;
     }

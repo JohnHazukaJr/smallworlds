@@ -12,6 +12,8 @@ import {
   type WorldExport
 } from '../db';
 import { decryptString, deriveKey, encryptString, randomSalt } from '../security/crypto';
+import { setStorySealSuspended } from '../security/storyKey';
+import { SEALED_IMPORT_MESSAGE, isSealedRecord } from '../security/storySeal';
 import type { VaultData } from '../security/vault';
 import { useVault } from '../security/vault';
 import { settingsSnapshot, useSettings } from '../store/settings';
@@ -78,8 +80,21 @@ export async function importDevice(data: DeviceExport, opts?: { mergeWorlds?: bo
   }
 
   const ids: string[] = [];
-  for (const w of data.worlds) {
-    ids.push(await importWorld(w));
+  const sealed = data.worlds.some((w) => isSealedRecord(w.world));
+  if (sealed && !data.vault) {
+    const { getStoryKey } = await import('../security/storyKey');
+    if (!getStoryKey()) throw new Error(SEALED_IMPORT_MESSAGE);
+  }
+  // A backup that brings its own vault must land byte-for-byte. Sealing with the
+  // current in-memory key would make those rows unreadable after the vault is replaced.
+  const keepFileBytes = !!data.vault;
+  if (keepFileBytes) setStorySealSuspended(true);
+  try {
+    for (const w of data.worlds) {
+      ids.push(await importWorld(w));
+    }
+  } finally {
+    if (keepFileBytes) setStorySealSuspended(false);
   }
 
   // Settings: restore provider shells + model picks. Keys come from vault or plaintext.

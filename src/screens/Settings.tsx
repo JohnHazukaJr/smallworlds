@@ -1,13 +1,20 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useId, useState } from 'react';
 import { testConnection } from '../ai/client';
-import { listModels, PROVIDER_PRESETS, presetFor, type ProviderPreset } from '../ai/providers';
+import {
+  BYOK_PRESETS, hostedBaseUrl, isHostedProvider, listModels, presetFor, type ProviderPreset
+} from '../ai/providers';
+import { COST_BEAT, COST_IMAGE, COST_UTILITY, HOSTED_IMAGE_MODEL, HOSTED_PROSE_MODEL, HOSTED_UTILITY_MODEL } from '../billing/plans';
 import { PassphraseDialog } from '../components/PassphraseDialog';
+import { deleteCloudAccount } from '../cloud/account';
+import { useAuth } from '../cloud/authStore';
+import { isCloudConfigured } from '../cloud/supabase';
 import { db, safeWrite, uid, wipeAllData } from '../db';
 import { formatUserError } from '../errors';
 import { useVault } from '../security/vault';
 import { useApp } from '../store/app';
 import { useSettings } from '../store/settings';
+import { LegalLinks } from './Legal';
 import type { ModelRef, ProviderConfig, StoryStance, World, WorldAISettings } from '../types';
 import { Bar, Chip, ErrorNote, Field, Mono, Toggle, phoneChrome, useViewport } from '../ui/bits';
 import { applyStanceToAi, STORY_STANCES, storyStanceOf } from '../worldOps';
@@ -46,15 +53,17 @@ export function Settings() {
         </button>
       </div>
 
+      <HostedSection />
+
       {/* providers */}
       <Section
         title="Your AI providers"
         note="keys live in this device's storage, sent only to the endpoint you name"
       >
         <div style={{ fontSize: 13, lineHeight: 1.6, color: 'var(--ink-muted)', maxWidth: '68ch', marginBottom: 4 }}>
-          Small Worlds runs on your own keys. Any OpenAI-compatible endpoint, Anthropic, or Gemini — and any model ID,
-          including ones released after this app was built. OpenRouter is the easiest start: one key, hundreds of
-          models to compare.
+          Bring your own key, or use Small Worlds hosted credits above. Any OpenAI-compatible endpoint, Anthropic, or
+          Gemini — and any model ID, including ones released after this app was built. OpenRouter is the easiest start:
+          one key, hundreds of models to compare.
         </div>
         {s.providers.map((p) => (
           <ProviderCard key={p.id} config={p} />
@@ -118,7 +127,52 @@ export function Settings() {
       </Section>
 
       <SecuritySection />
+      <div style={{ marginTop: 28 }}><LegalLinks /></div>
     </div>
+  );
+}
+
+function HostedSection() {
+  const s = useSettings();
+  const user = useAuth((a) => a.user);
+  const go = useApp((a) => a.go);
+  if (!isCloudConfigured()) return null;
+  const hosted = s.providers.find(isHostedProvider);
+
+  const enable = () => {
+    if (hosted) return;
+    const base = hostedBaseUrl();
+    if (!base) return;
+    const id = uid();
+    s.addProvider({ id, kind: 'openai', label: 'Small Worlds', baseUrl: base, apiKey: '' });
+    const after = useSettings.getState();
+    if (after.utilityModel?.providerId === id && after.utilityModel.model === HOSTED_PROSE_MODEL) {
+      s.setUtilityModel({ providerId: id, model: HOSTED_UTILITY_MODEL });
+    }
+    if (!after.imageModel) s.setImageModel({ providerId: id, model: HOSTED_IMAGE_MODEL });
+  };
+
+  return (
+    <Section title="Small Worlds hosted" note="billed in credits — your own keys stay free">
+      <div style={{ fontSize: 13, lineHeight: 1.6, color: 'var(--ink-muted)', maxWidth: '68ch' }}>
+        Prose costs {COST_BEAT} credits, short utility calls cost {COST_UTILITY}, images cost {COST_IMAGE}.
+        Sign in to spend credits. The model key stays on the server.
+      </div>
+      {!user ? (
+        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={{ fontSize: 13, color: 'rgba(236,234,230,0.7)' }}>Sign in on Profile to use hosted models.</div>
+          <button className="btn-ghost" onClick={() => go('profile')}>Open Profile</button>
+        </div>
+      ) : hosted ? (
+        <div style={{ fontSize: 13, color: 'rgba(236,234,230,0.75)' }}>
+          Hosted provider is on. Pick <span className="mono">{HOSTED_PROSE_MODEL}</span>,{' '}
+          <span className="mono">{HOSTED_UTILITY_MODEL}</span>, or <span className="mono">{HOSTED_IMAGE_MODEL}</span> in
+          the model lists below. Balance and checkout live on Profile.
+        </div>
+      ) : (
+        <div><button className="btn-primary" onClick={enable}>Use Small Worlds hosted</button></div>
+      )}
+    </Section>
   );
 }
 
@@ -126,6 +180,7 @@ export function Settings() {
 
 function SecuritySection() {
   const vault = useVault();
+  const signedIn = !!useAuth((a) => a.user);
   const vaultPersistError = useSettings((s) => s.vaultPersistError);
   const clearVaultPersistError = useSettings((s) => s.clearVaultPersistError);
   const [dialog, setDialog] = useState<'none' | 'enable' | 'change-old' | 'change-new'>('none');
@@ -186,8 +241,8 @@ function SecuritySection() {
               )}
               <button className="btn-quiet" onClick={() => {
                 const msg = vault.corrupt
-                  ? 'Reset the corrupt vault? Encrypted keys on this device will be wiped. Stories stay.'
-                  : 'Remove the passphrase? Your API keys will be stored unencrypted on this device again.';
+                  ? 'Reset the corrupt vault? Encrypted keys will be wiped. Sealed worlds on this device become unreadable until you restore a backup.'
+                  : 'Remove the passphrase? Worlds and API keys will be stored unencrypted on this device again.';
                 if (!confirm(msg)) return;
                 void (vault.corrupt ? Promise.resolve(vault.reset()) : vault.disable())
                   .catch((e) => setSectionError(formatUserError(e)));
@@ -200,22 +255,37 @@ function SecuritySection() {
           <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 5 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: 'oklch(0.75 0.12 25)' }}>Erase everything</div>
             <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
-              Deletes all worlds, characters, settings and keys from this device. Export a backup first — this cannot
-              be undone.
+              Deletes all worlds, characters, settings and keys from this device. A cloud account, if you have one,
+              is left in place. Export a backup first — this cannot be undone.
             </div>
           </div>
           <button className="btn-quiet" style={{ color: 'oklch(0.75 0.12 25)', borderColor: 'oklch(0.4 0.1 25)' }} onClick={() => {
-            if (!confirm('Delete ALL data on this device? This cannot be undone.')) return;
-            if (!confirm('Last chance — every world, season and key will be erased. Continue?')) return;
+            if (!confirm('Delete ALL data on this device? This cannot be undone. Cloud copies are kept.')) return;
+            if (!confirm('Last chance — every world, season and key on this device will be erased. Continue?')) return;
             void wipeAllData().catch((e) => setSectionError(formatUserError(e)));
-          }}>Erase all data</button>
+          }}>Erase this device</button>
         </div>
+        {signedIn && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
+            <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 5 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 600, color: 'oklch(0.75 0.12 25)' }}>Delete cloud account</div>
+              <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
+                Deletes the signed-in account, synced stories, encrypted secrets, and credits, then erases this device.
+              </div>
+            </div>
+            <button className="btn-quiet" style={{ color: 'oklch(0.75 0.12 25)', borderColor: 'oklch(0.4 0.1 25)' }} onClick={() => {
+              if (!confirm('Delete the cloud account and erase this device? This cannot be undone.')) return;
+              if (!confirm('Last chance — export a backup first if you need the stories. Continue?')) return;
+              void deleteCloudAccount().catch((e) => setSectionError(formatUserError(e)));
+            }}>Delete account</button>
+          </div>
+        )}
       </div>
 
       <PassphraseDialog
         open={dialog === 'enable'}
         title="Set a passphrase"
-        description="Locks the app UI and encrypts your API keys on this device. Story text in IndexedDB is not encrypted. Pick a passphrase you won't lose — it can't be recovered without wiping the keys."
+        description="Locks the app and encrypts stories and API keys on this device (AES-256-GCM). Use at least 12 characters. The passphrase cannot be recovered."
         mode="set"
         submitLabel="Encrypt & lock in"
         busy={busy}
@@ -256,7 +326,7 @@ function SecuritySection() {
       <PassphraseDialog
         open={dialog === 'change-new'}
         title="New passphrase"
-        description="Your keys will be re-encrypted with the new passphrase."
+        description="Keys and the story key are re-wrapped with the new passphrase. Worlds stay sealed and are not rewritten. Use at least 12 characters."
         mode="set"
         submitLabel="Change passphrase"
         busy={busy}
@@ -292,9 +362,9 @@ function Section({ title, note, children }: { title: string; note?: string; chil
 
 function AddProvider({ onDone }: { onDone: () => void }) {
   const s = useSettings();
-  const [preset, setPreset] = useState<ProviderPreset>(PROVIDER_PRESETS[0]);
+  const [preset, setPreset] = useState<ProviderPreset>(BYOK_PRESETS[0]);
   const [key, setKey] = useState('');
-  const [baseUrl, setBaseUrl] = useState(PROVIDER_PRESETS[0].baseUrl);
+  const [baseUrl, setBaseUrl] = useState(BYOK_PRESETS[0].baseUrl);
 
   const pick = (p: ProviderPreset) => { setPreset(p); setBaseUrl(p.baseUrl); };
   const add = () => {
@@ -309,7 +379,7 @@ function AddProvider({ onDone }: { onDone: () => void }) {
         <button className="btn-quiet" onClick={onDone}>cancel</button>
       </div>
       <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap' }}>
-        {PROVIDER_PRESETS.map((p) => (
+        {BYOK_PRESETS.map((p) => (
           <Chip key={p.id} active={preset.id === p.id} onClick={() => pick(p)}>{p.label}</Chip>
         ))}
       </div>
@@ -376,8 +446,12 @@ function ProviderCard({ config }: { config: ProviderConfig }) {
         </div>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))', gap: 12 }}>
-        <Field label="API key">
-          {editKey ? (
+        <Field label={isHostedProvider(config) ? 'Billing' : 'API key'}>
+          {isHostedProvider(config) ? (
+            <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.7)', padding: '8px 0' }}>
+              No API key. Calls are billed to your Small Worlds credits.
+            </div>
+          ) : editKey ? (
             <input
               type="password" defaultValue={config.apiKey} autoFocus
               onBlur={(e) => { s.updateProvider(config.id, { apiKey: e.target.value.trim() }); setEditKey(false); }}

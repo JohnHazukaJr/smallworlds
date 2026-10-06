@@ -1,21 +1,37 @@
 import { getSupabase, isCloudConfigured } from '../cloud/supabase';
 import type { ProviderConfig } from '../types';
+import { AI_PROXY_HOSTS, exactProxyHost } from './proxyHosts';
 
-/** Hosts that often block browser CORS — relay when cloud is configured. */
-export const AI_PROXY_HOSTS = ['api.z.ai', 'open.bigmodel.cn'];
+export { AI_PROXY_HOSTS };
+
+/** Supabase function that meters hosted Small Worlds models. */
+export const HOSTED_FN_MARK = '/functions/v1/hosted-ai';
+
+export function isHostedFunctionUrl(url: string): boolean {
+  return url.includes(HOSTED_FN_MARK);
+}
+
+/** Strip /chat/completions or /images/generations so the function root receives the body. */
+export function hostedFunctionRoot(url: string): string {
+  const u = new URL(url);
+  const idx = u.pathname.indexOf(HOSTED_FN_MARK);
+  if (idx < 0) return url;
+  u.pathname = u.pathname.slice(0, idx + HOSTED_FN_MARK.length);
+  u.search = '';
+  u.hash = '';
+  return u.toString();
+}
+
+export function hostedOp(url: string): 'image' | 'chat' {
+  return url.includes('/images/') ? 'image' : 'chat';
+}
 
 export function isZaiProvider(provider: ProviderConfig): boolean {
-  const u = provider.baseUrl.toLowerCase();
-  return u.includes('api.z.ai') || u.includes('open.bigmodel.cn');
+  return exactProxyHost(provider.baseUrl);
 }
 
 export function hostAllowlisted(url: string): boolean {
-  try {
-    const host = new URL(url).hostname.toLowerCase();
-    return AI_PROXY_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
-  } catch {
-    return false;
-  }
+  return exactProxyHost(url);
 }
 
 function supabaseFnUrl(): string | null {
@@ -29,6 +45,7 @@ function supabaseFnUrl(): string | null {
  * Falls back to a direct browser call if cloud is off or the function is missing.
  */
 export async function providerFetch(url: string, init: RequestInit): Promise<Response> {
+  if (isHostedFunctionUrl(url)) return hostedFetch(url, init);
   if (!isCloudConfigured() || !hostAllowlisted(url)) {
     return fetch(url, init);
   }
@@ -74,4 +91,31 @@ export async function providerFetch(url: string, init: RequestInit): Promise<Res
   } catch {
     return fetch(url, init);
   }
+}
+
+/** Session JWT only. The owner key never reaches the browser. */
+async function hostedFetch(url: string, init: RequestInit): Promise<Response> {
+  const sb = getSupabase();
+  const anon = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+  let token = '';
+  try {
+    token = sb ? (await sb.auth.getSession()).data.session?.access_token ?? '' : '';
+  } catch { /* unsigned */ }
+  if (!token) {
+    return new Response(JSON.stringify({ error: { message: 'Sign in required.' } }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+  return fetch(hostedFunctionRoot(url), {
+    method: 'POST',
+    signal: init.signal,
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+      apikey: anon ?? '',
+      'x-sw-op': hostedOp(url)
+    },
+    body: typeof init.body === 'string' ? init.body : undefined
+  });
 }

@@ -2,6 +2,10 @@ import Dexie, { type EntityTable } from 'dexie';
 import { formatUserError, logAppError } from './errors';
 import { useApp } from './store/app';
 import { decryptString, deriveKey, encryptString, randomSalt } from './security/crypto';
+import { getStoryKey, setStoryKey, storySealSuspended } from './security/storyKey';
+import {
+  SEALED_IMPORT_MESSAGE, STORY_TABLES, installStorySeal, isSealedRecord, openRecord, sealPayload, sealRecord
+} from './security/storySeal';
 import { isQuotaError, markStoragePressure } from './storage/quota';
 import type {
   World, Season, Episode, Turn, Character, Location, ContinuityFact, OpenThread, SeasonWrap,
@@ -62,6 +66,34 @@ db.version(4).stores({
   calendarEvents: 'id, worldId, seasonId, storyDay'
 });
 
+installStorySeal(db);
+
+const storyTableHandles = STORY_TABLES.map((name) => db.table(name));
+
+/** Read every story row and write it back so the active story key seals plaintext. */
+export async function resealStoryTables(): Promise<void> {
+  if (!getStoryKey()) return;
+  await db.transaction('rw', storyTableHandles, async () => {
+    for (const name of STORY_TABLES) {
+      const rows = await db.table(name).toArray();
+      if (rows.length) await db.table(name).bulkPut(rows);
+    }
+  });
+}
+
+/** Snapshot decrypted rows, drop the story key, then write plaintext back. */
+export async function unsealStoryTables(): Promise<void> {
+  const snap: Record<string, unknown[]> = {};
+  for (const name of STORY_TABLES) snap[name] = await db.table(name).toArray();
+  setStoryKey(null);
+  await db.transaction('rw', storyTableHandles, async () => {
+    for (const name of STORY_TABLES) {
+      const rows = snap[name];
+      if (rows.length) await db.table(name).bulkPut(rows);
+    }
+  });
+}
+
 export const uid = () => crypto.randomUUID();
 
 /** Run a Dexie write and flag storage pressure on QuotaExceededError. */
@@ -103,18 +135,22 @@ export interface TombstoneInput {
 export async function recordTombstones(items: TombstoneInput[]): Promise<void> {
   if (items.length === 0) return;
   const now = Date.now();
-  await guardStorage(() => db.tombstones.bulkPut(items.map((item) => ({
-    key: `${item.table}:${item.id}`,
-    table: item.table,
-    id: item.id,
-    worldId: item.worldId,
-    seasonId: item.seasonId,
-    episodeId: item.episodeId,
-    deletedAt: now,
-    payload: (item.payload && typeof item.payload === 'object'
+  const rows = await Promise.all(items.map(async (item) => {
+    const payload = item.payload && typeof item.payload === 'object'
       ? item.payload as Record<string, unknown>
-      : { id: item.id })
-  }))));
+      : { id: item.id };
+    return {
+      key: `${item.table}:${item.id}`,
+      table: item.table,
+      id: item.id,
+      worldId: item.worldId,
+      seasonId: item.seasonId,
+      episodeId: item.episodeId,
+      deletedAt: now,
+      payload: await sealPayload(item.table, payload)
+    };
+  }));
+  await guardStorage(() => db.tombstones.bulkPut(rows));
 }
 
 export async function clearTombstones(keys: string[]): Promise<void> {
@@ -154,29 +190,64 @@ export async function exportWorld(worldId: string): Promise<WorldExport> {
     db.wraps.where('worldId').equals(worldId).toArray(),
     db.calendarEvents.where('worldId').equals(worldId).toArray()
   ]);
+  const key = getStoryKey();
+  const seal = async <T>(row: T): Promise<T> => (
+    key ? await sealRecord(row as Record<string, unknown>, key) as T : row
+  );
   return {
     format: 'small-worlds-world', version: 1, exportedAt: Date.now(),
-    world, seasons, episodes, turns, characters, locations, continuity, threads, wraps, calendarEvents
+    world: await seal(world),
+    seasons: await Promise.all(seasons.map(seal)),
+    episodes: await Promise.all(episodes.map(seal)),
+    turns: await Promise.all(turns.map(seal)),
+    characters: await Promise.all(characters.map(seal)),
+    locations: await Promise.all(locations.map(seal)),
+    continuity: await Promise.all(continuity.map(seal)),
+    threads: await Promise.all(threads.map(seal)),
+    wraps: await Promise.all(wraps.map(seal)),
+    calendarEvents: await Promise.all(calendarEvents.map(seal))
   };
+}
+
+async function materializeRow<T>(row: T): Promise<T> {
+  if (storySealSuspended()) return row;
+  if (!row || typeof row !== 'object') return row;
+  if (!isSealedRecord(row)) return row;
+  const key = getStoryKey();
+  if (!key) throw new Error(SEALED_IMPORT_MESSAGE);
+  return openRecord(row, key) as Promise<T>;
 }
 
 export async function importWorld(data: WorldExport): Promise<string> {
   if (data.format !== 'small-worlds-world') throw new Error('Not a Small Worlds export file');
+  if (isSealedRecord(data.world) && !getStoryKey() && !storySealSuspended()) {
+    throw new Error(SEALED_IMPORT_MESSAGE);
+  }
+  const world = await materializeRow(data.world);
+  const seasons = await Promise.all(data.seasons.map(materializeRow));
+  const episodes = await Promise.all(data.episodes.map(materializeRow));
+  const turns = await Promise.all(data.turns.map(materializeRow));
+  const characters = await Promise.all(data.characters.map(materializeRow));
+  const locations = await Promise.all((data.locations ?? []).map(materializeRow));
+  const continuity = await Promise.all(data.continuity.map(materializeRow));
+  const threads = await Promise.all(data.threads.map(materializeRow));
+  const wraps = await Promise.all(data.wraps.map(materializeRow));
+  const calendarEvents = await Promise.all((data.calendarEvents ?? []).map(materializeRow));
   await guardStorage(() => db.transaction('rw',
     [db.worlds, db.seasons, db.episodes, db.turns, db.characters, db.locations, db.continuity, db.threads, db.wraps, db.calendarEvents],
     async () => {
-      await db.worlds.put(data.world);
-      await db.seasons.bulkPut(data.seasons);
-      await db.episodes.bulkPut(data.episodes);
-      await db.turns.bulkPut(data.turns);
-      await db.characters.bulkPut(data.characters);
-      await db.locations.bulkPut(data.locations ?? []);
-      await db.continuity.bulkPut(data.continuity);
-      await db.threads.bulkPut(data.threads);
-      await db.wraps.bulkPut(data.wraps);
-      if (data.calendarEvents?.length) await db.calendarEvents.bulkPut(data.calendarEvents);
+      await db.worlds.put(world);
+      await db.seasons.bulkPut(seasons);
+      await db.episodes.bulkPut(episodes);
+      await db.turns.bulkPut(turns);
+      await db.characters.bulkPut(characters);
+      await db.locations.bulkPut(locations);
+      await db.continuity.bulkPut(continuity);
+      await db.threads.bulkPut(threads);
+      await db.wraps.bulkPut(wraps);
+      if (calendarEvents.length) await db.calendarEvents.bulkPut(calendarEvents);
     }));
-  return data.world.id;
+  return world.id;
 }
 
 export interface BackupExport {
@@ -311,7 +382,15 @@ export async function deleteWorld(
           for (const t of threads) add('threads', t.id, t, { seasonId: t.seasonId });
           for (const w of wraps) add('wraps', w.id, w, { seasonId: w.seasonId });
           for (const ev of calendarEvents) add('calendarEvents', ev.id, ev, { seasonId: ev.seasonId });
-          if (tombs.length > 0) await db.tombstones.bulkPut(tombs);
+          if (tombs.length > 0) {
+            const key = getStoryKey();
+            if (key) {
+              for (const t of tombs) {
+                t.payload = await Dexie.waitFor(sealRecord(t.payload, key));
+              }
+            }
+            await db.tombstones.bulkPut(tombs);
+          }
         }
 
         await db.worlds.delete(worldId);

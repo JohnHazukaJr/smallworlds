@@ -1,4 +1,4 @@
-Copyright (c) 2026 [Your Name]. All rights reserved.
+Copyright (c) 2026 Small Worlds. All rights reserved.
 
 PROPRIETARY LICENSE
 
@@ -25,8 +25,8 @@ THIRD-PARTY COMPONENTS
 The Software depends on third-party open-source packages (including React,
 Dexie, Zustand, and Vite) that are licensed separately under their own terms
 (MIT and similar). Those licenses apply only to those components, not to the
-Software itself. Fonts loaded from Google Fonts are licensed under the SIL
-Open Font License.
+Software itself. Bundled Spectral and IBM Plex fonts are licensed under the
+SIL Open Font License.
 
 USER CONTENT
 

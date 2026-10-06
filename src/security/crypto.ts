@@ -29,6 +29,18 @@ export function randomSalt(): string {
   return toB64(crypto.getRandomValues(new Uint8Array(16)));
 }
 
+/** Random AES-256 key. `rawB64` is what the vault wraps; the CryptoKey stays in memory. */
+export async function generateAesKey(): Promise<{ key: CryptoKey; rawB64: string }> {
+  const raw = crypto.getRandomValues(new Uint8Array(32));
+  const key = await crypto.subtle.importKey('raw', raw as BufferSource, 'AES-GCM', false, ['encrypt', 'decrypt']);
+  return { key, rawB64: toB64(raw) };
+}
+
+export async function importAesKey(rawB64: string): Promise<CryptoKey> {
+  const raw = fromB64(rawB64);
+  return crypto.subtle.importKey('raw', raw as BufferSource, 'AES-GCM', false, ['encrypt', 'decrypt']);
+}
+
 export async function deriveKey(passphrase: string, saltB64: string): Promise<CryptoKey> {
   const material = await crypto.subtle.importKey('raw', encoder.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
   return crypto.subtle.deriveKey(

@@ -10,7 +10,9 @@ import {
   clearTombstones, db, deleteWorld, type SyncTableName, type Tombstone
 } from '../db';
 import { formatUserError } from '../errors';
-import { decryptString, deriveKey, encryptString, randomSalt } from '../security/crypto';
+import { decryptString, deriveKey, encryptString, randomSalt, type CipherPayload } from '../security/crypto';
+import { getStoryKey } from '../security/storyKey';
+import { isSealedRecord, openRecord, readDiskRows } from '../security/storySeal';
 import { useSettings } from '../store/settings';
 import type {
   CalendarEvent, Character, ContinuityFact, Episode, Location, OpenThread, Season, SeasonWrap, Turn, World
@@ -76,7 +78,8 @@ async function pullTable<T extends { id: string }>(
   if (error) throw error;
   let n = 0;
   for (const row of (data ?? []) as SyncRow[]) {
-    await apply(row.payload as T, !!row.deleted_at, rowUpdatedMs(row.updated_at));
+    const payload = await inboundPayload(row.payload as T);
+    await apply(payload, !!row.deleted_at, rowUpdatedMs(row.updated_at));
     n++;
   }
   return n;
@@ -136,6 +139,25 @@ async function lwwPut<T extends { id: string; updatedAt?: number; createdAt?: nu
   if (!local || entityUpdatedAt(local) < remoteMs) await table.put(remote);
 }
 
+/** Confirm a sealed cloud row opens with this device's story key, then store it still sealed. */
+async function inboundPayload<T>(payload: T): Promise<T> {
+  if (!isSealedRecord(payload)) return payload;
+  const key = getStoryKey();
+  if (!key) throw new Error('This cloud copy is encrypted. Unlock the app lock, then sync again.');
+  try {
+    await openRecord(payload, key);
+  } catch {
+    throw new Error('Could not decrypt a synced world. Unlock with the same passphrase that sealed it.');
+  }
+  return payload;
+}
+
+async function diskRows<T>(table: SyncTableName): Promise<T[]> {
+  await db.open();
+  const idb = db.backendDB();
+  return readDiskRows(idb, table) as Promise<T[]>;
+}
+
 function tombstonePushRow(t: Tombstone) {
   return {
     id: t.id,
@@ -191,16 +213,16 @@ export async function syncNow(): Promise<{ pulled: number; pushed: number }> {
 
     // Push full local snapshot (LWW on server via upsert; remote older rows lose on next pull).
     const [worlds, seasons, episodes, turns, characters, locations, continuity, threads, wraps, calendarEvents] = await Promise.all([
-      db.worlds.toArray(),
-      db.seasons.toArray(),
-      db.episodes.toArray(),
-      db.turns.toArray(),
-      db.characters.toArray(),
-      db.locations.toArray(),
-      db.continuity.toArray(),
-      db.threads.toArray(),
-      db.wraps.toArray(),
-      db.calendarEvents.toArray()
+      diskRows<World>('worlds'),
+      diskRows<Season>('seasons'),
+      diskRows<Episode>('episodes'),
+      diskRows<Turn>('turns'),
+      diskRows<Character>('characters'),
+      diskRows<Location>('locations'),
+      diskRows<ContinuityFact>('continuity'),
+      diskRows<OpenThread>('threads'),
+      diskRows<SeasonWrap>('wraps'),
+      diskRows<CalendarEvent>('calendarEvents')
     ]);
 
     await pushRows('worlds', userId, worlds.map((w) => ({
@@ -267,7 +289,9 @@ export async function pushEncryptedSecrets(secretsPassphrase: string): Promise<v
   }
   const salt = randomSalt();
   const key = await deriveKey(secretsPassphrase, salt);
-  const { iv, ct } = await encryptString(key, JSON.stringify(keyMap));
+  const { useVault } = await import('../security/vault');
+  const story = useVault.getState().exportVaultBlob()?.story ?? null;
+  const { iv, ct } = await encryptString(key, JSON.stringify({ v: 2, keys: keyMap, story }));
   const { error } = await sb.from('encrypted_secrets').upsert({
     user_id: session.user.id,
     salt, iv, ct,
@@ -288,18 +312,28 @@ export async function pullEncryptedSecrets(secretsPassphrase: string): Promise<n
   if (!data) throw new Error('No encrypted keys found for this account.');
 
   const key = await deriveKey(secretsPassphrase, data.salt);
-  let keyMap: Record<string, string>;
+  let parsed: unknown;
   try {
-    keyMap = JSON.parse(await decryptString(key, { iv: data.iv, ct: data.ct }));
+    parsed = JSON.parse(await decryptString(key, { iv: data.iv, ct: data.ct }));
   } catch {
     throw new Error('Wrong secrets passphrase (or the ciphertext is corrupted).');
   }
+  const { keys: keyMap, story } = splitSecrets(parsed);
 
   useSettings.setState((s) => ({
     providers: s.providers.map((p) => ({ ...p, apiKey: keyMap[p.id] ?? p.apiKey }))
   }));
   // Also add any providers that exist only in the cloud map? Keep shell providers local.
   const { useVault } = await import('../security/vault');
+  if (story) await useVault.getState().adoptStoryWrap(story);
   await useVault.getState().persistKeys();
   return Object.keys(keyMap).length;
+}
+
+function splitSecrets(parsed: unknown): { keys: Record<string, string>; story: CipherPayload | null } {
+  if (parsed && typeof parsed === 'object' && (parsed as { v?: unknown }).v === 2) {
+    const env = parsed as { keys?: Record<string, string>; story?: CipherPayload | null };
+    return { keys: env.keys ?? {}, story: env.story ?? null };
+  }
+  return { keys: (parsed ?? {}) as Record<string, string>, story: null };
 }

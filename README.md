@@ -31,7 +31,9 @@ The app runs on your own API keys. Open **Settings → Your AI providers → add
   which writes your stories best. GLM 5.x slugs are `z-ai/glm-5.2` and `z-ai/glm-5.3`.
 - **Z.ai**: direct GLM (`glm-5.2`, `glm-5.3`, `glm-5.3-flash`, `glm-image`). The browser may hit CORS —
   use OpenRouter’s `z-ai/glm-5.2`, or sign in so the optional cloud relay can reach `api.z.ai`.
-  China BigModel is Custom: `https://open.bigmodel.cn/api/paas/v4`.
+  The relay requires a signed-in user. China BigModel is Custom: `https://open.bigmodel.cn/api/paas/v4`.
+- **Small Worlds hosted** (optional): Settings → Small Worlds hosted, after you sign in. No API key.
+  Credits are metered on the server. Bring-your-own-key stays free.
 - **Anthropic / OpenAI / Gemini / Moonshot / Together / DeepSeek / xAI** direct keys also work.
 - **Local models**: point the Ollama or Custom endpoint preset at your local server
   (for Ollama, set `OLLAMA_ORIGINS=*` so the browser may call it).
@@ -73,10 +75,32 @@ Set three defaults in Settings (each can be overridden per world):
 - **Device backup** (Profile → Back up this device): worlds + settings + encrypted key vault.
   Restore on another browser the same way. World-only export/import still lives on the Worlds screen.
 - **Optional cloud sync** (Profile): set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` (see
-  `.env.example`), run `supabase/migrations/001_initial.sql`, then sign in with phone, email, or
-  Google. Sync is revisioned pull/push with RLS; API keys sync only as E2E ciphertext via a separate
-  secrets passphrase. Deploy `supabase/functions/ai-proxy` if you want the browser to reach Z.ai /
-  BigModel through an allowlisted relay (forwards your Bearer token; no hosted inference).
+  `.env.example`), run `supabase/migrations/001_initial.sql` and `002_calendar_events.sql`, then sign
+  in with phone, email, or Google. Sync is revisioned pull/push with RLS; API keys sync only as E2E
+  ciphertext via a separate secrets passphrase. Deploy `supabase/functions/ai-proxy` if you want the
+  browser to reach Z.ai / BigModel through an allowlisted relay (signed-in users only; forwards the
+  caller’s key; no hosted inference).
+- **Erase this device** (Settings) wipes local data only. **Delete cloud account** (Profile or
+  Settings, when signed in) deletes the Supabase user — synced rows and secrets cascade — and then
+  wipes this device.
+
+## Hosted credits
+
+Optional. BYOK and local play stay free. To sell hosted models:
+
+1. Run `supabase/migrations/003_billing.sql`.
+2. In Stripe, create a monthly price and a one-time pack price.
+3. Set function secrets (not `VITE_` vars): `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`,
+   `STRIPE_PRICE_MONTHLY`, `STRIPE_PRICE_PACK`, `HOSTED_CHAT_BASE_URL`, `HOSTED_CHAT_API_KEY`,
+   `HOSTED_PROSE_MODEL`, `HOSTED_UTILITY_MODEL`, `HOSTED_IMAGE_MODEL`. `HOSTED_IMAGE_BASE_URL` is
+   optional.
+4. Deploy `ensure-billing`, `create-checkout-session`, `create-portal-session`, `stripe-webhook`,
+   `hosted-ai`, and `delete-account`. `supabase/config.toml` turns JWT verification off for the
+   webhook only; the function checks the Stripe signature. Point the Stripe webhook at
+   `.../functions/v1/stripe-webhook` for `checkout.session.completed`, `invoice.paid`,
+   `customer.subscription.updated`, and `customer.subscription.deleted`.
+5. Credit amounts live in `src/billing/plans.ts` and `supabase/functions/_shared/billing.ts` (keep
+   them identical). New accounts get a one-time starter grant. The client cannot set the price.
 
 ## Security
 
@@ -91,8 +115,11 @@ Local-first by default. Optional Supabase auth is for sync — not required to p
 - **Optional TOTP MFA** on the account (Supabase free-tier basic MFA). Phone SMS OTP needs Twilio.
 - **Content-Security-Policy.** Production builds lock script execution to the app's own bundle.
   `connect-src` stays open on purpose — you can point the app at any AI endpoint, including local
-  Ollama over http.
-- **Erase all data** (Settings → Security) wipes IndexedDB, settings, keys, vault, and sync meta.
+  Ollama over http. Fonts are bundled; the app does not call Google Fonts.
+- **Erase this device** (Settings → Security) wipes IndexedDB, settings, keys, vault, and sync meta
+  on this browser. It does not delete a cloud account.
+- **Delete cloud account** removes the Supabase user (synced stories, encrypted secrets, billing)
+  and then erases this device.
 - **What this doesn't cover:** story text in IndexedDB is not encrypted at rest (protect it with
   OS/device encryption). Prompts go to whichever AI provider you configured.
 

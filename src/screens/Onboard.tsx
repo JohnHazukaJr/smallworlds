@@ -14,6 +14,7 @@ import type { Character, Episode, Location, Season, World, WorldAISettings } fro
 import { Bar, Chip, ErrorNote, Field, Spinner, Toggle, editorsStacked, useViewport } from '../ui/bits';
 import { fileToPortraitImage } from '../ui/image';
 import { avatarStyle, STRIPE, ACCENT } from '../ui/theme';
+import { LegalLinks } from './Legal';
 import {
   applyStanceToAi, characterPortraits, createWorld, DEFAULT_AI, emptyCharacter, emptyLocation,
   evaluateWorldWriteReady, MAX_CHARACTER_PORTRAITS, portraitsPatch, shapeTagFor,
@@ -1420,6 +1421,7 @@ export function Onboard() {
           <button className="btn-quiet" disabled={!!busy} onClick={() => void discardAndLeave()}>
             {worldId ? 'Skip — discard world' : 'Skip — back to worlds'}
           </button>
+          <LegalLinks />
         </div>
       </div>
 

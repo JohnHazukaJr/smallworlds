@@ -150,6 +150,26 @@ export function classifyError(e: unknown): AppError {
     });
   }
 
+  if (status === 402 || /not enough small worlds credits/i.test(msg)) {
+    return new AppError({
+      code: 'provider',
+      userMessage: 'Not enough Small Worlds credits. Subscribe or buy a pack in Profile.',
+      detail: msg,
+      status,
+      cause: e
+    });
+  }
+
+  if ((status === 401 || status === 403) && /sign in/i.test(msg)) {
+    return new AppError({
+      code: 'auth',
+      userMessage: 'Sign in to use Small Worlds hosted models.',
+      detail: msg,
+      status,
+      cause: e
+    });
+  }
+
   if (status === 401 || status === 403) {
     return new AppError({
       code: 'auth',

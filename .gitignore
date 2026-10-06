@@ -2,3 +2,7 @@ node_modules/
 dist/
 dev-dist/
 *.local
+.playwright-mcp/
+.tmp-visual/
+qa-*.png
+*.tsbuildinfo

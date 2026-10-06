@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Rail, TabBar } from './components/Nav';
 import { LockScreen } from './components/LockScreen';
 import { useAuth } from './cloud/authStore';
+import { writesInFlight } from './security/writeGate';
 import { useVault } from './security/vault';
 import { hasStoragePressure, STORAGE_PRESSURE_EVENT } from './storage/quota';
 import { useApp } from './store/app';
@@ -14,6 +15,7 @@ import { Sequel } from './screens/Sequel';
 import { Profile } from './screens/Profile';
 import { Settings } from './screens/Settings';
 import { Onboard } from './screens/Onboard';
+import { LegalOverlay } from './screens/Legal';
 
 export default function App() {
   const screen = useApp((s) => s.screen);
@@ -23,6 +25,7 @@ export default function App() {
   const { band, keyboardOpen } = useViewport();
   const phone = phoneChrome(band);
   const tabsVisible = phone && !keyboardOpen;
+  const vaultEnabled = useVault((v) => v.enabled);
   const vaultLocked = useVault((v) => v.enabled && v.locked);
   const readMode = screen === 'story' && layout === 'read' && !!currentWorldId;
   const initAuth = useAuth((s) => s.init);
@@ -31,6 +34,40 @@ export default function App() {
   useEffect(() => {
     void initAuth();
   }, [initAuth]);
+
+  useEffect(() => {
+    if (!vaultEnabled || vaultLocked) return;
+    const IDLE_MS = 15 * 60 * 1000;
+    const HIDDEN_MS = 5 * 60 * 1000;
+    let idle = 0;
+    let hidden = 0;
+    const lock = () => {
+      if (writesInFlight()) {
+        idle = window.setTimeout(lock, 30_000);
+        return;
+      }
+      void useVault.getState().lock();
+    };
+    const bump = () => {
+      window.clearTimeout(idle);
+      idle = window.setTimeout(lock, IDLE_MS);
+    };
+    const onVis = () => {
+      window.clearTimeout(hidden);
+      if (document.visibilityState === 'hidden') hidden = window.setTimeout(lock, HIDDEN_MS);
+      else bump();
+    };
+    const events = ['pointerdown', 'keydown', 'touchstart', 'input'] as const;
+    for (const event of events) window.addEventListener(event, bump, { passive: true });
+    document.addEventListener('visibilitychange', onVis);
+    bump();
+    return () => {
+      window.clearTimeout(idle);
+      window.clearTimeout(hidden);
+      for (const event of events) window.removeEventListener(event, bump);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [vaultEnabled, vaultLocked]);
 
   useEffect(() => {
     const refresh = () => setStoragePressure(hasStoragePressure());
@@ -95,6 +132,7 @@ export default function App() {
       </div>
 
       {tabsVisible && <TabBar />}
+      <LegalOverlay />
     </div>
   );
 }
