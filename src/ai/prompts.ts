@@ -1451,6 +1451,18 @@ export function chooseHistoryTail(model: string, agent: HistoryTailAgent): Histo
   return { charBudget: HISTORY_TAIL_CHAR_BUDGET, maxTurns: HISTORY_TAIL_MAX_TURNS };
 }
 
+/** Overflow retry keeps the latest exchange and drops the older chapter. */
+export const OVERFLOW_HISTORY_TAIL: HistoryTail = { charBudget: 4_000, maxTurns: 4 };
+
+export function historyTailFor(model: string, agent: HistoryTailAgent, pack?: PromptPack): HistoryTail {
+  const tail = chooseHistoryTail(model, agent);
+  if (pack !== 'tight') return tail;
+  return {
+    charBudget: Math.min(tail.charBudget, OVERFLOW_HISTORY_TAIL.charBudget),
+    maxTurns: Math.min(tail.maxTurns, OVERFLOW_HISTORY_TAIL.maxTurns)
+  };
+}
+
 /** Turns the narrator tail will drop — used to decide when to file a running summary. */
 export function omittedTurnsForNarratorTail(turns: Turn[], model: string): Turn[] {
   const tail = chooseHistoryTail(model, 'narrator');

@@ -1,5 +1,5 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
 import {
   analyzeEpisode, commitEpisodeWrap, commitSoftEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, draftColdOpenNarration, imageModelFor,
   clearEpisodeRunningSummary, regenerateBeat, rollbackTurnSnapshot,
@@ -7,8 +7,6 @@ import {
   WriteAbortedError, type EpisodeWrapDraft, type StreamMeta, type SeedCalendarEventDraft
 } from '../ai/engine';
 import {
-  applyDeliveryTone,
-  isDeliveryTone,
   parseDeliveryTone,
   type DeliveryTone
 } from '../ai/deliveryTone';
@@ -23,10 +21,9 @@ import {
 import { collectSceneImageRefs, generateSceneImage, sceneHasPortraitRefs } from '../ai/image';
 import {
   episodeContextPressure, episodeHistoryChars, HISTORY_CHAR_BUDGET,
-  pendingBeatLabel, preferBucketsForEpisodes, resolveSpeakerName, selectDirectorFacts, selectDirectorThreads,
+  preferBucketsForEpisodes, resolveSpeakerName, selectDirectorFacts, selectDirectorThreads,
   type DirectorBeat
 } from '../ai/prompts';
-import { DeliveryPicker } from '../components/DeliveryPicker';
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
 import { db, guardStorage, recordTombstones, safeWrite, uid } from '../db';
 import {
@@ -42,10 +39,10 @@ import { useSettings } from '../store/settings';
 import type {
   CalendarEvent, CalendarEventKind, CalendarEventScale, CalendarEventVisibility,
   Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, EpisodeWrap, EpisodeWrapBeat,
-  Location, OpenThread, PlotTarget, PlotTargetStatus, Season, Turn, TurnLength, World
+  Location, OpenThread, PlotTarget, PlotTargetStatus, Season, Turn, TurnLength, World, ActionWeight
 } from '../types';
 import {
-  defaultVisibilityForKind, isPlayerAgencyMode, resolveComposeMode, TURN_LENGTH_LABELS,
+  defaultVisibilityForKind, PAGE_LENGTH_LABELS,
   worldCalendarEventPrefs, CALENDAR_EVENT_CAP
 } from '../types';
 import { AppError, classifyError, formatUserError } from '../errors';
@@ -56,7 +53,7 @@ import {
 import { Face } from '../ui/Face';
 import { fileToSceneImage } from '../ui/image';
 import { attributionRun, isDialogueBlock, lastSpokenBy } from '../ui/attribution';
-import { abortWriteNotice, unfinishedWriteNotice, NOTICE_ADD_CAST, NOTICE_ADD_MODEL, noticeNavAction } from '../ui/writeNotices';
+import { abortWriteNotice, unfinishedWriteNotice, NOTICE_ADD_MODEL, noticeNavAction } from '../ui/writeNotices';
 import {
   SCROLL_BACKDROP_LABEL, SCROLL_BACKDROPS, resolveScrollBackdrop
 } from '../ui/scrollBackdrop';
@@ -252,7 +249,7 @@ function SceneCastStrip({
         fontSize: empty ? 13.5 : 12,
         fontStyle: 'italic',
         lineHeight: 1.4,
-        color: 'rgba(230,233,235,0.38)'
+        color: 'var(--ink-muted)'
       }}>
         {names.join(' · ')}
       </div>
@@ -261,6 +258,16 @@ function SceneCastStrip({
 }
 
 function parseTurn(turn: Turn, characters: Character[], guests: EpisodeGuest[] = []): ProseBlock[] {
+  if (turn.role === 'user' && turn.asCharacterId) {
+    const who = characters.find((c) => c.id === turn.asCharacterId);
+    return [{
+      text: turn.text,
+      speaker: who?.name ?? 'they',
+      hue: who?.hue ?? 200,
+      portrait: who ? characterPortraits(who)[0] : null,
+      kind: 'action'
+    }];
+  }
   if (turn.role === 'user') {
     const player = characters.find((c) => c.isPlayer);
     if (turn.mode === 'speak' || turn.mode === 'play') {
@@ -378,7 +385,7 @@ function SpeakParagraph({
           );
         }
         return (
-          <span key={i} style={{ color: 'rgba(236,234,230,0.55)', fontStyle: 'normal' }}>
+          <span key={i} style={{ color: 'var(--ink-muted)', fontStyle: 'normal' }}>
             {seg.text}{' '}
           </span>
         );
@@ -421,7 +428,7 @@ function SpeakBody({
 
 /** Inline attribution for prose layout — the speaker's own hue does the identifying. */
 function SpeakerLead({ b }: { b: ProseBlock }) {
-  const ink = b.hue !== undefined ? speakerInk(b.hue) : 'rgba(236,234,230,0.8)';
+  const ink = b.hue !== undefined ? speakerInk(b.hue) : 'var(--ink-heading)';
   return (
     <span style={{
       color: ink,
@@ -524,7 +531,7 @@ function ProseBlockView({
               lineHeight: 1.7,
               margin: 0,
               fontStyle: 'italic',
-              color: 'rgba(230,233,235,0.5)',
+              color: 'var(--ink-muted)',
               textWrap: 'pretty'
             }}
           >
@@ -603,8 +610,8 @@ function ProseBlockView({
             {b.deliveryTone && (
               <span style={{
                 letterSpacing: '0.08em', fontSize: 9, fontWeight: 500,
-                color: 'rgba(236,234,230,0.55)',
-                border: '1px solid rgba(255,255,255,0.14)',
+                color: 'var(--ink-muted)',
+                border: '1px solid var(--rule)',
                 borderRadius: 6, padding: '2px 7px'
               }}>
                 {b.deliveryTone}
@@ -615,7 +622,7 @@ function ProseBlockView({
         {b.kind === 'direction' ? (
           <p style={{
             fontFamily: "'IBM Plex Mono', monospace", fontSize: 11.5, lineHeight: 1.7, margin: 0,
-            color: 'rgba(236,234,230,0.45)', borderLeft: '1px solid rgba(255,255,255,0.14)', paddingLeft: 12
+            color: 'var(--ink-muted)', borderLeft: '1px solid var(--rule)', paddingLeft: 12
           }}>
             you direct: {b.text}
           </p>
@@ -635,6 +642,121 @@ function ProseBlockView({
 }
 
 // ---------- main screen ----------
+
+type StreamSink = (text: string, meta: StreamMeta) => void;
+
+/** Identity for parsed blocks. Speaker name, hue, and portrait change the markup. */
+function castParseKey(characters: Character[], guests: EpisodeGuest[]): string {
+  const cast = characters.map((c) =>
+    `${c.id}\t${c.isPlayer ? 1 : 0}\t${c.name}\t${c.hue}\t${c.portrait ?? ''}\t${(c.portraits ?? []).length}`
+  ).join('\n');
+  const guest = guests.map((g) => `${g.id}\t${g.name}`).join('\n');
+  return `${cast}\n--\n${guest}`;
+}
+
+/**
+ * The live line. Token updates stay here so the mounted chapter does not
+ * re-render on every chunk, and the scroll moves once per frame.
+ */
+function StreamTail({
+  sinkRef, active, scrollRef, onHasText, characters, guests, episodeId, worldId,
+  accent, prose, fontPx, avatarPx, dialogueStyle, opening
+}: {
+  sinkRef: RefObject<StreamSink>;
+  active: boolean;
+  scrollRef: RefObject<HTMLElement | null>;
+  onHasText: (hasText: boolean) => void;
+  characters: Character[];
+  guests: EpisodeGuest[];
+  episodeId: string;
+  worldId: string;
+  accent: string;
+  prose: string;
+  fontPx: number;
+  avatarPx: number;
+  dialogueStyle: DialogueStyle;
+  opening: boolean;
+}) {
+  const [partial, setPartial] = useState('');
+  const [meta, setMeta] = useState<StreamMeta>({ role: 'narrator' });
+  const pending = useRef<{ text: string; meta: StreamMeta } | null>(null);
+  const frame = useRef(0);
+  const hasText = useRef(false);
+  const activeRef = useRef(active);
+  activeRef.current = active;
+
+  useEffect(() => {
+    sinkRef.current = (text, nextMeta) => {
+      pending.current = { text, meta: nextMeta };
+      if (frame.current) return;
+      frame.current = requestAnimationFrame(() => {
+        frame.current = 0;
+        const next = pending.current;
+        pending.current = null;
+        if (!next || !activeRef.current) return;
+        setPartial(next.text);
+        setMeta(next.meta);
+        const filled = next.text.length > 0;
+        if (filled !== hasText.current) {
+          hasText.current = filled;
+          onHasText(filled);
+        }
+        const el = scrollRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    };
+    return () => {
+      sinkRef.current = () => {};
+      if (frame.current) cancelAnimationFrame(frame.current);
+      frame.current = 0;
+    };
+  }, [sinkRef, scrollRef, onHasText]);
+
+  useEffect(() => {
+    if (active) return;
+    if (frame.current) {
+      cancelAnimationFrame(frame.current);
+      frame.current = 0;
+    }
+    pending.current = null;
+    setPartial('');
+    if (hasText.current) {
+      hasText.current = false;
+      onHasText(false);
+    }
+  }, [active, onHasText]);
+
+  if (!active || !partial) return null;
+  const blocks = parseTurn({
+    id: 'partial',
+    episodeId,
+    worldId,
+    role: meta.role,
+    mode: null,
+    characterId: meta.characterId,
+    guestId: meta.guestId,
+    text: meta.role === 'character' ? previewSpeakText(partial) : partial,
+    createdAt: 0
+  }, characters, guests);
+  return (
+    <>
+      {blocks.map((b, i, arr) => (
+        <ProseBlockView
+          key={`p${i}`}
+          b={b}
+          accent={accent}
+          prose={prose}
+          fontPx={fontPx}
+          avatarPx={avatarPx}
+          dialogueStyle={dialogueStyle}
+          opening={opening && i === 0}
+          fromPlayer={meta.role === 'user'}
+          caret={i === arr.length - 1}
+        />
+      ))}
+    </>
+  );
+}
 
 export function Story() {
   const { band, height, keyboardOffset } = useViewport();
@@ -679,11 +801,21 @@ export function Story() {
   const lastEndedEpisode = seasonEpisodes ? latestEndedEpisode(seasonEpisodes) : undefined;
   const goLocations = () => openLocations(episode?.locationId ?? null);
   const goCast = () => openCast(null);
-  const turnsLive = useLiveQuery(
-    async () => (episode ? db.turns.where('episodeId').equals(episode.id).sortBy('createdAt') : []),
-    [episode?.id]
+  const bookKey = seasonEpisodes?.map((e) => `${e.id}:${e.number}:${e.title}:${e.status}`).join('|') ?? '';
+  const bookTurnsLive = useLiveQuery(
+    async () => {
+      if (!seasonEpisodes || seasonEpisodes.length === 0) return [] as Array<{ episode: Episode; turn: Turn }>;
+      const ordered = [...seasonEpisodes].sort((a, b) => a.number - b.number);
+      const chunks = await Promise.all(ordered.map(async (ep) => {
+        const rows = await db.turns.where('episodeId').equals(ep.id).sortBy('createdAt');
+        return rows.map((turn) => ({ episode: ep, turn }));
+      }));
+      return chunks.flat();
+    },
+    [bookKey]
   );
-  const turns = turnsLive ?? [];
+  const bookEntries = bookTurnsLive ?? [];
+  const turns = episode ? bookEntries.filter((e) => e.episode.id === episode.id).map((e) => e.turn) : [];
   const charactersLive = useLiveQuery(
     async () => (world ? db.characters.where('worldId').equals(world.id).toArray() : []),
     [world?.id]
@@ -703,20 +835,12 @@ export function Story() {
     [season?.id]
   ) ?? [];
   const storyRowsReady = !episode
-    || (turnsLive !== undefined && charactersLive !== undefined && locationsLive !== undefined);
+    || (bookTurnsLive !== undefined && charactersLive !== undefined && locationsLive !== undefined);
 
   // writing state — Continue/Steer exclusive; Speak/Act independent toggles → speak|act|play
-  const [composeBase, setComposeBase] = useState<'continue' | 'steer'>('continue');
-  const [speakOn, setSpeakOn] = useState(false);
-  const [actOn, setActOn] = useState(false);
-  const composeMode = resolveComposeMode(composeBase, speakOn, actOn);
-  const agencyOn = isPlayerAgencyMode(composeMode);
-  const [deliveryTone, setDeliveryTone] = useState<DeliveryTone | null>(() => {
-    try {
-      const last = localStorage.getItem('sw-last-delivery-tone');
-      return last && isDeliveryTone(last) ? last : null;
-    } catch { return null; }
-  });
+  const [, setComposeBase] = useState<'continue' | 'steer'>('continue');
+  const [, setSpeakOn] = useState(false);
+  const [, setActOn] = useState(false);
   const [length, setLength] = useState<TurnLength>(() => {
     try {
       const saved = localStorage.getItem('sw-reply-size');
@@ -724,14 +848,17 @@ export function Story() {
     } catch { /* ignore */ }
     return 'scene';
   });
+  const [weight, setWeight] = useState<ActionWeight>('matters');
+  const [asCharacterId, setAsCharacterId] = useState<string | null>(null);
   /** Pin who should answer on Speak/Act — null = director chooses. */
   const [preferSpeaker, setPreferSpeaker] = useState<
     null | { kind: 'cast'; id: string } | { kind: 'guest'; id: string }
   >(null);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
-  const [partial, setPartial] = useState('');
-  const [partialMeta, setPartialMeta] = useState<StreamMeta>({ role: 'narrator' });
+  const [tailHasText, setTailHasText] = useState(false);
+  const streamSink = useRef<StreamSink>(() => {});
+  const onTailText = useCallback((hasText: boolean) => setTailHasText(hasText), []);
   const [progressLabel, setProgressLabel] = useState('writing…');
   const [error, setError] = useState<string | AppError>('');
   const [notice, setNotice] = useState('');
@@ -892,7 +1019,7 @@ export function Story() {
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [turns.length, partial]);
+  }, [turns.length]);
 
   const pinMood = (id: typeof mood) => {
     setMood(id);
@@ -914,41 +1041,35 @@ export function Story() {
     mode: ComposeMode,
     text: string,
     resumeBeats?: DirectorBeat[],
-    lengthOverride?: TurnLength
+    lengthOverride?: TurnLength,
+    actionWeight?: ActionWeight,
+    handsId?: string | null
   ): Promise<{ status: 'ok' | 'error' | 'aborted'; beatsCompleted: number; remaining: number }> => {
     if (!world || !season || !episode) return { status: 'error', beatsCompleted: 0, remaining: 0 };
     setError('');
     setNotice('');
     setStreaming(true);
-    setPartial('');
-    setPartialMeta({ role: 'narrator' });
-    setProgressLabel(resumeBeats?.length ? 'continuing plan…' : 'planning…');
+    setTailHasText(false);
+    setProgressLabel('the page turns');
     const controller = new AbortController();
     abortRef.current = controller;
     try {
       await writeTurn({
         world, season, episode, mode, input: text, length: lengthOverride ?? length,
         resumeBeats,
-        preferCharacterId:
-          isPlayerAgencyMode(mode) && preferSpeaker?.kind === 'cast'
-            ? preferSpeaker.id
-            : undefined,
-        preferGuestId:
-          isPlayerAgencyMode(mode) && preferSpeaker?.kind === 'guest'
-            ? preferSpeaker.id
-            : undefined,
+        weight: actionWeight ?? weight,
+        asCharacterId: handsId === undefined ? (asCharacterId ?? undefined) : (handsId ?? undefined),
         signal: controller.signal,
-        onProgress: setProgressLabel,
+        onProgress: () => setProgressLabel('the page turns'),
         onNotice: setNotice,
         onDelta: (p, meta) => {
-          setPartialMeta(meta);
-          setPartial(p);
+          streamSink.current(p, meta);
         }
       });
-      setPartial('');
+      setTailHasText(false);
       return { status: 'ok', beatsCompleted: 1, remaining: 0 };
     } catch (e) {
-      setPartial('');
+      setTailHasText(false);
       if (e instanceof WriteAbortedError || (e as Error).name === 'AbortError') {
         const n = e instanceof WriteAbortedError ? e.beatsCompleted : 0;
         const left = e instanceof WriteAbortedError ? e.remainingBeats.length : 0;
@@ -999,48 +1120,15 @@ export function Story() {
       setNotice('Fix the checklist above, or press Write anyway.');
       return;
     }
-    if (composeMode === 'continue' && !input.trim() && (episode.pendingPlan?.beats?.length ?? 0) > 0) {
-      await continuePlan();
-      return;
-    }
-    if (composeMode !== 'continue' && !input.trim()) return;
+    if (!input.trim()) return;
     const sceneNpcs = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
-    const epGuests = episode.guests ?? [];
-    const activeGuests = episode.activeGuestIds == null
-      ? epGuests
-      : epGuests.filter((g) => episode.activeGuestIds!.includes(g.id));
-    if (agencyOn && sceneNpcs.length === 0 && activeGuests.length === 0) {
-      setNotice(NOTICE_ADD_CAST);
-      return;
-    }
-    const tagged = agencyOn
-      ? applyDeliveryTone(input, deliveryTone)
-      : input;
-    const text = tagged;
-    const savedTone = deliveryTone;
+    const mode: ComposeMode = asCharacterId || sceneNpcs.length === 0 ? 'act' : 'play';
+    const text = input;
     setInput('');
-    if (deliveryTone) {
-      try { localStorage.setItem('sw-last-delivery-tone', deliveryTone); } catch { /* ignore */ }
-    }
-    // Keep Speak/Act/Steer so back-and-forth RP does not need re-tapping mode.
-    // Delivery tone stays selected for the next line unless the player clears it.
-    const result = await runNarration(composeMode, text);
+    const result = await runNarration(mode, text, undefined, undefined, weight, asCharacterId);
     if (result.status !== 'ok' && result.beatsCompleted === 0 && result.remaining === 0) {
-      // Restore composer when nothing was applied (orphan user turn removed).
-      setInput(parseDeliveryTone(text).body);
-      setDeliveryTone(savedTone);
+      setInput(text);
     }
-  };
-
-  const continuePlan = async () => {
-    if (!world || !season || !episode || streaming) return;
-    if (!hasAI) {
-      setNotice(NOTICE_ADD_MODEL);
-      return;
-    }
-    const pending = episode.pendingPlan;
-    if (!pending?.beats?.length) return;
-    await runNarration('continue', '', pending.beats as DirectorBeat[], pending.length);
   };
 
   const rerollBeat = async (turn: Turn) => {
@@ -1049,8 +1137,8 @@ export function Story() {
     setError('');
     setNotice('');
     setStreaming(true);
-    setPartial('');
-    setPartialMeta({
+    setTailHasText(false);
+    streamSink.current('', {
       role: turn.role === 'narrator' ? 'narrator' : 'character',
       characterId: turn.characterId,
       guestId: turn.guestId
@@ -1064,14 +1152,13 @@ export function Story() {
         signal: controller.signal,
         onProgress: setProgressLabel,
         onDelta: (p, meta) => {
-          setPartialMeta(meta);
-          setPartial(p);
+          streamSink.current(p, meta);
         }
       });
-      setPartial('');
+      setTailHasText(false);
       setNotice('Beat re-rolled. Mid-episode summary was cleared.');
     } catch (e) {
-      setPartial('');
+      setTailHasText(false);
       if (e instanceof WriteAbortedError || (e as Error).name === 'AbortError') {
         setNotice('Re-roll stopped.');
       } else {
@@ -1088,26 +1175,7 @@ export function Story() {
     setComposeBase(m);
     setSpeakOn(false);
     setActOn(false);
-    setDeliveryTone(null);
     setPreferSpeaker(null);
-  };
-
-  const toggleSpeak = () => {
-    const next = !speakOn;
-    setSpeakOn(next);
-    if (!next && !actOn) {
-      setDeliveryTone(null);
-      setPreferSpeaker(null);
-    }
-  };
-
-  const toggleAct = () => {
-    const next = !actOn;
-    setActOn(next);
-    if (!next && !speakOn) {
-      setDeliveryTone(null);
-      setPreferSpeaker(null);
-    }
   };
 
   /** Steer from Director nudge — exclusive base mode. */
@@ -1278,7 +1346,7 @@ export function Story() {
       });
       await nextEpisode(episode);
       resetAfterEpisodeEnd();
-      const filed = 'Episode filed · next episode is open.';
+      const filed = 'Chapter filed · the next chapter is open.';
       setNotice(memoryNote ? `${memoryNote} ${filed}` : filed);
     } catch (e) {
       setError(classifyError(e));
@@ -1359,7 +1427,7 @@ export function Story() {
         meanwhile: wrapDraft.meanwhileKeep ? wrapDraft.meanwhile : ''
       });
       resetAfterEpisodeEnd();
-      setNotice('Episode filed · next episode is open.');
+      setNotice('Chapter filed · the next chapter is open.');
     } catch (e) {
       setError(classifyError(e));
     } finally {
@@ -1368,12 +1436,35 @@ export function Story() {
     }
   };
 
-  const blocks = useMemo(() => {
-    const guestList = episode?.guests ?? [];
-    const out: { turn: Turn; blocks: ProseBlock[] }[] = [];
-    for (const t of turns) out.push({ turn: t, blocks: parseTurn(t, characters, guestList) });
+  const blockCache = useRef<{ key: string; map: Map<string, { text: string; blocks: ProseBlock[] }> }>({
+    key: '',
+    map: new Map()
+  });
+  const manuscript = useMemo(() => {
+    const key = castParseKey(characters, []);
+    if (blockCache.current.key !== key) {
+      blockCache.current = { key, map: new Map() };
+    }
+    const cache = blockCache.current.map;
+    const seen = new Set<string>();
+    const out: { episode: Episode; turn: Turn; blocks: ProseBlock[] }[] = [];
+    for (const entry of bookEntries) {
+      const t = entry.turn;
+      const guestList = entry.episode.guests ?? [];
+      seen.add(t.id);
+      const hit = cache.get(t.id);
+      const textKey = `${t.text}\t${t.asCharacterId ?? ''}`;
+      if (hit && hit.text === textKey) {
+        out.push({ episode: entry.episode, turn: t, blocks: hit.blocks });
+        continue;
+      }
+      const parsed = parseTurn(t, characters, guestList);
+      cache.set(t.id, { text: textKey, blocks: parsed });
+      out.push({ episode: entry.episode, turn: t, blocks: parsed });
+    }
+    for (const id of cache.keys()) if (!seen.has(id)) cache.delete(id);
     return out;
-  }, [turns, characters, episode?.guests]);
+  }, [bookEntries, characters]);
 
   const recoverPad: CSSProperties = {
     padding: narrow ? '40px 20px' : '80px 60px',
@@ -1436,7 +1527,7 @@ export function Story() {
   if (!episode) {
     return (
       <div className="fade-in" style={recoverPad}>
-        <Mono>episode filed</Mono>
+        <Mono>chapter filed</Mono>
         <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: 'var(--ink-heading)' }}>
           {lastEndedEpisode
             ? `Episode ${lastEndedEpisode.number} is filed. Open the next, or review the season.`
@@ -1449,7 +1540,7 @@ export function Story() {
               {recoverBusy ? 'Opening…' : 'Open the next episode'}
             </button>
           )}
-          <button className="btn-ghost" onClick={() => go('sequel')}>Season review</button>
+          <button className="btn-ghost" onClick={() => go('sequel')}>The next book</button>
           <button className="btn-quiet" onClick={() => go('library')}>Worlds</button>
         </div>
       </div>
@@ -1461,13 +1552,6 @@ export function Story() {
 
   const inScene = characters.filter((c) => episode.castIds.includes(c.id));
   const guests = episode.guests ?? [];
-  const composerPlaceholder: Record<ComposeMode, string> = {
-    continue: 'Press write on — the narrator takes the next beat from here.',
-    steer: 'Tell the narrator what should happen, in your words. Everyone stays in character while it happens.',
-    speak: '*smiles* "Hello." — looks and gestures in *stars*, spoken words in quotes.',
-    act: 'You do something. No dialogue, no narration from you.',
-    play: '*opens the door* "Anyone home?" — gesture in *stars*, words in quotes.'
-  };
   const directorContent = (
     <DirectorContent
       world={world} season={season} episode={episode} characters={characters} locations={locations}
@@ -1516,57 +1600,7 @@ export function Story() {
       paddingBottom: keyboardOffset > 0 ? keyboardOffset : 0,
       paddingLeft: 0
     }}>
-      {/* backdrop — the room fills the frame, under dim-wash glass */}
-      {scrollPhoto ? (
-        <>
-          <div
-            key={`img-${sceneFadeKey}-${scrollPhoto.slice(0, 24)}`}
-            className={display.imageBlur > 0 ? 'scene-crossfade' : 'scene-crossfade scene-backdrop-drift'}
-            style={{
-              position: 'absolute', inset: 0, zIndex: 0,
-              backgroundImage: `url(${JSON.stringify(scrollPhoto)})`, backgroundSize: 'cover', backgroundPosition: 'center',
-              filter: display.imageBlur > 0 ? `blur(${display.imageBlur}px)` : undefined,
-              transform: display.imageBlur > 0 ? 'scale(1.06)' : undefined
-            }}
-          />
-          <div style={{
-            position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none',
-            background: `rgba(8,9,12,${(display.imageDim / 100).toFixed(2)})`,
-            transition: 'background 0.35s ease'
-          }} />
-        </>
-      ) : (
-        <div
-          key={`mood-${sceneFadeKey}`}
-          className="scene-crossfade"
-          style={{
-            position: 'absolute', inset: 0, zIndex: 0,
-            background: `linear-gradient(160deg, ${BD.a}, ${BD.b})`,
-            opacity: scrollBg.kind === 'off' ? 0 : backdrop === 'none' ? 0.28 : 1,
-            transition: 'opacity 0.45s ease'
-          }}
-        />
-      )}
-      <div
-        className="scene-room-vignette"
-        style={{ position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none' }}
-      />
-      {scrollBg.kind !== 'off' && (
-        <>
-          <div
-            key={`tint-${mood}`}
-            style={{
-              position: 'absolute', inset: 0, zIndex: 1, pointerEvents: 'none',
-              background: M.tint,
-              transition: 'background 0.45s ease'
-            }}
-          />
-          <div
-            className={`climate-layer climate-${mood}`}
-            style={{ position: 'absolute', inset: 0, zIndex: 1 }}
-          />
-        </>
-      )}
+      {/* The frame is paper. Mood is a stain on the page, not a room. */}
 
       {/* header — thin strip in Read mode */}
       {readMode ? (
@@ -1583,7 +1617,7 @@ export function Story() {
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0, flex: 1 }}>
             <div style={{ minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
-              <div className="serif" style={{ fontSize: 13, fontStyle: 'italic', color: 'rgba(230,233,235,0.55)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              <div className="serif" style={{ fontSize: 13, fontStyle: 'italic', color: 'var(--ink-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                 {world.title}{locLabel ? ` · ${locLabel}` : ''}
               </div>
             </div>
@@ -1599,9 +1633,7 @@ export function Story() {
             ) : (
               <>
                 <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
-                  onClick={() => setDirectorSheet(true)}>Direct</button>
-                <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
-                  onClick={() => setWrapOpen('episode')}>End episode</button>
+                  onClick={() => setWrapOpen('episode')}>End chapter</button>
                 <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
                   onClick={() => setLayout('write')}>Exit read</button>
               </>
@@ -1616,7 +1648,7 @@ export function Story() {
           paddingBottom: narrow ? 11 : 13,
           paddingLeft: narrow ? 14 : 24,
           paddingRight: narrow ? 14 : 24,
-          borderBottom: '1px solid rgba(255,255,255,0.08)',
+          borderBottom: '1px solid var(--rule)',
           flexWrap: 'wrap'
         }}
         className="glass-clear">
@@ -1628,31 +1660,31 @@ export function Story() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
               <div className="serif" style={{ fontSize: 16, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{world.title}</div>
               <div className="label" style={{ fontSize: 11 }}>
-                Season {season.number} · episode {episode.number}{locLabel ? ` · ${locLabel}` : ''} · {formatStoryDate(worldCalendar(world), worldCalendar(world).currentDay)} · {M.label}
+                Book {season.number} · chapter {episode.number}{locLabel ? ` · ${locLabel}` : ''} · {formatStoryDate(worldCalendar(world), worldCalendar(world).currentDay)} · {M.label}
               </div>
             </div>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <div style={{ display: 'flex', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, overflow: 'hidden', background: 'rgba(255,255,255,0.05)' }}>
+            <div style={{ display: 'flex', borderBottom: '1px solid var(--rule)' }}>
               {([['write', 'Write'], ['read', 'Read']] as const).map(([id, label]) => (
                 <button key={id} onClick={() => setLayout(id as StoryLayout)} style={{
-                  border: 0, background: layout === id ? 'rgba(255,255,255,0.14)' : 'transparent',
-                  color: 'inherit', opacity: layout === id ? 1 : 0.55, padding: '7px 12px',
-                  fontSize: 12, fontWeight: 600, cursor: 'pointer', minHeight: 36
+                  border: 0, background: 'transparent',
+                  color: 'inherit', opacity: layout === id ? 1 : 0.5, padding: '7px 12px',
+                  fontSize: 12, fontWeight: layout === id ? 600 : 500, cursor: 'pointer', minHeight: 36,
+                  boxShadow: layout === id ? 'inset 0 -2px 0 var(--accent)' : 'none'
                 }}>{label}</button>
               ))}
             </div>
             {!short && (
               <>
-                <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setDirectorSheet(true)}>Direct</button>
-                <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setWrapOpen('episode')}>End episode</button>
+                <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setWrapOpen('episode')}>End chapter</button>
               </>
             )}
             {short ? (
               <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setMoreSheet(true)}>More</button>
             ) : (
               <>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', maxWidth: '100%', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px' }} className="glass-clear">
+                <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', maxWidth: '100%', border: '1px solid var(--rule)', borderRadius: 10, padding: '6px 9px' }} className="glass-clear">
                     <span className="label" style={{ fontSize: 11, opacity: 0.55 }}>Scroll</span>
                     {SCROLL_BACKDROPS.map((id) => (
                       <Chip key={id} active={display.scrollBackdrop === id} onClick={() => setDisplay({ scrollBackdrop: id })}>
@@ -1660,7 +1692,7 @@ export function Story() {
                       </Chip>
                     ))}
                   </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '6px 9px', background: 'rgba(255,255,255,0.05)', maxWidth: '100%' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', border: '1px solid var(--rule)', borderRadius: 10, padding: '6px 9px', background: 'rgba(28,22,18,0.04)', maxWidth: '100%' }}>
                   <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.45 }}>
                     mood{episode.moodPinned ? ' · pinned' : ''}
                   </span>
@@ -1669,8 +1701,8 @@ export function Story() {
                       display: 'inline-flex', alignItems: 'center', gap: 4,
                       height: 22, padding: '0 6px', borderRadius: 2, cursor: 'pointer',
                       background: mood === id ? m.accent : 'transparent',
-                      border: `1px solid ${mood === id ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.14)'}`,
-                      opacity: mood === id ? 1 : 0.55, color: mood === id ? '#0a1416' : 'rgba(230,233,235,0.7)',
+                      border: `1px solid ${mood === id ? 'var(--accent)' : 'var(--rule)'}`,
+                      opacity: mood === id ? 1 : 0.55, color: mood === id ? 'var(--accent-ink)' : 'var(--paper)',
                       fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.04em'
                     }}>
                       <span style={{ width: 8, height: 8, borderRadius: 1, background: m.accent, flexShrink: 0 }} />
@@ -1694,8 +1726,8 @@ export function Story() {
         <section ref={scrollRef} style={{ overflow: 'auto', display: 'flex', flexDirection: 'column', position: 'relative' }}>
           {readMode && showReadCoach && (
             <div className="glass-nudge" style={{ margin: narrow ? '12px 16px 0' : '16px 28px 0', display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-              <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.78)' }}>
-                End episode and Direct are in this bar. Switch to Write to compose. Turn tools appear when you hover a line.
+              <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, lineHeight: 1.55, color: 'var(--paper)' }}>
+                End the chapter from this bar. Switch to Write to take an action.
               </div>
               <button type="button" className="btn-quiet" style={{ fontSize: 11 }} onClick={dismissReadCoach}>Got it</button>
             </div>
@@ -1710,23 +1742,34 @@ export function Story() {
           )}
 
           <div
-            className={`page-plane glass-scroll${readMode && display.textScrim > 0 ? ' read-scrim' : ''}`}
+            className="page-plane"
             style={{
               maxWidth: '40rem',
-              margin: readMode ? '8px auto 28px' : '8px auto 18px',
-              width: 'calc(100% - 24px)',
+              margin: readMode ? '12px auto 28px' : '12px auto 18px',
+              width: 'calc(100% - 32px)',
+              background: scrollBg.kind === 'off'
+                ? 'var(--page)'
+                : `linear-gradient(90deg, ${M.tint}, transparent 8%, transparent 92%, ${M.tint}), var(--page)`,
+              boxShadow: '0 0 0 1px rgba(28, 22, 18, 0.1)',
               padding: narrow
                 ? (readMode ? '28px 22px 48px' : '22px 18px 40px')
-                : (readMode ? '40px 36px 80px' : '32px 32px 68px'),
-              ...(readMode && display.textScrim > 0
-                ? { ['--text-scrim' as string]: (display.textScrim / 100).toFixed(2) }
-                : !readMode && display.textScrim > 0
-                  ? {
-                    background: `linear-gradient(180deg, rgba(8,9,12,${(display.textScrim / 100 * 0.35).toFixed(2)}), rgba(8,9,12,${(display.textScrim / 100).toFixed(2)}) 16%, rgba(8,9,12,${(display.textScrim / 100).toFixed(2)}) 84%, rgba(8,9,12,${(display.textScrim / 100 * 0.4).toFixed(2)}))`
-                  }
-                  : {})
+                : (readMode ? '44px 48px 80px' : '36px 44px 68px')
             }}
           >
+            {(scrollPhoto || backdrop !== 'none') && scrollBg.kind !== 'off' && (
+              <div
+                key={`plate-${sceneFadeKey}`}
+                aria-hidden
+                style={{
+                  height: 7,
+                  marginBottom: 22,
+                  background: scrollPhoto
+                    ? `linear-gradient(90deg, rgba(247,243,234,${(display.imageDim / 140).toFixed(2)}), transparent 24%, transparent 76%, rgba(247,243,234,${(display.imageDim / 140).toFixed(2)})), url(${JSON.stringify(scrollPhoto)}) center/cover`
+                    : `linear-gradient(90deg, ${BD.a}, ${BD.b})`,
+                  filter: scrollPhoto && display.imageBlur > 0 ? `blur(${Math.min(display.imageBlur, 6)}px)` : undefined
+                }}
+              />
+            )}
             <header style={{ marginBottom: turns.length === 0 ? 28 : 22 }}>
               <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
                 {activeLocation && (
@@ -1740,26 +1783,26 @@ export function Story() {
                 <>
                   <div className="serif" style={{
                     fontSize: 11,
-                    letterSpacing: '0.16em',
+                    letterSpacing: '0.18em',
                     textTransform: 'uppercase',
-                    color: 'rgba(230,233,235,0.42)',
+                    color: 'var(--ink-muted)',
                     fontWeight: 500
                   }}>
-                    Season {numberWord(season.number)} · episode {numberWord(episode.number)}
+                    Book {numberWord(season.number)} · chapter {numberWord(episode.number)}
                   </div>
                   <div className="serif" style={{
                     fontSize: narrow ? 26 : 32,
-                    fontWeight: 300,
+                    fontWeight: 400,
                     lineHeight: 1.2,
                     margin: '12px 0 0',
-                    color: '#f4f0e8'
+                    color: 'var(--ink-heading)'
                   }}>
-                    {episode.title.trim() || activeLocation?.name || episode.location || 'Untitled scene'}
+                    {episode.title.trim() || activeLocation?.name || episode.location || 'Untitled chapter'}
                   </div>
                   {sceneDate && (
                     <div className="serif" style={{
                       marginTop: 10, fontSize: 15, lineHeight: 1.55, fontStyle: 'italic',
-                      color: 'rgba(230,233,235,0.52)'
+                      color: 'var(--ink-muted)'
                     }}>
                       {sceneDate}
                     </div>
@@ -1767,8 +1810,8 @@ export function Story() {
                 </>
               ) : (
                 <div className="serif" style={{
-                  fontSize: 14, fontStyle: 'italic', lineHeight: 1.45,
-                  color: 'rgba(230,233,235,0.42)'
+                  fontSize: 13, letterSpacing: '0.14em', textTransform: 'uppercase', lineHeight: 1.45,
+                  color: 'var(--ink-muted)'
                 }}>
                   {episode.title.trim() || activeLocation?.name || episode.location}
                   {sceneDate ? ` · ${sceneDate}` : ''}
@@ -1781,13 +1824,13 @@ export function Story() {
                   cast={stageCast}
                   guests={stageGuests}
                   empty={turns.length === 0}
-                  onOpen={() => setDirectorSheet(true)}
+                  onOpen={goCast}
                 />
               )}
               {turns.length === 0 && (
                 <div style={{
-                  height: 1, marginTop: 22,
-                  background: 'linear-gradient(90deg, rgba(236,228,214,0.22), rgba(255,255,255,0.05) 48%, transparent)'
+                  width: 72, height: 1, marginTop: 22,
+                  background: 'var(--rule)'
                 }} />
               )}
             </header>
@@ -1796,13 +1839,13 @@ export function Story() {
               <div style={{ marginBottom: 32 }}>
                 <div className="serif" style={{
                   fontSize: 11, letterSpacing: '0.16em', textTransform: 'uppercase',
-                  color: 'rgba(230,233,235,0.38)', marginBottom: 10
+                  color: 'var(--ink-muted)', marginBottom: 10
                 }}>
                   Previously
                 </div>
                 <p className="serif" style={{
                   fontSize: fontPx, lineHeight: 1.82, margin: 0, fontStyle: 'italic',
-                  color: 'rgba(236,234,230,0.62)', textWrap: 'pretty'
+                  color: 'var(--paper)', textWrap: 'pretty'
                 }}>
                   {season.bible.recap}
                 </p>
@@ -1814,14 +1857,14 @@ export function Story() {
                 {season.premise ? (
                   <p className="serif" style={{
                     fontSize: fontPx, lineHeight: 1.82, margin: 0, fontStyle: 'italic',
-                    color: 'rgba(236,234,230,0.55)', textWrap: 'pretty'
+                    color: 'var(--ink-muted)', textWrap: 'pretty'
                   }}>
                     {season.premise}
                   </p>
                 ) : (
                   <p className="serif" style={{
                     fontSize: fontPx, lineHeight: 1.82, margin: 0, fontWeight: 300,
-                    color: 'rgba(236,234,230,0.5)'
+                    color: 'var(--ink-muted)'
                   }}>
                     The page is blank. Write on, and the narrator takes the first beat.
                   </p>
@@ -1834,10 +1877,10 @@ export function Story() {
                 )}
                 {writeReady && writeReady.missing.length > 0 && !writeAnyway && (
                   <div style={{
-                    border: '1px solid rgba(255,255,255,0.12)', borderRadius: 6, padding: '12px 14px',
-                    background: 'rgba(255,255,255,0.04)', display: 'flex', flexDirection: 'column', gap: 10
+                    border: '1px solid var(--rule)', borderRadius: 6, padding: '12px 14px',
+                    background: 'transparent', display: 'flex', flexDirection: 'column', gap: 10
                   }}>
-                    <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.78)' }}>
+                    <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, lineHeight: 1.55, color: 'var(--paper)' }}>
                       {writeReady.missing.map((m) => (
                         <li key={m}>{m}</li>
                       ))}
@@ -1846,7 +1889,7 @@ export function Story() {
                       <button className="btn-ghost" style={{ fontSize: 11, padding: '7px 12px' }}
                         onClick={() => setWorldEditOpen(true)}>Edit world</button>
                       <button className="btn-ghost" style={{ fontSize: 11, padding: '7px 12px' }}
-                        onClick={goCast}>Cast</button>
+                        onClick={goCast}>People</button>
                       <button className="btn-ghost" style={{ fontSize: 11, padding: '7px 12px' }}
                         onClick={goLocations}>Places</button>
                       <button className="btn-quiet" style={{ fontSize: 11 }}
@@ -1855,12 +1898,12 @@ export function Story() {
                   </div>
                 )}
                 {writeReady && writeReady.warnings.length > 0 && (writeAnyway || writeReady.missing.length === 0) && (
-                  <div style={{ fontSize: 12, lineHeight: 1.5, color: 'rgba(200,230,235,0.75)' }}>
+                  <div style={{ fontSize: 12, lineHeight: 1.5, color: 'var(--ink-muted)' }}>
                     {writeReady.warnings[0]}
                   </div>
                 )}
                 {(!hasAI || (writeReady && writeReady.missing.length > 0 && !writeAnyway)) && (
-                <p style={{ fontSize: 14, margin: 0, color: 'rgba(236,234,230,0.78)' }}>
+                <p style={{ fontSize: 14, margin: 0, color: 'var(--paper)' }}>
                   {!hasAI
                     ? 'Add a writing model in Settings before Write on.'
                     : 'Fix the checklist above, or press Write anyway, then Write on.'}
@@ -1897,9 +1940,6 @@ export function Story() {
                       Add a writing model in Settings
                     </button>
                   )}
-                  <button className="btn-ghost" style={{ fontSize: 12, padding: '7px 12px' }} onClick={() => setDirectorSheet(true)}>
-                    Open Direct
-                  </button>
                   {(continuity.length > 0 || threads.length > 0) && (
                     <span className="label" style={{ opacity: 0.5 }}>
                       {continuity.length} fact{continuity.length === 1 ? '' : 's'} · {threads.length} thread{threads.length === 1 ? '' : 's'}
@@ -1909,16 +1949,16 @@ export function Story() {
               </div>
             )}
 
-            {blocks.length > turnWindow && (
+            {manuscript.length > turnWindow && (
               <div style={{ margin: '0 0 28px', textAlign: 'center' }}>
                 <button
                   type="button"
                   onClick={() => setTurnWindow((n) => n + 60)}
                   className="serif"
-                  title={`${blocks.length - turnWindow} earlier turns`}
+                  title={`${manuscript.length - turnWindow} earlier pages`}
                   style={{
                     border: 0, background: 'transparent', cursor: 'pointer',
-                    fontSize: 14, fontStyle: 'italic', color: 'rgba(230,233,235,0.42)',
+                    fontSize: 14, fontStyle: 'italic', color: 'var(--ink-muted)',
                     padding: '6px 8px'
                   }}
                 >
@@ -1927,84 +1967,99 @@ export function Story() {
               </div>
             )}
 
-            {blocks.slice(-turnWindow).map(({ turn, blocks: bs }, ti, visible) => (
-              <TurnRow
-                key={turn.id}
-                turn={turn}
-                blocks={bs}
-                characters={characters}
-                accent={M.accent}
-                prose={M.prose}
-                fontPx={fontPx}
-                avatarPx={avatarPx}
-                dialogueStyle={display.dialogueStyle}
-                prevSpeaker={ti > 0 ? lastSpokenBy(visible[ti - 1].blocks) : null}
-                streaming={streaming}
-                hasBelow={ti < visible.length - 1 || streaming}
-                opening={blocks.length <= turnWindow && ti === 0}
-                onRetry={() => {
-                  const idx = turns.findIndex((t) => t.id === turn.id);
-                  const below = idx < 0 ? 0 : turns.length - idx - 1;
-                  if (below > 0) setConfirmAsk({ kind: 'retryFrom', turn });
-                  else void retryFrom(turn);
-                }}
-                onReroll={
-                  turn.role === 'narrator' || turn.role === 'character'
-                    ? () => setConfirmAsk({ kind: 'reroll', turn })
-                    : undefined
-                }
-                onDeleteBelow={() => setConfirmAsk({ kind: 'deleteBelow', turn })}
-                onDelete={() => setConfirmAsk({ kind: 'delete', turn })}
-              />
-            ))}
+            {(() => {
+              const visible = manuscript.slice(-turnWindow);
+              const latestPassageId = [...turns].reverse().find((t) => t.role === 'user')?.id ?? null;
+              let prevEpisodeId = '';
+              return visible.map(({ episode: chapter, turn, blocks: bs }, ti) => {
+                const showBreak = chapter.id !== prevEpisodeId
+                  && !(prevEpisodeId === '' && chapter.id === episode.id);
+                prevEpisodeId = chapter.id;
+                const chapterTitle = chapter.title.trim() || chapter.location || `Chapter ${chapter.number}`;
+                return (
+                  <div key={turn.id}>
+                    {showBreak && (
+                      <div style={{ margin: '2.6em 0 1.4em', textAlign: 'center' }}>
+                        <div className="serif" style={{
+                          fontSize: 11, letterSpacing: '0.2em', textTransform: 'uppercase',
+                          color: 'var(--ink-muted)'
+                        }}>
+                          Chapter {chapter.number}
+                        </div>
+                        <div style={{ width: 48, height: 1, margin: '10px auto 0', background: 'var(--rule)' }} />
+                        <div className="serif" style={{
+                          fontSize: narrow ? 22 : 26, fontWeight: 400, marginTop: 10, color: 'var(--ink-heading)'
+                        }}>
+                          {chapterTitle}
+                        </div>
+                      </div>
+                    )}
+                    <TurnRow
+                      turn={turn}
+                      blocks={bs}
+                      characters={characters}
+                      accent={M.accent}
+                      prose={M.prose}
+                      fontPx={fontPx}
+                      avatarPx={avatarPx}
+                      dialogueStyle="prose"
+                      prevSpeaker={ti > 0 ? lastSpokenBy(visible[ti - 1].blocks) : null}
+                      streaming={streaming}
+                      hasBelow={ti < visible.length - 1 || streaming}
+                      opening={manuscript.length <= turnWindow && ti === 0}
+                      bare
+                      onRewrite={turn.id === latestPassageId ? () => {
+                        const idx = turns.findIndex((t) => t.id === turn.id);
+                        const below = idx < 0 ? 0 : turns.length - idx - 1;
+                        if (below > 0) setConfirmAsk({ kind: 'retryFrom', turn });
+                        else void retryFrom(turn);
+                      } : undefined}
+                      onRetry={() => undefined}
+                      onDeleteBelow={() => undefined}
+                      onDelete={() => undefined}
+                    />
+                  </div>
+                );
+              });
+            })()}
 
-            {streaming && partial && (
-              parseTurn({
-                id: 'partial',
-                episodeId: episode.id,
-                worldId: world.id,
-                role: partialMeta.role,
-                mode: null,
-                characterId: partialMeta.characterId,
-                guestId: partialMeta.guestId,
-                text: partialMeta.role === 'character' ? previewSpeakText(partial) : partial,
-                createdAt: 0
-              }, characters, guests)
-                .map((b, i, arr) => (
-                  <ProseBlockView
-                    key={`p${i}`}
-                    b={b}
-                    accent={M.accent}
-                    prose={M.prose}
-                    fontPx={fontPx}
-                    avatarPx={avatarPx}
-                    dialogueStyle={display.dialogueStyle}
-                    opening={turns.length === 0 && i === 0}
-                    fromPlayer={partialMeta.role === 'user'}
-                    caret={i === arr.length - 1}
-                  />
-                ))
-            )}
+            <StreamTail
+              sinkRef={streamSink}
+              active={streaming}
+              scrollRef={scrollRef}
+              onHasText={onTailText}
+              characters={characters}
+              guests={guests}
+              episodeId={episode.id}
+              worldId={world.id}
+              accent={M.accent}
+              prose={M.prose}
+              fontPx={fontPx}
+              avatarPx={avatarPx}
+              dialogueStyle="prose"
+              opening={turns.length === 0}
+            />
 
-            {streaming && !partial && (
+            {streaming && !tailHasText && (
               <p className="serif" style={{
                 fontSize: fontPx, lineHeight: 1.82, margin: '0.4em 0 0',
-                fontStyle: 'italic', color: 'rgba(230,233,235,0.42)'
+                fontStyle: 'italic', color: 'var(--ink-muted)'
               }}>
-                {progressLabel || 'the scene turns'}
+                {progressLabel || 'the page turns'}
                 <span className="prose-caret" aria-hidden />
               </p>
             )}
 
-            {!streaming && input.trim() && composeMode !== 'continue' && (
+            {!streaming && input.trim() && (
               <div style={{ opacity: 0.46, marginTop: 10 }}>
                 {parseTurn({
                   id: 'ghost',
                   episodeId: episode.id,
                   worldId: world.id,
                   role: 'user',
-                  mode: composeMode,
-                  text: agencyOn ? applyDeliveryTone(input, deliveryTone) : input,
+                  mode: 'act',
+                  text: input,
+                  asCharacterId: asCharacterId ?? undefined,
                   createdAt: 0
                 }, characters, guests).map((b, i, arr) => (
                   <ProseBlockView
@@ -2014,8 +2069,8 @@ export function Story() {
                     prose={M.prose}
                     fontPx={fontPx}
                     avatarPx={avatarPx}
-                    dialogueStyle={display.dialogueStyle}
-                    fromPlayer
+                    dialogueStyle="prose"
+                    fromPlayer={!asCharacterId}
                     caret={i === arr.length - 1}
                   />
                 ))}
@@ -2026,7 +2081,7 @@ export function Story() {
         </section>
       </div>
 
-      {(confirmAsk || error || notice || ((episode.pendingPlan?.beats?.length ?? 0) > 0 && !streaming)) && (
+      {(confirmAsk || error || notice) && (
         <div style={{
           position: 'relative', zIndex: 3,
           padding: narrow ? '10px 12px 0' : '12px 24px 0',
@@ -2069,7 +2124,7 @@ export function Story() {
               border: `1px solid ${ACCENT_RGBA.a35}`,
               background: ACCENT_RGBA.a08, display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap'
             }}>
-              <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(200,230,235,0.95)', flex: 1, minWidth: 0 }}>{notice}</div>
+              <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--paper)', flex: 1, minWidth: 0 }}>{notice}</div>
               {noticeNavAction(notice) && (
                 <button className="btn-quiet" style={{ fontSize: 11, minHeight: 28 }}
                   onClick={() => {
@@ -2081,36 +2136,6 @@ export function Story() {
                 </button>
               )}
               <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 14 }} onClick={() => setNotice('')}>×</button>
-            </div>
-          )}
-          {(episode.pendingPlan?.beats?.length ?? 0) > 0 && !streaming && (
-            <div className="glass-nudge" style={{
-              display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap'
-            }}>
-              <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.8)', flex: 1, minWidth: 0 }}>
-                <div>
-                  {episode.pendingPlan!.beats.length} line{episode.pendingPlan!.beats.length === 1 ? '' : 's'} left in the plan
-                  {episode.pendingPlan!.length
-                    ? ` · resume as ${TURN_LENGTH_LABELS[episode.pendingPlan!.length]}`
-                    : ''}.
-                </div>
-                <ul style={{ margin: '8px 0 0', paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  {episode.pendingPlan!.beats.slice(0, 3).map((beat, i) => (
-                    <li key={i} style={{ opacity: 0.85 }}>{pendingBeatLabel(beat, characters, guests)}</li>
-                  ))}
-                  {episode.pendingPlan!.beats.length > 3 && (
-                    <li style={{ opacity: 0.55 }}>
-                      and {episode.pendingPlan!.beats.length - 3} more
-                    </li>
-                  )}
-                </ul>
-              </div>
-              <button className="btn-primary" style={{ padding: '7px 12px', fontSize: 12, minHeight: 40 }}
-                disabled={!hasAI}
-                onClick={() => void continuePlan()}>Continue plan</button>
-              <button className="btn-quiet" style={{ fontSize: 11 }} onClick={() => void safeWrite(async () => {
-                await db.episodes.update(episode.id, { pendingPlan: null, updatedAt: Date.now() });
-              })}>Dismiss</button>
             </div>
           )}
         </div>
@@ -2131,7 +2156,7 @@ export function Story() {
               display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
               background: pressure === 'escalate' ? ACCENT_RGBA.a12 : undefined
             }}>
-              <div style={{ flex: 1, minWidth: narrow ? 0 : 200, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.78)' }}>
+              <div style={{ flex: 1, minWidth: narrow ? 0 : 200, fontSize: 12.5, lineHeight: 1.55, color: 'var(--paper)' }}>
                 {pressure === 'escalate'
                   ? 'This chapter is getting long. Close it so the season can move — facts from play are already on file.'
                   : locationShiftNudge && (pressure === 'ok' || pressure === 'warm')
@@ -2140,7 +2165,7 @@ export function Story() {
               </div>
               <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
                 <button className="btn-primary" style={{ padding: '7px 12px', fontSize: 12 }}
-                  disabled={wrapBusy} onClick={() => setWrapOpen('episode')}>End episode</button>
+                  disabled={wrapBusy} onClick={() => setWrapOpen('episode')}>End chapter</button>
                 <button className="btn-quiet" style={{ fontSize: 11 }} onClick={dismissWrapNudge}>Not yet</button>
               </div>
             </div>
@@ -2154,7 +2179,7 @@ export function Story() {
               fontSize: 16, fontStyle: 'italic', opacity: 0.7
             }}
           >
-            Continue
+            Continue the book
           </button>
         </div>
       ) : (
@@ -2167,7 +2192,7 @@ export function Story() {
         }}>
           {!hasAI && turns.length > 0 && (
             <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-              <p style={{ fontSize: 14, margin: 0, color: 'rgba(236,234,230,0.78)', flex: 1, minWidth: 180 }}>
+              <p style={{ fontSize: 14, margin: 0, color: 'var(--paper)', flex: 1, minWidth: 180 }}>
                 Add a writing model in Settings before Write on.
               </p>
               <button className="btn-ghost" style={{ fontSize: 12, padding: '7px 12px' }}
@@ -2181,7 +2206,7 @@ export function Story() {
               display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
               background: pressure === 'escalate' ? ACCENT_RGBA.a12 : undefined
             }}>
-              <div style={{ flex: 1, minWidth: narrow ? 0 : 200, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.78)' }}>
+              <div style={{ flex: 1, minWidth: narrow ? 0 : 200, fontSize: 12.5, lineHeight: 1.55, color: 'var(--paper)' }}>
                 {pressure === 'escalate'
                   ? 'This chapter is getting long. Close it so the season can move — facts from play are already on file.'
                   : locationShiftNudge && (pressure === 'ok' || pressure === 'warm')
@@ -2190,113 +2215,47 @@ export function Story() {
               </div>
               <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
                 <button className="btn-primary" style={{ padding: '7px 12px', fontSize: 12 }}
-                  disabled={wrapBusy} onClick={() => setWrapOpen('episode')}>End episode</button>
+                  disabled={wrapBusy} onClick={() => setWrapOpen('episode')}>End chapter</button>
                 <button className="btn-quiet" style={{ fontSize: 11 }} onClick={dismissWrapNudge}>Not yet</button>
               </div>
             </div>
           )}
           {(!readMode || composeMore) && (
           <>
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: compact ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))',
-            gap: 0,
-            border: '1px solid rgba(255,255,255,0.12)',
-            borderRadius: 4,
-            overflow: 'hidden',
-            background: 'rgba(255,255,255,0.03)'
-          }}>
-            {([
-              { id: 'continue' as const, label: 'Continue', active: !agencyOn && composeBase === 'continue', onClick: () => pickBaseMode('continue') },
-              { id: 'steer' as const, label: 'Steer', active: !agencyOn && composeBase === 'steer', onClick: () => pickBaseMode('steer') },
-              { id: 'speak' as const, label: 'Speak', active: speakOn, onClick: () => toggleSpeak() },
-              { id: 'act' as const, label: 'Act', active: actOn, onClick: () => toggleAct() }
-            ]).map((m, i, arr) => (
-              <button
-                key={m.id}
-                type="button"
-                onClick={m.onClick}
-                style={{
-                  border: 0,
-                  borderRight: i < arr.length - 1 ? '1px solid rgba(255,255,255,0.08)' : 0,
-                  minHeight: 44,
-                  padding: '8px 4px',
-                  fontSize: compact ? 12 : 13,
-                  fontWeight: m.active ? 600 : 500,
-                  cursor: 'pointer',
-                  color: m.active ? '#0a1416' : 'rgba(230,233,235,0.65)',
-                  background: m.active ? ACCENT : 'transparent',
-                  boxShadow: m.active ? `inset 0 -2px 0 ${ACCENT_RGBA.a55}` : 'none'
-                }}
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span className="label" style={{ fontSize: 11 }}>
+              whose hands
+            </span>
+            <Chip active={asCharacterId === null} onClick={() => setAsCharacterId(null)}>You</Chip>
+            {inScene.filter((c) => !c.isPlayer).map((c) => (
+              <Chip
+                key={c.id}
+                active={asCharacterId === c.id}
+                onClick={() => setAsCharacterId(asCharacterId === c.id ? null : c.id)}
               >
-                {m.label}
-              </button>
-              ))}
-            </div>
-          {composeMode === 'play' && (
-            <Mono style={{ fontSize: 10, opacity: 0.55 }}>Play · you speak and act in one move</Mono>
-          )}
-          {agencyOn && (
-            <DeliveryPicker value={deliveryTone} onChange={setDeliveryTone} />
-          )}
-          {agencyOn && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              <span
-                style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.45 }}
-                title="Who should answer your line"
-              >
-                reply from
-              </span>
-              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                <Chip
-                  active={preferSpeaker === null}
-                  onClick={() => setPreferSpeaker(null)}
-                >
-                  Anyone
-                </Chip>
-                {inScene.filter((c) => !c.isPlayer).map((c) => (
-                  <Chip
-                    key={c.id}
-                    active={preferSpeaker?.kind === 'cast' && preferSpeaker.id === c.id}
-                    onClick={() => setPreferSpeaker(
-                      preferSpeaker?.kind === 'cast' && preferSpeaker.id === c.id
-                        ? null
-                        : { kind: 'cast', id: c.id }
-                    )}
-                  >
-                    {c.name}
-                  </Chip>
-                ))}
-                {(episode.activeGuestIds == null
-                  ? guests
-                  : guests.filter((g) => episode.activeGuestIds!.includes(g.id))
-                ).map((g) => (
-                  <Chip
-                    key={g.id}
-                    active={preferSpeaker?.kind === 'guest' && preferSpeaker.id === g.id}
-                    onClick={() => setPreferSpeaker(
-                      preferSpeaker?.kind === 'guest' && preferSpeaker.id === g.id
-                        ? null
-                        : { kind: 'guest', id: g.id }
-                    )}
-                  >
-                    {g.name}
-                  </Chip>
-                ))}
-              </div>
-            </div>
-          )}
+                {c.name}
+              </Chip>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span className="label" style={{ fontSize: 11 }}>
+              this action
+            </span>
+            <Chip active={weight === 'matters'} onClick={() => setWeight('matters')}>This changes things</Chip>
+            <Chip active={weight === 'moment'} onClick={() => setWeight('moment')}>Only this moment</Chip>
+          </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
               <span
-                style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.1em', textTransform: 'uppercase', opacity: 0.45 }}
-                title="How long each narration or spoken reply runs — not story structure"
+                className="label"
+                style={{ fontSize: 11 }}
+                title="How long the book writes back"
               >
-                reply size
+                the page
               </span>
               {(['beat', 'scene', 'episode'] as const).map((l) => (
                 <Chip key={l} active={length === l} onClick={() => setLength(l)}>
-                  {TURN_LENGTH_LABELS[l]}
+                  {PAGE_LENGTH_LABELS[l]}
                 </Chip>
               ))}
             </div>
@@ -2315,31 +2274,14 @@ export function Story() {
               </button>
             </div>
           )}
-          {composeMode === 'continue' ? (
-            <div style={{
-              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 16,
-              maxWidth: '40rem', margin: '0 auto', width: '100%', padding: '6px 0 2px'
+          {streaming && !tailHasText && (
+            <p className="serif" style={{
+              margin: 0, fontSize: narrow ? 16 : 18, fontStyle: 'italic',
+              color: 'var(--ink-muted)', textAlign: 'center'
             }}>
-              <p className="serif" style={{
-                margin: 0, fontSize: narrow ? 16 : 18, fontStyle: 'italic',
-                color: 'rgba(230,233,235,0.5)', flex: 1, textAlign: 'center'
-              }}>
-                the scene continues
-              </p>
-              {streaming ? (
-                <button className="btn-quiet" style={{ minHeight: 44 }} onClick={() => abortRef.current?.abort()}>Stop</button>
-              ) : (
-                <button
-                  className="btn-primary"
-                  style={{ padding: '10px 19px', minHeight: 44 }}
-                  disabled={writeBlocked}
-                  onClick={() => void write()}
-                >
-                  Write on
-                </button>
-              )}
-            </div>
-          ) : (
+              the page turns
+            </p>
+          )}
           <div style={{
             display: 'flex', gap: 13, alignItems: 'flex-end',
             maxWidth: '40rem', margin: '0 auto', width: '100%',
@@ -2351,7 +2293,9 @@ export function Story() {
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void write(); }
               }}
-              placeholder={composerPlaceholder[composeMode]}
+              placeholder={asCharacterId
+                ? 'What do they do?'
+                : 'What do you do, or what do you say?'}
               rows={2}
               disabled={streaming}
               style={{
@@ -2366,23 +2310,13 @@ export function Story() {
               <button
                 className="btn-primary"
                 style={{ alignSelf: 'flex-end', padding: '10px 19px', minHeight: 44 }}
-                disabled={
-                  writeBlocked
-                  || (
-                    agencyOn
-                    && inScene.filter((c) => !c.isPlayer).length === 0
-                    && (episode.activeGuestIds == null
-                      ? guests.length === 0
-                      : guests.filter((g) => episode.activeGuestIds!.includes(g.id)).length === 0)
-                  )
-                }
+                disabled={writeBlocked || !input.trim()}
                 onClick={() => void write()}
               >
-                Write on
+                Turn the page
               </button>
             )}
           </div>
-          )}
           {!readMode && (
             <div style={{ display: 'flex', gap: 16, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.4, flexWrap: 'wrap' }}>
               <span>memory: {continuity.length} facts · {threads.length} open threads</span>
@@ -2411,7 +2345,7 @@ export function Story() {
                   'Closing the chapter…'
                 ) : (
                   <span style={{ display: 'flex', flexDirection: 'column', gap: 2, lineHeight: 1.25 }}>
-                    <span>Close chapter · open episode {episode.number + 1}</span>
+                    <span>Close chapter · open chapter {episode.number + 1}</span>
                     <span style={{ fontSize: 11, fontWeight: 500, opacity: 0.8 }}>
                       {formatStoryDate(worldCalendar(world), wrapDraft?.nextStoryDay ?? worldCalendar(world).currentDay).toLowerCase()}
                     </span>
@@ -2449,7 +2383,7 @@ export function Story() {
                 disabled={wrapBusy}
                 onClick={() => void runEpisodeAnalyze()}
               >
-                Analyze episode
+                Read the chapter
               </button>
               <button
                 className="btn-quiet"
@@ -2466,15 +2400,15 @@ export function Story() {
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 14 }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: '0.14em', textTransform: 'uppercase', opacity: 0.5 }}>
-              season {season.number} · episode {episode.number}
+              book {season.number} · chapter {episode.number}
             </div>
             <div className="serif" style={{ fontWeight: 300, fontSize: 27, lineHeight: 1.15, color: 'var(--ink-heading)' }}>
-              End the episode.
+              End the chapter.
             </div>
             <div style={{ fontSize: 13, lineHeight: 1.6, opacity: 0.62, maxWidth: '48ch', color: '#eceae6' }}>
               {wrapPhase === 'review'
                 ? 'Edit the recap and time skip, Keep or Drop anything new or stale, then close the chapter. Facts from play are already on file.'
-                : 'The utility model proposes a previously-on recap, how time passed, and only new or stale memory — you review before the next episode opens. Skipping still keeps a short recap.'}
+                : 'Read the chapter back, then open the next one. Skipping still keeps a short recap.'}
             </div>
           </div>
           <button className="btn-ghost" aria-label="Close" style={{ width: 30, height: 30, padding: 0, flexShrink: 0 }} onClick={closeWrapSheet}>×</button>
@@ -2487,16 +2421,16 @@ export function Story() {
             style={{ fontSize: 12, minHeight: 36 }}
             onClick={() => { closeWrapSheet(); go('sequel'); }}
           >
-            Season review →
+            The next book →
           </button>
         </div>
 
         {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
         {notice && (
           <div style={{
-            fontSize: 12.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.85)',
-            border: '1px solid rgba(255,255,255,0.12)', borderRadius: 10, padding: '10px 12px',
-            background: 'rgba(255,255,255,0.05)', display: 'flex', gap: 10, alignItems: 'flex-start'
+            fontSize: 12.5, lineHeight: 1.5, color: 'var(--paper)',
+            border: '1px solid var(--rule)', borderRadius: 10, padding: '10px 12px',
+            background: 'rgba(28,22,18,0.04)', display: 'flex', gap: 10, alignItems: 'flex-start'
           }}>
             <span style={{ flex: 1 }}>{notice}</span>
             <button className="btn-quiet" style={{ fontSize: 11, minHeight: 28 }} onClick={() => setNotice('')}>dismiss</button>
@@ -2512,9 +2446,9 @@ export function Story() {
         ) : (
           <>
             <div style={{
-              fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.7)',
-              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, padding: '12px 14px',
-              background: 'rgba(255,255,255,0.04)'
+              fontSize: 12.5, lineHeight: 1.55, color: 'var(--paper)',
+              border: '1px solid var(--rule)', borderRadius: 12, padding: '12px 14px',
+              background: 'transparent'
             }}>
               Analyze closes the chapter: previously-on, time skip, next opening, plus Keep/Drop only for new or stale facts and threads
               {guests.length > 0 ? ', and walk-on effects' : ''}. Episode prose stays saved; only the active episode stays in the writing loop.
@@ -2565,10 +2499,7 @@ export function Story() {
           {(readMode || short) && (
             <>
               <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setWrapOpen('episode'); }}>
-                End episode
-              </button>
-              <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setDirectorSheet(true); }}>
-                Direct
+                End chapter
               </button>
               {readMode && (
                 <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setLayout('write'); }}>
@@ -2592,7 +2523,7 @@ export function Story() {
             Edit world
           </button>
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); go('cast'); }}>
-            Cast
+            People
           </button>
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); goLocations(); }}>
             Places
@@ -2601,7 +2532,7 @@ export function Story() {
             Profile
           </button>
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); go('sequel'); }}>
-            Season review
+            The next book
           </button>
           <Mono style={{ fontSize: 11 }}>mood{episode.moodPinned ? ' · pinned' : ''}</Mono>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
@@ -2609,9 +2540,9 @@ export function Story() {
               <button key={id} type="button" title={m.label} onClick={() => pinMood(id)} aria-label={m.label} style={{
                 display: 'inline-flex', alignItems: 'center', gap: 6,
                 height: 28, padding: '0 10px', borderRadius: 2, cursor: 'pointer',
-                background: mood === id ? m.accent : 'rgba(255,255,255,0.04)',
-                border: `1px solid ${mood === id ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.12)'}`,
-                opacity: mood === id ? 1 : 0.55, color: mood === id ? '#0a1416' : 'rgba(230,233,235,0.75)',
+                background: mood === id ? m.accent : 'transparent',
+                border: `1px solid ${mood === id ? 'var(--accent)' : 'var(--rule)'}`,
+                opacity: mood === id ? 1 : 0.55, color: mood === id ? 'var(--accent-ink)' : 'var(--paper)',
                 fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.04em'
               }}>
                 <span style={{ width: 10, height: 10, borderRadius: 1, background: m.accent, flexShrink: 0 }} />
@@ -2741,7 +2672,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
         {/* atmosphere */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <Mono style={{ fontSize: 9 }}>atmosphere for this scene</Mono>
-          <div style={{ fontSize: 12, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
+          <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
             Weather, time of day, or a sensory note the narrator should keep returning to.
             Location hue also suggests mood unless you pin it.
           </div>
@@ -2767,12 +2698,12 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
           {(episode.sceneLedger?.length ?? 0) > 0 && (
             <div className="craft-row" style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
               <Mono style={{ fontSize: 9 }}>already true in this room</Mono>
-              <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.45)' }}>
+              <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--ink-muted)' }}>
                 Tracked from the prose as you play. The narrator and cast are held to these.
               </div>
               <ul style={{ margin: 0, paddingLeft: 16, display: 'flex', flexDirection: 'column', gap: 4 }}>
                 {episode.sceneLedger!.map((d, i) => (
-                  <li key={i} className="serif" style={{ fontSize: 13, lineHeight: 1.5, color: 'rgba(236,234,230,0.78)' }}>
+                  <li key={i} className="serif" style={{ fontSize: 13, lineHeight: 1.5, color: 'var(--paper)' }}>
                     {d}
                   </li>
                 ))}
@@ -2806,8 +2737,8 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
                 display: 'inline-flex', alignItems: 'center', gap: 5,
                 height: 24, padding: '0 8px', borderRadius: 2, cursor: 'pointer',
                 background: mood === id ? m.accent : 'transparent',
-                border: `1px solid ${mood === id ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.14)'}`,
-                opacity: mood === id ? 1 : 0.5, color: mood === id ? '#0a1416' : 'rgba(230,233,235,0.7)',
+                border: `1px solid ${mood === id ? 'var(--accent)' : 'var(--rule)'}`,
+                opacity: mood === id ? 1 : 0.5, color: mood === id ? 'var(--accent-ink)' : 'var(--paper)',
                 fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.04em'
               }}>
                 <span style={{ width: 8, height: 8, borderRadius: 1, background: m.accent, flexShrink: 0 }} />
@@ -2820,7 +2751,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
         {/* scroll background */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <Mono style={{ fontSize: 9 }}>scroll background — under the glass</Mono>
-          <div style={{ fontSize: 12, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
+          <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
             What you see behind the story. Auto uses a scene photo you or the AI set, then the place photo, then climate.
             Dim wash keeps the type readable without hiding the room.
           </div>
@@ -2846,13 +2777,13 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
         {/* scene image */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <Mono style={{ fontSize: 9 }}>scene image — episode {episode.number}</Mono>
-          <div style={{ fontSize: 12, lineHeight: 1.55, color: 'rgba(236,234,230,0.55)' }}>
+          <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
             A picture of what's happening right now, shown behind the story text. Swap it whenever
             the scene changes; each episode keeps its own.
           </div>
           {episode.image && (
             <div style={{
-              height: 120, borderRadius: 13, border: '1px solid rgba(255,255,255,0.12)',
+              height: 120, borderRadius: 13, border: '1px solid var(--rule)',
               backgroundImage: `url(${JSON.stringify(episode.image)})`, backgroundSize: 'cover', backgroundPosition: 'center'
             }} />
           )}
@@ -2860,7 +2791,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
           {canMatchFaces && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
               <Toggle label="Match faces in the scene image" on={matchCast} onClick={() => setMatchCast((v) => !v)} />
-              <div style={{ fontSize: 12.5, lineHeight: 1.45, color: 'rgba(236,234,230,0.7)' }}>
+              <div style={{ fontSize: 12.5, lineHeight: 1.45, color: 'var(--paper)' }}>
                 Match cast photos — keep uploaded faces when the image model accepts references.
               </div>
             </div>
@@ -2876,7 +2807,10 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
             </button>
             {episode.image && (
               <button className="btn-quiet" style={{ fontSize: 11 }}
-                onClick={() => void db.episodes.update(episode.id, { image: null })}>remove</button>
+                onClick={() => void safeWrite(
+                  () => db.episodes.update(episode.id, { image: null, updatedAt: Date.now() }),
+                  setImgError
+                )}>remove</button>
             )}
             <input
               ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }}
@@ -2890,7 +2824,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
         </div>
 
         {/* text visibility */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, borderTop: '1px solid var(--rule)', paddingTop: 16 }}>
           <Mono style={{ fontSize: 9 }}>text</Mono>
           <SliderRow label="air behind text" value={display.textScrim} min={0} max={80} unit="%"
             onChange={(v) => setDisplay({ textScrim: v })} />
@@ -2899,7 +2833,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
         </div>
 
         {/* dialogue layout */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: '1px solid var(--rule)', paddingTop: 16 }}>
           <Mono style={{ fontSize: 9 }}>how dialogue sits on the page</Mono>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <Chip
@@ -2915,7 +2849,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
               Staged
             </Chip>
           </div>
-          <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.45)' }}>
+          <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--ink-muted)' }}>
             {display.dialogueStyle === 'prose'
               ? 'Speech sits with a portrait plate and the speaker’s name in their colour. A speaker who keeps talking is not re-announced.'
               : 'Every line gets a portrait plate and a name — a conversation, not a chip list.'}
@@ -2923,7 +2857,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
         </div>
 
         {/* avatars */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: '1px solid var(--rule)', paddingTop: 16 }}>
             <Mono style={{ fontSize: 9 }}>plate size in the scroll</Mono>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               {(['S', 'M', 'L'] as AvatarSize[]).map((s) => (
@@ -2952,7 +2886,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
 
 // ---------- turn row with edit / retry / delete-below ----------
 
-function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, dialogueStyle, prevSpeaker, streaming, hasBelow, opening, onRetry, onReroll, onDeleteBelow, onDelete }: {
+function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, dialogueStyle, prevSpeaker, streaming, hasBelow, opening, onRetry, onReroll, onDeleteBelow, onDelete, bare, onRewrite }: {
   turn: Turn;
   blocks: ProseBlock[];
   characters: Character[];
@@ -2970,6 +2904,9 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, di
   onReroll?: () => void;
   onDeleteBelow: () => void;
   onDelete: () => void;
+  /** Manuscript: prose only, with an optional rewrite on the latest passage. */
+  bare?: boolean;
+  onRewrite?: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
@@ -3036,6 +2973,13 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, di
           fromPlayer={turn.role === 'user'}
         />
       ))}
+      {onRewrite && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4, marginBottom: 10 }}>
+          <button className="btn-quiet" style={{ fontSize: 12, padding: '6px 10px', minHeight: 36 }} disabled={streaming}
+            onClick={onRewrite}>Rewrite this passage</button>
+        </div>
+      )}
+      {!bare && (
       <div className="turn-tools" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 0, marginBottom: 8 }}>
         <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
           onClick={() => { setDraft(turn.text); setEditing(true); }}>Edit</button>
@@ -3053,6 +2997,7 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, di
         <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
           onClick={onDelete}>Delete</button>
       </div>
+      )}
     </div>
   );
 }
@@ -3159,8 +3104,8 @@ function SceneCastPanel({ episode, characters, accent, onGoCast }: {
             style={{
               display: 'flex', gap: 10, alignItems: 'center', padding: 8, borderRadius: 12,
               cursor: c.isPlayer ? 'default' : 'pointer',
-              background: active ? 'rgba(255,255,255,0.05)' : 'transparent',
-              border: `1px solid ${active ? 'rgba(255,255,255,0.08)' : 'transparent'}`,
+              background: active ? 'rgba(28,22,18,0.04)' : 'transparent',
+              border: `1px solid ${active ? 'var(--rule)' : 'transparent'}`,
               opacity: active ? 1 : 0.45
             }}
           >
@@ -3175,7 +3120,7 @@ function SceneCastPanel({ episode, characters, accent, onGoCast }: {
             </div>
             <div style={{
               width: 14, height: 14, borderRadius: 5, flexShrink: 0,
-              border: `1px solid ${active ? accent : 'rgba(255,255,255,0.18)'}`,
+              border: `1px solid ${active ? accent : 'var(--rule)'}`,
               background: active ? accent : 'transparent',
               opacity: c.isPlayer ? 0.85 : 1
             }} />
@@ -3192,8 +3137,8 @@ function SceneCastPanel({ episode, characters, accent, onGoCast }: {
             <div
               style={{
                 display: 'flex', gap: 10, alignItems: 'center', padding: 8, borderRadius: 12,
-                background: active ? 'rgba(255,255,255,0.04)' : 'transparent',
-                border: `1px solid ${active ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.06)'}`,
+                background: active ? 'transparent' : 'transparent',
+                border: `1px solid ${active ? 'var(--rule)' : 'var(--rule)'}`,
                 opacity: active ? 1 : 0.4
               }}
             >
@@ -3221,7 +3166,7 @@ function SceneCastPanel({ episode, characters, accent, onGoCast }: {
                 onClick={() => void toggleGuest(g.id)}
                 style={{
                   width: 14, height: 14, borderRadius: 5, flexShrink: 0, cursor: 'pointer',
-                  border: `1px solid ${active ? accent : 'rgba(255,255,255,0.18)'}`,
+                  border: `1px solid ${active ? accent : 'var(--rule)'}`,
                   background: active ? accent : 'transparent'
                 }}
               />
@@ -3261,7 +3206,7 @@ function SceneCastPanel({ episode, characters, accent, onGoCast }: {
         );
       })}
       {addingWalkOn ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 8, borderRadius: 12, border: '1px solid rgba(255,255,255,0.1)' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 8, borderRadius: 12, border: '1px solid var(--rule)' }}>
           <input value={walkName} onChange={(e) => setWalkName(e.target.value)} placeholder="Walk-on name" style={{ fontSize: 13 }} />
           <textarea value={walkBrief} onChange={(e) => setWalkBrief(e.target.value)} placeholder="Who they are (one sentence)" rows={2} style={{ fontSize: 12.5 }} />
           <input value={walkVoice} onChange={(e) => setWalkVoice(e.target.value)} placeholder="Voice note (optional)" style={{ fontSize: 12.5 }} />
@@ -3291,8 +3236,8 @@ function locationThumb(l: Location, size = 30): CSSProperties {
     return {
       width: size, height: size, borderRadius: '50%', flexShrink: 0,
       backgroundImage: `url(${JSON.stringify(l.portrait)})`, backgroundSize: 'cover', backgroundPosition: 'center',
-      border: '1px solid rgba(255,255,255,0.22)',
-      boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.2)'
+      border: '1px solid rgba(28,22,18,0.28)',
+      boxShadow: 'none'
     };
   }
   return { ...avatarStyle(l.hue, size), borderRadius: '50%' };
@@ -3384,8 +3329,8 @@ function SceneLocationsPanel({ episode, locations, accent, world, characters, on
         return (
           <div key={l.id} onClick={() => void select(l)} style={{
             display: 'flex', gap: 10, alignItems: 'center', padding: 8, borderRadius: 12, cursor: 'pointer',
-            background: active ? 'rgba(255,255,255,0.05)' : 'transparent',
-            border: `1px solid ${active ? 'rgba(255,255,255,0.08)' : 'transparent'}`,
+            background: active ? 'rgba(28,22,18,0.04)' : 'transparent',
+            border: `1px solid ${active ? 'var(--rule)' : 'transparent'}`,
             opacity: active ? 1 : 0.45
           }}>
             <div style={locationThumb(l, 30)} />
@@ -3397,7 +3342,7 @@ function SceneLocationsPanel({ episode, locations, accent, world, characters, on
             </div>
             <div style={{
               width: 14, height: 14, borderRadius: 5, flexShrink: 0,
-              border: `1px solid ${active ? accent : 'rgba(255,255,255,0.18)'}`,
+              border: `1px solid ${active ? accent : 'var(--rule)'}`,
               background: active ? accent : 'transparent'
             }} />
           </div>
@@ -3428,14 +3373,14 @@ function ScenePlatePanel({ episode, bd }: { episode: Episode; bd: { tag: string;
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
       <Mono style={{ fontSize: 9 }}>scene note — free text</Mono>
-      <div style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, overflow: 'hidden', background: 'rgba(255,255,255,0.04)' }}>
+      <div style={{ border: '1px solid var(--rule)', borderRadius: 12, overflow: 'hidden', background: 'transparent' }}>
         <div style={{
           height: 98, display: 'flex', alignItems: 'flex-end', padding: 9,
           background: episode.image
-            ? `linear-gradient(rgba(8,9,12,0.15), rgba(8,9,12,0.3)), url(${episode.image}) center / cover`
-            : `linear-gradient(155deg, ${bd.a}, ${bd.b}), ${STRIPE('rgba(255,255,255,0.06)', 'rgba(255,255,255,0.015)')}`
+            ? `linear-gradient(rgba(243,239,230,0.35), rgba(243,239,230,0.55)), url(${episode.image}) center / cover`
+            : `linear-gradient(155deg, ${bd.a}, ${bd.b}), ${STRIPE('var(--rule)', 'rgba(28,22,18,0.02)')}`
         }}>
-          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, color: 'rgba(236,234,230,0.6)', background: 'rgba(8,9,12,0.5)', padding: '4px 7px', borderRadius: 5 }}>
+          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, color: 'var(--ink-muted)', background: 'rgba(247,243,234,0.82)', padding: '4px 7px', borderRadius: 5 }}>
             {bd.tag}
           </span>
         </div>
@@ -3549,8 +3494,8 @@ function PriorWrapMemoryPanel({ priorEpisodes }: { priorEpisodes: Episode[] }) {
           <div
             key={ep.id}
             style={{
-              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 12, padding: '12px 12px',
-              background: 'rgba(255,255,255,0.03)', display: 'flex', flexDirection: 'column', gap: 10
+              border: '1px solid var(--rule)', borderRadius: 12, padding: '12px 12px',
+              background: 'transparent', display: 'flex', flexDirection: 'column', gap: 10
             }}
           >
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.65 }}>
@@ -3575,7 +3520,7 @@ function PriorWrapMemoryPanel({ priorEpisodes }: { priorEpisodes: Episode[] }) {
                   <div key={`b${i}`} style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
                     <div style={{
                       fontSize: 12, lineHeight: 1.4, flex: 1, color: '#eceae6', opacity: 0.88,
-                      paddingLeft: 10, borderLeft: '1px solid rgba(255,255,255,0.14)'
+                      paddingLeft: 10, borderLeft: '1px solid var(--rule)'
                     }}>
                       {b.text}
                       {b.consequence ? (
@@ -3692,8 +3637,8 @@ function PlotTargetsPanel({ episode, season }: { episode: Episode; season: Seaso
       key={`${scope}-${t.id}`}
       style={{
         display: 'flex', flexDirection: 'column', gap: 6,
-        border: '1px solid rgba(255,255,255,0.1)', borderRadius: 11, padding: '10px 12px',
-        background: 'rgba(255,255,255,0.04)',
+        border: '1px solid var(--rule)', borderRadius: 11, padding: '10px 12px',
+        background: 'transparent',
         opacity: t.status === 'pending' ? 1 : 0.5
       }}
     >
@@ -3802,7 +3747,7 @@ function ContinuityPanel({ continuity, world, season, episode, priorEpisodes }: 
           <div key={f.id} style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
             <div style={{
               fontSize: 12, lineHeight: 1.45, paddingLeft: 12,
-              borderLeft: `1px solid ${f.pinned || inPlan ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.08)'}`,
+              borderLeft: `1px solid ${f.pinned || inPlan ? 'rgba(28,22,18,0.28)' : 'var(--rule)'}`,
               flex: 1, color: '#eceae6', opacity: f.pinned || inPlan ? 0.88 : 0.45
             }}>
               {f.text}
@@ -3869,9 +3814,9 @@ function ThreadsPanel({ threads, episode, priorEpisodes }: {
         const inPlan = inPlanIds.has(t.id);
         return (
           <div key={t.id} style={{
-            border: `1px solid ${t.pinned || inPlan ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.06)'}`,
+            border: `1px solid ${t.pinned || inPlan ? 'var(--rule)' : 'var(--rule)'}`,
             borderRadius: 11, padding: '10px 12px',
-            background: 'rgba(255,255,255,0.04)', display: 'flex', flexDirection: 'column', gap: 5,
+            background: 'transparent', display: 'flex', flexDirection: 'column', gap: 5,
             opacity: t.pinned || inPlan ? 1 : 0.55
           }}>
             <div style={{ fontSize: 12.5, lineHeight: 1.4, color: '#eceae6' }}>{t.text}</div>
@@ -3934,7 +3879,7 @@ function NudgesPanel({
       <Mono style={{ fontSize: 9 }}>nudge the scene</Mono>
       {nudges.map((n, i) => (
         <button key={i} onClick={() => onNudge(n)} style={{
-          textAlign: 'left', border: '1px solid rgba(255,255,255,0.09)', background: 'rgba(255,255,255,0.03)',
+          textAlign: 'left', border: '1px solid var(--rule)', background: 'transparent',
           color: 'inherit', borderRadius: 11, padding: '10px 12px', fontSize: 12.5, cursor: 'pointer', lineHeight: 1.4
         }} className="hover-border">
           {n}
@@ -3960,7 +3905,7 @@ function DirectorAccordion({
         onClick={onToggle}
         style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          minHeight: 44, padding: '10px 0', border: 0, borderBottom: '1px solid rgba(255,255,255,0.1)',
+          minHeight: 44, padding: '10px 0', border: 0, borderBottom: '1px solid var(--rule)',
           background: 'transparent', color: 'inherit', cursor: 'pointer', textAlign: 'left'
         }}
       >
@@ -4093,7 +4038,7 @@ function CalendarSeasonEventsPanel({ world, season }: { world: World; season: Se
   const scheduledCount = events.filter((e) => e.status === 'scheduled').length;
   const selectStyle: CSSProperties = {
     fontFamily: "'IBM Plex Mono', monospace", fontSize: 12,
-    background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.12)',
+    background: 'rgba(28,22,18,0.05)', border: '1px solid var(--rule)',
     borderRadius: 8, padding: '6px 8px', color: '#f0eee9', width: '100%'
   };
 
@@ -4210,13 +4155,13 @@ function CalendarSeasonEventsPanel({ world, season }: { world: World; season: Se
 
   return (
     <div style={{
-      marginTop: 8, paddingTop: 14, borderTop: '1px solid rgba(255,255,255,0.1)',
+      marginTop: 8, paddingTop: 14, borderTop: '1px solid var(--rule)',
       display: 'flex', flexDirection: 'column', gap: 12
     }}>
       <Mono style={{ fontSize: 9 }}>
         season calendar · {dueCount} due · {scheduledCount} scheduled
       </Mono>
-      <div style={{ fontSize: 12, lineHeight: 1.45, color: 'rgba(236,234,230,0.5)' }}>
+      <div style={{ fontSize: 12, lineHeight: 1.45, color: 'var(--ink-muted)' }}>
         Dated texture as the calendar ticks. Peek shows a summary once; visibility is the lasting spoil policy.
         The narrator always gets the full beat when due.
       </div>
@@ -4262,8 +4207,8 @@ function CalendarSeasonEventsPanel({ world, season }: { world: World; season: Se
       {drafts.length > 0 && (
         <div style={{
           display: 'flex', flexDirection: 'column', gap: 8, padding: 12,
-          border: '1px solid rgba(255,255,255,0.12)', borderRadius: 11,
-          background: 'rgba(255,255,255,0.04)'
+          border: '1px solid var(--rule)', borderRadius: 11,
+          background: 'transparent'
         }}>
           <Mono style={{ fontSize: 9 }}>review generated</Mono>
           {drafts.map((d, i) => (
@@ -4305,8 +4250,8 @@ function CalendarSeasonEventsPanel({ world, season }: { world: World; season: Se
         const showSummary = ev.visibility === 'spoiler' || peekedOn;
         return (
           <div key={ev.id} style={{
-            border: '1px solid rgba(255,255,255,0.1)', borderRadius: 11, padding: '12px 14px',
-            background: 'rgba(255,255,255,0.04)', display: 'flex', flexDirection: 'column', gap: 8,
+            border: '1px solid var(--rule)', borderRadius: 11, padding: '12px 14px',
+            background: 'transparent', display: 'flex', flexDirection: 'column', gap: 8,
             opacity: settled ? 0.45 : 1
           }}>
             <button
@@ -4461,7 +4406,7 @@ function CalendarTrackerPanel({
 
   const inputStyle: CSSProperties = {
     fontFamily: "'IBM Plex Mono', monospace", fontSize: 12,
-    background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.12)',
+    background: 'rgba(28,22,18,0.05)', border: '1px solid var(--rule)',
     borderRadius: 8, padding: '6px 8px', color: '#f0eee9'
   };
   const ymdGrid = narrow ? '1fr' : '1fr 1.4fr 0.9fr';
@@ -4569,8 +4514,8 @@ function CalendarTrackerPanel({
       <Mono style={{ fontSize: 9 }}>calendar tracker</Mono>
       {calError && <ErrorNote error={calError} onDismiss={() => setCalError('')} />}
       <div style={{
-        border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '14px 14px',
-        background: 'rgba(255,255,255,0.04)', display: 'flex', flexDirection: 'column', gap: 12
+        border: '1px solid var(--rule)', borderRadius: 14, padding: '14px 14px',
+        background: 'transparent', display: 'flex', flexDirection: 'column', gap: 12
       }}>
         <div className="serif" style={{ fontSize: 20, lineHeight: 1.3, color: '#f0eee9' }}>
           {formatStoryDateShort(cal, cal.currentDay)}
@@ -4812,9 +4757,9 @@ function KeepDropChips({
       style={{
         flex: 1,
         minHeight: 44,
-        border: `1px solid ${active ? 'rgba(255,255,255,0.22)' : 'rgba(255,255,255,0.11)'}`,
-        background: active ? ACCENT_RGBA.a85 : 'rgba(255,255,255,0.05)',
-        color: active ? '#0a1416' : 'rgba(230,233,235,0.62)',
+        border: `1px solid ${active ? 'rgba(28,22,18,0.28)' : 'var(--rule)'}`,
+        background: active ? ACCENT_RGBA.a85 : 'rgba(28,22,18,0.04)',
+        color: active ? 'var(--accent-ink)' : 'var(--paper)',
         borderRadius: 4,
         fontSize: 13,
         fontWeight: active ? 600 : 500,
@@ -4875,7 +4820,7 @@ function WrapReviewBody({
           onChange={(e) => onChange({ ...draft, recap: e.target.value })}
           style={{
             fontFamily: 'Spectral, serif', fontSize: 15.5, lineHeight: 1.65, color: '#f0eee9',
-            width: '100%', background: 'rgba(255,255,255,0.04)'
+            width: '100%', background: 'transparent'
           }}
         />
       </div>
@@ -4889,7 +4834,7 @@ function WrapReviewBody({
           onChange={(e) => onChange({ ...draft, premisePreview: e.target.value })}
           style={{
             fontFamily: 'Spectral, serif', fontSize: 14.5, lineHeight: 1.6, color: '#f0eee9',
-            width: '100%', background: 'rgba(255,255,255,0.04)'
+            width: '100%', background: 'transparent'
           }}
         />
       </div>
@@ -4897,8 +4842,8 @@ function WrapReviewBody({
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         <Mono style={{ fontSize: 9 }}>episode date</Mono>
         <div style={{
-          border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '12px 14px',
-          background: 'rgba(255,255,255,0.04)', display: 'flex', flexDirection: 'column', gap: 10
+          border: '1px solid var(--rule)', borderRadius: 14, padding: '12px 14px',
+          background: 'transparent', display: 'flex', flexDirection: 'column', gap: 10
         }}>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
             <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 100px' }}>
@@ -4947,7 +4892,7 @@ function WrapReviewBody({
           />
 
           <div style={{
-            borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 12,
+            borderTop: '1px solid var(--rule)', paddingTop: 12,
             display: 'flex', flexDirection: 'column', gap: 10
           }}>
             <Mono style={{ fontSize: 8, opacity: 0.5 }}>next episode opens</Mono>
@@ -4988,7 +4933,7 @@ function WrapReviewBody({
                   onChange={(e) => setNextDay(Number(e.target.value) || draft.storyDayEnd)}
                   style={{
                     width: 64, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12,
-                    background: 'rgba(0,0,0,0.25)', border: '1px solid rgba(255,255,255,0.12)',
+                    background: 'rgba(28,22,18,0.05)', border: '1px solid var(--rule)',
                     borderRadius: 8, padding: '6px 8px', color: '#f0eee9'
                   }}
                 />
@@ -5010,8 +4955,8 @@ function WrapReviewBody({
           {draft.place && (
             <div style={{
               display: 'flex', flexDirection: 'column', gap: 10,
-              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '14px 14px',
-              background: 'rgba(255,255,255,0.04)',
+              border: '1px solid var(--rule)', borderRadius: 14, padding: '14px 14px',
+              background: 'transparent',
               opacity: draft.place.keep ? 1 : 0.42
             }}>
               <Mono style={{ fontSize: 8, opacity: 0.5 }}>
@@ -5035,7 +4980,7 @@ function WrapReviewBody({
                   place: { ...draft.place!, atmosphere: e.target.value }
                 })}
                 placeholder="Weather / light for the next opening (optional)"
-                style={{ fontSize: 12.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.55)', background: 'transparent', border: 0, padding: 0 }}
+                style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-muted)', background: 'transparent', border: 0, padding: 0 }}
               />
               <KeepDropChips
                 keep={draft.place.keep}
@@ -5047,8 +4992,8 @@ function WrapReviewBody({
           {draft.elsewhere.map((p, i) => (
             <div key={`${p.name}-${i}`} style={{
               display: 'flex', flexDirection: 'column', gap: 10,
-              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '14px 14px',
-              background: 'rgba(255,255,255,0.04)',
+              border: '1px solid var(--rule)', borderRadius: 14, padding: '14px 14px',
+              background: 'transparent',
               opacity: p.keep ? 1 : 0.42
             }}>
               <input
@@ -5103,8 +5048,8 @@ function WrapReviewBody({
           </div>
           <div style={{
             display: 'flex', flexDirection: 'column', gap: 10,
-            border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '14px 14px',
-            background: 'rgba(255,255,255,0.04)',
+            border: '1px solid var(--rule)', borderRadius: 14, padding: '14px 14px',
+            background: 'transparent',
             opacity: draft.meanwhileKeep ? 1 : 0.42
           }}>
             <textarea
@@ -5138,8 +5083,8 @@ function WrapReviewBody({
         {draft.beats.map((b, i) => (
           <div key={i} style={{
             display: 'flex', flexDirection: 'column', gap: 10,
-            border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '14px 14px',
-            background: 'rgba(255,255,255,0.04)',
+            border: '1px solid var(--rule)', borderRadius: 14, padding: '14px 14px',
+            background: 'transparent',
             opacity: b.keep ? 1 : 0.42
           }}>
             <textarea
@@ -5154,7 +5099,7 @@ function WrapReviewBody({
               value={b.consequence}
               onChange={(e) => patchBeat(i, { consequence: e.target.value })}
               placeholder="what it leaves for later…"
-              style={{ fontSize: 12.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.55)', background: 'transparent', border: 0, padding: 0 }}
+              style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-muted)', background: 'transparent', border: 0, padding: 0 }}
             />
             <KeepDropChips
               keep={b.keep}
@@ -5182,8 +5127,8 @@ function WrapReviewBody({
           {draft.hitTargets.map((row, i) => (
             <div key={i} style={{
               display: 'flex', flexDirection: 'column', gap: 10,
-              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '12px 14px',
-              background: 'rgba(255,255,255,0.04)',
+              border: '1px solid var(--rule)', borderRadius: 14, padding: '12px 14px',
+              background: 'transparent',
               opacity: row.keep ? 1 : 0.42
             }}>
               <textarea
@@ -5226,8 +5171,8 @@ function WrapReviewBody({
           {draft.hitCalendarEvents.map((row, i) => (
             <div key={row.id || i} style={{
               display: 'flex', flexDirection: 'column', gap: 10,
-              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '12px 14px',
-              background: 'rgba(255,255,255,0.04)',
+              border: '1px solid var(--rule)', borderRadius: 14, padding: '12px 14px',
+              background: 'transparent',
               opacity: row.keep ? 1 : 0.42
             }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: '#eceae6' }}>{row.title}</div>
@@ -5277,8 +5222,8 @@ function WrapReviewBody({
             {draft[key].map((row, i) => (
               <div key={i} style={{
                 display: 'flex', flexDirection: 'column', gap: 10,
-                border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '12px 14px',
-                background: 'rgba(255,255,255,0.04)',
+                border: '1px solid var(--rule)', borderRadius: 14, padding: '12px 14px',
+                background: 'transparent',
                 opacity: row.keep ? 1 : 0.42
               }}>
                 <textarea
@@ -5304,8 +5249,8 @@ function WrapReviewBody({
           {draft.characterUpdates.map((u, i) => (
             <div key={i} style={{
               display: 'flex', flexDirection: 'column', gap: 8,
-              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '12px 14px',
-              background: 'rgba(255,255,255,0.04)',
+              border: '1px solid var(--rule)', borderRadius: 14, padding: '12px 14px',
+              background: 'transparent',
               opacity: u.keep ? 1 : 0.42
             }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: '#f0eee9' }}>{u.name}</div>
@@ -5343,8 +5288,8 @@ function WrapReviewBody({
           {draft.knowledgeUpdates.map((u, i) => (
             <div key={i} style={{
               display: 'flex', flexDirection: 'column', gap: 8,
-              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '12px 14px',
-              background: 'rgba(255,255,255,0.04)',
+              border: '1px solid var(--rule)', borderRadius: 14, padding: '12px 14px',
+              background: 'transparent',
               opacity: u.keep ? 1 : 0.42
             }}>
               <div style={{ fontSize: 14, fontWeight: 600, color: '#f0eee9' }}>{u.name}</div>
@@ -5401,8 +5346,8 @@ function WrapReviewBody({
           {draft.relationshipUpdates.map((u, i) => (
             <div key={i} style={{
               display: 'flex', flexDirection: 'column', gap: 8,
-              border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '12px 14px',
-              background: 'rgba(255,255,255,0.04)',
+              border: '1px solid var(--rule)', borderRadius: 14, padding: '12px 14px',
+              background: 'transparent',
               opacity: u.keep ? 1 : 0.42
             }}>
               <div style={{ fontSize: 14, color: '#f0eee9' }}>

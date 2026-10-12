@@ -260,6 +260,15 @@ export const TURN_LENGTH_LABELS: Record<TurnLength, string> = {
   episode: 'Long'
 };
 
+/** How long the book writes back. Stored values stay beat / scene / episode. */
+export const PAGE_LENGTH_LABELS: Record<TurnLength, string> = {
+  beat: 'A shorter page',
+  scene: 'A page',
+  episode: 'A longer page'
+};
+
+export type ActionWeight = 'moment' | 'matters';
+
 export interface Turn {
   id: string;
   episodeId: string;
@@ -267,6 +276,10 @@ export interface Turn {
   role: TurnRole;
   /** for user turns: which mode produced it */
   mode: ComposeMode | null;
+  /** Whether this action may move people, places, and threads. Omitted on older turns. */
+  weight?: ActionWeight;
+  /** When set, the player took this action with that person's hands. Omitted means the player. */
+  asCharacterId?: string;
   /** set when role === 'character' — which NPC Cast card spoke this turn */
   characterId?: string;
   /** set when role === 'character' — ephemeral episode guest spoke (no Cast card) */

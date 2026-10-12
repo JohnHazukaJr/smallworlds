@@ -1,4 +1,4 @@
-import { COPYRIGHT_HOLDER, COPYRIGHT_YEAR } from '../legal';
+import { COPYRIGHT_HOLDER, COPYRIGHT_YEAR, legalContactSentence } from '../legal';
 import { useLegal } from '../ui/legalNav';
 import { Mono, phoneChrome, useViewport } from '../ui/bits';
 
@@ -38,8 +38,9 @@ export function LegalOverlay() {
         </h1>
         <div style={{ fontSize: 12.5, color: 'var(--ink-muted)', marginBottom: 22 }}>
           {COPYRIGHT_HOLDER} · {COPYRIGHT_YEAR}
+          <div style={{ marginTop: 6 }}>{legalContactSentence()}</div>
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16, fontSize: 15, lineHeight: 1.65, color: 'rgba(236,234,230,0.82)', maxWidth: '68ch' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16, fontSize: 15, lineHeight: 1.65, color: 'var(--paper)', maxWidth: '68ch' }}>
           {(doc === 'privacy' ? PRIVACY : TERMS).map((block) => (
             <section key={block.title}>
               <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--ink-heading)', margin: '0 0 6px' }}>{block.title}</h2>
@@ -53,6 +54,14 @@ export function LegalOverlay() {
 }
 
 const PRIVACY: Array<{ title: string; body: string[] }> = [
+  {
+    title: 'Who operates this',
+    body: [
+      `${COPYRIGHT_HOLDER} operates this app. ${legalContactSentence()}`,
+      'Sign-in and synced worlds are stored by Supabase. Payments are processed by Stripe. We keep a credit ledger and a Stripe customer id, and we do not store your card number. Hosted model calls are sent to the provider configured for our relay. Those companies process data only to provide their own service.',
+      'An account, synced stories, encrypted secrets, and the credit ledger stay until you delete the cloud account. Stripe may keep its own payment records under its policy. Erase all data removes only the copy on this device.'
+    ]
+  },
   {
     title: 'What stays on this device',
     body: [
@@ -94,22 +103,40 @@ const TERMS: Array<{ title: string; body: string[] }> = [
     body: [
       `${COPYRIGHT_HOLDER} is a writing app. You can use your own model providers at no charge from us, or buy hosted credits. Local stories and bring-your-own-key use do not require an account.`,
       'Hosted credits are a prepaid balance for model calls we make on your behalf. A monthly plan refills credits each paid period. A credit pack adds a one-time balance. Unused credits are not cash and are not transferred. Starter credits, when granted, are a one-time allowance for a new account.',
-      'Prices and credit amounts are shown before you pay. Stripe processes the charge. You can cancel a subscription in the billing portal; access continues through the period you already paid.'
+      'Prices and credit amounts are shown before you pay. Stripe processes the charge. You can cancel a subscription in the billing portal; access continues through the period you already paid. Cancelling does not refund the period you already paid for.',
+      'A credit pack is spent as hosted calls succeed. If a hosted call fails before a reply is delivered, that charge is returned to your balance. Unused credits are not cash and are not refunded as money.',
+      'You must be 18 or older. The app can write adult scenes when a world is marked adult. It is not for children, and we do not want an account for anyone under 18.'
     ]
   },
   {
     title: 'Your stories',
     body: [
       'Stories, characters, and worlds you create belong to you. The license on the software does not cover your content.',
+      `You give ${COPYRIGHT_HOLDER} a limited license to store, sync, encrypt, and send a story to the model you selected, only to run the service. We do not claim your copyright and we do not train models on your stories.`,
       'Stories are encrypted at rest only while the app lock is on. The passphrase cannot be recovered if you lose it.',
-      'You are responsible for the content you write and for complying with the terms of any model provider you connect. Do not use the app to harm people or to break the law.'
+      'You are responsible for the content you write, for what you keep or publish, and for complying with the terms of any model provider you connect. Do not use the app to harm people or to break the law.'
+    ]
+  },
+  {
+    title: 'Model output',
+    body: [
+      'Replies can be wrong, invented, incomplete, unavailable, or similar to someone else’s work. We do not warrant the prose. You decide what to keep and what to publish.',
+      'We may refuse or stop hosted credits if a request breaks the law or the hosted model provider’s usage rules, or to protect the service.'
+    ]
+  },
+  {
+    title: 'Claims',
+    body: [
+      `You will cover claims against ${COPYRIGHT_HOLDER} that come from your stories, from content you ask a model to write, or from how you use a provider you connect.`,
+      `To the extent the law allows, our total liability for a claim is the amount you paid us in the twelve months before the claim. If you paid nothing, we owe nothing in damages. We are not liable for lost stories, lost profits, or model output.`,
+      legalContactSentence()
     ]
   },
   {
     title: 'The software',
     body: [
       `The app is proprietary. Copyright © ${COPYRIGHT_YEAR} ${COPYRIGHT_HOLDER}. You receive a license to use the hosted app. You do not receive a license to copy, modify, or redistribute the software.`,
-      'The service is provided as is, without warranty. Model output can be wrong, incomplete, or unavailable. We can suspend hosted access for abuse, non-payment, or to protect the service.',
+      'The service is provided as is, without warranty. We can suspend hosted access for abuse, non-payment, or to protect the service.',
       'These terms and the privacy page are the agreement for using the hosted app. If a store later distributes a native build, that store’s terms apply to the download, and these terms still apply to the service.'
     ]
   }

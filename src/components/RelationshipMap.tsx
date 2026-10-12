@@ -27,7 +27,7 @@ interface NodePos {
 function portraitFill(c: Character, size: number): CSSProperties {
   const portrait = characterPortraits(c)[0];
   return {
-    ...avatarStyle(c.hue, size, 'rgba(255,255,255,0.22)'),
+    ...avatarStyle(c.hue, size, 'rgba(28,22,18,0.28)'),
     ...(portrait
       ? { backgroundImage: `url(${portrait})`, backgroundSize: 'cover', backgroundPosition: 'center' }
       : {})
@@ -94,7 +94,7 @@ function EdgeLabel({
         x={x}
         y={y + 4}
         textAnchor="middle"
-        fill={muted ? 'rgba(236,234,230,0.45)' : 'rgba(236,234,230,0.8)'}
+        fill={muted ? 'var(--ink-muted)' : 'var(--paper)'}
         fontSize={compact ? 10 : 9}
         fontFamily="'IBM Plex Mono', monospace"
         letterSpacing="0.04em"
@@ -151,7 +151,7 @@ function HtmlNode({
           fontFamily: "'IBM Plex Mono', monospace",
           fontSize: 9,
           letterSpacing: '0.04em',
-          color: 'rgba(236,234,230,0.7)',
+          color: 'var(--paper)',
           whiteSpace: 'nowrap',
           overflow: 'hidden',
           textOverflow: 'ellipsis',

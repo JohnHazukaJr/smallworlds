@@ -6,7 +6,7 @@
 import {
   db,
   exportWorld,
-  importWorld,
+  importWorlds,
   type BackupExport,
   type EncryptedExport,
   type WorldExport
@@ -90,9 +90,7 @@ export async function importDevice(data: DeviceExport, opts?: { mergeWorlds?: bo
   const keepFileBytes = !!data.vault;
   if (keepFileBytes) setStorySealSuspended(true);
   try {
-    for (const w of data.worlds) {
-      ids.push(await importWorld(w));
-    }
+    ids.push(...await importWorlds(data.worlds));
   } finally {
     if (keepFileBytes) setStorySealSuspended(false);
   }

@@ -1,7 +1,7 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef, useState } from 'react';
 import { analyzeSeason, beginNextSeason, draftPremise, evolveCharacters } from '../ai/engine';
-import { db, safeWrite } from '../db';
+import { db, recordTombstones, safeWrite } from '../db';
 import { formatUserError } from '../errors';
 import { useApp } from '../store/app';
 import type {
@@ -53,9 +53,10 @@ export function Sequel() {
     [world?.id, world?.activeSeasonId]
   );
   const storedWrap = useLiveQuery(
-    async () => season
-      ? db.wraps.where('seasonId').equals(season.id).filter((w) => w.status === 'draft').first()
-      : undefined,
+    async () => {
+      if (!season) return null;
+      return (await db.wraps.where('seasonId').equals(season.id).filter((w) => w.status === 'draft').first()) ?? null;
+    },
     [season?.id]
   );
   const characters = useLiveQuery(
@@ -68,21 +69,35 @@ export function Sequel() {
   ) ?? 0;
 
   // Local editable copy of the wrap, debounced back to the DB.
+  // undefined = the live query is still loading; null = there is no draft wrap.
   useEffect(() => {
-    if (storedWrap && storedWrap.id !== draft?.id) setDraft(storedWrap);
-    if (!storedWrap) setDraft(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [storedWrap?.id]);
+    if (storedWrap === undefined) return;
+    if (storedWrap === null) {
+      setDraft(null);
+      return;
+    }
+    setDraft((current) => (current?.id === storedWrap.id ? current : storedWrap));
+  }, [storedWrap]);
   const timer = useRef<number>(undefined);
+  const dirty = useRef(false);
   const draftRef = useRef<SeasonWrap | null>(null);
   draftRef.current = draft;
   const clearDebounce = () => {
     window.clearTimeout(timer.current);
     timer.current = undefined;
   };
+  useEffect(() => () => {
+    const unsaved = dirty.current;
+    clearDebounce();
+    const live = draftRef.current;
+    if (!unsaved || !live) return;
+    dirty.current = false;
+    void safeWrite(() => db.wraps.put({ ...live, updatedAt: Date.now() }));
+  }, []);
   /** Persist the in-memory draft immediately so Begin/evolve cannot commit a stale wrap. */
   const flushWrap = async (w: SeasonWrap) => {
     clearDebounce();
+    dirty.current = false;
     const next = { ...w, updatedAt: Date.now() };
     await safeWrite(() => db.wraps.put(next), setError);
     setDraft(next);
@@ -93,10 +108,12 @@ export function Sequel() {
       if (!d) return d;
       const next = { ...d, ...p, updatedAt: Date.now() };
       clearDebounce();
-      timer.current = window.setTimeout(
-        () => void safeWrite(() => db.wraps.put(next), setError),
-        400
-      );
+      dirty.current = true;
+      timer.current = window.setTimeout(() => {
+        dirty.current = false;
+        timer.current = undefined;
+        void safeWrite(() => db.wraps.put(next), setError);
+      }, 400);
       return next;
     });
   };
@@ -108,7 +125,8 @@ export function Sequel() {
     // Flush pending local edits so AI writes cannot be overwritten by a stale put.
     clearDebounce();
     const live = draftRef.current;
-    if (live && kind !== 'analyze') {
+    if (live && dirty.current) {
+      dirty.current = false;
       await safeWrite(() => db.wraps.put({ ...live, updatedAt: Date.now() }), setError);
     }
     setBusy(kind);
@@ -141,7 +159,7 @@ export function Sequel() {
     return (
       <div className="fade-in" style={{ padding: narrow ? '40px 20px' : '80px 60px', display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 560 }}>
         <Mono>no season</Mono>
-        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: 'var(--ink-heading)' }}>This world has no season to review.</div>
+        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: 'var(--ink-heading)' }}>This world has no book to review.</div>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           <button className="btn-primary" onClick={() => go('story')}>Back to story</button>
           <button className="btn-ghost" onClick={() => go('library')}>Go to Worlds</button>
@@ -162,15 +180,15 @@ export function Sequel() {
     return (
       <div className="fade-in" style={{ ...pagePad, maxWidth: 1020 }}>
         <button className="btn-quiet" style={{ fontSize: 12, marginBottom: 16, alignSelf: 'flex-start' }}
-          onClick={() => go('story')}>← Back to story</button>
-        <Mono style={{ letterSpacing: '0.16em', marginBottom: 11 }}>season {season.number} · {episodeCount} episode{episodeCount === 1 ? '' : 's'} so far</Mono>
+          onClick={() => go('story')}>← Back to the book</button>
+        <Mono style={{ letterSpacing: '0.16em', marginBottom: 11 }}>book {season.number} · {episodeCount} chapter{episodeCount === 1 ? '' : 's'} so far</Mono>
         <h1 className="serif" style={{ fontWeight: 300, fontSize: compact ? 26 : phone ? 30 : 40, lineHeight: 1.12, margin: '0 0 11px', color: 'var(--ink-heading)' }}>
-          When the season ends, tell me what mattered.
+          When this book rests, say what mattered.
         </h1>
         <div style={{ fontSize: 14.5, lineHeight: 1.65, color: 'var(--ink-muted)', maxWidth: '62ch', marginBottom: 28 }}>
-          The review reads the whole season back and proposes the beats that will shape the next one. You mark each
-          beat — drop it and it stays in the past, raise it and the cast arrives already carrying it. Then a time gap,
-          who returns, and the premise the next season opens on.
+          The review reads the book back and proposes what the next one should carry. You mark each
+          piece — leave it in the past, or let the people arrive already holding it. Then a time gap,
+          who returns, and the premise the next book opens on.
         </div>
         {error && <div style={{ marginBottom: 16 }}><ErrorNote error={error} onDismiss={() => setError('')} /></div>}
         <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -180,7 +198,7 @@ export function Sequel() {
             disabled={busy !== null}
             onClick={() => void run('analyze', async () => { await analyzeSeason(world, season); })}
           >
-            {busy === 'analyze' ? 'Reading the season back…' : `Read season ${season.number} back`}
+            {busy === 'analyze' ? 'Reading the book back…' : `Read book ${season.number} back`}
           </button>
           {busy === 'analyze' && <Spinner label="the utility model is extracting beats and outcomes" />}
         </div>
@@ -213,13 +231,13 @@ export function Sequel() {
           onClick={() => go('story')}>← Back to story</button>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 11, marginBottom: 28 }}>
-          <Mono style={{ letterSpacing: '0.16em' }}>season {season.number} closing · season {season.number + 1} setup</Mono>
+          <Mono style={{ letterSpacing: '0.16em' }}>book {season.number} closing · book {season.number + 1} setup</Mono>
           <h1 className="serif" style={{ fontWeight: 300, fontSize: compact ? 26 : phone ? 30 : 40, lineHeight: 1.12, margin: 0, color: 'var(--ink-heading)' }}>
             Before we go on, tell me what mattered.
           </h1>
           <div style={{ fontSize: 14.5, lineHeight: 1.65, color: 'var(--ink-muted)', maxWidth: '62ch' }}>
-            I read the whole season back. Here is what I think happened. Mark what should shape the next one — anything
-            you drop stays in the past, anything you raise becomes situation the characters carry into season {season.number + 1}.
+            I read the book back. Here is what I think happened. Mark what should shape the next one — anything
+            you drop stays in the past, anything you raise is carried into book {season.number + 1}.
           </div>
         </div>
 
@@ -229,9 +247,9 @@ export function Sequel() {
           {['What mattered', 'How it continues', 'Who returns'].map((label, i) => (
             <div key={label} style={{
               display: 'flex', alignItems: 'center', gap: 8,
-              border: `1px solid rgba(255,255,255,${i === 0 ? '0.18' : '0.09'})`,
-              background: i === 0 ? ACCENT_RGBA.a12 : 'rgba(255,255,255,0.03)',
-              color: i === 0 ? '#f2f4f5' : 'rgba(230,233,235,0.5)',
+              border: '1px solid var(--rule)',
+              background: i === 0 ? ACCENT_RGBA.a12 : 'transparent',
+              color: i === 0 ? 'var(--ink-heading)' : 'var(--ink-muted)',
               borderRadius: 4, padding: '8px 14px', fontSize: 12.5, fontWeight: 600,
               boxShadow: i === 0 ? `inset 0 -2px 0 ${ACCENT}` : 'none'
             }}>
@@ -245,7 +263,16 @@ export function Sequel() {
             onClick={() => {
               if (confirm('Discard this review and re-read the season?')) {
                 void safeWrite(async () => {
+                  await recordTombstones([{
+                    table: 'wraps',
+                    id: draft.id,
+                    worldId: draft.worldId,
+                    seasonId: draft.seasonId,
+                    payload: draft
+                  }]);
                   await db.wraps.delete(draft.id);
+                  dirty.current = false;
+                  draftRef.current = null;
                   setDraft(null);
                 }, setError);
               }
@@ -256,15 +283,15 @@ export function Sequel() {
         {/* beats */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 11, marginBottom: 34 }}>
           <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-muted)', marginBottom: 4 }}>
-            Raised beats become season plot targets the director works toward. Keep/Soften stay as ambient situation in the season bible.
+            Raised pieces become aims the next book works toward. What you keep stays as situation in the book.
           </div>
           {draft.beats.map((b, i) => {
             const hot = b.disposition === 'raise';
             return (
               <div key={i} style={{
-                border: `1px solid rgba(255,255,255,${hot ? '0.18' : '0.09'})`,
+                border: '1px solid var(--rule)',
                 borderRadius: 4,
-                background: hot ? ACCENT_RGBA.a10 : 'rgba(255,255,255,0.03)',
+                background: hot ? ACCENT_RGBA.a10 : 'transparent',
                 boxShadow: hot ? `inset 3px 0 0 ${ACCENT_RGBA.a70}` : 'none',
                 padding: '16px 18px',
                 display: 'flex',
@@ -275,7 +302,7 @@ export function Sequel() {
                 opacity: b.disposition === 'drop' ? 0.42 : 1
               }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: 1, minWidth: 0 }}>
-                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.1em', color: 'rgba(236,234,230,0.4)' }}>{b.where}</div>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.1em', color: 'var(--ink-muted)' }}>{b.where}</div>
                   <input
                     className="serif"
                     value={b.text}
@@ -318,7 +345,7 @@ export function Sequel() {
                 <Chip key={label} active={draft.gap === i} onClick={() => patch({ gap: i })}>{label}</Chip>
               ))}
             </div>
-            <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'var(--ink-muted)', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 13 }}>
+            <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'var(--ink-muted)', borderTop: '1px solid var(--rule)', paddingTop: 13 }}>
               {GAP_EFFECTS[draft.gap]}
             </div>
             <button
@@ -332,7 +359,7 @@ export function Sequel() {
             >
               {busy === 'evolve' ? 'Evolving cast, relationships, and plot…' : 'Propose what changed off-screen'}
             </button>
-            <div style={{ fontSize: 12, lineHeight: 1.5, color: 'rgba(236,234,230,0.45)' }}>
+            <div style={{ fontSize: 12, lineHeight: 1.5, color: 'var(--ink-muted)' }}>
               Begin applies only kept patches below. Voice and anchors stay identity.
             </div>
           </div>
@@ -344,8 +371,8 @@ export function Sequel() {
               return (
                 <div key={c.characterId} style={{
                   display: 'flex', flexDirection: 'column', gap: 8, padding: '9px 10px', borderRadius: 12,
-                  border: `1px solid rgba(255,255,255,${c.returning ? '0.14' : '0.06'})`,
-                  background: `rgba(255,255,255,${c.returning ? '0.06' : '0'})`,
+                  border: '1px solid var(--rule)',
+                  background: c.returning ? 'oklch(0.32 0.12 25 / 0.06)' : 'transparent',
                   opacity: c.returning ? 1 : 0.45
                 }}>
                   <div
@@ -356,14 +383,14 @@ export function Sequel() {
                     <div style={{ fontSize: 13, fontWeight: 600, flex: 1 }}>{c.name}</div>
                     <div style={{
                       width: 16, height: 16, borderRadius: 6, flexShrink: 0,
-                      border: `1px solid ${c.returning ? ACCENT : 'rgba(255,255,255,0.18)'}`,
+                      border: `1px solid ${c.returning ? ACCENT : 'var(--rule)'}`,
                       background: c.returning ? ACCENT : 'transparent'
                     }} />
                   </div>
                   <textarea
                     rows={2}
                     value={c.evolution || c.outcome}
-                    placeholder="where the season leaves them…"
+                    placeholder="where the book leaves them…"
                     onChange={(e) => patch({
                       characters: patchCharacter(draft, i, { evolution: e.target.value })
                     })}
@@ -440,7 +467,7 @@ export function Sequel() {
                               };
                               patch({ characters: patchCharacter(draft, i, { statePatch }) });
                             }}
-                            style={{ fontSize: 12.5, background: 'rgba(8,9,12,0.35)' }}
+                            style={{ fontSize: 12.5, background: 'transparent' }}
                           />
                         </label>
                       ))}
@@ -459,7 +486,7 @@ export function Sequel() {
                               const sheetPatch = { ...(c.sheetPatch ?? {}), [field]: e.target.value };
                               patch({ characters: patchCharacter(draft, i, { sheetPatch }) });
                             }}
-                            style={{ fontSize: 12.5, background: 'rgba(8,9,12,0.35)' }}
+                            style={{ fontSize: 12.5, background: 'transparent' }}
                           />
                         </label>
                       ))}
@@ -478,7 +505,7 @@ export function Sequel() {
                                 knowledge: { ...c.knowledge, nowKnows: e.target.value }
                               })
                             })}
-                            style={{ fontSize: 12.5, background: 'rgba(8,9,12,0.35)' }}
+                            style={{ fontSize: 12.5, background: 'transparent' }}
                           />
                         </label>
                       )}
@@ -492,7 +519,7 @@ export function Sequel() {
                                 knowledge: { ...c.knowledge, clearMustNotKnow: e.target.value }
                               })
                             })}
-                            style={{ fontSize: 12.5, background: 'rgba(8,9,12,0.35)' }}
+                            style={{ fontSize: 12.5, background: 'transparent' }}
                           />
                         </label>
                       )}
@@ -510,7 +537,7 @@ export function Sequel() {
                     display: 'flex', gap: 10, alignItems: 'flex-start', flexWrap: 'wrap',
                     opacity: r.keep === false ? 0.42 : 1,
                     padding: '8px 0',
-                    borderBottom: '1px solid rgba(255,255,255,0.06)'
+                    borderBottom: '1px solid var(--rule)'
                   }}>
                     <div style={{ flex: 1, minWidth: 160, fontSize: 13, color: '#eceae6' }}>
                       <strong>{r.from}</strong>
@@ -540,7 +567,7 @@ export function Sequel() {
                 <Mono style={{ fontSize: 9 }}>extra plot situations · Raise beats already seed targets</Mono>
                 {raised > 0 && (
                   <div style={{ fontSize: 12, color: 'var(--ink-muted)', lineHeight: 1.45 }}>
-                    {raised} Raise beat{raised === 1 ? '' : 's'} will become season plot targets automatically.
+                    {raised} piece{raised === 1 ? '' : 's'} will shape the next book.
                   </div>
                 )}
                 {draft.plotArc!.map((p, i) => (
@@ -553,7 +580,7 @@ export function Sequel() {
                       onChange={(e) => patch({
                         plotArc: draft.plotArc!.map((x, j) => (j === i ? { ...x, text: e.target.value } : x))
                       })}
-                      style={{ flex: 1, minWidth: 160, fontSize: 13, background: 'rgba(8,9,12,0.35)' }}
+                      style={{ flex: 1, minWidth: 160, fontSize: 13, background: 'transparent' }}
                     />
                     <Chip
                       active={p.keep !== false}
@@ -577,14 +604,14 @@ export function Sequel() {
           padding: narrow ? '18px 18px' : '24px 26px',
           display: 'flex', flexDirection: 'column', gap: 14
         }}>
-          <div className="label">The premise season {season.number + 1} opens on</div>
+          <div className="label">The premise book {season.number + 1} opens on</div>
           <textarea
             rows={3}
             className="serif"
             value={draft.premise}
             onChange={(e) => patch({ premise: e.target.value })}
             placeholder="Write it yourself, or have it drafted from your beat choices…"
-            style={{ fontFamily: 'Spectral, serif', fontSize: narrow ? 17 : 21, lineHeight: 1.55, color: 'var(--ink-heading)', background: 'rgba(8,9,12,0.3)' }}
+            style={{ fontFamily: 'Spectral, serif', fontSize: narrow ? 17 : 21, lineHeight: 1.55, color: 'var(--ink-heading)', background: 'transparent' }}
           />
           {!narrow && (
             <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', paddingTop: 6 }}>
@@ -593,7 +620,7 @@ export function Sequel() {
                 disabled={busy !== null || !draft.premise.trim()}
                 onClick={beginSeason}
               >
-                {busy === 'begin' ? 'Building season bible and applying handoff…' : `Begin season ${season.number + 1}`}
+                {busy === 'begin' ? 'Opening the next book…' : `Begin book ${season.number + 1}`}
               </button>
               <button
                 className="btn-ghost"
@@ -602,14 +629,14 @@ export function Sequel() {
               >
                 {busy === 'premise' ? 'Drafting…' : draft.premise ? 'Redraft the premise' : 'Draft the premise'}
               </button>
-              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)', marginLeft: 'auto' }}>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', marginLeft: 'auto' }}>
                 {raised} raised · {dropped} dropped · {draft.beats.length} beats reviewed
               </div>
             </div>
           )}
           {busy === 'begin' && <Spinner label="writing the recap and applying cast handoff" />}
           {narrow && (
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)' }}>
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)' }}>
               {raised} raised · {dropped} dropped · {draft.beats.length} beats reviewed
             </div>
           )}
@@ -624,14 +651,14 @@ export function Sequel() {
           right: 0,
           bottom: tabBarInset(true),
           zIndex: 30,
-          borderTop: '1px solid rgba(255,255,255,0.14)',
-          background: 'rgba(255,255,255,0.045)',
-          backdropFilter: 'blur(14px) saturate(140%)',
+          borderTop: '1px solid var(--rule)',
+          background: 'transparent',
+          
           padding: '12px 16px',
           display: 'flex',
           flexDirection: 'column',
           gap: 8,
-          boxShadow: '0 -16px 40px rgba(0,0,0,0.35)'
+          boxShadow: '0 -8px 24px rgba(28,22,18,0.06)'
         }}>
           <button
             className="btn-primary"
@@ -639,7 +666,7 @@ export function Sequel() {
             disabled={busy !== null || !draft.premise.trim()}
             onClick={beginSeason}
           >
-            {busy === 'begin' ? 'Building season bible and applying handoff…' : `Begin season ${season.number + 1}`}
+            {busy === 'begin' ? 'Opening the next book…' : `Begin book ${season.number + 1}`}
           </button>
           <button
             className="btn-ghost"

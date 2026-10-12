@@ -14,6 +14,7 @@ import { decryptString, deriveKey, encryptString, randomSalt, type CipherPayload
 import { getStoryKey } from '../security/storyKey';
 import { isSealedRecord, openRecord, readDiskRows } from '../security/storySeal';
 import { useSettings } from '../store/settings';
+import { syncSide } from './lww';
 import type {
   CalendarEvent, Character, ContinuityFact, Episode, Location, OpenThread, Season, SeasonWrap, Turn, World
 } from '../types';
@@ -64,25 +65,44 @@ function isoFromEntity(payload: { updatedAt?: number; createdAt?: number }): str
   return new Date(entityUpdatedAt(payload) || Date.now()).toISOString();
 }
 
-async function pullTable<T extends { id: string }>(
-  table: SyncTableName,
-  userId: string,
-  since: number | null,
-  apply: (payload: T, deleted: boolean, remoteUpdated: number) => Promise<void>
-): Promise<number> {
+const META_PAGE = 1000;
+const ID_CHUNK = 100;
+
+interface RemoteMeta {
+  id: string;
+  updated_at: string;
+  deleted_at: string | null;
+}
+
+async function listRemoteMeta(table: SyncTableName, userId: string): Promise<RemoteMeta[]> {
   const sb = getSupabase();
-  if (!sb) return 0;
-  let q = sb.from(table).select('*').eq('user_id', userId);
-  if (since) q = q.gte('updated_at', new Date(since).toISOString());
-  const { data, error } = await q;
-  if (error) throw error;
-  let n = 0;
-  for (const row of (data ?? []) as SyncRow[]) {
-    const payload = await inboundPayload(row.payload as T);
-    await apply(payload, !!row.deleted_at, rowUpdatedMs(row.updated_at));
-    n++;
+  if (!sb) return [];
+  const rows: RemoteMeta[] = [];
+  for (let from = 0; ; from += META_PAGE) {
+    const { data, error } = await sb
+      .from(table)
+      .select('id, updated_at, deleted_at')
+      .eq('user_id', userId)
+      .range(from, from + META_PAGE - 1);
+    if (error) throw error;
+    const batch = (data ?? []) as RemoteMeta[];
+    rows.push(...batch);
+    if (batch.length < META_PAGE) break;
   }
-  return n;
+  return rows;
+}
+
+async function fetchRemoteRows(table: SyncTableName, userId: string, ids: string[]): Promise<SyncRow[]> {
+  const sb = getSupabase();
+  if (!sb || ids.length === 0) return [];
+  const rows: SyncRow[] = [];
+  for (let i = 0; i < ids.length; i += ID_CHUNK) {
+    const slice = ids.slice(i, i + ID_CHUNK);
+    const { data, error } = await sb.from(table).select('*').eq('user_id', userId).in('id', slice);
+    if (error) throw error;
+    rows.push(...((data ?? []) as SyncRow[]));
+  }
+  return rows;
 }
 
 async function pushRows(
@@ -186,6 +206,56 @@ async function pushTombstones(userId: string): Promise<number> {
   return tombs.length;
 }
 
+type Stamped = { id: string; updatedAt?: number; createdAt?: number };
+
+interface PushShape {
+  id: string;
+  world_id?: string;
+  season_id?: string;
+  episode_id?: string;
+  payload: unknown;
+  updated_at: string;
+  deleted_at?: string | null;
+}
+
+/** Pull rows the server has newer; push rows this device has newer. Tombstone ids are not pushed back. */
+async function reconcileTable<T extends Stamped>(
+  table: SyncTableName,
+  userId: string,
+  localRows: T[],
+  skipIds: Set<string>,
+  apply: (payload: T, deleted: boolean, remoteUpdated: number) => Promise<void>,
+  toPush: (row: T) => PushShape
+): Promise<{ pulled: number; pushed: number }> {
+  const remote = await listRemoteMeta(table, userId);
+  const remoteById = new Map(remote.map((row) => [row.id, row]));
+  const localById = new Map(localRows.map((row) => [row.id, row]));
+
+  const pullIds: string[] = [];
+  for (const row of remote) {
+    if (skipIds.has(row.id)) continue;
+    const local = localById.get(row.id);
+    const localMs = local ? entityUpdatedAt(local) : null;
+    if (syncSide(localMs, rowUpdatedMs(row.updated_at)) === 'pull') pullIds.push(row.id);
+  }
+
+  const payloads = await fetchRemoteRows(table, userId, pullIds);
+  for (const row of payloads) {
+    const payload = await inboundPayload(row.payload as T);
+    await apply(payload, !!row.deleted_at, rowUpdatedMs(row.updated_at));
+  }
+
+  const push: PushShape[] = [];
+  for (const row of localRows) {
+    if (skipIds.has(row.id)) continue;
+    const remoteRow = remoteById.get(row.id);
+    const remoteMs = remoteRow ? rowUpdatedMs(remoteRow.updated_at) : null;
+    if (syncSide(entityUpdatedAt(row), remoteMs) === 'push') push.push(toPush(row));
+  }
+  await pushRows(table, userId, push);
+  return { pulled: payloads.length, pushed: push.length };
+}
+
 export async function syncNow(): Promise<{ pulled: number; pushed: number }> {
   const sb = getSupabase();
   if (!sb) throw new Error('Cloud sync is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.');
@@ -193,25 +263,19 @@ export async function syncNow(): Promise<{ pulled: number; pushed: number }> {
   if (!session?.user) throw new Error('Sign in to sync.');
 
   const userId = session.user.id;
-  const since = useSyncMeta.getState().lastSyncedAt;
   useSyncMeta.setState({ busy: true, error: '', lastResult: '' });
 
   try {
-    let pulled = 0;
-    pulled += await pullTable<World>('worlds', userId, since, lwwPutWorld);
-    pulled += await pullTable<Season>('seasons', userId, since, (p, d, m) => lwwPut(db.seasons, p, d, m));
-    pulled += await pullTable<Episode>('episodes', userId, since, (p, d, m) => lwwPut(db.episodes, p, d, m));
-    pulled += await pullTable<Turn>('turns', userId, since, (p, d, m) => lwwPut(db.turns, p, d, m));
-    pulled += await pullTable<Character>('characters', userId, since, (p, d, m) => lwwPut(db.characters, p, d, m));
-    pulled += await pullTable<Location>('locations', userId, since, (p, d, m) => lwwPut(db.locations, p, d, m));
-    pulled += await pullTable<ContinuityFact>('continuity', userId, since, (p, d, m) => lwwPut(db.continuity, p, d, m));
-    pulled += await pullTable<OpenThread>('threads', userId, since, (p, d, m) => lwwPut(db.threads, p, d, m));
-    pulled += await pullTable<SeasonWrap>('wraps', userId, since, (p, d, m) => lwwPut(db.wraps, p, d, m));
-    pulled += await pullTable<CalendarEvent>('calendarEvents', userId, since, (p, d, m) => lwwPut(db.calendarEvents, p, d, m));
-
+    const tombs = await db.tombstones.toArray();
+    const skipIds = new Map<SyncTableName, Set<string>>();
+    for (const tomb of tombs) {
+      const ids = skipIds.get(tomb.table) ?? new Set<string>();
+      ids.add(tomb.id);
+      skipIds.set(tomb.table, ids);
+    }
     const tombPushed = await pushTombstones(userId);
+    const skip = (table: SyncTableName) => skipIds.get(table) ?? new Set<string>();
 
-    // Push full local snapshot (LWW on server via upsert; remote older rows lose on next pull).
     const [worlds, seasons, episodes, turns, characters, locations, continuity, threads, wraps, calendarEvents] = await Promise.all([
       diskRows<World>('worlds'),
       diskRows<Season>('seasons'),
@@ -225,46 +289,48 @@ export async function syncNow(): Promise<{ pulled: number; pushed: number }> {
       diskRows<CalendarEvent>('calendarEvents')
     ]);
 
-    await pushRows('worlds', userId, worlds.map((w) => ({
-      id: w.id, payload: w, updated_at: isoFromEntity(w), deleted_at: null
-    })));
-    await pushRows('seasons', userId, seasons.map((s) => ({
-      id: s.id, world_id: s.worldId, payload: s, updated_at: isoFromEntity(s), deleted_at: null
-    })));
-    await pushRows('episodes', userId, episodes.map((e) => ({
-      id: e.id, world_id: e.worldId, season_id: e.seasonId, payload: e, updated_at: isoFromEntity(e), deleted_at: null
-    })));
-    await pushRows('turns', userId, turns.map((t) => ({
-      id: t.id, world_id: t.worldId, episode_id: t.episodeId, payload: t, updated_at: isoFromEntity(t), deleted_at: null
-    })));
-    await pushRows('characters', userId, characters.map((c) => ({
-      id: c.id, world_id: c.worldId, payload: c, updated_at: isoFromEntity(c), deleted_at: null
-    })));
-    await pushRows('locations', userId, locations.map((l) => ({
-      id: l.id, world_id: l.worldId, payload: l, updated_at: isoFromEntity(l), deleted_at: null
-    })));
-    await pushRows('continuity', userId, continuity.map((c) => ({
-      id: c.id, world_id: c.worldId, season_id: c.seasonId, payload: c, updated_at: isoFromEntity(c), deleted_at: null
-    })));
-    await pushRows('threads', userId, threads.map((t) => ({
-      id: t.id, world_id: t.worldId, season_id: t.seasonId, payload: t, updated_at: isoFromEntity(t), deleted_at: null
-    })));
-    await pushRows('wraps', userId, wraps.map((w) => ({
-      id: w.id, world_id: w.worldId, season_id: w.seasonId, payload: w, updated_at: isoFromEntity(w), deleted_at: null
-    })));
-    await pushRows('calendarEvents', userId, calendarEvents.map((e) => ({
-      id: e.id, world_id: e.worldId, season_id: e.seasonId, payload: e, updated_at: isoFromEntity(e), deleted_at: null
-    })));
+    const parts = [
+      await reconcileTable('worlds', userId, worlds, skip('worlds'), lwwPutWorld, (w) => ({
+        id: w.id, payload: w, updated_at: isoFromEntity(w), deleted_at: null
+      })),
+      await reconcileTable('seasons', userId, seasons, skip('seasons'), (p, d, m) => lwwPut(db.seasons, p, d, m), (s) => ({
+        id: s.id, world_id: s.worldId, payload: s, updated_at: isoFromEntity(s), deleted_at: null
+      })),
+      await reconcileTable('episodes', userId, episodes, skip('episodes'), (p, d, m) => lwwPut(db.episodes, p, d, m), (e) => ({
+        id: e.id, world_id: e.worldId, season_id: e.seasonId, payload: e, updated_at: isoFromEntity(e), deleted_at: null
+      })),
+      await reconcileTable('turns', userId, turns, skip('turns'), (p, d, m) => lwwPut(db.turns, p, d, m), (t) => ({
+        id: t.id, world_id: t.worldId, episode_id: t.episodeId, payload: t, updated_at: isoFromEntity(t), deleted_at: null
+      })),
+      await reconcileTable('characters', userId, characters, skip('characters'), (p, d, m) => lwwPut(db.characters, p, d, m), (c) => ({
+        id: c.id, world_id: c.worldId, payload: c, updated_at: isoFromEntity(c), deleted_at: null
+      })),
+      await reconcileTable('locations', userId, locations, skip('locations'), (p, d, m) => lwwPut(db.locations, p, d, m), (l) => ({
+        id: l.id, world_id: l.worldId, payload: l, updated_at: isoFromEntity(l), deleted_at: null
+      })),
+      await reconcileTable('continuity', userId, continuity, skip('continuity'), (p, d, m) => lwwPut(db.continuity, p, d, m), (c) => ({
+        id: c.id, world_id: c.worldId, season_id: c.seasonId, payload: c, updated_at: isoFromEntity(c), deleted_at: null
+      })),
+      await reconcileTable('threads', userId, threads, skip('threads'), (p, d, m) => lwwPut(db.threads, p, d, m), (t) => ({
+        id: t.id, world_id: t.worldId, season_id: t.seasonId, payload: t, updated_at: isoFromEntity(t), deleted_at: null
+      })),
+      await reconcileTable('wraps', userId, wraps, skip('wraps'), (p, d, m) => lwwPut(db.wraps, p, d, m), (w) => ({
+        id: w.id, world_id: w.worldId, season_id: w.seasonId, payload: w, updated_at: isoFromEntity(w), deleted_at: null
+      })),
+      await reconcileTable('calendarEvents', userId, calendarEvents, skip('calendarEvents'), (p, d, m) => lwwPut(db.calendarEvents, p, d, m), (e) => ({
+        id: e.id, world_id: e.worldId, season_id: e.seasonId, payload: e, updated_at: isoFromEntity(e), deleted_at: null
+      }))
+    ];
 
-    const pushed =
-      tombPushed +
-      worlds.length + seasons.length + episodes.length + turns.length +
-      characters.length + locations.length + continuity.length + threads.length + wraps.length +
-      calendarEvents.length;
+    let pulled = 0;
+    let pushed = tombPushed;
+    for (const part of parts) {
+      pulled += part.pulled;
+      pushed += part.pushed;
+    }
 
-    const now = Date.now();
     useSyncMeta.setState({
-      lastSyncedAt: now,
+      lastSyncedAt: Date.now(),
       busy: false,
       error: '',
       lastResult: `Synced · pulled ${pulled} · pushed ${pushed}`

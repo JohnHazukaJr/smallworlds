@@ -80,7 +80,7 @@ export function LockScreen() {
       }} />
       <div className="craft-row fade-in" style={{ position: 'relative', width: 400, maxWidth: '100%', padding: '30px 28px', display: 'flex', flexDirection: 'column', gap: 18 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <div className="serif" style={{ fontSize: 26, letterSpacing: '0.01em', color: '#f2f4f5', fontWeight: 300 }}>
+          <div className="serif" style={{ fontSize: 26, letterSpacing: '0.01em', color: 'var(--ink-heading)', fontWeight: 300 }}>
             Small Worlds
           </div>
           <div className="label">Make a world. Live in it.</div>
@@ -96,7 +96,7 @@ export function LockScreen() {
           disabled={busy || waitLeft > 0}
         />
         {waitLeft > 0 && (
-          <div style={{ fontSize: 12.5, color: 'rgba(236,234,230,0.7)' }}>
+          <div style={{ fontSize: 12.5, color: 'var(--paper)' }}>
             Try again in {Math.ceil(waitLeft / 1000)}s.
           </div>
         )}
@@ -104,7 +104,7 @@ export function LockScreen() {
         <button className="btn-primary" disabled={busy || !pass || waitLeft > 0} onClick={() => void unlock()}>
           {busy ? 'Unlocking…' : waitLeft > 0 ? 'Locked out' : 'Unlock'}
         </button>
-        <div style={{ fontSize: 12, lineHeight: 1.6, color: 'rgba(236,234,230,0.45)' }}>
+        <div style={{ fontSize: 12, lineHeight: 1.6, color: 'var(--ink-muted)' }}>
           The lock encrypts stories and API keys on this device (AES-256-GCM) and hides the app.
           The passphrase was never sent anywhere and cannot be recovered. Resetting it deletes the story key,
           so sealed worlds on this device stay unreadable until you restore a backup.

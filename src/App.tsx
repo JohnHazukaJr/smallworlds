@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Rail, TabBar } from './components/Nav';
 import { LockScreen } from './components/LockScreen';
 import { useAuth } from './cloud/authStore';
+import { db } from './db';
 import { writesInFlight } from './security/writeGate';
 import { useVault } from './security/vault';
 import { hasStoragePressure, STORAGE_PRESSURE_EVENT } from './storage/quota';
@@ -34,6 +35,17 @@ export default function App() {
   useEffect(() => {
     void initAuth();
   }, [initAuth]);
+
+  useEffect(() => {
+    if (!currentWorldId) return;
+    const id = currentWorldId;
+    let cancelled = false;
+    void db.worlds.get(id).then((world) => {
+      if (cancelled || world) return;
+      useApp.getState().closeWorldIf(id);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [currentWorldId]);
 
   useEffect(() => {
     if (!vaultEnabled || vaultLocked) return;
@@ -95,11 +107,11 @@ export default function App() {
         <div style={{
           flexShrink: 0, position: 'relative', zIndex: 40,
           borderBottom: '1px solid var(--focus)',
-          background: 'rgba(255, 255, 255, 0.05)', backdropFilter: 'blur(14px) saturate(140%)',
+          background: 'var(--page)',
           padding: '10px 16px', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap'
         }}>
           <Mono style={{ fontSize: 10, color: 'var(--accent-strong)' }}>Storage pressure</Mono>
-          <div style={{ flex: 1, minWidth: 180, fontSize: 12.5, lineHeight: 1.45, color: 'rgba(230,233,235,0.8)' }}>
+          <div style={{ flex: 1, minWidth: 180, fontSize: 12.5, lineHeight: 1.45, color: 'var(--paper)' }}>
             This browser is low on space. Back up now — worlds or keys can fail to save.
           </div>
           <button className="btn-primary" style={{ padding: '7px 12px', fontSize: 12 }} onClick={() => go('profile')}>

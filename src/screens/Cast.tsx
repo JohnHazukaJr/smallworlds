@@ -12,8 +12,9 @@ import { useApp } from '../store/app';
 import type { Character, Relationship } from '../types';
 import { Chip, ConfirmBar, ErrorNote, Field, Mono, Spinner, editorsStacked, phoneChrome, useViewport } from '../ui/bits';
 import { fileToPortraitImage } from '../ui/image';
-import { avatarStyle, STRIPE, ACCENT, ACCENT_RGBA } from '../ui/theme';
+import { avatarStyle, ACCENT, ACCENT_RGBA } from '../ui/theme';
 import { characterPortraits, emptyCharacter, MAX_CHARACTER_PORTRAITS, nextSceneCastIds, portraitsPatch, pruneDeletedCharacterFromEpisodes } from '../worldOps';
+import { shouldFlushAutosave } from '../ui/autosave';
 
 type Tab = 'persona' | 'voice' | 'psyche' | 'secrets' | 'relations' | 'anchors' | 'ai';
 const TABS: Array<[Tab, string]> = [
@@ -25,20 +26,24 @@ const TABS: Array<[Tab, string]> = [
 function useAutosave(draft: Character | null, onError: (msg: string) => void) {
   const timer = useRef<number>(undefined);
   const pending = useRef<Character | null>(null);
+  const removed = useRef(new Set<string>());
   const first = useRef(true);
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
+  const flush = (d: Character) => {
+    if (!shouldFlushAutosave(d.id, removed.current, true)) return;
+    void safeWrite(async () => {
+      if (!shouldFlushAutosave(d.id, removed.current, true)) return;
+      const row = await db.characters.get(d.id);
+      if (!shouldFlushAutosave(d.id, removed.current, !!row)) return;
+      await db.characters.put({ ...d, updatedAt: Date.now() });
+    }, (msg) => onErrorRef.current(msg));
+  };
   useEffect(() => {
-    if (!draft) return;
+    if (!draft || removed.current.has(draft.id)) return;
     if (first.current) { first.current = false; return; }
     pending.current = draft;
     window.clearTimeout(timer.current);
-    const flush = (d: Character) => {
-      void safeWrite(
-        () => db.characters.put({ ...d, updatedAt: Date.now() }),
-        (msg) => onErrorRef.current(msg)
-      );
-    };
     timer.current = window.setTimeout(() => {
       const d = pending.current;
       pending.current = null;
@@ -52,6 +57,18 @@ function useAutosave(draft: Character | null, onError: (msg: string) => void) {
     };
   }, [draft]);
   useEffect(() => { first.current = true; }, [draft?.id]);
+  return {
+    discard(id: string) {
+      removed.current.add(id);
+      if (pending.current?.id === id) {
+        pending.current = null;
+        window.clearTimeout(timer.current);
+      }
+    },
+    release(id: string) {
+      removed.current.delete(id);
+    }
+  };
 }
 
 export function Cast() {
@@ -130,7 +147,7 @@ export function Cast() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id]);
 
-  useAutosave(draft, setError);
+  const { discard: discardAutosave, release: releaseAutosave } = useAutosave(draft, setError);
 
   const patch = (p: Partial<Character>) => setDraft((d) => (d ? { ...d, ...p } : d));
 
@@ -295,7 +312,7 @@ export function Cast() {
               flexShrink: stacked ? 0 : 1,
               minWidth: 0,
               maxWidth: stacked ? 200 : undefined,
-              background: active ? 'rgba(255,255,255,0.08)' : 'transparent',
+              background: active ? 'var(--rule)' : 'transparent',
               border: `1px solid ${active ? 'var(--glass-rim)' : 'transparent'}`
             }}>
               {(() => {
@@ -313,7 +330,7 @@ export function Cast() {
                   {c.name || 'unnamed'}{c.selfTag ? ' · me' : ''}
                 </div>
                 {!narrow && (
-                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.42)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {c.role || (c.isPlayer ? 'protagonist' : 'no role yet')}
                     {episode && !c.isPlayer ? (inScene ? ' · in scene' : ' · off-page') : ''}
                   </div>
@@ -384,22 +401,22 @@ export function Cast() {
                   return (
                     <>
                       <div style={{
-                        height: narrow ? 160 : 306, borderRadius: 16, border: '1px solid rgba(255,255,255,0.12)',
+                        height: narrow ? 160 : 306, borderRadius: 16, border: '1px solid var(--rule)',
                         display: 'flex', alignItems: 'flex-end', padding: 12, position: 'relative', overflow: 'hidden',
                         backgroundImage: primary
                           ? `url(${primary})`
-                          : `linear-gradient(155deg, oklch(0.5 0.06 ${d.hue} / 0.7), rgba(8,9,12,0.9)), ${STRIPE('rgba(255,255,255,0.06)', 'rgba(255,255,255,0.015)')}`,
+                          : `linear-gradient(155deg, oklch(0.9 0.04 ${d.hue}), #f7f3ea)`,
                         backgroundSize: 'cover', backgroundPosition: 'center'
                       }}>
                         {!primary && (
-                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.62)', background: 'rgba(8,9,12,0.5)', backdropFilter: 'blur(6px)', padding: '5px 8px', borderRadius: 6 }}>
+                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', background: 'transparent',  padding: '5px 8px', borderRadius: 6 }}>
                             portrait plate · no photo yet
                           </span>
                         )}
                         {d.selfTag && (
                           <span style={{
                             position: 'absolute', top: 10, right: 10, fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5,
-                            letterSpacing: '0.06em', color: '#0a1416', background: ACCENT, padding: '4px 8px', borderRadius: 4
+                            letterSpacing: '0.06em', color: 'var(--accent-ink)', background: ACCENT, padding: '4px 8px', borderRadius: 4
                           }}>this is me</span>
                         )}
                       </div>
@@ -413,7 +430,7 @@ export function Cast() {
                                 onClick={() => void setPrimaryPortrait(i)}
                                 style={{
                                   width: 52, height: 52, borderRadius: 10, padding: 0, cursor: 'pointer',
-                                  border: i === 0 ? `2px solid ${ACCENT}` : '1px solid rgba(255,255,255,0.16)',
+                                  border: i === 0 ? `2px solid ${ACCENT}` : '1px solid var(--rule)',
                                   backgroundImage: `url(${url})`, backgroundSize: 'cover', backgroundPosition: 'center'
                                 }}
                               />
@@ -425,7 +442,7 @@ export function Cast() {
                                 style={{
                                   position: 'absolute', top: -6, right: -6, width: 18, height: 18, padding: 0,
                                   borderRadius: '50%', fontSize: 10, lineHeight: '18px',
-                                  background: 'rgba(8,9,12,0.85)', border: '1px solid rgba(255,255,255,0.2)'
+                                  background: 'var(--page)', border: '1px solid var(--rule)'
                                 }}
                               >×</button>
                             </div>
@@ -508,24 +525,34 @@ export function Cast() {
                     onCancel={() => setConfirmRemove(false)}
                     onConfirm={() => {
                       setConfirmRemove(false);
+                      const removed = d;
+                      discardAutosave(removed.id);
                       void (async () => {
-                        await recordTombstones([{ table: 'characters', id: d.id, worldId: d.worldId, payload: d }]);
-                        const remaining = cast.filter((c) => c.id !== d.id);
-                        const pruned = pruneRelationshipsToCast(remaining);
-                        await db.transaction('rw', db.characters, db.episodes, async () => {
-                          await db.characters.delete(d.id);
-                          await pruneDeletedCharacterFromEpisodes(d.worldId, d.id);
-                          for (const c of pruned) {
-                            const before = remaining.find((x) => x.id === c.id);
-                            if (!before) continue;
-                            if (JSON.stringify(before.relationships) !== JSON.stringify(c.relationships)) {
-                              await db.characters.update(c.id, {
-                                relationships: c.relationships,
-                                updatedAt: Date.now()
-                              });
+                        const saved = await safeWrite(async () => {
+                          await recordTombstones([{ table: 'characters', id: removed.id, worldId: removed.worldId, payload: removed }]);
+                          const remaining = cast.filter((c) => c.id !== removed.id);
+                          const pruned = pruneRelationshipsToCast(remaining);
+                          await db.transaction('rw', db.characters, db.episodes, async () => {
+                            await db.characters.delete(removed.id);
+                            await pruneDeletedCharacterFromEpisodes(removed.worldId, removed.id);
+                            for (const c of pruned) {
+                              const before = remaining.find((x) => x.id === c.id);
+                              if (!before) continue;
+                              if (JSON.stringify(before.relationships) !== JSON.stringify(c.relationships)) {
+                                await db.characters.update(c.id, {
+                                  relationships: c.relationships,
+                                  updatedAt: Date.now()
+                                });
+                              }
                             }
-                          }
-                        });
+                          });
+                          return true;
+                        }, setError);
+                        if (!saved) {
+                          releaseAutosave(removed.id);
+                          setDraft((cur) => (cur && cur.id === removed.id ? { ...cur } : cur));
+                          return;
+                        }
                         setSelectedId(null);
                       })();
                     }}
@@ -544,7 +571,7 @@ export function Cast() {
                   <input
                     value={d.role} onChange={(e) => patch({ role: e.target.value })}
                     placeholder="role · relation to the protagonist"
-                    style={{ fontSize: 13.5, color: 'rgba(236,234,230,0.7)', marginTop: 8, background: 'transparent', border: 0, padding: 0, borderRadius: 0 }}
+                    style={{ fontSize: 13.5, color: 'var(--paper)', marginTop: 8, background: 'transparent', border: 0, padding: 0, borderRadius: 0 }}
                   />
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 11 }}>
@@ -558,7 +585,7 @@ export function Cast() {
                       <Mono style={{ fontSize: 9, letterSpacing: '0.12em' }}>{k}</Mono>
                       <input
                         value={v} onChange={(e) => set(e.target.value)} placeholder="—"
-                        style={{ fontSize: 13, background: 'transparent', border: 0, padding: 0, borderRadius: 0, color: 'rgba(236,234,230,0.92)' }}
+                        style={{ fontSize: 13, background: 'transparent', border: 0, padding: 0, borderRadius: 0, color: 'var(--ink-heading)' }}
                       />
                     </div>
                   ))}
@@ -569,11 +596,11 @@ export function Cast() {
               </div>
             </div>
 
-            <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid rgba(255,255,255,0.08)', marginBottom: 24, flexWrap: 'wrap', overflowX: 'auto' }}>
+            <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid var(--rule)', marginBottom: 24, flexWrap: 'wrap', overflowX: 'auto' }}>
               {TABS.map(([id, label]) => (
                 <button key={id} onClick={() => setTab(id)} style={{
                   border: 0, background: 'transparent',
-                  color: tab === id ? 'var(--ink-heading)' : 'rgba(236,234,230,0.45)',
+                  color: tab === id ? 'var(--ink-heading)' : 'var(--ink-muted)',
                   borderBottom: `2px solid ${tab === id ? ACCENT : 'transparent'}`,
                   padding: '10px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap'
                 }}>{label}</button>
@@ -685,7 +712,7 @@ export function Cast() {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                     <div style={{ width: 6, height: 6, borderRadius: '50%', background: ACCENT }} />
                     <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-heading)' }}>Behaviour anchors</div>
-                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)', marginLeft: 'auto' }}>
+                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', marginLeft: 'auto' }}>
                       what keeps them human
                     </div>
                   </div>
@@ -704,7 +731,7 @@ export function Cast() {
                   />
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     {d.anchors.filter((a) => a.trim()).map((a, i) => (
-                      <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, lineHeight: 1.5, color: 'rgba(236,234,230,0.9)' }}>
+                      <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, lineHeight: 1.5, color: 'var(--ink-heading)' }}>
                         <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: ACCENT, paddingTop: 3 }}>
                           {String(i + 1).padStart(2, '0')}
                         </span>
@@ -813,7 +840,7 @@ function RelationsEditor({
       paddingBottom: narrow ? 24 : 0
     }}>
       <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'var(--ink-muted)' }}>
-        Outbound links from <strong style={{ color: 'rgba(236,234,230,0.85)', fontWeight: 600 }}>{character.name || 'this character'}</strong>.
+        Outbound links from <strong style={{ color: 'var(--paper)', fontWeight: 600 }}>{character.name || 'this character'}</strong>.
         Map shows the web; dashed edges are inbound-only. The cast card named “you” is the story protagonist — not you the author.
       </div>
 
@@ -825,9 +852,9 @@ function RelationsEditor({
           zIndex: 5,
           margin: '0 -4px',
           padding: '8px 4px 10px',
-          background: 'rgba(255,255,255,0.045)',
-          backdropFilter: 'blur(14px) saturate(140%)',
-          borderBottom: '1px solid rgba(255,255,255,0.08)'
+          background: 'transparent',
+          
+          borderBottom: '1px solid var(--rule)'
         } : {})
       }}>
         <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -851,7 +878,7 @@ function RelationsEditor({
 
       {notice && (
         <div style={{
-          fontSize: 12.5, color: 'rgba(200,230,235,0.95)',
+          fontSize: 12.5, color: 'var(--paper)',
           border: `1px solid ${ACCENT_RGBA.a35}`, borderRadius: 6, padding: '10px 12px',
           background: ACCENT_RGBA.a08, display: 'flex', gap: 10
         }}>

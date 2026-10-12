@@ -2,9 +2,10 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useRef, useState } from 'react';
 import { PassphraseDialog } from '../components/PassphraseDialog';
 import {
-  db, deleteWorld, encryptExport, exportWorld, importAnyFile, isEncryptedExport,
+  db, deleteWorld, encryptExport, exportWorld, importAnyFile, importConflictTitles, isEncryptedExport,
   type EncryptedExport
 } from '../db';
+import { replaceImportMessage } from '../importFile';
 import { compactWorldToVolume } from '../ai/compactWorld';
 import { formatUserError } from '../errors';
 import { IMPORT_TOO_LARGE, importTooLarge } from '../security/importLimit';
@@ -77,6 +78,8 @@ export function Library() {
   const [compactProgress, setCompactProgress] = useState('');
 
   const finishImport = async (data: unknown) => {
+    const message = replaceImportMessage(await importConflictTitles(data));
+    if (message && !confirm(message)) return;
     const ids = await importAnyFile(data);
     if (ids.length === 1) openWorld(ids[0]);
     else setNotice(`Imported ${ids.length} world${ids.length === 1 ? '' : 's'}.`);
@@ -140,7 +143,7 @@ export function Library() {
     }}>
       <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between', gap: 24, flexWrap: 'wrap', marginBottom: 40 }}>
         <div style={{ maxWidth: 480 }}>
-          <h1 className="serif" style={{ fontWeight: 300, fontSize: compact ? 32 : phone ? 40 : 56, lineHeight: 1.02, margin: 0, color: 'var(--ink-heading)' }}>
+          <h1 className="serif" style={{ fontWeight: 500, fontSize: compact ? 32 : phone ? 40 : 56, lineHeight: 1.02, margin: 0, color: 'var(--ink-heading)' }}>
             Small Worlds
           </h1>
           <p style={{ margin: '14px 0 0', fontSize: 15, lineHeight: 1.55, color: 'var(--ink-muted)', maxWidth: '38ch' }}>
@@ -159,7 +162,7 @@ export function Library() {
 
       {error && <div style={{ marginBottom: 18 }}><ErrorNote error={error} onDismiss={() => setError('')} /></div>}
       {notice && (
-        <div style={{ marginBottom: 18, fontSize: 13.5, lineHeight: 1.5, color: 'rgba(200,230,235,0.85)' }}>
+        <div style={{ marginBottom: 18, fontSize: 13.5, lineHeight: 1.5, color: 'var(--paper)' }}>
           {notice}
           <button className="btn-quiet" style={{ marginLeft: 10, fontSize: 11 }} onClick={() => setNotice('')}>dismiss</button>
         </div>
@@ -208,14 +211,14 @@ export function Library() {
             >
               <div style={{ ...plateStyle(w.hue, narrow ? 88 : '100%'), minHeight: narrow ? 88 : 112, borderRadius: 0 }}>
                 <span className="mono meta" style={{
-                  color: 'rgba(230,233,235,0.75)', background: 'rgba(10,12,14,0.5)',
+                  color: 'var(--paper)', background: 'rgba(247,243,234,0.8)',
                   padding: '4px 7px', borderRadius: 2
                 }}>
                   {st ? `S${st.seasons} · E${st.episodes}` : '—'}
                 </span>
                 <span className="label" style={{
-                  color: 'rgba(230,233,235,0.5)', background: 'rgba(10,12,14,0.5)',
-                  border: '1px solid rgba(255,255,255,0.08)', padding: '3px 7px', borderRadius: 2
+                  color: 'var(--ink-muted)', background: 'rgba(247,243,234,0.8)',
+                  border: '1px solid var(--rule)', padding: '3px 7px', borderRadius: 2
                 }}>
                   {VIS[w.visibility].label}
                 </span>
@@ -227,8 +230,8 @@ export function Library() {
                 </div>
                 <div style={{
                   display: 'flex', gap: 14, fontSize: 11,
-                  color: 'rgba(230,233,235,0.4)', paddingTop: 6, marginTop: 2,
-                  borderTop: '1px solid rgba(255,255,255,0.06)',
+                  color: 'var(--ink-muted)', paddingTop: 6, marginTop: 2,
+                  borderTop: '1px solid var(--rule)',
                   alignItems: 'center'
                 }}>
                   <span>{st ? `${st.cast} cast` : '…'}</span>

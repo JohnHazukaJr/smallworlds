@@ -8,7 +8,6 @@ import { modelProfile, shouldReserveReasoningTokens } from './modelProfile';
 const CHARS_PER_TOKEN = 3.2;
 const TOKENIZER_RESERVE = 1024;
 const REASONING_OUTPUT_RESERVE = 4000;
-const PROMPT_FLOOR_CHARS = 12_000;
 const PROMPT_CAP_CHARS = 110_000;
 /** Ceiling for overflow safety — not the default send. */
 const PROMPT_CAP_LARGE_CHARS = 180_000;
@@ -36,7 +35,9 @@ export function promptCharBudget(
   const tokens = Math.max(0, window - Math.max(0, maxTokens) - reserve);
   const chars = Math.floor(tokens * CHARS_PER_TOKEN);
   const cap = window >= 128_000 ? PROMPT_CAP_LARGE_CHARS : PROMPT_CAP_CHARS;
-  return Math.max(PROMPT_FLOOR_CHARS, Math.min(chars, cap));
+  // Do not lift a small window up to a fixed floor. That floor can be larger
+  // than the room left after the reply.
+  return Math.min(chars, cap);
 }
 
 export function isLargeContextWindow(model: string): boolean {

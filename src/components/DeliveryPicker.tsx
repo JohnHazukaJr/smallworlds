@@ -94,7 +94,7 @@ export function DeliveryPicker({
       </div>
 
       {!tipSeen && (
-        <div style={{ fontSize: 12, lineHeight: 1.45, color: 'rgba(236,234,230,0.55)' }}>
+        <div style={{ fontSize: 12, lineHeight: 1.45, color: 'var(--ink-muted)' }}>
           Optional tone for how you speak or act — sarcastic, pleading, deadpan. Tap again to clear.
           <button
             className="btn-quiet"
@@ -118,7 +118,7 @@ export function DeliveryPicker({
             </Chip>
           ))}
           {quick.length === 0 && (
-            <span style={{ fontSize: 12, color: 'rgba(236,234,230,0.4)', alignSelf: 'center' }}>
+            <span style={{ fontSize: 12, color: 'var(--ink-muted)', alignSelf: 'center' }}>
               pick a tone from all tones
             </span>
           )}
@@ -129,8 +129,8 @@ export function DeliveryPicker({
         <div style={{
           display: 'flex', flexDirection: 'column', gap: 12,
           maxHeight: 260, overflowY: 'auto',
-          border: '1px solid rgba(255,255,255,0.1)', borderRadius: 6,
-          padding: '12px 12px 14px', background: 'rgba(255,255,255,0.03)'
+          border: '1px solid var(--rule)', borderRadius: 6,
+          padding: '12px 12px 14px', background: 'transparent'
         }}>
           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
             <Chip active={value === null} onClick={() => { onChange(null); setOpen(false); }}>

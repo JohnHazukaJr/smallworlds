@@ -91,10 +91,10 @@ export function Chip({
       onClick={onClick}
       disabled={disabled}
       style={{
-        border: `1px solid ${active ? tint(0.55) : 'rgba(255,255,255,0.12)'}`,
-        background: active ? tint(0.14) : 'transparent',
-        color: active ? '#e8f2f4' : 'rgba(230,233,235,0.62)',
-        borderRadius: 4,
+        border: `1px solid ${active ? tint(0.55) : 'var(--rule)'}`,
+        background: active ? tint(0.1) : 'transparent',
+        color: active ? 'var(--accent)' : 'var(--paper)',
+        borderRadius: 2,
         padding: '8px 12px',
         minHeight: 36,
         fontSize: 12,
@@ -120,16 +120,16 @@ export function Toggle({ on, onClick, accent = ACCENT, label }: { on: boolean; o
       aria-label={label}
       onClick={onClick}
       style={{
-        width: 44, height: 24, borderRadius: 4, flexShrink: 0,
-        border: `1px solid rgba(255,255,255,${on ? '0.22' : '0.12'})`,
-        background: on ? accent : 'rgba(255,255,255,0.05)',
+        width: 44, height: 24, borderRadius: 2, flexShrink: 0,
+        border: '1px solid var(--rule)',
+        background: on ? accent : 'transparent',
         cursor: 'pointer', padding: 3, display: 'flex',
         justifyContent: on ? 'flex-end' : 'flex-start', transition: 'all 0.2s ease'
       }}
     >
       <div style={{
         width: 16, height: 16, borderRadius: 2,
-        background: on ? '#0a1416' : 'rgba(230,233,235,0.55)'
+        background: on ? 'var(--accent-ink)' : 'var(--ink-muted)'
       }} />
     </button>
   );
@@ -137,7 +137,7 @@ export function Toggle({ on, onClick, accent = ACCENT, label }: { on: boolean; o
 
 export function Bar({ pct, color = ACCENT }: { pct: number; color?: string }) {
   return (
-    <div style={{ height: 2, borderRadius: 1, background: 'rgba(255,255,255,0.1)', overflow: 'hidden' }}>
+    <div style={{ height: 2, borderRadius: 1, background: 'var(--rule)', overflow: 'hidden' }}>
       <div style={{ height: '100%', width: `${pct}%`, background: color, borderRadius: 1 }} />
     </div>
   );
@@ -149,7 +149,7 @@ export function Field({
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, justifyContent: 'space-between' }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: 'rgba(230,233,235,0.9)' }}>{label}</div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-heading)' }}>{label}</div>
         {note && <div className="label">{note}</div>}
       </div>
       {children}
@@ -165,7 +165,7 @@ export function Spinner({ label, accent = ACCENT }: { label: string; accent?: st
         boxShadow: `10px 0 0 ${accent}99, 20px 0 0 ${accent}44`,
         animation: 'wr-pulse 1.2s ease-in-out infinite'
       }} />
-      <span className="label" style={{ marginLeft: 24, color: 'rgba(230,233,235,0.65)' }}>{label}</span>
+      <span className="label" style={{ marginLeft: 24 }}>{label}</span>
     </div>
   );
 }
@@ -193,7 +193,7 @@ export function ErrorNote({
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{
           fontSize: 12.5, lineHeight: 1.55, wordBreak: 'break-word',
-          color: warn ? 'rgba(200,230,235,0.95)' : 'rgba(240,200,190,0.95)'
+          color: warn ? 'var(--paper)' : 'oklch(0.38 0.1 25)'
         }}>
           {message}
         </div>
@@ -301,15 +301,15 @@ export function Sheet({
     <>
       <div
         onClick={onClose}
-        style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(6,7,10,0.55)', backdropFilter: 'blur(4px)' }}
+        style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(28,22,18,0.28)' }}
       />
       <aside
         className="sheet-panel"
         style={{
           position: 'fixed', zIndex: 51,
           ...(narrow
-            ? { left: 0, right: 0, bottom: dock, top: '8vh', borderTop: '1px solid var(--glass-rim)', borderRadius: '12px 12px 0 0', animation: 'wr-slide-up 0.35s ease both' }
-            : { top: 0, right: 0, bottom: dock, width, borderLeft: '1px solid var(--glass-rim)', animation: 'wr-fade 0.35s ease both' }),
+            ? { left: 0, right: 0, bottom: dock, top: '8vh', borderTop: '1px solid var(--rule)', borderRadius: 0, animation: 'wr-slide-up 0.35s ease both' }
+            : { top: 0, right: 0, bottom: dock, width, borderLeft: '1px solid var(--rule)', animation: 'wr-fade 0.35s ease both' }),
           display: 'flex', flexDirection: 'column', gap: 0,
           padding: 0,
           overflow: 'hidden',
@@ -326,11 +326,11 @@ export function Sheet({
         {footer != null && (
           <div style={{
             flexShrink: 0,
-            borderTop: '1px solid var(--glass-rim)',
+            borderTop: '1px solid var(--rule)',
             padding: narrow
               ? '12px 16px calc(12px + env(safe-area-inset-bottom))'
               : '14px 22px 18px',
-            background: 'var(--glass-fill)',
+            background: 'var(--page)',
             display: 'flex', flexDirection: 'column', gap: 10
           }}>
             {footer}

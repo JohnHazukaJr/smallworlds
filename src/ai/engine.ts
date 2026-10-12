@@ -26,7 +26,7 @@ import { proseCompletionTokens } from './modelProfile';
 import { applyDeliveryTone, parseDeliveryTone } from './deliveryTone';
 import { stancePlaybook } from './storyStance';
 import { hasSpokenDialogue, normalizeSpeakText, speakHoldsForPlayer, stitchSpeakRetry, stripNarratorEmbeddedDialogue } from './dialogueFormat';
-import { SPEAK_WALL_NUDGE, speakLeaksMustNotKnow } from './knowledgeWall';
+import { SPEAK_WALL_NUDGE, acceptWallRetry, clearMustNotKnowClause, speakLeaksMustNotKnow } from './knowledgeWall';
 import {
   activeGuests,
   buildCharacterSpeakMessages,
@@ -36,7 +36,7 @@ import {
   buildNarrationBeatMessages,
   buildNarratorSystemPrompt,
   characterSpeakTokens,
-  chooseHistoryTail,
+  historyTailFor,
   compressOmittedTurns,
   DIRECTOR_PLAN_TOKENS,
   directorSystemPrompt,
@@ -196,11 +196,14 @@ async function streamSpeakComplete(opts: {
       job: 'prose',
       onDelta: (d) => {
         acc += d;
-        opts.onAccumulated(acc);
+        opts.onAccumulated(stitchSpeakRetry(cleaned, acc));
       }
     });
-    const retried = normalizeSpeakText(acc);
-    if (retried) cleaned = retried;
+    const kept = acceptWallRetry(normalizeSpeakText(acc), wall);
+    if (!kept) {
+      throw new AIError('That line still says something they must not know. Try the beat again.');
+    }
+    cleaned = kept;
   }
   return cleaned;
 }
@@ -269,7 +272,7 @@ function historyPackFor(
   pack: PromptBuildOpts,
   totalCap: number
 ): Pick<PromptBuildOpts, 'totalCap' | 'skipOmittedDigest' | 'historyTailChars' | 'historyTailMaxTurns'> {
-  const tail = chooseHistoryTail(model, agent);
+  const tail = historyTailFor(model, agent, pack.pack);
   return {
     totalCap,
     skipOmittedDigest: pack.skipOmittedDigest ?? !!episode.runningSummary?.trim(),
@@ -278,7 +281,9 @@ function historyPackFor(
   };
 }
 
-/** Retry once with a tight lore pack — never shortens the scene itself. */
+const OVERFLOW_NOTICE = 'Prompt was too large for this model — sent a tighter pack and a shorter recent transcript.';
+
+/** Retry once with a tight lore pack and a short transcript tail. */
 async function withOverflowRetry<T>(
   run: (pack: PromptBuildOpts) => Promise<T>,
   onNotice?: (message: string) => void
@@ -288,7 +293,7 @@ async function withOverflowRetry<T>(
   } catch (e) {
     if ((e as Error).name === 'AbortError') throw e;
     if (!isPromptPackRetryError(e)) throw e;
-    onNotice?.('Prompt was too large for this model — sent a tighter pack of lore, not a shorter scene.');
+    onNotice?.(OVERFLOW_NOTICE);
     return run({ pack: 'tight' });
   }
 }
@@ -331,6 +336,10 @@ export interface WriteOptions {
   signal?: AbortSignal;
   /** Prefer this Cast NPC for the speak reply (Speak/Act). */
   preferCharacterId?: string;
+  /** This changes things, or only this moment. A moment is not filed as canon. */
+  weight?: 'moment' | 'matters';
+  /** The action is taken as this cast member. Omitted means the player. */
+  asCharacterId?: string;
   /** Prefer this walk-on for the speak reply (Speak/Act). */
   preferGuestId?: string;
   /** Skip director planning and run these leftover beats (Continue plan). */
@@ -815,12 +824,35 @@ function beatMemoryQuery(
   return memoryFocusQuery([playerText, brief, names.join(' '), ctx.episode.location]);
 }
 
+/**
+ * Post-turn summary and live memory. The write that scheduled it has already
+ * returned, so the next write or re-roll waits here before reading the episode.
+ */
+let postTurnTail: Promise<void> = Promise.resolve();
+
+function trackPostTurn(task: () => Promise<void>): void {
+  beginAppWrite();
+  const run = task()
+    .catch((e: unknown) => {
+      if ((e as Error).name === 'AbortError' || e instanceof WriteAbortedError) return;
+      logAppError(e, 'post turn');
+    })
+    .finally(endAppWrite);
+  postTurnTail = postTurnTail.then(() => run, () => run);
+}
+
+function waitForPostTurn(): Promise<void> {
+  return postTurnTail;
+}
+
 export function writeTurn(opts: WriteOptions): Promise<string> {
   beginAppWrite();
   return writeTurnInner(opts).finally(endAppWrite);
 }
 
 async function writeTurnInner(opts: WriteOptions): Promise<string> {
+  await waitForPostTurn();
+  throwIfAborted(opts.signal, 0);
   const { provider, model } = proseModelFor(opts.world);
   const ctx = await loadContext(opts.world, opts.season, opts.episode);
   let castIds = [...opts.episode.castIds];
@@ -862,7 +894,9 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
       : opts.input.trim();
     const userTurn: Turn = {
       id: uid(), episodeId: opts.episode.id, worldId: opts.world.id,
-      role: 'user', mode: opts.mode, text: userText, createdAt: Date.now()
+      role: 'user', mode: opts.mode, text: userText, createdAt: Date.now(),
+      weight: opts.weight ?? 'matters',
+      ...(opts.asCharacterId ? { asCharacterId: opts.asCharacterId } : {})
     };
     await guardStorage(() => db.turns.add(userTurn));
     userTurnId = userTurn.id;
@@ -871,7 +905,12 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
 
   const progress = opts.onProgress ?? (() => {});
 
-  const playerText = opts.input.trim();
+  const hands = opts.asCharacterId
+    ? ctx.characters.find((c) => c.id === opts.asCharacterId)
+    : undefined;
+  const playerText = hands
+    ? `${hands.name} takes this action. Write what follows around it, and do not play the action again as if it had not happened:\n${opts.input.trim()}`
+    : opts.input.trim();
   const requireDialogue = requiresSpokenReply(opts.mode);
 
   // File glue before planning so the first long Write is not tail-only.
@@ -885,11 +924,11 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
   let beats: DirectorBeat[];
   let enterIds: string[] = [];
   if (opts.resumeBeats && opts.resumeBeats.length > 0) {
-    progress('continuing plan…');
+    progress('the page turns');
     beats = opts.resumeBeats;
   } else {
     try {
-      progress('planning…');
+      progress('the page turns');
       const speakersPresent = inScene.length > 0 || activeGuests(ctx.episode).length > 0;
       const prefer = {
         characterId: opts.preferCharacterId,
@@ -897,38 +936,40 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
       };
       const utilityModel = utilityModelFor(opts.world).model;
       const directorCap = promptCharBudget(utilityModel, DIRECTOR_PLAN_TOKENS);
-      const directorTail = chooseHistoryTail(utilityModel, 'director');
       const directorSystem = directorSystemPrompt(
         opts.mode, speakersPresent, opts.length, storyStanceOf(opts.world)
       );
-      const planDirector = (pack: PromptBuildOpts['pack'] = 'normal') => utilityJson<{
-        castDelta?: { enter?: string[]; leave?: string[]; introduce?: IntroduceSpec[] };
-        beats: Array<{ type?: string; brief?: string; characterId?: string; guestId?: string }>;
-      }>(
-        opts.world,
-        directorSystem,
-        directorUserPrompt(ctx, opts.mode, playerText, {
-          preferCharacterId: opts.preferCharacterId,
-          preferGuestId: opts.preferGuestId,
-          pack,
-          totalCap: directorCap,
-          systemChars: directorSystem.length,
-          historyTailChars: directorTail.charBudget,
-          historyTailMaxTurns: directorTail.maxTurns
-        }),
-        DIRECTOR_PLAN_TOKENS,
-        opts.signal,
-        UTILITY_TIMEOUT_MS,
-        'utility',
-        PLAN_TURN_TOOL
-      );
+      const planDirector = (pack: PromptBuildOpts['pack'] = 'normal') => {
+        const tail = historyTailFor(utilityModel, 'director', pack);
+        return utilityJson<{
+          castDelta?: { enter?: string[]; leave?: string[]; introduce?: IntroduceSpec[] };
+          beats: Array<{ type?: string; brief?: string; characterId?: string; guestId?: string }>;
+        }>(
+          opts.world,
+          directorSystem,
+          directorUserPrompt(ctx, opts.mode, playerText, {
+            preferCharacterId: opts.preferCharacterId,
+            preferGuestId: opts.preferGuestId,
+            pack,
+            totalCap: directorCap,
+            systemChars: directorSystem.length,
+            historyTailChars: tail.charBudget,
+            historyTailMaxTurns: tail.maxTurns
+          }),
+          DIRECTOR_PLAN_TOKENS,
+          opts.signal,
+          UTILITY_TIMEOUT_MS,
+          'utility',
+          PLAN_TURN_TOOL
+        );
+      };
       let plan: Awaited<ReturnType<typeof planDirector>>;
       try {
         plan = await planDirector('normal');
       } catch (first) {
         if ((first as Error).name === 'AbortError') asWriteAbort(first, beatsCompleted);
         if (isPromptPackRetryError(first)) {
-          opts.onNotice?.('Prompt was too large for this model — sent a tighter pack of lore, not a shorter scene.');
+          opts.onNotice?.(OVERFLOW_NOTICE);
           plan = await planDirector('tight');
         } else {
           logAppError(first, 'director plan (retrying)');
@@ -937,7 +978,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
           } catch (second) {
             if ((second as Error).name === 'AbortError') asWriteAbort(second, beatsCompleted);
             if (isPromptPackRetryError(second)) {
-              opts.onNotice?.('Prompt was too large for this model — sent a tighter pack of lore, not a shorter scene.');
+              opts.onNotice?.(OVERFLOW_NOTICE);
               plan = await planDirector('tight');
             } else {
               throw second;
@@ -1252,28 +1293,30 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
   }
 
   await clearPendingPlan(opts.episode.id);
-
-  // Summary + light cast-state refresh are best-effort after beats are saved —
-  // abort here must not look like a zero-beat stop.
-  try {
-    await maybeRefreshRunningSummary(opts.world, ctx, opts.signal, progress, opts.onNotice, {
-      phase: 'post',
-      proseModel: model
-    });
-    await maybeRefreshLiveMemory(
-      opts.world, ctx, beatsCompleted, opts.signal, progress, opts.onNotice
-    );
-  } catch (e) {
-    if ((e as Error).name === 'AbortError' || e instanceof WriteAbortedError) {
-      if (beatsCompleted > 0) {
-        await db.worlds.update(opts.world.id, { updatedAt: Date.now() });
-        return lastId;
-      }
-      asWriteAbort(e, beatsCompleted);
-    }
-    throw e;
-  }
   await db.worlds.update(opts.world.id, { updatedAt: Date.now() });
+
+  // Beats are already saved. Memory refresh must not keep the composer locked,
+  // and an abort here must not look like a zero-beat stop.
+  if (!opts.signal?.aborted) {
+    const saved = beatsCompleted;
+    trackPostTurn(async () => {
+      const quiet = () => {};
+      try {
+        await Promise.all([
+          maybeRefreshRunningSummary(opts.world, ctx, opts.signal, quiet, opts.onNotice, {
+            phase: 'post',
+            proseModel: model
+          }),
+          opts.weight === 'moment'
+            ? Promise.resolve()
+            : maybeRefreshLiveMemory(opts.world, ctx, saved, opts.signal, quiet, opts.onNotice)
+        ]);
+      } catch (e) {
+        if ((e as Error).name === 'AbortError' || e instanceof WriteAbortedError) return;
+        throw e;
+      }
+    });
+  }
   return lastId;
 }
 
@@ -1307,6 +1350,8 @@ async function regenerateBeatInner(opts: {
   if (opts.turn.role !== 'narrator' && opts.turn.role !== 'character') {
     throw new AIError('Only narrator or character turns can be re-rolled.');
   }
+  await waitForPostTurn();
+  throwIfAborted(opts.signal, 0);
   const { provider, model } = proseModelFor(opts.world);
   const ctx = await loadContext(opts.world, opts.season, opts.episode);
   const progress = opts.onProgress ?? (() => {});
@@ -1757,6 +1802,17 @@ async function maybeRefreshLiveMemory(
       if (newThreads.length > 0) await db.threads.bulkAdd(newThreads);
       if (extract.place?.currentState) {
         await applyPlacePatches(ctx.locations, [extract.place], ctx.episode.locationId);
+      }
+      for (const k of extract.knowledge) {
+        const learned = k.nowKnows?.trim();
+        if (!learned) continue;
+        const c = inScene.find((x) => x.name.toLowerCase() === k.name.toLowerCase())
+          ?? ctx.characters.find((x) => !x.isPlayer && x.name.toLowerCase() === k.name.toLowerCase());
+        if (!c) continue;
+        const nextWall = clearMustNotKnowClause(c.mustNotKnow, learned);
+        if (nextWall === c.mustNotKnow) continue;
+        await db.characters.update(c.id, { mustNotKnow: nextWall, updatedAt: now });
+        c.mustNotKnow = nextWall;
       }
     }
 
@@ -3060,18 +3116,7 @@ export async function commitEpisodeWrap(
     if (!c || c.isPlayer) continue;
     let mustNotKnow = c.mustNotKnow;
     const clear = k.clearMustNotKnow?.trim();
-    if (clear && mustNotKnow) {
-      const parts = mustNotKnow
-        .split(/[.;\n]+/)
-        .map((p) => p.trim())
-        .filter(Boolean)
-        .filter((p) => {
-          const pl = p.toLowerCase();
-          const cl = clear.toLowerCase();
-          return !(pl.includes(cl) || cl.includes(pl));
-        });
-      mustNotKnow = parts.join('; ');
-    }
+    if (clear && mustNotKnow) mustNotKnow = clearMustNotKnowClause(mustNotKnow, clear);
     if (k.nowKnows?.trim()) {
       const line = `${c.name} now knows: ${k.nowKnows.trim()}`;
       if (knowledgeStillNovel(c.name, k.nowKnows, remainingFactTexts)) {
@@ -4769,7 +4814,7 @@ export async function fleshOutWorldEverything(
 
     if (createdCharacterIds.length > 0) {
       const castIds = [...new Set([...liveEpisode.castIds, ...createdCharacterIds])];
-      await db.episodes.update(liveEpisode.id, { castIds });
+      await db.episodes.update(liveEpisode.id, { castIds, updatedAt: Date.now() });
       liveEpisode = { ...liveEpisode, castIds };
     }
 
@@ -4791,7 +4836,7 @@ export async function fleshOutWorldEverything(
     const open = existingPlaces.find((l) => l.id === liveEpisode.locationId)
       ?? await db.locations.get(liveEpisode.locationId);
     if (open?.name.trim()) {
-      await db.episodes.update(liveEpisode.id, { title: open.name.trim() });
+      await db.episodes.update(liveEpisode.id, { title: open.name.trim(), updatedAt: Date.now() });
       liveEpisode = { ...liveEpisode, title: open.name.trim() };
     }
   }
@@ -4879,7 +4924,7 @@ async function repairWriteReadyFields(world: World, episode: Episode): Promise<v
   let castIds = [...liveEpisode.castIds];
   if (castIds.length === 0 && npcsAll.length > 0) {
     castIds = npcsAll.map((c) => c.id);
-    await db.episodes.update(liveEpisode.id, { castIds });
+    await db.episodes.update(liveEpisode.id, { castIds, updatedAt: Date.now() });
   }
   const inScene = new Set(castIds);
   for (const npc of npcsAll.filter((c) => inScene.has(c.id))) {

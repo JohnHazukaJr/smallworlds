@@ -11,6 +11,8 @@ import {
   DIRECTOR_TRANSCRIPT_TURNS,
   directorUserPrompt,
   packTurnsDetailed,
+  historyTailFor,
+  OVERFLOW_HISTORY_TAIL,
   sceneLedgerSection,
   storyCachePrefix,
   buildCharacterSpeakMessages,
@@ -543,8 +545,21 @@ describe('context window heuristics', () => {
     expect(inferContextWindowTokens('my-model-8k')).toBe(8 * 1024);
   });
 
-  it('does not shrink output maxTokens into the prompt budget math below the floor', () => {
+  it('keeps a 32k unknown model above a short chapter', () => {
     expect(promptCharBudget('unknown', 1100)).toBeGreaterThanOrEqual(12_000);
+  });
+
+  it('does not lift a 4k model up to 12,000 characters', () => {
+    const budget = promptCharBudget('my-model-4k', 1400);
+    expect(budget).toBeLessThan(12_000);
+    expect(budget).toBeLessThan(4 * 1024 * 4);
+  });
+
+  it('cuts the transcript tail only on the overflow retry', () => {
+    const normal = historyTailFor('unknown', 'narrator', 'normal');
+    const tight = historyTailFor('unknown', 'narrator', 'tight');
+    expect(normal.maxTurns).toBeGreaterThan(OVERFLOW_HISTORY_TAIL.maxTurns);
+    expect(tight).toEqual(OVERFLOW_HISTORY_TAIL);
   });
 });
 
@@ -555,6 +570,9 @@ describe('isContextOverflowError', () => {
     expect(isContextOverflowError(new Error('prompt is too long'))).toBe(true);
     expect(isContextOverflowError(new Error('input tokens exceed the limit'))).toBe(true);
     expect(isContextOverflowError(new Error('max prompt size exceeded'))).toBe(true);
+    expect(isContextOverflowError(new Error('too much context'))).toBe(true);
+    expect(isContextOverflowError(new Error('exceeds the context window'))).toBe(true);
+    expect(isContextOverflowError(new Error('context size is too large'))).toBe(true);
     expect(isContextOverflowError(new Error('HTTP 413'))).toBe(true);
     expect(isContextOverflowError(new AIError('payload too large', 413))).toBe(true);
     expect(isContextOverflowError(new Error('rate limited'))).toBe(false);

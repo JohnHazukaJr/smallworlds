@@ -1,5 +1,6 @@
 import Dexie, { type EntityTable } from 'dexie';
 import { formatUserError, logAppError } from './errors';
+import { worldIdsInImport } from './importFile';
 import { useApp } from './store/app';
 import { decryptString, deriveKey, encryptString, randomSalt } from './security/crypto';
 import { getStoryKey, setStoryKey, storySealSuspended } from './security/storyKey';
@@ -218,36 +219,98 @@ async function materializeRow<T>(row: T): Promise<T> {
   return openRecord(row, key) as Promise<T>;
 }
 
-export async function importWorld(data: WorldExport): Promise<string> {
+interface PreparedImport {
+  world: World;
+  seasons: Season[];
+  episodes: Episode[];
+  turns: Turn[];
+  characters: Character[];
+  locations: Location[];
+  continuity: ContinuityFact[];
+  threads: OpenThread[];
+  wraps: SeasonWrap[];
+  calendarEvents: CalendarEvent[];
+}
+
+const importStores = () => [
+  db.worlds, db.seasons, db.episodes, db.turns, db.characters, db.locations,
+  db.continuity, db.threads, db.wraps, db.calendarEvents, db.tombstones
+];
+
+function tombKeys(table: SyncTableName, rows: Array<{ id: string }>): string[] {
+  return rows.map((row) => `${table}:${row.id}`);
+}
+
+async function prepareImport(data: WorldExport): Promise<PreparedImport> {
   if (data.format !== 'small-worlds-world') throw new Error('Not a Small Worlds export file');
   if (isSealedRecord(data.world) && !getStoryKey() && !storySealSuspended()) {
     throw new Error(SEALED_IMPORT_MESSAGE);
   }
-  const world = await materializeRow(data.world);
-  const seasons = await Promise.all(data.seasons.map(materializeRow));
-  const episodes = await Promise.all(data.episodes.map(materializeRow));
-  const turns = await Promise.all(data.turns.map(materializeRow));
-  const characters = await Promise.all(data.characters.map(materializeRow));
-  const locations = await Promise.all((data.locations ?? []).map(materializeRow));
-  const continuity = await Promise.all(data.continuity.map(materializeRow));
-  const threads = await Promise.all(data.threads.map(materializeRow));
-  const wraps = await Promise.all(data.wraps.map(materializeRow));
-  const calendarEvents = await Promise.all((data.calendarEvents ?? []).map(materializeRow));
-  await guardStorage(() => db.transaction('rw',
-    [db.worlds, db.seasons, db.episodes, db.turns, db.characters, db.locations, db.continuity, db.threads, db.wraps, db.calendarEvents],
-    async () => {
-      await db.worlds.put(world);
-      await db.seasons.bulkPut(seasons);
-      await db.episodes.bulkPut(episodes);
-      await db.turns.bulkPut(turns);
-      await db.characters.bulkPut(characters);
-      await db.locations.bulkPut(locations);
-      await db.continuity.bulkPut(continuity);
-      await db.threads.bulkPut(threads);
-      await db.wraps.bulkPut(wraps);
-      if (calendarEvents.length) await db.calendarEvents.bulkPut(calendarEvents);
-    }));
+  return {
+    world: await materializeRow(data.world),
+    seasons: await Promise.all(data.seasons.map(materializeRow)),
+    episodes: await Promise.all(data.episodes.map(materializeRow)),
+    turns: await Promise.all(data.turns.map(materializeRow)),
+    characters: await Promise.all(data.characters.map(materializeRow)),
+    locations: await Promise.all((data.locations ?? []).map(materializeRow)),
+    continuity: await Promise.all(data.continuity.map(materializeRow)),
+    threads: await Promise.all(data.threads.map(materializeRow)),
+    wraps: await Promise.all(data.wraps.map(materializeRow)),
+    calendarEvents: await Promise.all((data.calendarEvents ?? []).map(materializeRow))
+  };
+}
+
+async function commitImport(rows: PreparedImport): Promise<string> {
+  const { world, seasons, episodes, turns, characters, locations, continuity, threads, wraps, calendarEvents } = rows;
+  await db.worlds.put(world);
+  await db.seasons.bulkPut(seasons);
+  await db.episodes.bulkPut(episodes);
+  await db.turns.bulkPut(turns);
+  await db.characters.bulkPut(characters);
+  await db.locations.bulkPut(locations);
+  await db.continuity.bulkPut(continuity);
+  await db.threads.bulkPut(threads);
+  await db.wraps.bulkPut(wraps);
+  if (calendarEvents.length) await db.calendarEvents.bulkPut(calendarEvents);
+  await clearTombstones([
+    ...tombKeys('worlds', [world]),
+    ...tombKeys('seasons', seasons),
+    ...tombKeys('episodes', episodes),
+    ...tombKeys('turns', turns),
+    ...tombKeys('characters', characters),
+    ...tombKeys('locations', locations),
+    ...tombKeys('continuity', continuity),
+    ...tombKeys('threads', threads),
+    ...tombKeys('wraps', wraps),
+    ...tombKeys('calendarEvents', calendarEvents)
+  ]);
   return world.id;
+}
+
+/** Write every world in one transaction so a later failure rolls the earlier ones back. */
+export async function importWorlds(worlds: WorldExport[]): Promise<string[]> {
+  const prepared: PreparedImport[] = [];
+  for (const world of worlds) prepared.push(await prepareImport(world));
+  return guardStorage(() => db.transaction('rw', importStores(), async () => {
+    const ids: string[] = [];
+    for (const rows of prepared) ids.push(await commitImport(rows));
+    return ids;
+  }));
+}
+
+export async function importWorld(data: WorldExport): Promise<string> {
+  const [id] = await importWorlds([data]);
+  return id;
+}
+
+/** Titles of worlds in this file that already exist on the device. */
+export async function importConflictTitles(data: unknown): Promise<string[]> {
+  const titles: string[] = [];
+  for (const id of worldIdsInImport(data)) {
+    const row = await db.worlds.get(id);
+    if (row) titles.push(row.title?.trim() || 'Untitled world');
+  }
+  return titles;
 }
 
 export interface BackupExport {
@@ -286,14 +349,8 @@ export function isEncryptedExport(data: unknown): data is EncryptedExport {
 
 /** Import a single-world export or a full worlds-only backup. Returns the imported world ids. */
 export async function importAny(data: WorldExport | BackupExport): Promise<string[]> {
-  if (data.format === 'small-worlds-world') {
-    return [await importWorld(data)];
-  }
-  if (data.format === 'small-worlds-backup') {
-    const ids: string[] = [];
-    for (const w of data.worlds) ids.push(await importWorld(w));
-    return ids;
-  }
+  if (data.format === 'small-worlds-world') return importWorlds([data]);
+  if (data.format === 'small-worlds-backup') return importWorlds(data.worlds);
   throw new Error('Not a Small Worlds file.');
 }
 

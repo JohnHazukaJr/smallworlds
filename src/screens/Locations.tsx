@@ -7,8 +7,9 @@ import { useApp } from '../store/app';
 import type { Location } from '../types';
 import { ConfirmBar, ErrorNote, Field, Mono, Spinner, editorsStacked, phoneChrome, useViewport } from '../ui/bits';
 import { fileToPortraitImage } from '../ui/image';
-import { avatarStyle, STRIPE, ACCENT } from '../ui/theme';
+import { avatarStyle, ACCENT } from '../ui/theme';
 import { clearDeletedPlaceFromEpisodes, emptyLocation, syncSceneLocationName } from '../worldOps';
+import { shouldFlushAutosave } from '../ui/autosave';
 
 type Tab = 'overview' | 'atmosphere' | 'history' | 'rules' | 'ai';
 const TABS: Array<[Tab, string]> = [
@@ -20,23 +21,25 @@ const TABS: Array<[Tab, string]> = [
 function useAutosave(draft: Location | null, onError: (msg: string) => void) {
   const timer = useRef<number>(undefined);
   const pending = useRef<Location | null>(null);
+  const removed = useRef(new Set<string>());
   const first = useRef(true);
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
+  const flush = (d: Location) => {
+    if (!shouldFlushAutosave(d.id, removed.current, true)) return;
+    void safeWrite(async () => {
+      if (!shouldFlushAutosave(d.id, removed.current, true)) return;
+      const row = await db.locations.get(d.id);
+      if (!shouldFlushAutosave(d.id, removed.current, !!row)) return;
+      await db.locations.put({ ...d, updatedAt: Date.now() });
+      await syncSceneLocationName({ id: d.id, name: d.name, worldId: d.worldId });
+    }, (msg) => onErrorRef.current(msg));
+  };
   useEffect(() => {
-    if (!draft) return;
+    if (!draft || removed.current.has(draft.id)) return;
     if (first.current) { first.current = false; return; }
     pending.current = draft;
     window.clearTimeout(timer.current);
-    const flush = (d: Location) => {
-      void safeWrite(
-        async () => {
-          await db.locations.put({ ...d, updatedAt: Date.now() });
-          await syncSceneLocationName({ id: d.id, name: d.name, worldId: d.worldId });
-        },
-        (msg) => onErrorRef.current(msg)
-      );
-    };
     timer.current = window.setTimeout(() => {
       const d = pending.current;
       pending.current = null;
@@ -50,6 +53,18 @@ function useAutosave(draft: Location | null, onError: (msg: string) => void) {
     };
   }, [draft]);
   useEffect(() => { first.current = true; }, [draft?.id]);
+  return {
+    discard(id: string) {
+      removed.current.add(id);
+      if (pending.current?.id === id) {
+        pending.current = null;
+        window.clearTimeout(timer.current);
+      }
+    },
+    release(id: string) {
+      removed.current.delete(id);
+    }
+  };
 }
 
 export function Locations() {
@@ -127,7 +142,7 @@ export function Locations() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id]);
 
-  useAutosave(draft, setError);
+  const { discard: discardAutosave, release: releaseAutosave } = useAutosave(draft, setError);
 
   const patch = (p: Partial<Location>) => setDraft((d) => (d ? { ...d, ...p } : d));
 
@@ -264,14 +279,14 @@ export function Locations() {
               flexShrink: stacked ? 0 : 1,
               minWidth: 0,
               maxWidth: stacked ? 220 : undefined,
-              background: active ? 'rgba(255,255,255,0.08)' : 'transparent',
+              background: active ? 'var(--rule)' : 'transparent',
               border: `1px solid ${active ? 'var(--glass-rim)' : 'transparent'}`
             }}>
               <div style={{ ...avatarStyle(l.hue, stacked ? 28 : 34), flexShrink: 0, ...(l.portrait ? { backgroundImage: `url(${l.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}) }} />
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
                 <div style={{ fontSize: stacked ? 12.5 : 13.5, fontWeight: 600, color: 'var(--ink-heading)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{l.name || 'unnamed'}</div>
                 {!narrow && (
-                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.42)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {inScene ? 'this scene' : (l.tagline || 'no tagline yet')}
                   </div>
                 )}
@@ -337,15 +352,15 @@ export function Locations() {
             <div style={{ display: 'flex', gap: 26, flexWrap: 'wrap', alignItems: 'flex-start', marginBottom: 32 }}>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 11, width: narrow ? '100%' : 258 }}>
                 <div style={{
-                  height: narrow ? 160 : 306, borderRadius: 16, border: '1px solid rgba(255,255,255,0.12)',
+                  height: narrow ? 160 : 306, borderRadius: 16, border: '1px solid var(--rule)',
                   display: 'flex', alignItems: 'flex-end', padding: 12,
                   backgroundImage: d.portrait
                     ? `url(${d.portrait})`
-                    : `linear-gradient(155deg, oklch(0.5 0.06 ${d.hue} / 0.7), rgba(8,9,12,0.9)), ${STRIPE('rgba(255,255,255,0.06)', 'rgba(255,255,255,0.015)')}`,
+                    : `linear-gradient(155deg, oklch(0.9 0.04 ${d.hue}), #f7f3ea)`,
                   backgroundSize: 'cover', backgroundPosition: 'center'
                 }}>
                   {!d.portrait && (
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.62)', background: 'rgba(8,9,12,0.5)', backdropFilter: 'blur(6px)', padding: '5px 8px', borderRadius: 6 }}>
+                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', background: 'transparent',  padding: '5px 8px', borderRadius: 6 }}>
                       location plate · no photo yet
                     </span>
                   )}
@@ -410,12 +425,22 @@ export function Locations() {
                       onCancel={() => setConfirmRemove(false)}
                       onConfirm={() => {
                         setConfirmRemove(false);
+                        const removed = d;
+                        discardAutosave(removed.id);
                         void (async () => {
-                          await recordTombstones([{ table: 'locations', id: d.id, worldId: d.worldId, payload: d }]);
-                          await db.transaction('rw', db.locations, db.episodes, async () => {
-                            await db.locations.delete(d.id);
-                            await clearDeletedPlaceFromEpisodes({ id: d.id, worldId: d.worldId });
-                          });
+                          const saved = await safeWrite(async () => {
+                            await recordTombstones([{ table: 'locations', id: removed.id, worldId: removed.worldId, payload: removed }]);
+                            await db.transaction('rw', db.locations, db.episodes, async () => {
+                              await db.locations.delete(removed.id);
+                              await clearDeletedPlaceFromEpisodes({ id: removed.id, worldId: removed.worldId });
+                            });
+                            return true;
+                          }, setError);
+                          if (!saved) {
+                            releaseAutosave(removed.id);
+                            setDraft((cur) => (cur && cur.id === removed.id ? { ...cur } : cur));
+                            return;
+                          }
                           setSelectedId(null);
                         })();
                       }}
@@ -435,7 +460,7 @@ export function Locations() {
                   <input
                     value={d.tagline} onChange={(e) => patch({ tagline: e.target.value })}
                     placeholder="tagline · e.g. harbour district · public square"
-                    style={{ fontSize: 13.5, color: 'rgba(236,234,230,0.7)', marginTop: 8, background: 'transparent', border: 0, padding: 0, borderRadius: 0 }}
+                    style={{ fontSize: 13.5, color: 'var(--paper)', marginTop: 8, background: 'transparent', border: 0, padding: 0, borderRadius: 0 }}
                   />
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 11 }}>
@@ -447,7 +472,7 @@ export function Locations() {
                       <Mono style={{ fontSize: 9, letterSpacing: '0.12em' }}>{k}</Mono>
                       <input
                         value={v} onChange={(e) => set(e.target.value)} placeholder="—"
-                        style={{ fontSize: 13, background: 'transparent', border: 0, padding: 0, borderRadius: 0, color: 'rgba(236,234,230,0.92)' }}
+                        style={{ fontSize: 13, background: 'transparent', border: 0, padding: 0, borderRadius: 0, color: 'var(--ink-heading)' }}
                       />
                     </div>
                   ))}
@@ -455,11 +480,11 @@ export function Locations() {
               </div>
             </div>
 
-            <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid rgba(255,255,255,0.08)', marginBottom: 24, flexWrap: 'wrap', overflowX: 'auto' }}>
+            <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid var(--rule)', marginBottom: 24, flexWrap: 'wrap', overflowX: 'auto' }}>
               {TABS.map(([id, label]) => (
                 <button key={id} onClick={() => setTab(id)} style={{
                   border: 0, background: 'transparent',
-                  color: tab === id ? 'var(--ink-heading)' : 'rgba(236,234,230,0.45)',
+                  color: tab === id ? 'var(--ink-heading)' : 'var(--ink-muted)',
                   borderBottom: `2px solid ${tab === id ? ACCENT : 'transparent'}`,
                   padding: '10px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap'
                 }}>{label}</button>
@@ -499,7 +524,7 @@ export function Locations() {
                     <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                       <div style={{ width: 6, height: 6, borderRadius: '50%', background: ACCENT }} />
                       <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-heading)' }}>Hard rules</div>
-                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)', marginLeft: 'auto' }}>
+                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', marginLeft: 'auto' }}>
                         hazards & laws, never broken
                       </div>
                     </div>
@@ -514,7 +539,7 @@ export function Locations() {
                     />
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                       {d.rules.filter((r) => r.trim()).map((r, i) => (
-                        <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, lineHeight: 1.5, color: 'rgba(236,234,230,0.9)' }}>
+                        <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, lineHeight: 1.5, color: 'var(--ink-heading)' }}>
                           <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: ACCENT, paddingTop: 3 }}>
                             {String(i + 1).padStart(2, '0')}
                           </span>

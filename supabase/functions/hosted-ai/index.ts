@@ -7,7 +7,8 @@ import {
   HOSTED_IMAGE_MODEL,
   HOSTED_UTILITY_MODEL,
   UTILITY_TOKEN_CEILING,
-  chatCredit
+  chatCredit,
+  hostedPromptChars
 } from '../_shared/billing.ts';
 import { CORS, MAX_CHAT_BODY, MAX_IMAGE_BODY, adminClient, handleOptions, json, readLimitedJson, requireUser } from '../_shared/http.ts';
 
@@ -128,7 +129,7 @@ function priceCall(op: 'chat' | 'image', body: Record<string, unknown>):
 
   const maxRaw = body.max_tokens ?? body.max_completion_tokens ?? UTILITY_TOKEN_CEILING;
   const maxTokens = typeof maxRaw === 'number' && Number.isFinite(maxRaw) ? maxRaw : UTILITY_TOKEN_CEILING;
-  const credit = chatCredit(model, maxTokens);
+  const credit = chatCredit(model, maxTokens, hostedPromptChars(body));
   if (!credit || credit.reason === 'image') {
     return { ok: false, status: 400, message: 'Unknown hosted model.' };
   }

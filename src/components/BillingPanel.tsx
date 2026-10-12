@@ -6,6 +6,7 @@ import { ensureBilling, loadBilling, openBillingPortal, startCheckout, type Bill
 import { deleteCloudAccount } from '../cloud/account';
 import { formatUserError } from '../errors';
 import { Mono } from '../ui/bits';
+import { useLegal } from '../ui/legalNav';
 
 export function BillingPanel({
   userId,
@@ -16,6 +17,7 @@ export function BillingPanel({
 }) {
   const [snap, setSnap] = useState<BillingSnapshot | null>(null);
   const [busy, setBusy] = useState(false);
+  const openLegal = useLegal((s) => s.open);
 
   const refresh = async () => {
     try {
@@ -58,13 +60,13 @@ export function BillingPanel({
   const period = snap?.periodEnd ? new Date(snap.periodEnd).toLocaleDateString() : null;
 
   return (
-    <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <div style={{ borderTop: '1px solid var(--rule)', paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
       <Mono style={{ fontSize: 9 }}>hosted credits</Mono>
-      <div style={{ fontSize: 13.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.78)' }}>
+      <div style={{ fontSize: 13.5, lineHeight: 1.55, color: 'var(--paper)' }}>
         {snap ? `${snap.balance} credits · ${status}` : 'Loading balance…'}
         {period ? ` · renews ${period}` : ''}
       </div>
-      <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.5)' }}>
+      <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
         Bring-your-own-key stays free. Hosted prose is {COST_BEAT} credits, short utility calls are {COST_UTILITY},
         images are {COST_IMAGE}. New accounts get {STARTER_CREDITS} starter credits once.
         A month adds {MONTHLY_CREDITS}; a pack adds {PACK_CREDITS}.
@@ -72,6 +74,12 @@ export function BillingPanel({
       {snap?.note && (
         <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'oklch(0.78 0.06 195)' }}>{snap.note}</div>
       )}
+      <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
+        Subscribing or buying a pack means you agree to the{' '}
+        <button type="button" className="btn-quiet" style={{ fontSize: 12.5, padding: 0 }} onClick={() => openLegal('terms')}>Terms</button>
+        {' '}and{' '}
+        <button type="button" className="btn-quiet" style={{ fontSize: 12.5, padding: 0 }} onClick={() => openLegal('privacy')}>Privacy</button>.
+      </div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         <button className="btn-primary" disabled={busy || snap?.ready === false} onClick={() => void run(() => startCheckout('monthly'))}>
           Subscribe
@@ -87,7 +95,7 @@ export function BillingPanel({
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         <button
           className="btn-quiet"
-          style={{ color: 'oklch(0.75 0.12 25)', borderColor: 'oklch(0.4 0.1 25)', fontSize: 11 }}
+          style={{ color: 'oklch(0.4 0.12 25)', borderColor: 'oklch(0.4 0.1 25)', fontSize: 11 }}
           disabled={busy}
           onClick={() => {
             if (!confirm('Delete the cloud account and erase this device? Synced stories, secrets, and credits are removed. This cannot be undone.')) return;

@@ -23,6 +23,13 @@ describe('closeWorldIf', () => {
     useApp.getState().closeWorld();
     expect(useApp.getState().currentWorldId).toBeNull();
   });
+
+  it('opening a new world drops the previous one', () => {
+    useApp.setState({ currentWorldId: 'world-a', screen: 'story' });
+    useApp.getState().go('onboard');
+    expect(useApp.getState().screen).toBe('onboard');
+    expect(useApp.getState().currentWorldId).toBeNull();
+  });
 });
 
 describe('storyAvatarHeight', () => {

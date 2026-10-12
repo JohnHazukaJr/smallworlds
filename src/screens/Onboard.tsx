@@ -5,15 +5,15 @@ import {
   fleshOutNarratorRules, fleshOutPremise, fleshOutRelationships, fleshOutWorldEverything,
   fleshOutWorldLore, interviewWorldIdea, seedOpeningMemory, type WorldInterviewQuestion
 } from '../ai/engine';
-import { db, deleteWorld, safeWrite } from '../db';
+import { db, deleteWorld, recordTombstones, safeWrite } from '../db';
 import { formatUserError } from '../errors';
-import { normalizeRelationships } from '../relationships';
+import { normalizeRelationships, pruneRelationshipsToCast } from '../relationships';
 import { useApp } from '../store/app';
 import { resolveModel, useSettings } from '../store/settings';
 import type { Character, Episode, Location, Season, World, WorldAISettings } from '../types';
 import { Bar, Chip, ErrorNote, Field, Spinner, Toggle, editorsStacked, useViewport } from '../ui/bits';
 import { fileToPortraitImage } from '../ui/image';
-import { avatarStyle, STRIPE, ACCENT } from '../ui/theme';
+import { avatarStyle, ACCENT } from '../ui/theme';
 import { LegalLinks } from './Legal';
 import {
   applyStanceToAi, characterPortraits, createWorld, DEFAULT_AI, emptyCharacter, emptyLocation,
@@ -38,21 +38,21 @@ const SEED_KINDS = [
 const LANES = [
   {
     label: 'From an idea',
-    line: 'Describe the roleplay. AI asks a few questions, builds the whole world, then you review and perfect.'
+    line: 'Describe the story. You make a character, the world answers, and you live in the book.'
   },
   {
     label: 'Step by step',
-    line: 'Shape, seed, voice, you, cast, place, memory — fill each yourself, with AI help when you want it.'
+    line: 'Shape, seed, voice, you, people, place, memory — fill each yourself, with AI help when you want it.'
   }
 ];
 
 const PROMISES = [
-  { t: 'Idea → interview → world', d: 'Paste a roleplay idea; AI asks clarifying questions, then drafts bible, premise, cast, places, memory, and a cold open — you review before Enter.' },
-  { t: 'Bible, premise, cast, place', d: 'Onboard builds a write-ready world: lore, what’s live this season, voiced NPCs with anchors and live state, and a location with hard rules.' },
-  { t: 'Opening memory', d: 'Seed continuity facts and open threads so the first scene already has a situation to lean on.' },
-  { t: 'Characters that hold a line', d: 'Behaviour anchors ride along in every Speak turn. They can refuse you, and they will.' },
-  { t: 'Direct after you enter', d: 'In Story: Direct edits cast and place, pins continuity, and sets Aim targets. Wrap files memory between episodes.' },
-  { t: 'Speak with delivery', d: 'On Speak or Act, pick a tone chip so the scene hears how you mean it. Reply size is Short / Medium / Long.' },
+  { t: 'Idea → you and the story', d: 'Paste a story idea. A few questions, then a world, your character, and the opening of the book — you review before you enter.' },
+  { t: 'Bible, premise, people, place', d: 'Onboard builds a book you can open: lore, what is true now, people with voices, and a place with rules.' },
+  { t: 'Opening memory', d: 'A few facts and open threads so the first chapter already has a situation.' },
+  { t: 'People who hold a line', d: 'They remember how they behave. They can refuse you, and they will.' },
+  { t: 'The book after you enter', d: 'You act on the page. The world writes back. End a chapter when the book should rest, and the next one opens with what mattered.' },
+  { t: 'Your action, their hands', d: 'Write what you do, or take someone else’s hands for a moment. Mark whether it changes the story or is only this moment.' },
   { t: 'Your key, any model', d: 'OpenRouter, Anthropic, Gemini, Kimi, local models — swap engines per world, any time.' },
   { t: 'Private by design', d: 'Everything lives on this device. Nothing is sent anywhere but the AI endpoint you name.' }
 ];
@@ -294,9 +294,16 @@ export function Onboard() {
     const notes = castNotes.trim();
     if (!name && !notes) return;
     const c = emptyCharacter(worldId, { name: name || notes.slice(0, 40), summary: notes });
-    await db.characters.add(c);
-    const ep = await episodeForWorld(worldId, episode);
-    if (ep) await db.episodes.update(ep.id, { castIds: [...ep.castIds, c.id] });
+    const episodeId = episode?.id;
+    await db.transaction('rw', db.characters, db.episodes, async () => {
+      await db.characters.add(c);
+      const ep = episodeId
+        ? await db.episodes.get(episodeId)
+        : await db.episodes.where('worldId').equals(worldId).first();
+      if (ep && !ep.castIds.includes(c.id)) {
+        await db.episodes.update(ep.id, { castIds: [...ep.castIds, c.id], updatedAt: Date.now() });
+      }
+    });
     setCastName('');
     setCastNotes('');
     setExpandedCastId(c.id);
@@ -314,9 +321,16 @@ export function Onboard() {
       const existingCast = await db.characters.where('worldId').equals(worldId).toArray();
       const sheet = await fleshOutCharacter(worldContext(), draft, existingCast);
       const c: Character = { ...draft, ...sheet, updatedAt: Date.now() };
-      await db.characters.add(c);
-      const ep = await episodeForWorld(worldId, episode);
-      if (ep) await db.episodes.update(ep.id, { castIds: [...ep.castIds, c.id] });
+      const episodeId = episode?.id;
+      await db.transaction('rw', db.characters, db.episodes, async () => {
+        await db.characters.add(c);
+        const ep = episodeId
+          ? await db.episodes.get(episodeId)
+          : await db.episodes.where('worldId').equals(worldId).first();
+        if (ep && !ep.castIds.includes(c.id)) {
+          await db.episodes.update(ep.id, { castIds: [...ep.castIds, c.id], updatedAt: Date.now() });
+        }
+      });
       setCastName('');
       setCastNotes('');
       setExpandedCastId(c.id);
@@ -328,8 +342,36 @@ export function Onboard() {
   };
 
   const removeCastEntry = async (id: string) => {
-    await db.characters.delete(id);
-    if (episode) await db.episodes.update(episode.id, { castIds: episode.castIds.filter((cid) => cid !== id) });
+    if (!worldId) return;
+    const row = characters.find((c) => c.id === id);
+    await recordTombstones([{
+      table: 'characters',
+      id,
+      worldId: row?.worldId ?? worldId,
+      payload: row ?? { id }
+    }]);
+    await db.transaction('rw', db.characters, db.episodes, async () => {
+      await db.characters.delete(id);
+      const remaining = (await db.characters.where('worldId').equals(worldId).toArray())
+        .filter((c) => c.id !== id);
+      const pruned = pruneRelationshipsToCast(remaining);
+      const now = Date.now();
+      for (const c of pruned) {
+        const before = remaining.find((x) => x.id === c.id);
+        if (!before) continue;
+        if (JSON.stringify(before.relationships) !== JSON.stringify(c.relationships)) {
+          await db.characters.update(c.id, { relationships: c.relationships, updatedAt: now });
+        }
+      }
+      const episodes = await db.episodes.where('worldId').equals(worldId).toArray();
+      for (const ep of episodes) {
+        if (!ep.castIds.includes(id)) continue;
+        await db.episodes.update(ep.id, {
+          castIds: ep.castIds.filter((cid) => cid !== id),
+          updatedAt: now
+        });
+      }
+    });
   };
 
   const toggleSelfTag = async (id: string) => {
@@ -349,11 +391,16 @@ export function Onboard() {
     const notes = placeNotes.trim();
     if (!name && !notes) return;
     const l = emptyLocation(worldId, { name: name || notes.slice(0, 40), summary: notes });
-    await db.locations.add(l);
-    const ep = await episodeForWorld(worldId, episode);
-    if (ep && !ep.locationId && !ep.location && l.name) {
-      await db.episodes.update(ep.id, { location: l.name, locationId: l.id });
-    }
+    const episodeId = episode?.id;
+    await db.transaction('rw', db.locations, db.episodes, async () => {
+      await db.locations.add(l);
+      const ep = episodeId
+        ? await db.episodes.get(episodeId)
+        : await db.episodes.where('worldId').equals(worldId).first();
+      if (ep && !ep.locationId && !ep.location.trim() && l.name) {
+        await db.episodes.update(ep.id, { location: l.name, locationId: l.id, updatedAt: Date.now() });
+      }
+    });
     setPlaceName('');
     setPlaceNotes('');
     setExpandedPlaceId(l.id);
@@ -370,11 +417,16 @@ export function Onboard() {
       const draft = emptyLocation(worldId, { name: name || notes.slice(0, 40), summary: notes });
       const sheet = await fleshOutLocation(worldContext(), draft);
       const l: Location = { ...draft, ...sheet, updatedAt: Date.now() };
-      await db.locations.add(l);
-      const ep = await episodeForWorld(worldId, episode);
-      if (ep && !ep.locationId && !ep.location && l.name) {
-        await db.episodes.update(ep.id, { location: l.name, locationId: l.id });
-      }
+      const episodeId = episode?.id;
+      await db.transaction('rw', db.locations, db.episodes, async () => {
+        await db.locations.add(l);
+        const ep = episodeId
+          ? await db.episodes.get(episodeId)
+          : await db.episodes.where('worldId').equals(worldId).first();
+        if (ep && !ep.locationId && !ep.location.trim() && l.name) {
+          await db.episodes.update(ep.id, { location: l.name, locationId: l.id, updatedAt: Date.now() });
+        }
+      });
       setPlaceName('');
       setPlaceNotes('');
       setExpandedPlaceId(l.id);
@@ -386,19 +438,36 @@ export function Onboard() {
   };
 
   const removePlaceEntry = async (id: string) => {
-    await db.locations.delete(id);
-    if (episode?.locationId === id) {
-      await db.episodes.update(episode.id, { location: '', locationId: null });
-    }
+    if (!worldId) return;
+    const row = places.find((l) => l.id === id);
+    await recordTombstones([{
+      table: 'locations',
+      id,
+      worldId: row?.worldId ?? worldId,
+      payload: row ?? { id }
+    }]);
+    await db.transaction('rw', db.locations, db.episodes, async () => {
+      await db.locations.delete(id);
+      const episodes = await db.episodes.where('worldId').equals(worldId).toArray();
+      const now = Date.now();
+      for (const ep of episodes) {
+        if (ep.locationId !== id) continue;
+        await db.episodes.update(ep.id, { location: '', locationId: null, updatedAt: now });
+      }
+    });
   };
 
   const setOpeningPlace = async (id: string) => {
     if (!episode) return;
     const loc = places.find((l) => l.id === id);
     if (!loc) return;
-    const patch: Partial<typeof episode> = { location: loc.name, locationId: loc.id };
-    if (!(episode.title ?? '').trim() && loc.name.trim()) patch.title = loc.name.trim();
-    await db.episodes.update(episode.id, patch);
+    await db.transaction('rw', db.episodes, async () => {
+      const ep = await db.episodes.get(episode.id);
+      if (!ep) return;
+      const patch: Partial<Episode> = { location: loc.name, locationId: loc.id, updatedAt: Date.now() };
+      if (!(ep.title ?? '').trim() && loc.name.trim()) patch.title = loc.name.trim();
+      await db.episodes.update(ep.id, patch);
+    });
   };
 
   const openFullEditor = (screen: 'cast' | 'locations') => {
@@ -500,13 +569,13 @@ export function Onboard() {
       {ready.ok ? (
         <div style={{ fontSize: 12.5, color: 'oklch(0.78 0.08 145)' }}>Ready to enter Story.</div>
       ) : (
-        <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.65)' }}>
+        <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
           {ready.missing.map((m) => (
             <li key={m}>
               <button
                 type="button"
                 className="btn-quiet"
-                style={{ fontSize: 12.5, padding: 0, textAlign: 'left', color: 'rgba(236,234,230,0.75)' }}
+                style={{ fontSize: 12.5, padding: 0, textAlign: 'left', color: 'var(--paper)' }}
                 onClick={() => jumpForMissing(m)}
               >
                 {m}
@@ -827,7 +896,7 @@ export function Onboard() {
       content: (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <OptionList options={LANES} value={lane} onChange={(i) => { setLane(i); setInterviewQs([]); setInterviewAnswers({}); setReviewBanner(''); }} />
-          <div style={{ fontSize: 12.5, fontWeight: 600, color: 'rgba(236,234,230,0.7)' }}>Story shape</div>
+          <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--paper)' }}>Story shape</div>
           <OptionList options={STORY_STANCES} value={shape} onChange={persistShape} />
           {ideaLane && !hasAI && (
             <div style={{ fontSize: 12.5, color: 'oklch(0.78 0.06 195)' }}>
@@ -959,7 +1028,7 @@ export function Onboard() {
 
               <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
                 <Toggle on={ai.mature} onClick={() => patchAI({ mature: !ai.mature })} />
-                <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.6)' }}>
+                <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
                   {ai.mature
                     ? 'Adult world — graphic violence, sex, and darker themes permitted where the story calls for them.'
                     : 'General audience — imply rather than depict.'}
@@ -1251,7 +1320,7 @@ export function Onboard() {
               {turnCount > 0 ? ` · ${turnCount} opening turn${turnCount === 1 ? '' : 's'}` : ''}
             </div>
             {continuity.slice(0, 4).map((f) => (
-              <div key={f.id} style={{ fontSize: 12.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.7)' }}>· {f.text}</div>
+              <div key={f.id} style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--paper)' }}>· {f.text}</div>
             ))}
             {threads.slice(0, 4).map((t) => (
               <div key={t.id} style={{ fontSize: 12.5, lineHeight: 1.5, color: 'oklch(0.74 0.05 195)' }}>⟳ {t.text}</div>
@@ -1278,7 +1347,7 @@ export function Onboard() {
               </div>
             ) : (
               relationshipLines.map((line) => (
-                <div key={line.key} style={{ fontSize: 12.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.7)' }}>
+                <div key={line.key} style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--paper)' }}>
                   {line.text}
                 </div>
               ))
@@ -1385,7 +1454,7 @@ export function Onboard() {
           {steps.map((_, i) => (
             <div key={i} style={{
               width: i === step ? 22 : 8, height: 8, borderRadius: 1,
-              background: i <= step ? 'oklch(0.72 0.06 195)' : 'rgba(255,255,255,0.12)',
+              background: i <= step ? 'oklch(0.32 0.12 25)' : 'var(--rule)',
               transition: 'all 0.3s ease'
             }} />
           ))}
@@ -1427,28 +1496,28 @@ export function Onboard() {
 
       {!narrow && (
         <div style={{
-          borderLeft: '1px solid rgba(255,255,255,0.08)', padding: '46px 40px', display: 'flex',
-          flexDirection: 'column', gap: 20, justifyContent: 'center', background: 'rgba(12,14,16,0.35)'
+          borderLeft: '1px solid var(--rule)', padding: '46px 40px', display: 'flex',
+          flexDirection: 'column', gap: 20, justifyContent: 'center', background: 'var(--page)'
         }}>
           <div className="label">What you are making</div>
           <div style={{
-            height: 200, borderRadius: 4, border: '1px solid rgba(255,255,255,0.1)',
+            height: 200, borderRadius: 4, border: '1px solid var(--rule)',
             display: 'flex', alignItems: 'flex-end', padding: 14,
-            background: `linear-gradient(165deg, oklch(0.72 0.06 195 / 0.14), rgba(10,12,14,0.92)), ${STRIPE('rgba(255,255,255,0.04)', 'rgba(255,255,255,0.01)')}`
+            background: `linear-gradient(165deg, oklch(0.32 0.12 25 / 0.1), #f7f3ea)`
           }}>
             <span className="mono meta" style={{
-              color: 'rgba(230,233,235,0.65)', background: 'rgba(10,12,14,0.55)', padding: '5px 9px', borderRadius: 2
+              color: 'var(--ink-muted)', background: 'rgba(247,243,234,0.85)', padding: '5px 9px', borderRadius: 2
             }}>
               Endpaper
             </span>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             {PROMISES.map((p) => (
-              <div key={p.t} style={{ display: 'flex', gap: 12, alignItems: 'flex-start', borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 12 }}>
-                <div style={{ width: 2, height: 14, background: 'oklch(0.72 0.06 195)', marginTop: 4, flexShrink: 0 }} />
+              <div key={p.t} style={{ display: 'flex', gap: 12, alignItems: 'flex-start', borderTop: '1px solid var(--rule)', paddingTop: 12 }}>
+                <div style={{ width: 2, height: 14, background: 'oklch(0.32 0.12 25)', marginTop: 4, flexShrink: 0 }} />
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                  <div style={{ fontSize: 13.5, fontWeight: 600, color: '#f2f4f5' }}>{p.t}</div>
-                  <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'rgba(230,233,235,0.55)' }}>{p.d}</div>
+                  <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>{p.t}</div>
+                  <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'var(--ink-muted)' }}>{p.d}</div>
                 </div>
               </div>
             ))}
@@ -1466,7 +1535,7 @@ function SliderCard({ label, value, onChange, note, valueLabel }: {
     <div className="craft-row" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
         <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-heading)' }}>{label}</div>
-        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: 'oklch(0.72 0.06 195)' }}>{valueLabel}</div>
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: 'oklch(0.32 0.12 25)' }}>{valueLabel}</div>
       </div>
       <Bar pct={value} />
       <input
@@ -1524,7 +1593,7 @@ function CastCard({ c, expanded, hasAI, fleshBusy, onToggle, onRemove, onPatch, 
           )}
         </div>
         <button className="btn-quiet" style={{ fontSize: 11, flexShrink: 0 }} onClick={(e) => { e.stopPropagation(); onRemove(); }}>remove</button>
-        <span style={{ fontSize: 10, color: 'rgba(236,234,230,0.4)', flexShrink: 0 }}>{expanded ? '▲' : '▼'}</span>
+        <span style={{ fontSize: 10, color: 'var(--ink-muted)', flexShrink: 0 }}>{expanded ? '▲' : '▼'}</span>
       </div>
       {expanded && (
         <div style={{ padding: '2px 14px 14px', display: 'flex', flexDirection: 'column', gap: 10 }} onClick={(e) => e.stopPropagation()}>
@@ -1545,7 +1614,7 @@ function CastCard({ c, expanded, hasAI, fleshBusy, onToggle, onRemove, onPatch, 
                     }}
                     style={{
                       width: 44, height: 44, borderRadius: 9, padding: 0, cursor: 'pointer',
-                      border: i === 0 ? '2px solid oklch(0.72 0.06 195)' : '1px solid rgba(255,255,255,0.16)',
+                      border: i === 0 ? '2px solid oklch(0.32 0.12 25)' : '1px solid var(--rule)',
                       backgroundImage: `url(${url})`, backgroundSize: 'cover', backgroundPosition: 'center'
                     }}
                   />
@@ -1557,7 +1626,7 @@ function CastCard({ c, expanded, hasAI, fleshBusy, onToggle, onRemove, onPatch, 
                     style={{
                       position: 'absolute', top: -5, right: -5, width: 16, height: 16, padding: 0,
                       borderRadius: '50%', fontSize: 9, lineHeight: '16px',
-                      background: 'rgba(8,9,12,0.85)', border: '1px solid rgba(255,255,255,0.2)'
+                      background: 'var(--page)', border: '1px solid var(--rule)'
                     }}
                   >×</button>
                 </div>
@@ -1663,7 +1732,7 @@ function PlaceCard({ l, expanded, isOpening, hasAI, fleshBusy, onToggle, onRemov
           )}
         </div>
         <button className="btn-quiet" style={{ fontSize: 11, flexShrink: 0 }} onClick={(e) => { e.stopPropagation(); onRemove(); }}>remove</button>
-        <span style={{ fontSize: 10, color: 'rgba(236,234,230,0.4)', flexShrink: 0 }}>{expanded ? '▲' : '▼'}</span>
+        <span style={{ fontSize: 10, color: 'var(--ink-muted)', flexShrink: 0 }}>{expanded ? '▲' : '▼'}</span>
       </div>
       {expanded && (
         <div style={{ padding: '2px 14px 14px', display: 'flex', flexDirection: 'column', gap: 10 }} onClick={(e) => e.stopPropagation()}>
@@ -1708,17 +1777,17 @@ function OptionList({ options, value, onChange }: {
   options: Array<{ label: string; line: string }>; value: number; onChange: (i: number) => void;
 }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 0, borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 0, borderTop: '1px solid var(--rule)' }}>
       {options.map((o, i) => {
         const active = value === i;
         return (
           <button key={o.label} onClick={() => onChange(i)} style={{
             display: 'flex', alignItems: 'center', gap: 14,
             border: 0,
-            borderBottom: '1px solid rgba(255,255,255,0.1)',
-            borderLeft: `2px solid ${active ? 'oklch(0.72 0.06 195)' : 'transparent'}`,
-            background: active ? 'oklch(0.72 0.06 195 / 0.08)' : 'transparent',
-            color: active ? '#f2f4f5' : 'rgba(230,233,235,0.62)',
+            borderBottom: '1px solid var(--rule)',
+            borderLeft: `2px solid ${active ? 'oklch(0.32 0.12 25)' : 'transparent'}`,
+            background: active ? 'oklch(0.32 0.12 25 / 0.08)' : 'transparent',
+            color: active ? 'var(--ink-heading)' : 'var(--ink-muted)',
             borderRadius: 0, padding: '15px 14px', cursor: 'pointer', textAlign: 'left'
           }}>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 5, textAlign: 'left', flex: 1 }}>

@@ -2,7 +2,7 @@
  * Stripe → credit ledger. Signature-checked. Idempotent on the Stripe event id.
  * Subscription refills come from invoice.paid. Packs come from Checkout payment mode.
  */
-import { MONTHLY_CREDITS, PACK_CREDITS } from '../_shared/billing.ts';
+import { MONTHLY_CREDITS, PACK_CREDITS, subscriptionGrantsCredits } from '../_shared/billing.ts';
 import { adminClient, json } from '../_shared/http.ts';
 import { verifyStripeSignature } from '../_shared/stripe.ts';
 
@@ -108,6 +108,8 @@ async function onCheckout(admin: ReturnType<typeof adminClient>, session: Row): 
   }
 
   if (str(session.mode) === 'subscription' && customerId) {
+    const payment = str(session.payment_status);
+    if (payment !== 'paid' && payment !== 'no_payment_required') return;
     const { error } = await admin.rpc('set_billing_subscription', {
       p_user: userId,
       p_customer: customerId,
@@ -121,9 +123,10 @@ async function onCheckout(admin: ReturnType<typeof adminClient>, session: Row): 
 
 async function onInvoice(admin: ReturnType<typeof adminClient>, invoice: Row): Promise<void> {
   const reason = str(invoice.billing_reason);
-  if (reason !== 'subscription_create' && reason !== 'subscription_cycle' && reason !== 'subscription_update') {
-    return;
-  }
+  const paid = typeof invoice.amount_paid === 'number' && Number.isFinite(invoice.amount_paid)
+    ? invoice.amount_paid
+    : 0;
+  if (!subscriptionGrantsCredits(reason, paid)) return;
   const details = asRow(invoice.subscription_details);
   const parent = asRow(asRow(invoice.parent).subscription_details);
   const meta = asRow(details.metadata);

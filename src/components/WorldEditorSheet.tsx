@@ -1,5 +1,5 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { useState, type ReactNode } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import { fleshOutNarratorRules, fleshOutPremise, fleshOutWorldLore } from '../ai/engine';
 import {
   episodeSceneDay, preferBucketsForEpisodes, selectDirectorFacts, selectDirectorThreads
@@ -59,17 +59,44 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
   const [saveError, setSaveError] = useState('');
 
   const onSaveFail = (msg: string) => setSaveError(msg);
+  const worldWrites = useRef(Promise.resolve());
+  const charWrites = useRef(Promise.resolve());
+  const enqueue = (queue: { current: Promise<void> }, task: () => Promise<unknown>) => {
+    queue.current = queue.current.then(task, task).then(() => undefined);
+  };
   const patchWorld = (p: Partial<World>) =>
     void safeWrite(() => db.worlds.update(world.id, { ...p, updatedAt: Date.now() }), onSaveFail);
-  const patchAI = (p: Partial<WorldAISettings>) => patchWorld({ ai: { ...world.ai, ...p } });
-  const patchStance = (stance: StoryStance) =>
-    patchWorld({ storyStance: stance, ai: applyStanceToAi(world.ai, stance) });
+  const patchAI = (p: Partial<WorldAISettings>) => {
+    enqueue(worldWrites, () => safeWrite(async () => {
+      const row = await db.worlds.get(world.id);
+      if (!row) return;
+      await db.worlds.update(world.id, { ai: { ...row.ai, ...p }, updatedAt: Date.now() });
+    }, onSaveFail));
+  };
+  const patchStance = (stance: StoryStance) => {
+    enqueue(worldWrites, () => safeWrite(async () => {
+      const row = await db.worlds.get(world.id);
+      if (!row) return;
+      await db.worlds.update(world.id, {
+        storyStance: stance,
+        ai: applyStanceToAi(row.ai, stance),
+        updatedAt: Date.now()
+      });
+    }, onSaveFail));
+  };
   const patchSeason = (p: Partial<Season>) =>
     void safeWrite(() => db.seasons.update(season.id, { ...p, updatedAt: Date.now() }), onSaveFail);
   const patchEpisode = (p: Partial<Episode>) =>
     void safeWrite(() => db.episodes.update(episode.id, { ...p, updatedAt: Date.now() }), onSaveFail);
-  const patchChar = (id: string, p: Partial<Character>) =>
-    void safeWrite(() => db.characters.update(id, { ...p, updatedAt: Date.now() }), onSaveFail);
+  const patchChar = (id: string, p: Partial<Character>) => {
+    enqueue(charWrites, () => safeWrite(async () => {
+      const row = await db.characters.get(id);
+      if (!row) return;
+      const next: Partial<Character> = { ...p, updatedAt: Date.now() };
+      if (p.state) next.state = { ...row.state, ...p.state };
+      await db.characters.update(id, next);
+    }, onSaveFail));
+  };
   const patchLoc = (id: string, p: Partial<Location>) =>
     void safeWrite(async () => {
       await db.locations.update(id, { ...p, updatedAt: Date.now() });
@@ -505,7 +532,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               valueLabel={world.ai.pacing < 34 ? 'slow-burn' : world.ai.pacing < 67 ? 'measured' : 'propulsive'}
             />
 
-            <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <div style={{ borderTop: '1px solid var(--rule)', paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
               <Field label="Prose model for this world" note="unset = global default">
                 <ModelPicker
                   value={world.proseModel}
@@ -551,7 +578,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
             {characters.map((c) => (
               <div key={c.id} onClick={() => setCharId(c.id)} className="hover-bright" style={{
                 display: 'flex', gap: 11, alignItems: 'center', padding: '10px 12px', borderRadius: 13,
-                cursor: 'pointer', border: '1px solid rgba(255,255,255,0.09)', background: 'rgba(255,255,255,0.04)'
+                cursor: 'pointer', border: '1px solid var(--rule)', background: 'transparent'
               }}>
                 <div style={avatarStyle(c.hue, 34)} />
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
@@ -658,10 +685,10 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
             {locations.map((l) => (
               <div key={l.id} onClick={() => setLocId(l.id)} className="hover-bright" style={{
                 display: 'flex', gap: 11, alignItems: 'center', padding: '10px 12px', borderRadius: 13,
-                cursor: 'pointer', border: '1px solid rgba(255,255,255,0.09)', background: 'rgba(255,255,255,0.04)'
+                cursor: 'pointer', border: '1px solid var(--rule)', background: 'transparent'
               }}>
                 <div style={l.portrait
-                  ? { width: 34, height: 34, borderRadius: '50%', flexShrink: 0, backgroundImage: `url(${l.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center', border: '1px solid rgba(255,255,255,0.18)' }
+                  ? { width: 34, height: 34, borderRadius: '50%', flexShrink: 0, backgroundImage: `url(${l.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center', border: '1px solid var(--rule)' }
                   : avatarStyle(l.hue, 34)} />
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
                   <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>
@@ -688,7 +715,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
             <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
               <button className="btn-quiet" style={{ fontSize: 11, padding: '4px 6px' }} onClick={() => setLocId(null)}>← places</button>
               <div style={selectedLoc.portrait
-                ? { width: 30, height: 30, borderRadius: '50%', flexShrink: 0, backgroundImage: `url(${selectedLoc.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center', border: '1px solid rgba(255,255,255,0.18)' }
+                ? { width: 30, height: 30, borderRadius: '50%', flexShrink: 0, backgroundImage: `url(${selectedLoc.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center', border: '1px solid var(--rule)' }
                 : avatarStyle(selectedLoc.hue, 30)} />
               <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink-heading)', flex: 1 }}>
                 {selectedLoc.name || 'unnamed'}
@@ -757,10 +784,10 @@ function ContextSection({ title, children, note }: { title: string; children: Re
         {note && <span style={{ fontSize: 11, opacity: 0.45 }}>{note}</span>}
       </div>
       <div style={{
-        border: '1px solid rgba(255,255,255,0.08)', borderRadius: 12,
-        padding: '12px 14px', background: 'rgba(0,0,0,0.18)',
+        border: '1px solid var(--rule)', borderRadius: 12,
+        padding: '12px 14px', background: 'var(--page)',
         display: 'flex', flexDirection: 'column', gap: 8,
-        fontSize: 13, lineHeight: 1.55, color: 'rgba(236,234,230,0.88)'
+        fontSize: 13, lineHeight: 1.55, color: 'var(--paper)'
       }}>
         {children}
       </div>
@@ -1027,8 +1054,8 @@ function MiniSlider({ label, value, onChange, valueLabel }: {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: 'rgba(236,234,230,0.9)' }}>{label}</div>
-        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: 'oklch(0.72 0.06 195)' }}>{valueLabel}</div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-heading)' }}>{label}</div>
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: 'oklch(0.32 0.12 25)' }}>{valueLabel}</div>
       </div>
       <Bar pct={value} />
       <input

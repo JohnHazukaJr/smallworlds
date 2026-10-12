@@ -1,5 +1,5 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { useId, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { testConnection } from '../ai/client';
 import {
   BYOK_PRESETS, hostedBaseUrl, isHostedProvider, listModels, presetFor, type ProviderPreset
@@ -100,7 +100,7 @@ export function Settings() {
             <ModelPicker value={s.imageModel ?? null} onChange={s.setImageModel} />
           </div>
         </div>
-        <div style={{ fontSize: 12, lineHeight: 1.55, color: 'rgba(236,234,230,0.45)', marginTop: 10 }}>
+        <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)', marginTop: 10 }}>
           Z.ai in the browser may fail CORS — use OpenRouter’s <span className="mono">z-ai/glm-5.2</span> or sign in
           so the cloud relay can reach Z.ai. Custom still covers BigModel China
           (<span className="mono">open.bigmodel.cn/api/paas/v4</span>).
@@ -115,7 +115,7 @@ export function Settings() {
         <div className="craft-row" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap' }}>
             <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 5 }}>
-              <div style={{ fontSize: 13.5, fontWeight: 600, color: 'rgba(236,234,230,0.92)' }}>Mature content on new worlds</div>
+              <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>Mature content on new worlds</div>
               <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
                 Unlocks graphic violence, sex, and darker themes for new worlds. Whether the model complies also
                 depends on the provider you point it at. Per-world override in each world's settings.
@@ -160,11 +160,11 @@ function HostedSection() {
       </div>
       {!user ? (
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-          <div style={{ fontSize: 13, color: 'rgba(236,234,230,0.7)' }}>Sign in on Profile to use hosted models.</div>
+          <div style={{ fontSize: 13, color: 'var(--paper)' }}>Sign in on Profile to use hosted models.</div>
           <button className="btn-ghost" onClick={() => go('profile')}>Open Profile</button>
         </div>
       ) : hosted ? (
-        <div style={{ fontSize: 13, color: 'rgba(236,234,230,0.75)' }}>
+        <div style={{ fontSize: 13, color: 'var(--paper)' }}>
           Hosted provider is on. Pick <span className="mono">{HOSTED_PROSE_MODEL}</span>,{' '}
           <span className="mono">{HOSTED_UTILITY_MODEL}</span>, or <span className="mono">{HOSTED_IMAGE_MODEL}</span> in
           the model lists below. Balance and checkout live on Profile.
@@ -209,13 +209,13 @@ function SecuritySection() {
       <div className="craft-row" style={{ padding: 20, display: 'flex', flexDirection: 'column', gap: 18 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap' }}>
           <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 5 }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600, color: 'rgba(236,234,230,0.92)' }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>
               App lock &amp; key encryption
               {vault.enabled && (
                 <span style={{
                   fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.1em', textTransform: 'uppercase',
-                  marginLeft: 10, padding: '3px 8px', borderRadius: 6, border: '1px solid rgba(255,255,255,0.16)',
-                  color: vault.corrupt ? 'oklch(0.75 0.12 25)' : 'oklch(0.85 0.09 140)'
+                  marginLeft: 10, padding: '3px 8px', borderRadius: 6, border: '1px solid var(--rule)',
+                  color: vault.corrupt ? 'oklch(0.4 0.12 25)' : 'oklch(0.38 0.08 145)'
                 }}>{vault.corrupt ? 'corrupt' : 'on'}</span>
               )}
             </div>
@@ -250,29 +250,29 @@ function SecuritySection() {
           )}
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap', borderTop: '1px solid var(--rule)', paddingTop: 16 }}>
           <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 5 }}>
-            <div style={{ fontSize: 13.5, fontWeight: 600, color: 'oklch(0.75 0.12 25)' }}>Erase everything</div>
+            <div style={{ fontSize: 13.5, fontWeight: 600, color: 'oklch(0.4 0.12 25)' }}>Erase everything</div>
             <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
               Deletes all worlds, characters, settings and keys from this device. A cloud account, if you have one,
               is left in place. Export a backup first — this cannot be undone.
             </div>
           </div>
-          <button className="btn-quiet" style={{ color: 'oklch(0.75 0.12 25)', borderColor: 'oklch(0.4 0.1 25)' }} onClick={() => {
+          <button className="btn-quiet" style={{ color: 'oklch(0.4 0.12 25)', borderColor: 'oklch(0.4 0.1 25)' }} onClick={() => {
             if (!confirm('Delete ALL data on this device? This cannot be undone. Cloud copies are kept.')) return;
             if (!confirm('Last chance — every world, season and key on this device will be erased. Continue?')) return;
             void wipeAllData().catch((e) => setSectionError(formatUserError(e)));
           }}>Erase this device</button>
         </div>
         {signedIn && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap', borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 18, flexWrap: 'wrap', borderTop: '1px solid var(--rule)', paddingTop: 16 }}>
             <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 5 }}>
-              <div style={{ fontSize: 13.5, fontWeight: 600, color: 'oklch(0.75 0.12 25)' }}>Delete cloud account</div>
+              <div style={{ fontSize: 13.5, fontWeight: 600, color: 'oklch(0.4 0.12 25)' }}>Delete cloud account</div>
               <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
                 Deletes the signed-in account, synced stories, encrypted secrets, and credits, then erases this device.
               </div>
             </div>
-            <button className="btn-quiet" style={{ color: 'oklch(0.75 0.12 25)', borderColor: 'oklch(0.4 0.1 25)' }} onClick={() => {
+            <button className="btn-quiet" style={{ color: 'oklch(0.4 0.12 25)', borderColor: 'oklch(0.4 0.1 25)' }} onClick={() => {
               if (!confirm('Delete the cloud account and erase this device? This cannot be undone.')) return;
               if (!confirm('Last chance — export a backup first if you need the stories. Continue?')) return;
               void deleteCloudAccount().catch((e) => setSectionError(formatUserError(e)));
@@ -350,7 +350,7 @@ function Section({ title, note, children }: { title: string; note?: string; chil
     <div style={{ display: 'flex', flexDirection: 'column', gap: 13, marginBottom: 34 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
         <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink-heading)' }}>{title}</div>
-        {note && <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)' }}>{note}</div>}
+        {note && <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)' }}>{note}</div>}
       </div>
       {children}
     </div>
@@ -382,7 +382,7 @@ function AddProvider({ onDone }: { onDone: () => void }) {
           <Chip key={p.id} active={preset.id === p.id} onClick={() => pick(p)}>{p.label}</Chip>
         ))}
       </div>
-      <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'rgba(236,234,230,0.6)' }}>
+      <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
         {preset.note}
         {preset.keyUrl && (
           <> Get a key at <a href={preset.keyUrl} target="_blank" rel="noreferrer">{preset.keyUrl.replace('https://', '')}</a>.</>
@@ -435,19 +435,19 @@ function ProviderCard({ config }: { config: ProviderConfig }) {
         <div style={{ fontSize: 14.5, fontWeight: 600, color: 'var(--ink-heading)' }}>{config.label}</div>
         <div style={{
           fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: '0.1em', textTransform: 'uppercase',
-          borderRadius: 6, padding: '3px 8px', border: '1px solid rgba(255,255,255,0.16)',
-          color: testState === 'ok' ? 'oklch(0.85 0.09 140)' : testState === 'fail' ? 'oklch(0.75 0.12 25)' : 'oklch(0.72 0.06 195)'
+          borderRadius: 6, padding: '3px 8px', border: '1px solid var(--rule)',
+          color: testState === 'ok' ? 'oklch(0.4 0.08 145)' : testState === 'fail' ? 'oklch(0.4 0.12 25)' : 'oklch(0.32 0.12 25)'
         }}>
           {testState === 'ok' ? 'connected' : testState === 'fail' ? 'failed' : testState === 'busy' ? 'testing…' : 'not verified'}
         </div>
-        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)', marginLeft: 'auto', wordBreak: 'break-all' }}>
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', marginLeft: 'auto', wordBreak: 'break-all' }}>
           {config.baseUrl}
         </div>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))', gap: 12 }}>
         <Field label={isHostedProvider(config) ? 'Billing' : 'API key'}>
           {isHostedProvider(config) ? (
-            <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.7)', padding: '8px 0' }}>
+            <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--paper)', padding: '8px 0' }}>
               No API key. Calls are billed to your Small Worlds credits.
             </div>
           ) : editKey ? (
@@ -460,9 +460,9 @@ function ProviderCard({ config }: { config: ProviderConfig }) {
             <div
               onClick={() => setEditKey(true)}
               style={{
-                border: '1px solid rgba(255,255,255,0.11)', borderRadius: 11, padding: '11px 13px',
-                background: 'rgba(8,9,12,0.5)', fontFamily: "'IBM Plex Mono', monospace", fontSize: 12,
-                color: 'rgba(236,234,230,0.85)', cursor: 'pointer'
+                border: '1px solid var(--rule)', borderRadius: 11, padding: '11px 13px',
+                background: 'transparent', fontFamily: "'IBM Plex Mono', monospace", fontSize: 12,
+                color: 'var(--paper)', cursor: 'pointer'
               }}
             >
               {config.apiKey ? `${config.apiKey.slice(0, 5)}•••• ${config.apiKey.slice(-4)}` : 'no key — click to add'}
@@ -484,7 +484,7 @@ function ProviderCard({ config }: { config: ProviderConfig }) {
           if (confirm(`Remove ${config.label}? Worlds pointing at it will need a new model.`)) s.removeProvider(config.id);
         }}>Remove</button>
         {testState !== 'fail' && (
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)', marginLeft: 'auto', maxWidth: '100%', wordBreak: 'break-word' }}>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', marginLeft: 'auto', maxWidth: '100%', wordBreak: 'break-word' }}>
             {testMsg || 'run a test before writing a chapter'}
           </div>
         )}
@@ -571,12 +571,30 @@ export function ModelPicker({ value, onChange }: { value: ModelRef | null; onCha
 
 function WorldSettings({ world }: { world: World }) {
   const [saveError, setSaveError] = useState('');
+  const aiWrites = useRef(Promise.resolve());
+  const enqueueAI = (task: () => Promise<unknown>) => {
+    aiWrites.current = aiWrites.current.then(task, task).then(() => undefined);
+  };
   const patchWorld = (p: Partial<World>) =>
     void safeWrite(() => db.worlds.update(world.id, { ...p, updatedAt: Date.now() }), setSaveError);
-  const patchAI = (p: Partial<WorldAISettings>) =>
-    patchWorld({ ai: { ...world.ai, ...p } });
-  const patchStance = (stance: StoryStance) =>
-    patchWorld({ storyStance: stance, ai: applyStanceToAi(world.ai, stance) });
+  const patchAI = (p: Partial<WorldAISettings>) => {
+    enqueueAI(() => safeWrite(async () => {
+      const row = await db.worlds.get(world.id);
+      if (!row) return;
+      await db.worlds.update(world.id, { ai: { ...row.ai, ...p }, updatedAt: Date.now() });
+    }, setSaveError));
+  };
+  const patchStance = (stance: StoryStance) => {
+    enqueueAI(() => safeWrite(async () => {
+      const row = await db.worlds.get(world.id);
+      if (!row) return;
+      await db.worlds.update(world.id, {
+        storyStance: stance,
+        ai: applyStanceToAi(row.ai, stance),
+        updatedAt: Date.now()
+      });
+    }, setSaveError));
+  };
 
   return (
     <Section title={`This world — ${world.title}`} note="instructions the narrator follows in this world only">
@@ -664,7 +682,7 @@ function WorldSettings({ world }: { world: World }) {
           />
         </Field>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: 14, borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 16 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: 14, borderTop: '1px solid var(--rule)', paddingTop: 16 }}>
           <Field label="Prose model override" note="unset = global default">
             <ModelPicker
               value={world.proseModel}
@@ -709,8 +727,8 @@ function SliderCard({ label, value, onChange, note, valueLabel }: {
   return (
     <div className="craft-row" style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
       <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: 'rgba(236,234,230,0.92)' }}>{label}</div>
-        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: 'oklch(0.72 0.06 195)' }}>{valueLabel}</div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-heading)' }}>{label}</div>
+        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: 'oklch(0.32 0.12 25)' }}>{valueLabel}</div>
       </div>
       <Bar pct={value} />
       <input

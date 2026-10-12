@@ -116,7 +116,9 @@ export const useApp = create<AppStore>()(
       display: DEFAULT_DISPLAY,
       pendingCharacterId: null,
       pendingLocationId: null,
-      go: (screen) => set({ screen }),
+      go: (screen) => set(screen === 'onboard'
+        ? { screen, currentWorldId: null }
+        : { screen }),
       goCast: (characterId) => set({
         screen: 'cast',
         pendingCharacterId: characterId ?? null

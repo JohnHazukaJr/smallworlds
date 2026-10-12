@@ -24,9 +24,32 @@ export function knowledgeWallScore(text: string, wall: string): number {
   return inter / Math.min(A.size, B.size);
 }
 
+/** Drop must-not-know clauses that overlap a fact this character just learned. */
+export function clearMustNotKnowClause(mustNotKnow: string, learned: string): string {
+  const clear = learned.trim();
+  if (!clear || !mustNotKnow.trim()) return mustNotKnow;
+  const parts = mustNotKnow
+    .split(/[.;\n]+/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .filter((p) => {
+      const pl = p.toLowerCase();
+      const cl = clear.toLowerCase();
+      return !(pl.includes(cl) || cl.includes(pl));
+    });
+  return parts.join('; ');
+}
+
 export function speakLeaksMustNotKnow(text: string, wall: string): boolean {
   if (!wall.trim() || !text.trim()) return false;
   return knowledgeWallScore(text, wall) > 0;
+}
+
+/** Retry text to keep. Null when it is empty or still states the forbidden fact. */
+export function acceptWallRetry(retried: string, wall: string): string | null {
+  const text = retried.trim();
+  if (!text || speakLeaksMustNotKnow(text, wall)) return null;
+  return text;
 }
 
 export const SPEAK_WALL_NUDGE =

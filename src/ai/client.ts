@@ -74,6 +74,9 @@ export function isContextOverflowError(e: unknown): boolean {
   if (msg.includes('too long') && (msg.includes('context') || msg.includes('prompt'))) {
     return true;
   }
+  if (msg.includes('too much context')) return true;
+  if (msg.includes('context window')) return true;
+  if (msg.includes('context size')) return true;
   return false;
 }
 

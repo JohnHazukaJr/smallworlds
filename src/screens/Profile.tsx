@@ -4,7 +4,8 @@ import { BillingPanel } from '../components/BillingPanel';
 import { PassphraseDialog } from '../components/PassphraseDialog';
 import { useAuth } from '../cloud/authStore';
 import { isCloudConfigured } from '../cloud/supabase';
-import { db, exportWorld, importAnyFile, isEncryptedExport, type EncryptedExport } from '../db';
+import { db, exportWorld, importAnyFile, importConflictTitles, isEncryptedExport, type EncryptedExport } from '../db';
+import { replaceImportMessage } from '../importFile';
 import { useVault } from '../security/vault';
 import { useSettings } from '../store/settings';
 import {
@@ -84,6 +85,8 @@ export function Profile() {
   };
 
   const finishRestore = async (data: unknown) => {
+    const message = replaceImportMessage(await importConflictTitles(data));
+    if (message && !confirm(message)) return;
     const ids = await importAnyFile(data);
     clearStoragePressure();
     setNotice(`Restored ${ids.length} world${ids.length === 1 ? '' : 's'}. Unlock if the vault was restored.`);
@@ -122,7 +125,7 @@ export function Profile() {
       maxWidth: 1020
     }}>
       <div style={{ display: 'flex', gap: 22, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 34 }}>
-        <div style={avatarStyle(60, 84, 'rgba(255,255,255,0.2)')} />
+        <div style={avatarStyle(60, 84, 'var(--rule)')} />
         <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 9 }}>
           <div className="serif" style={{ fontWeight: 300, fontSize: compact ? 26 : phone ? 28 : 36, lineHeight: 1.1, color: 'var(--ink-heading)' }}>Your shelf</div>
           <div style={{ fontSize: 13.5, lineHeight: 1.65, color: 'var(--ink-muted)', maxWidth: '58ch' }}>
@@ -141,11 +144,11 @@ export function Profile() {
 
       {storageWarn && (
         <div className="craft-row" style={{
-          padding: '14px 16px', marginBottom: 22, borderColor: 'oklch(0.72 0.06 195 / 0.35)',
+          padding: '14px 16px', marginBottom: 22, borderColor: 'oklch(0.32 0.12 25 / 0.35)',
           display: 'flex', flexDirection: 'column', gap: 8
         }}>
-          <Mono style={{ fontSize: 9, color: 'oklch(0.72 0.06 195 / 0.9)' }}>storage pressure</Mono>
-          <div style={{ fontSize: 13, lineHeight: 1.55, color: 'rgba(236,234,230,0.75)' }}>
+          <Mono style={{ fontSize: 9, color: 'var(--accent)' }}>storage pressure</Mono>
+          <div style={{ fontSize: 13, lineHeight: 1.55, color: 'var(--paper)' }}>
             This browser is running low on space{storage ? ` (${storage.label})` : ''}. Export a device backup now —
             if storage fills up, worlds or keys can fail to save.
           </div>
@@ -157,7 +160,7 @@ export function Profile() {
 
       <AccountSection onError={setError} onNotice={setNotice} />
 
-      <div style={{ display: 'flex', gap: 26, flexWrap: 'wrap', borderTop: '1px solid rgba(255,255,255,0.08)', borderBottom: '1px solid rgba(255,255,255,0.08)', padding: '16px 0', marginBottom: 34 }}>
+      <div style={{ display: 'flex', gap: 26, flexWrap: 'wrap', borderTop: '1px solid var(--rule)', borderBottom: '1px solid var(--rule)', padding: '16px 0', marginBottom: 34 }}>
         {[
           ['worlds', String(worlds.length)],
           ['seasons', String(stats?.seasons ?? '—')],
@@ -175,16 +178,16 @@ export function Profile() {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 13, marginBottom: 34 }}>
         <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink-heading)' }}>Your worlds</div>
-          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)' }}>
+          <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)' }}>
             sharing is a future feature — every world is private today
           </div>
         </div>
         {worlds.map((w) => (
           <div key={w.id} className="craft-row" style={{ padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
-            <div style={{ ...plateStyle(w.hue, 46), width: 46, borderRadius: 12, border: '1px solid rgba(255,255,255,0.12)', padding: 0 }} />
+            <div style={{ ...plateStyle(w.hue, 46), width: 46, borderRadius: 12, border: '1px solid var(--rule)', padding: 0 }} />
             <div style={{ flex: 1, minWidth: 180, display: 'flex', flexDirection: 'column', gap: 3 }}>
               <div className="serif" style={{ fontSize: 17, color: 'var(--ink-heading)' }}>{w.title}</div>
-              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.4)' }}>{w.line.slice(0, 60)}</div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)' }}>{w.line.slice(0, 60)}</div>
             </div>
             <div style={{ display: 'flex', gap: 6 }}>
               <button
@@ -214,11 +217,11 @@ export function Profile() {
             return (
               <button key={id} onClick={() => s.setDefaultVisibility(id)} style={{
                 textAlign: 'left', display: 'flex', flexDirection: 'column', gap: 5,
-                border: `1px solid rgba(255,255,255,${active ? '0.18' : '0.09'})`,
-                background: active ? 'oklch(0.72 0.06 195 / 0.1)' : 'rgba(255,255,255,0.03)',
-                color: active ? '#f2f4f5' : 'rgba(230,233,235,0.62)',
+                border: '1px solid var(--rule)',
+                background: active ? 'oklch(0.32 0.12 25 / 0.08)' : 'transparent',
+                color: active ? 'var(--ink-heading)' : 'var(--ink-muted)',
                 borderRadius: 4, padding: '13px 15px', cursor: 'pointer',
-                boxShadow: active ? 'inset 0 -2px 0 oklch(0.72 0.06 195)' : 'none'
+                boxShadow: active ? 'inset 0 -2px 0 oklch(0.32 0.12 25)' : 'none'
               }}>
                 <div style={{ fontSize: 13.5, fontWeight: 600 }}>{v.label}</div>
                 <div style={{ fontSize: 12, lineHeight: 1.5, opacity: 0.68 }}>{v.line}</div>
@@ -236,11 +239,11 @@ export function Profile() {
             ['Cloud sync', isCloudConfigured() ? 'optional — sign in above' : 'configure VITE_SUPABASE_* to enable']
           ].map(([label, value]) => (
             <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'space-between' }}>
-              <div style={{ fontSize: 12.5, color: 'rgba(236,234,230,0.6)' }}>{label}</div>
-              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: 'rgba(236,234,230,0.9)', textAlign: 'right' }}>{value}</div>
+              <div style={{ fontSize: 12.5, color: 'var(--ink-muted)' }}>{label}</div>
+              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, color: 'var(--ink-heading)', textAlign: 'right' }}>{value}</div>
             </div>
           ))}
-          <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 14, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <div style={{ borderTop: '1px solid var(--rule)', paddingTop: 14, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
             <button className="btn-primary" disabled={exporting} onClick={() => setBackupDialog(true)}>
               {exporting ? 'Exporting…' : 'Back up this device'}
             </button>
@@ -252,7 +255,7 @@ export function Profile() {
               onChange={(e) => { const f = e.target.files?.[0]; if (f) void onRestoreFile(f); e.target.value = ''; }}
             />
           </div>
-          <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.4)' }}>
+          <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--ink-muted)' }}>
             Device backup includes worlds, settings, and the encrypted key vault. Prefer a passphrase whenever keys are present.
           </div>
           <LegalLinks />
@@ -321,7 +324,7 @@ function AccountSection({
     return (
       <div className="craft-row" style={{ padding: 20, marginBottom: 28, display: 'flex', flexDirection: 'column', gap: 10 }}>
         <Mono style={{ fontSize: 9 }}>account · cloud sync</Mono>
-        <div style={{ fontSize: 13.5, lineHeight: 1.6, color: 'rgba(236,234,230,0.65)' }}>
+        <div style={{ fontSize: 13.5, lineHeight: 1.6, color: 'var(--ink-muted)' }}>
           Cloud sync is off. Copy <code style={{ fontFamily: 'IBM Plex Mono, monospace', fontSize: 11 }}>.env.example</code> to
           <code style={{ fontFamily: 'IBM Plex Mono, monospace', fontSize: 11 }}> .env.local</code>, add your Supabase URL and anon key,
           run <code style={{ fontFamily: 'IBM Plex Mono, monospace', fontSize: 11 }}>supabase/migrations/001_initial.sql</code>,
@@ -349,7 +352,7 @@ function AccountSection({
     return (
       <div className="craft-row" style={{ padding: 20, marginBottom: 28, display: 'flex', flexDirection: 'column', gap: 14 }}>
         <Mono style={{ fontSize: 9 }}>sign in · equal options</Mono>
-        <div style={{ fontSize: 13, lineHeight: 1.55, color: 'rgba(236,234,230,0.6)' }}>
+        <div style={{ fontSize: 13, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
           Phone, email, or Google — pick whichever you prefer. None is required to play locally.
         </div>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -394,7 +397,7 @@ function AccountSection({
                 </button>
               </>
             )}
-            <div style={{ fontSize: 11, color: 'rgba(236,234,230,0.4)' }}>SMS is billed via Twilio on your Supabase project.</div>
+            <div style={{ fontSize: 11, color: 'var(--ink-muted)' }}>SMS is billed via Twilio on your Supabase project.</div>
           </div>
         )}
 
@@ -417,10 +420,10 @@ function AccountSection({
         <Mono style={{ fontSize: 9 }}>signed in</Mono>
         <button className="btn-quiet" style={{ fontSize: 11 }} disabled={busy} onClick={() => void run(() => auth.signOut())}>Sign out</button>
       </div>
-      <div style={{ fontSize: 13.5, color: 'rgba(236,234,230,0.85)' }}>
+      <div style={{ fontSize: 13.5, color: 'var(--paper)' }}>
         {auth.user.email || auth.user.phone || auth.user.id.slice(0, 8)}
       </div>
-      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'rgba(236,234,230,0.45)' }}>
+      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)' }}>
         last synced · {last}
         {sync.lastResult ? ` · ${sync.lastResult}` : ''}
       </div>
@@ -442,9 +445,9 @@ function AccountSection({
 
       <BillingPanel userId={auth.user.id} onError={onError} />
 
-      <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ borderTop: '1px solid var(--rule)', paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
         <Mono style={{ fontSize: 9 }}>encrypted API keys (E2E)</Mono>
-        <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'rgba(236,234,230,0.55)' }}>
+        <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-muted)' }}>
           Separate from your account password. Encrypts provider keys so the server only stores ciphertext.
         </div>
         <input
@@ -466,11 +469,11 @@ function AccountSection({
         </div>
       </div>
 
-      <div style={{ borderTop: '1px solid rgba(255,255,255,0.08)', paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ borderTop: '1px solid var(--rule)', paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
         <Mono style={{ fontSize: 9 }}>optional TOTP MFA</Mono>
         {auth.factors.length > 0 ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <div style={{ fontSize: 12.5, color: 'rgba(236,234,230,0.65)' }}>
+            <div style={{ fontSize: 12.5, color: 'var(--ink-muted)' }}>
               {auth.factors.length} authenticator factor{auth.factors.length > 1 ? 's' : ''} enrolled.
             </div>
             {auth.factors.map((f) => (
@@ -486,7 +489,7 @@ function AccountSection({
           })}>Enroll authenticator</button>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ fontSize: 12, color: 'rgba(236,234,230,0.55)' }}>Scan with your authenticator, then enter a code.</div>
+            <div style={{ fontSize: 12, color: 'var(--ink-muted)' }}>Scan with your authenticator, then enter a code.</div>
             <img src={totp.qr} alt="TOTP QR" style={{ width: 160, height: 160, borderRadius: 8, background: '#fff' }} />
             <Mono style={{ fontSize: 10 }}>{totp.secret}</Mono>
             <input placeholder="6-digit code" value={totpCode} onChange={(e) => setTotpCode(e.target.value)} />
