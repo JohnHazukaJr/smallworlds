@@ -144,7 +144,7 @@ export function classifyError(e: unknown): AppError {
   ) {
     return new AppError({
       code: 'vault',
-      userMessage: 'Vault unreadable — restore a backup or reset the vault (stories are kept).',
+      userMessage: 'Vault unreadable — restore a backup or reset the vault. Sealed worlds stay unreadable until a backup is restored.',
       detail: msg,
       cause: e
     });

@@ -38,8 +38,10 @@ import {
   characterSpeakTokens,
   chooseHistoryTail,
   compressOmittedTurns,
+  DIRECTOR_PLAN_TOKENS,
   directorSystemPrompt,
   directorUserPrompt,
+  memoryFocusQuery,
   episodeContextPressure,
   episodeHistoryChars,
   omittedTurnsForNarratorTail,
@@ -802,6 +804,17 @@ export function pendingBeatsToKeep(remaining: DirectorBeat[]): DirectorBeat[] {
  * the director, then stream narrator (narration-only) and character agents.
  * Each completed beat is persisted immediately. Returns the last turn id.
  */
+function beatMemoryQuery(
+  ctx: { characters: Character[]; episode: Episode },
+  playerText: string,
+  brief: string
+): string {
+  const names = ctx.characters
+    .filter((c) => ctx.episode.castIds.includes(c.id))
+    .map((c) => c.name);
+  return memoryFocusQuery([playerText, brief, names.join(' '), ctx.episode.location]);
+}
+
 export function writeTurn(opts: WriteOptions): Promise<string> {
   beginAppWrite();
   return writeTurnInner(opts).finally(endAppWrite);
@@ -883,7 +896,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
         guestId: opts.preferGuestId
       };
       const utilityModel = utilityModelFor(opts.world).model;
-      const directorCap = promptCharBudget(utilityModel, 2500);
+      const directorCap = promptCharBudget(utilityModel, DIRECTOR_PLAN_TOKENS);
       const directorTail = chooseHistoryTail(utilityModel, 'director');
       const directorSystem = directorSystemPrompt(
         opts.mode, speakersPresent, opts.length, storyStanceOf(opts.world)
@@ -903,7 +916,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
           historyTailChars: directorTail.charBudget,
           historyTailMaxTurns: directorTail.maxTurns
         }),
-        2500,
+        DIRECTOR_PLAN_TOKENS,
         opts.signal,
         UTILITY_TIMEOUT_MS,
         'utility',
@@ -1027,7 +1040,8 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
           const narrSystem = buildNarratorSystemPrompt(ctx, {
             ...pack,
             focusIds: focus.characterIds,
-            focusGuestIds: focus.guestIds
+            focusGuestIds: focus.guestIds,
+            memoryQuery: beatMemoryQuery(ctx, playerText, beat.brief)
           });
           return streamNarrationComplete({
             provider, model,
@@ -1072,7 +1086,8 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
           const guestSystem = buildGuestSystemPrompt(ctx, guest, {
             ...pack,
             focusIds: focus.characterIds,
-            focusGuestIds: focus.guestIds
+            focusGuestIds: focus.guestIds,
+            memoryQuery: beatMemoryQuery(ctx, playerText, beat.brief)
           });
           return streamSpeakComplete({
             provider, model,
@@ -1125,7 +1140,8 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
         const charSystem = buildCharacterSystemPrompt(ctx, speaking, {
           ...pack,
           focusIds: focus.characterIds,
-          focusGuestIds: focus.guestIds
+          focusGuestIds: focus.guestIds,
+          memoryQuery: beatMemoryQuery(ctx, playerText, beat.brief)
         });
         return streamSpeakComplete({
           provider, model,
@@ -1308,7 +1324,10 @@ async function regenerateBeatInner(opts: {
       opts.turn.text.slice(0, 900);
     const narrCap = promptCharBudget(model, narrOutTokens(model, opts.length));
     const narrText = await withOverflowRetry(async (pack) => {
-      const narrSystem = buildNarratorSystemPrompt(ctx, pack);
+      const narrSystem = buildNarratorSystemPrompt(ctx, {
+        ...pack,
+        memoryQuery: beatMemoryQuery(ctx, '', brief)
+      });
       return streamNarrationComplete({
         provider, model,
         system: narrSystem,
@@ -1354,7 +1373,12 @@ async function regenerateBeatInner(opts: {
   const focusGuestIds = guest ? [guest.id] : [];
   const cleaned = await withOverflowRetry(async (pack) => {
     if (guest) {
-      const guestSystem = buildGuestSystemPrompt(ctx, guest, { ...pack, focusIds, focusGuestIds });
+      const guestSystem = buildGuestSystemPrompt(ctx, guest, {
+        ...pack,
+        focusIds,
+        focusGuestIds,
+        memoryQuery: beatMemoryQuery(ctx, '', brief)
+      });
       return streamSpeakComplete({
         provider, model,
         system: guestSystem,
@@ -1374,7 +1398,12 @@ async function regenerateBeatInner(opts: {
         onAccumulated: (acc) => opts.onDelta(acc, meta)
       });
     }
-    const charSystem = buildCharacterSystemPrompt(ctx, speaking!, { ...pack, focusIds, focusGuestIds });
+    const charSystem = buildCharacterSystemPrompt(ctx, speaking!, {
+      ...pack,
+      focusIds,
+      focusGuestIds,
+      memoryQuery: beatMemoryQuery(ctx, '', brief)
+    });
     return streamSpeakComplete({
       provider, model,
       system: charSystem,

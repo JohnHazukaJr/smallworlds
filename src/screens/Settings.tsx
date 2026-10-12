@@ -202,7 +202,7 @@ function SecuritySection() {
       )}
       {vault.corrupt && !vaultCorruptDismissed && (
         <ErrorNote
-          error="Vault unreadable — restore a backup from Profile, or reset the vault (stories are kept; keys on this device are lost)."
+          error="Vault unreadable — restore a backup from Profile, or reset the vault. Resetting deletes the story key, so sealed worlds on this device stay unreadable until that backup is restored."
           onDismiss={() => setVaultCorruptDismissed(true)}
         />
       )}
@@ -220,11 +220,10 @@ function SecuritySection() {
               )}
             </div>
             <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
-              Sets a passphrase that locks the app UI and encrypts your API keys at rest (AES-256-GCM; the key is
-              derived from your passphrase and never stored). Story text in IndexedDB is not encrypted by this lock —
-              only keys are. Anyone with device access can still read worlds via DevTools. If you forget the
-              passphrase, keys on this device are wiped — export a device backup from Profile first. Stories stay
-              either way.
+              Sets a passphrase that locks the app and encrypts stories and API keys on this device (AES-256-GCM).
+              The passphrase is never stored and cannot be recovered. If you forget it, sealed worlds on this device
+              stay unreadable until you restore a backup — export one from Profile first. With the lock off, story
+              text is stored in plaintext again.
             </div>
           </div>
           {!vault.enabled ? (

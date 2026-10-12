@@ -181,6 +181,15 @@ describe('speak agent context frame', () => {
     expect(joined).toMatch(/Output format \(required\)/);
   });
 
+  it('puts the knowledge wall on the speak request, next to the brief', () => {
+    const ada = npc('c1', 'Ada', { mustNotKnow: 'Ivo took guild money' });
+    const last = buildCharacterSpeakMessages([], [ada], ada, 'press them', []).at(-1)?.content ?? '';
+    const intent = last.indexOf('Intent for this line: press them');
+    const wall = last.indexOf('must not know, hint at, or act on this: Ivo took guild money');
+    expect(intent).toBeGreaterThan(-1);
+    expect(wall).toBeGreaterThan(intent);
+  });
+
   it('puts guest voice as a hard identity guide', () => {
     const guest: EpisodeGuest = { id: 'g1', name: 'Clerk', brief: 'tired', voice: 'dry harbour rasp' };
     const prompt = buildGuestSystemPrompt(
@@ -643,13 +652,17 @@ describe('token-efficient packing', () => {
     expect(a).toBe(b);
   });
 
-  it('keeps a stable prefix per agent across turns in one Write', () => {
+  it('keeps the narrator prefix stable and leaves the bible off spoken lines', () => {
     const frame = ctx({ turns: manyTurns().slice(0, 4) });
     const narrPrefix = storyCachePrefix(frame, { agent: 'narrator' });
-    const speakPrefix = storyCachePrefix(frame, { agent: 'character' });
-    expect(buildNarratorSystemPrompt(frame).startsWith(narrPrefix)).toBe(true);
-    expect(buildCharacterSystemPrompt(frame, npc('c1', 'Ada')).startsWith(speakPrefix)).toBe(true);
-    expect(speakPrefix.length).toBeLessThan(narrPrefix.length);
+    const narr = buildNarratorSystemPrompt(frame);
+    const speak = buildCharacterSystemPrompt(frame, npc('c1', 'Ada'));
+    expect(narr.startsWith(narrPrefix)).toBe(true);
+    expect(narr).toMatch(/## The world/);
+    expect(speak).not.toMatch(/## The world/);
+    expect(speak).not.toContain('A coastal city of ledgers.');
+    expect(speak.length).toBeLessThan(narr.length);
+    expect(speak).toMatch(/## Characters in the scene/);
   });
 
   it('sends a smaller director payload than the narrator frame', () => {
@@ -709,6 +722,8 @@ describe('engine context pack', () => {
     expect(speak).not.toMatch(/Other established locations/);
     expect(narr).toContain('END_BIBLE');
     expect(speak).not.toContain('END_BIBLE');
+    expect(speak).not.toMatch(/## The world/);
+    expect(speak.length).toBeLessThan(narr.length * 0.75);
     expect(narr).toContain('Durable fact 19');
     expect(speak).not.toContain('Durable fact 0');
     expect(narr).not.toMatch(/Week cycle:/);

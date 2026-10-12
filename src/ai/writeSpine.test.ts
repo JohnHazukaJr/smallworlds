@@ -442,6 +442,23 @@ describe('selectDirectorFacts / Threads pin', () => {
     expect(selected.length).toBeLessThanOrEqual(24);
   });
 
+  it('keeps a fact that matches the player line ahead of a newer unrelated fact', () => {
+    const facts: ContinuityFact[] = [
+      {
+        id: 'key', worldId: 'w', seasonId: 's', episodeId: 'e',
+        text: 'The brass key is under the pier', source: 'manual',
+        pinned: false, createdAt: 1, updatedAt: 1
+      },
+      {
+        id: 'weather', worldId: 'w', seasonId: 's', episodeId: 'e',
+        text: 'Weather was mild on the hill', source: 'manual',
+        pinned: false, createdAt: 80, updatedAt: 80
+      }
+    ];
+    const selected = selectFactsPinnedFirst(facts, ['e'], 1, 'Where is the brass key');
+    expect(selected.map((f) => f.id)).toEqual(['key']);
+  });
+
   it('agent thread selection honors pins', () => {
     const threads: OpenThread[] = Array.from({ length: 20 }, (_, i) => ({
       id: `t${i}`, worldId: 'w', seasonId: 's',

@@ -2165,6 +2165,17 @@ export function Story() {
             : '12px 24px 16px',
           display: 'flex', flexDirection: 'column', gap: 10
         }}>
+          {!hasAI && turns.length > 0 && (
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              <p style={{ fontSize: 14, margin: 0, color: 'rgba(236,234,230,0.78)', flex: 1, minWidth: 180 }}>
+                Add a writing model in Settings before Write on.
+              </p>
+              <button className="btn-ghost" style={{ fontSize: 12, padding: '7px 12px' }}
+                onClick={() => go('settings')}>
+                Add a writing model in Settings
+              </button>
+            </div>
+          )}
           {showWrapNudge && (
             <div className="glass-nudge" style={{
               display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',

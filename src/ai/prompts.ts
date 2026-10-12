@@ -91,6 +91,8 @@ export interface PromptBuildOpts {
   agent?: 'narrator' | 'character' | 'guest';
   historyTailChars?: number;
   historyTailMaxTurns?: number;
+  /** Player line, beat brief, names, and place — ranks unpinned memory inside the cap. */
+  memoryQuery?: string;
 }
 
 function playerRelLine(c: Character, all: Character[]): string | null {
@@ -348,6 +350,11 @@ export const DIRECTOR_FACT_CAP = 16;
 export const DIRECTOR_THREAD_CAP = 10;
 /** How many recent packed turns the director sees (after history packing). */
 export const DIRECTOR_TRANSCRIPT_TURNS = 8;
+/**
+ * Completion budget for plan_turn.
+ * Must stay under the hosted utility ceiling (900) so a plan is 1 credit, not a beat.
+ */
+export const DIRECTOR_PLAN_TOKENS = 800;
 /** How many prior wrapped episodes to surface in prompts. */
 const PRIOR_EPISODE_DIGEST_COUNT = 3;
 
@@ -473,11 +480,72 @@ function threadBucket(t: OpenThread): string {
   return episodeNumFromOpenedLabel(t.openedLabel) || t.seasonId || 'legacy';
 }
 
-/** Pinned facts fill the cap first, then bucket-balanced rest. Used by director and all agents. */
+const MEMORY_STOP = new Set([
+  'the', 'and', 'for', 'with', 'that', 'this', 'from', 'your', 'you', 'are', 'was', 'were',
+  'have', 'has', 'had', 'not', 'but', 'her', 'his', 'she', 'him', 'they', 'them', 'their',
+  'into', 'about', 'what', 'when', 'where', 'who', 'how', 'its', 'our', 'did', 'does'
+]);
+
+function memoryTokens(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !MEMORY_STOP.has(w));
+}
+
+/** Join the player line, brief, names, and place into one ranking query. */
+export function memoryFocusQuery(parts: Array<string | null | undefined>): string {
+  return parts.map((p) => (p ?? '').trim()).filter(Boolean).join('\n');
+}
+
+function textOverlap(text: string, query: Set<string>): number {
+  if (query.size === 0) return 0;
+  let n = 0;
+  const seen = new Set<string>();
+  for (const word of memoryTokens(text)) {
+    if (!query.has(word) || seen.has(word)) continue;
+    seen.add(word);
+    n++;
+  }
+  return n;
+}
+
+function rankUnpinned<T extends { id: string; createdAt: number; text: string }>(
+  items: T[],
+  bucketOf: (t: T) => string,
+  cap: number,
+  preferBuckets: string[],
+  query: string
+): T[] {
+  const tokens = new Set(memoryTokens(query));
+  if (tokens.size === 0) return pickAcrossBuckets(items, bucketOf, cap, preferBuckets);
+  const hot: T[] = [];
+  const cold: T[] = [];
+  const scored = items.map((item) => ({ item, score: textOverlap(item.text, tokens) }));
+  scored.sort((a, b) => b.score - a.score || b.item.createdAt - a.item.createdAt);
+  for (const row of scored) {
+    if (row.score > 0) hot.push(row.item);
+    else cold.push(row.item);
+  }
+  const picked = hot.slice(0, cap);
+  if (picked.length >= cap) return picked;
+  const seen = new Set(picked.map((item) => item.id));
+  const fill = pickAcrossBuckets(
+    cold.filter((item) => !seen.has(item.id)),
+    bucketOf,
+    cap - picked.length,
+    preferBuckets
+  );
+  return [...picked, ...fill];
+}
+
+/** Pinned facts fill the cap first, then relevance, then bucket-balanced rest. */
 export function selectFactsPinnedFirst(
   continuity: ContinuityFact[],
   preferBuckets: string[] = [],
-  cap: number
+  cap: number,
+  query = ''
 ): ContinuityFact[] {
   const pinned = continuity
     .filter((f) => f.pinned)
@@ -486,29 +554,33 @@ export function selectFactsPinnedFirst(
   const pinnedIds = new Set(pinned.map((f) => f.id));
   const restCap = Math.max(0, cap - pinned.length);
   const rest = restCap > 0
-    ? pickAcrossBuckets(
+    ? rankUnpinned(
       continuity.filter((f) => !pinnedIds.has(f.id)),
       factBucket,
       restCap,
-      preferBuckets
+      preferBuckets,
+      query
     )
     : [];
-  return [...pinned, ...rest].sort((a, b) => b.createdAt - a.createdAt);
+  if (!query.trim()) return [...pinned, ...rest].sort((a, b) => b.createdAt - a.createdAt);
+  return [...pinned, ...rest];
 }
 
 /** Same fact selection the director prompt uses. Pinned facts fill the cap first. */
 export function selectDirectorFacts(
   continuity: ContinuityFact[],
-  preferBuckets: string[] = []
+  preferBuckets: string[] = [],
+  query = ''
 ): ContinuityFact[] {
-  return selectFactsPinnedFirst(continuity, preferBuckets, DIRECTOR_FACT_CAP);
+  return selectFactsPinnedFirst(continuity, preferBuckets, DIRECTOR_FACT_CAP, query);
 }
 
-/** Pinned open threads fill the cap first. */
+/** Pinned open threads fill the cap first, then relevance, then bucket-balanced rest. */
 export function selectThreadsPinnedFirst(
   threads: OpenThread[],
   preferBuckets: string[] = [],
-  cap: number
+  cap: number,
+  query = ''
 ): OpenThread[] {
   const open = threads.filter((t) => t.status === 'open');
   const pinned = open
@@ -518,22 +590,25 @@ export function selectThreadsPinnedFirst(
   const pinnedIds = new Set(pinned.map((t) => t.id));
   const restCap = Math.max(0, cap - pinned.length);
   const rest = restCap > 0
-    ? pickAcrossBuckets(
+    ? rankUnpinned(
       open.filter((t) => !pinnedIds.has(t.id)),
       threadBucket,
       restCap,
-      preferBuckets
+      preferBuckets,
+      query
     )
     : [];
-  return [...pinned, ...rest].sort((a, b) => b.createdAt - a.createdAt);
+  if (!query.trim()) return [...pinned, ...rest].sort((a, b) => b.createdAt - a.createdAt);
+  return [...pinned, ...rest];
 }
 
 /** Same thread selection the director prompt uses. Pinned threads fill the cap first. */
 export function selectDirectorThreads(
   threads: OpenThread[],
-  preferBuckets: string[] = []
+  preferBuckets: string[] = [],
+  query = ''
 ): OpenThread[] {
-  return selectThreadsPinnedFirst(threads, preferBuckets, DIRECTOR_THREAD_CAP);
+  return selectThreadsPinnedFirst(threads, preferBuckets, DIRECTOR_THREAD_CAP, query);
 }
 
 /** Absolute day that counts as "now" in the active episode scene. */
@@ -618,18 +693,20 @@ function episodeHeader(episode: Episode): string {
 function cappedThreadLines(
   threads: OpenThread[],
   preferBuckets: string[] = [],
-  cap = THREAD_CAP
+  cap = THREAD_CAP,
+  query = ''
 ): string[] {
-  return selectThreadsPinnedFirst(threads, preferBuckets, cap)
+  return selectThreadsPinnedFirst(threads, preferBuckets, cap, query)
     .map((t) => `- ${t.text} (${t.openedLabel})`);
 }
 
 function cappedContinuityLines(
   continuity: ContinuityFact[],
   preferBuckets: string[] = [],
-  cap = CONTINUITY_FACT_CAP
+  cap = CONTINUITY_FACT_CAP,
+  query = ''
 ): string[] {
-  return selectFactsPinnedFirst(continuity, preferBuckets, cap)
+  return selectFactsPinnedFirst(continuity, preferBuckets, cap, query)
     .map((f) => `- ${f.text}`);
 }
 
@@ -680,10 +757,11 @@ function continuityBlock(
   ctx: PromptContext,
   agent: Exclude<PromptAgent, 'director'>,
   tone: 'hard' | 'plausible',
-  cap = FACT_CAPS[agent].facts
+  cap = FACT_CAPS[agent].facts,
+  query = ''
 ): string | null {
   const prefer = preferEpisodeBuckets(ctx);
-  const lines = cappedContinuityLines(ctx.continuity, prefer, cap);
+  const lines = cappedContinuityLines(ctx.continuity, prefer, cap, query);
   if (lines.length === 0) return null;
   const heading = tone === 'hard'
     ? '## Continuity — established facts, never contradict these'
@@ -695,13 +773,14 @@ function threadsBlock(
   ctx: PromptContext,
   agent: PromptAgent,
   tone: 'narrator' | 'speak' | 'director',
-  capOverride?: number
+  capOverride?: number,
+  query = ''
 ): string | null {
   const prefer = preferEpisodeBuckets(ctx);
   const cap = capOverride ?? FACT_CAPS[agent].threads;
   const lines = agent === 'director'
-    ? selectThreadsPinnedFirst(ctx.threads, prefer, cap).map((t) => `- ${t.text}`)
-    : cappedThreadLines(ctx.threads, prefer, cap);
+    ? selectThreadsPinnedFirst(ctx.threads, prefer, cap, query).map((t) => `- ${t.text}`)
+    : cappedThreadLines(ctx.threads, prefer, cap, query);
   if (lines.length === 0) return null;
   if (tone === 'director') {
     return `Open threads (draw on sparingly; soft tensions, not the plot-target hit-list):\n${lines.join('\n')}`;
@@ -1018,6 +1097,36 @@ function storyCacheSections(ctx: PromptContext, opts: PromptBuildOpts = {}): str
   return sections;
 }
 
+/**
+ * Room packet for a spoken line: who is here, the air of the place, the live premise.
+ * The world bible and season recap stay on the narrator.
+ */
+function speakScenePrefix(ctx: PromptContext): string {
+  const { episode, characters } = ctx;
+  const sections: string[] = [];
+  sections.push(situationPremise(ctx, { includeSeasonMeta: true }));
+  sections.push(episodeHeader(episode));
+  sections.push(...currentLocationBlock(ctx, { includeOthers: false, atmosphereOnly: true }));
+
+  const player = characters.find((c) => c.isPlayer);
+  const inScene = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
+  if (player) sections.push(`## The player\n${presenceSheet(player, characters)}`);
+  if (inScene.length > 0) {
+    sections.push(
+      `## Characters in the scene\n` +
+      inScene.map((c) => presenceSheet(c, characters)).join('\n\n')
+    );
+  }
+  const guests = activeGuests(episode);
+  if (guests.length > 0) {
+    sections.push(
+      `## Walk-ons in this episode (not Cast cards — temporary)\n` +
+      guests.map((g) => `- ${g.name}: ${g.brief}${g.voice ? ` Voice: ${g.voice}` : ''}`).join('\n')
+    );
+  }
+  return sections.join('\n\n');
+}
+
 function worldSpineSections(
   ctx: PromptContext,
   agent: Exclude<PromptAgent, 'director'>,
@@ -1030,20 +1139,23 @@ function worldSpineSections(
     if (targets) sections.push(targets);
   }
 
-  const priorEps = tight
-    ? formatPriorEpisodesSection(ctx, {
-      beatCapImmediate: 3, beatCapDigest: 1,
-      recapDigestChars: 160, recapImmediateChars: 700
-    })
-    : priorMemoryFor(ctx, agent);
-  if (priorEps) sections.push(priorEps);
+  if (agent === 'narrator') {
+    const priorEps = tight
+      ? formatPriorEpisodesSection(ctx, {
+        beatCapImmediate: 3, beatCapDigest: 1,
+        recapDigestChars: 160, recapImmediateChars: 700
+      })
+      : priorMemoryFor(ctx, agent);
+    if (priorEps) sections.push(priorEps);
+  }
 
   const factCap = tight ? 8 : FACT_CAPS[agent].facts;
   const threadCap = tight ? 4 : FACT_CAPS[agent].threads;
   const tone = 'hard';
   const threadKind = agent === 'narrator' ? 'narrator' : 'speak';
-  const cont = continuityBlock(ctx, agent, tone, factCap);
-  const threads = threadsBlock(ctx, agent, threadKind, threadCap);
+  const query = opts.memoryQuery ?? '';
+  const cont = continuityBlock(ctx, agent, tone, factCap, query);
+  const threads = threadsBlock(ctx, agent, threadKind, threadCap, query);
   if (cont) sections.push(cont);
   if (threads) sections.push(threads);
 
@@ -1197,14 +1309,10 @@ export function buildCharacterSystemPrompt(
 ): string {
   const { world, characters } = ctx;
   const ai = world.ai;
-  const focus = new Set(opts.focusIds ?? []);
   const frameOpts: PromptBuildOpts = { ...opts, agent: 'character' };
-  const namedOff = characters.filter(
-    (c) => c.id !== character.id && !ctx.episode.castIds.includes(c.id) && focus.has(c.id)
-  );
   const sections: string[] = [];
 
-  sections.push(storyCachePrefix(ctx, frameOpts));
+  sections.push(speakScenePrefix(ctx));
   sections.push(stancePlaybook(storyStanceOf(world)));
 
   sections.push(
@@ -1218,14 +1326,7 @@ export function buildCharacterSystemPrompt(
   const self = speakSelfSheet(character, characters);
   if (self) sections.push(`## You\n${self}`);
 
-  if (namedOff.length > 0) {
-    sections.push(
-      `## Named off-scene (this beat only)\n` +
-      namedOff.map((c) => presenceSheet(c, characters)).join('\n\n')
-    );
-  }
-
-  // Speak format lives on the user message only (buildCharacterSpeakMessages).
+  // Speak format and the knowledge wall live on the user message, next to the brief.
   sections.push(
     `## How you respond\n` +
     `- Honour behaviour anchors and MUST NOT KNOW. Never soften yourself to please the player.\n` +
@@ -1255,7 +1356,7 @@ export function buildGuestSystemPrompt(
   const frameOpts: PromptBuildOpts = { ...opts, agent: 'guest' };
   const sections: string[] = [];
 
-  sections.push(storyCachePrefix(ctx, frameOpts));
+  sections.push(speakScenePrefix(ctx));
   sections.push(stancePlaybook(storyStanceOf(world)));
 
   sections.push(
@@ -1670,6 +1771,12 @@ function speakVoiceReminder(speaking: Character): string {
   return parts.length > 0 ? `${parts.join('\n')}\n\n` : '';
 }
 
+function knowledgeWallCue(wall: string | undefined): string {
+  const text = wall?.trim();
+  if (!text) return '';
+  return `You must not know, hint at, or act on this: ${text}\n\n`;
+}
+
 /** When the last NPC line was a question, remind the speaker the player already answered. */
 function heardAnswerCue(turns: Turn[], characters: Character[], guests: EpisodeGuest[]): string {
   const asked = lastOpenQuestion(
@@ -1707,6 +1814,7 @@ export function buildCharacterSpeakMessages(
     speakVoiceReminder(speaking) +
     heardAnswerCue(turns, characters, guests) +
     `Intent for this line: ${brief}\n\n` +
+    knowledgeWallCue(speaking.mustNotKnow) +
     `Use the required *action* "dialogue" format. No other speakers.\n` +
     `${speakSizeHint(length)}\n\n` +
     SPEAK_FORMAT_RULES +
@@ -1969,10 +2077,16 @@ export function directorUserPrompt(
 
   const prefer = preferEpisodeBuckets(ctx);
   const factCap = tight ? 8 : DIRECTOR_FACT_CAP;
-  const factLines = selectFactsPinnedFirst(ctx.continuity, prefer, factCap)
+  const memoryQuery = memoryFocusQuery([
+    input,
+    inScene.map((c) => c.name).join(' '),
+    guests.map((g) => g.name).join(' '),
+    ctx.episode.location
+  ]);
+  const factLines = selectFactsPinnedFirst(ctx.continuity, prefer, factCap, memoryQuery)
     .map((f) => `- ${f.text}`)
     .join('\n');
-  const threadSec = threadsBlock(ctx, 'director', 'director', tight ? 4 : DIRECTOR_THREAD_CAP);
+  const threadSec = threadsBlock(ctx, 'director', 'director', tight ? 4 : DIRECTOR_THREAD_CAP, memoryQuery);
   const wallCast = ctx.characters.filter((c) => {
     if (c.isPlayer || !c.mustNotKnow.trim()) return false;
     if (ctx.episode.castIds.includes(c.id)) return true;
@@ -1991,22 +2105,6 @@ export function directorUserPrompt(
     .map((c) => `- ${c.name}: must not know — ${c.mustNotKnow.trim()}`)
     .join('\n');
 
-  const bible = ctx.season.bible;
-  const seasonBibleClip = bible
-    ? `Season bible (prior season): ${clipText(bible.recap, 320)}` +
-      (bible.carriedBeats.some((b) => b.disposition === 'raise' || b.disposition === 'keep')
-        ? `\nCarried season beats (ambient; plot targets are listed separately):\n${bible.carriedBeats
-          .filter((b) => b.disposition === 'raise' || b.disposition === 'keep')
-          .slice(0, 4)
-          .map((b) => `- [${b.disposition.toUpperCase()}] ${b.text}`)
-          .join('\n')}`
-        : '')
-    : '';
-
-  const priorSection = priorMemoryFor(ctx, 'director');
-  const priorMemory = priorSection
-    ? priorSection.replace(/^## Recent episodes this season\n/, '')
-    : '';
   const running = runningSummaryFor(ctx.episode, PRIOR_CAPS.director.runningCap);
   const runningLine = running
     ? running.replace(
@@ -2026,10 +2124,7 @@ export function directorUserPrompt(
       ) + '\n'
     : '';
   const calEventsCompact = calendarEventsSection(ctx, 'compact', { includeUpcoming: !tight }) ?? '';
-  const locBlocks = currentLocationBlock(ctx, {
-    clipChars: tight ? 600 : 1200,
-    atmosphereOnly: tight
-  });
+  const locBlocks = currentLocationBlock(ctx, { atmosphereOnly: true });
   const locLine = locBlocks.length > 0
     ? locBlocks[0].replace(/^## /, '') + '\n'
     : '';
@@ -2040,8 +2135,6 @@ export function directorUserPrompt(
     `What's live: ${ctx.season.premise || '(unwritten)'}\n` +
     targetsCompact +
     calEventsCompact +
-    (seasonBibleClip ? `${seasonBibleClip}\n` : '') +
-    (priorMemory ? `\nRecent episode memory:\n${priorMemory}\n` : '') +
     `Continuity (do not contradict — these outrank any running summary):\n${factLines || '(none)'}\n\n` +
     `${threadSec ?? 'Open threads (draw on sparingly; soft tensions, not the plot-target hit-list):\n(none)'}\n\n` +
     (runningLine ? `${runningLine}\n` : '') +
