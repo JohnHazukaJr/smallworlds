@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   bandForWidth,
+  bookStageOpen,
   editorsStacked,
   measureViewport,
   phoneChrome,
@@ -44,6 +45,15 @@ describe('chrome helpers', () => {
     expect(editorsStacked('compact')).toBe(true);
     expect(editorsStacked('regular')).toBe(false);
     expect(editorsStacked('wide')).toBe(false);
+  });
+
+  it('opens a book on the Fold inner screen and keeps other devices scrolling', () => {
+    expect(bookStageOpen(bandForWidth(390), false)).toBe(false);
+    expect(bookStageOpen(bandForWidth(752), false)).toBe(true);
+    expect(bookStageOpen(bandForWidth(884), false)).toBe(true);
+    expect(bookStageOpen(bandForWidth(1280), false)).toBe(false);
+    expect(bookStageOpen(bandForWidth(752), true)).toBe(false);
+    expect(bookStageOpen(bandForWidth(884), true)).toBe(false);
   });
 
   it('docks sheets to the bottom only on compact', () => {

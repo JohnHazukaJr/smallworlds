@@ -38,8 +38,10 @@ import type {
 import { AppError, classifyError } from '../errors';
 import {
   Chip, ConfirmBar, ErrorNote, Mono, Sheet, Spinner,
-  phoneChrome, sheetsFromBottom, shortStoryChrome, useViewport
+  bookStageOpen, phoneChrome, sheetsFromBottom, shortStoryChrome, useViewport
 } from '../ui/bits';
+import { BookStage, type BookPiece } from '../ui/BookStage';
+import { writingLineText } from '../ui/bookPage';
 import { Face } from '../ui/Face';
 import { attributionRun, isDialogueBlock, lastSpokenBy } from '../ui/attribution';
 import { abortWriteNotice, unfinishedWriteNotice, NOTICE_ADD_MODEL, noticeNavAction } from '../ui/writeNotices';
@@ -527,6 +529,20 @@ function castParseKey(characters: Character[], guests: EpisodeGuest[]): string {
  * The live line. Token updates stay here so the mounted chapter does not
  * re-render on every chunk, and the scroll moves once per frame.
  */
+function WritingLine({ text, fontPx }: { text: string; fontPx: number }) {
+  return (
+    <p
+      className="serif writing-line"
+      role="status"
+      data-writing-line
+      style={{ fontSize: fontPx, lineHeight: 1.82 }}
+    >
+      {text}
+      <span className="prose-caret" aria-hidden />
+    </p>
+  );
+}
+
 function StreamTail({
   sinkRef, active, scrollRef, onHasText, characters, guests, episodeId, worldId,
   accent, prose, fontPx, avatarPx, dialogueStyle, opening
@@ -628,7 +644,8 @@ function StreamTail({
 }
 
 export function Story() {
-  const { band, height, keyboardOffset } = useViewport();
+  const { band, height, keyboardOffset, keyboardOpen } = useViewport();
+  const book = bookStageOpen(band, keyboardOpen);
   const phone = phoneChrome(band);
   const compact = band === 'compact';
   const short = shortStoryChrome(band, height);
@@ -717,10 +734,11 @@ export function Story() {
   const [asCharacterId, setAsCharacterId] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
-  const [, setTailHasText] = useState(false);
+  const [tailHasText, setTailHasText] = useState(false);
   const streamSink = useRef<StreamSink>(() => {});
   const onTailText = useCallback((hasText: boolean) => setTailHasText(hasText), []);
-  const [, setProgressLabel] = useState('writing…');
+  const [progressLabel, setProgressLabel] = useState('');
+  const [pageReveal, setPageReveal] = useState(0);
   const [error, setError] = useState<string | AppError>('');
   const [notice, setNotice] = useState('');
   const [writeAnyway, setWriteAnyway] = useState(false);
@@ -813,13 +831,14 @@ export function Story() {
         weight: actionWeight ?? weight,
         asCharacterId: handsId === undefined ? (asCharacterId ?? undefined) : (handsId ?? undefined),
         signal: controller.signal,
-        onProgress: () => setProgressLabel('Writing…'),
+        onProgress: (label) => setProgressLabel(label),
         onNotice: setNotice,
         onDelta: (p, meta) => {
           streamSink.current(p, meta);
         }
       });
       setTailHasText(false);
+      setPageReveal((n) => n + 1);
       return { status: 'ok', beatsCompleted: 1, remaining: 0 };
     } catch (e) {
       setTailHasText(false);
@@ -1082,6 +1101,202 @@ export function Story() {
   const stageGuests = episode.activeGuestIds == null
     ? guests
     : guests.filter((g) => episode.activeGuestIds!.includes(g.id));
+  const writing = writingLineText(streaming, tailHasText, progressLabel);
+  const bookPieces: BookPiece[] = [];
+  if (book) {
+    const visible = manuscript.slice(-turnWindow);
+    const latestPassageId = [...turns].reverse().find((t) => t.role === 'user')?.id ?? null;
+    const chapterTitle = episode.title.trim() || activeLocation?.name || episode.location || 'Untitled chapter';
+    if (manuscript.length > turnWindow) {
+      bookPieces.push({
+        key: 'earlier',
+        node: (
+          <div style={{ textAlign: 'center', marginBottom: 16 }}>
+            <button
+              type="button"
+              className="serif"
+              onClick={() => setTurnWindow((n) => n + 60)}
+              style={{
+                border: 0, background: 'transparent', cursor: 'pointer',
+                fontSize: 14, fontStyle: 'italic', color: 'var(--ink-muted)', padding: '6px 8px'
+              }}
+            >
+              Show earlier turns
+            </button>
+          </div>
+        )
+      });
+    }
+    bookPieces.push({
+      key: 'head',
+      node: (
+        <header style={{ marginBottom: turns.length === 0 ? 22 : 16 }}>
+          <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
+            {activeLocation && (
+              <div style={{ ...locationThumb(activeLocation, turns.length === 0 ? 52 : 32), marginTop: turns.length === 0 ? 12 : 2 }} />
+            )}
+            <div style={{ minWidth: 0, flex: 1 }}>
+              {turns.length === 0 ? (
+                <>
+                  <div className="serif" style={{ fontSize: 11, letterSpacing: '0.18em', textTransform: 'uppercase', color: 'var(--ink-muted)', fontWeight: 500 }}>
+                    Chapter {numberWord(episode.number)}
+                  </div>
+                  <div className="serif" style={{ fontSize: 32, fontWeight: 400, lineHeight: 1.2, margin: '12px 0 0', color: 'var(--ink-heading)' }}>
+                    {chapterTitle}
+                  </div>
+                  {sceneDate && (
+                    <div className="serif" style={{ marginTop: 10, fontSize: 15, lineHeight: 1.55, fontStyle: 'italic', color: 'var(--ink-muted)' }}>
+                      {sceneDate}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="serif" style={{ fontSize: 13, letterSpacing: '0.14em', textTransform: 'uppercase', lineHeight: 1.45, color: 'var(--ink-muted)' }}>
+                  {chapterTitle}{sceneDate ? ` · ${sceneDate}` : ''}
+                </div>
+              )}
+            </div>
+          </div>
+          {(stageCast.length > 0 || stageGuests.length > 0) && (
+            <SceneCastStrip cast={stageCast} guests={stageGuests} empty={turns.length === 0} onOpen={goCast} />
+          )}
+        </header>
+      )
+    });
+    if (openingNote && turns.length === 0) {
+      const noteStyle: CSSProperties = {
+        fontSize: fontPx, lineHeight: 1.82, margin: '0 0 18px', fontStyle: 'italic', color: 'var(--paper)'
+      };
+      bookPieces.push({
+        key: 'opening',
+        text: openingNote,
+        node: <p className="serif" style={noteStyle}>{openingNote}</p>,
+        renderSlice: (slice) => <p className="serif" style={noteStyle}>{slice}</p>
+      });
+    }
+    if (turns.length === 0) {
+      bookPieces.push({
+        key: 'empty',
+        node: (
+          <div style={{ fontSize: 14, lineHeight: 1.7, display: 'flex', flexDirection: 'column', gap: 16 }}>
+            {episode.number === 1 && season.premise ? (
+              <p className="serif" style={{ fontSize: fontPx, lineHeight: 1.82, margin: 0, fontStyle: 'italic', color: 'var(--ink-muted)' }}>
+                {season.premise}
+              </p>
+            ) : !openingNote ? (
+              <p className="serif" style={{ fontSize: fontPx, lineHeight: 1.82, margin: 0, fontWeight: 300, color: 'var(--ink-muted)' }}>
+                Nothing here yet. Write the first turn.
+              </p>
+            ) : null}
+            {hasAI && (
+              <button
+                className="btn-ghost"
+                style={{ fontSize: 12, padding: '8px 14px', alignSelf: 'flex-start' }}
+                disabled={!!streaming}
+                onClick={() => {
+                  void (async () => {
+                    setError('');
+                    setProgressLabel('Writing opening…');
+                    setStreaming(true);
+                    let opened = false;
+                    try {
+                      await draftColdOpenNarration(world, season, episode);
+                      opened = true;
+                    } catch (e) {
+                      setError(classifyError(e));
+                    } finally {
+                      setStreaming(false);
+                      setProgressLabel('');
+                      if (opened) setPageReveal((n) => n + 1);
+                    }
+                  })();
+                }}
+              >
+                Draft opening
+              </button>
+            )}
+          </div>
+        )
+      });
+    }
+    let prevEpisodeId = '';
+    visible.forEach(({ episode: chapter, turn, blocks }, ti) => {
+      const showBreak = chapter.id !== prevEpisodeId && !(prevEpisodeId === '' && chapter.id === episode.id);
+      prevEpisodeId = chapter.id;
+      if (showBreak) {
+        const breakTitle = chapter.title.trim() || chapter.location || `Chapter ${chapter.number}`;
+        bookPieces.push({
+          key: `break-${chapter.id}`,
+          node: (
+            <div style={{ margin: '1.6em 0 1.2em', textAlign: 'center' }}>
+              <div className="serif" style={{ fontSize: 11, letterSpacing: '0.2em', textTransform: 'uppercase', color: 'var(--ink-muted)' }}>
+                Chapter {chapter.number}
+              </div>
+              <div className="serif" style={{ fontSize: 26, fontWeight: 400, marginTop: 10, color: 'var(--ink-heading)' }}>{breakTitle}</div>
+            </div>
+          )
+        });
+      }
+      const continued = attributionRun(blocks, ti > 0 ? lastSpokenBy(visible[ti - 1].blocks) : null);
+      blocks.forEach((block, bi) => {
+        const opening = manuscript.length <= turnWindow && ti === 0 && bi === 0;
+        const fromPlayer = turn.role === 'user';
+        const renderBlock = (b: ProseBlock, isOpening: boolean) => (
+          <ProseBlockView
+            b={b}
+            accent={M.accent}
+            prose={M.prose}
+            fontPx={fontPx}
+            avatarPx={avatarPx}
+            dialogueStyle="prose"
+            continues={continued[bi]}
+            opening={isOpening}
+            fromPlayer={fromPlayer}
+          />
+        );
+        bookPieces.push({
+          key: `${turn.id}:${bi}`,
+          text: block.text,
+          node: renderBlock(block, opening),
+          renderSlice: (slice) => renderBlock(
+            { ...block, text: slice, segments: block.segments ? parseSpeakSegments(slice) : undefined },
+            opening && block.text.startsWith(slice)
+          )
+        });
+      });
+      if (turn.id === latestPassageId) {
+        bookPieces.push({
+          key: `rewrite-${turn.id}`,
+          node: (
+            <div style={{ display: 'flex', justifyContent: 'flex-end', margin: '4px 0 10px' }}>
+              <button
+                className="btn-quiet"
+                style={{ fontSize: 12, padding: '6px 10px', minHeight: 36 }}
+                disabled={streaming}
+                onClick={() => {
+                  const idx = turns.findIndex((t) => t.id === turn.id);
+                  const below = idx < 0 ? 0 : turns.length - idx - 1;
+                  if (below > 0) setConfirmAsk({ kind: 'retryFrom', turn });
+                  else void retryFrom(turn);
+                }}
+              >
+                Rewrite this passage
+              </button>
+            </div>
+          )
+        });
+      }
+    });
+    if (writing) {
+      bookPieces.push({
+        key: 'writing',
+        node: <WritingLine text={writing} fontPx={fontPx} />
+      });
+    }
+  }
+  const bookSignature = book
+    ? `${episode.id}\n${fontPx}\n${turnWindow}\n${writing ?? ''}\n${manuscript.map((entry) => `${entry.turn.id}:${entry.turn.text.length}`).join('|')}`
+    : '';
 
   return (
     <div
@@ -1190,11 +1405,44 @@ export function Story() {
         </div>
       )}
 
-      {/* body — the manuscript column */}
-      <div style={{
-        position: 'relative', zIndex: 2, flex: 1, display: 'grid', minHeight: 0,
-        gridTemplateColumns: 'minmax(0, 1fr)'
-      }}>
+      {/* body — the manuscript column, or a book on the open Fold */}
+      <div
+        aria-busy={streaming}
+        style={{
+          position: 'relative', zIndex: 2, flex: 1, display: 'grid', minHeight: 0,
+          gridTemplateColumns: 'minmax(0, 1fr)',
+          gridTemplateRows: 'minmax(0, 1fr)'
+        }}
+      >
+        {book ? (
+          <BookStage
+            episodeId={episode.id}
+            reveal={pageReveal}
+            streaming={streaming}
+            fontPx={fontPx}
+            signature={bookSignature}
+            pieces={bookPieces}
+            tail={(
+              <StreamTail
+                sinkRef={streamSink}
+                active={streaming}
+                scrollRef={scrollRef}
+                onHasText={onTailText}
+                characters={characters}
+                guests={guests}
+                episodeId={episode.id}
+                worldId={world.id}
+                accent={M.accent}
+                prose={M.prose}
+                fontPx={fontPx}
+                avatarPx={avatarPx}
+                dialogueStyle="prose"
+                opening={turns.length === 0}
+              />
+            )}
+          />
+        ) : null}
+        {!book && (
         <section ref={scrollRef} style={{ overflow: 'auto', display: 'flex', flexDirection: 'column', position: 'relative' }}>
 
           <div
@@ -1344,13 +1592,16 @@ export function Story() {
                           setError('');
                           setProgressLabel('Writing opening…');
                           setStreaming(true);
+                          let opened = false;
                           try {
                             await draftColdOpenNarration(world, season, episode);
+                            opened = true;
                           } catch (e) {
                             setError(classifyError(e));
                           } finally {
                             setStreaming(false);
-                            setProgressLabel('writing…');
+                            setProgressLabel('');
+                            if (opened) setPageReveal((n) => n + 1);
                           }
                         })();
                       }}
@@ -1457,10 +1708,11 @@ export function Story() {
               dialogueStyle="prose"
               opening={turns.length === 0}
             />
+            {writing && <WritingLine text={writing} fontPx={fontPx} />}
 
-  
           </div>
         </section>
+        )}
       </div>
 
       {(confirmAsk || error || notice) && (

@@ -9,7 +9,7 @@ import {
 export type { ViewportBand };
 export {
   COMPACT_MAX, REGULAR_MAX, TAB_BAR_HEIGHT, TAB_LABEL_MIN, TALL_CHROME_MIN,
-  bandForWidth, editorsStacked, phoneChrome, sheetsFromBottom, shortStoryChrome, tabBarInset
+  bandForWidth, bookStageOpen, editorsStacked, phoneChrome, sheetsFromBottom, shortStoryChrome, tabBarInset
 } from './viewport';
 
 const FALLBACK_VIEWPORT = {

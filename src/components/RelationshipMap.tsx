@@ -1,9 +1,8 @@
-import type { CSSProperties } from 'react';
 import type { Character } from '../types';
 import { hasLink } from '../relationships';
 import { useVw } from '../ui/bits';
-import { avatarStyle, ACCENT, ACCENT_RGBA } from '../ui/theme';
-import { characterPortraits } from '../worldOps';
+import { characterAvatarStyle } from '../ui/avatar';
+import { ACCENT, ACCENT_RGBA } from '../ui/theme';
 
 export type RelationshipMapMode = 'map' | 'web';
 
@@ -24,14 +23,8 @@ interface NodePos {
   c: Character;
 }
 
-function portraitFill(c: Character, size: number): CSSProperties {
-  const portrait = characterPortraits(c)[0];
-  return {
-    ...avatarStyle(c.hue, size, 'rgba(0,0,0,0.28)'),
-    ...(portrait
-      ? { backgroundImage: `url(${portrait})`, backgroundSize: 'cover', backgroundPosition: 'center' }
-      : {})
-  };
+function portraitFill(c: Character, size: number) {
+  return characterAvatarStyle(c, size, 'rgba(0,0,0,0.28)');
 }
 
 function ringPositions(

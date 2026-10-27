@@ -7,8 +7,9 @@ import { useApp } from '../store/app';
 import type {
   BeatDisposition, CharacterState, SeasonWrap, WrapCharacterOutcome
 } from '../types';
+import { characterAvatarStyle } from '../ui/avatar';
 import { Chip, ErrorNote, Mono, Spinner, phoneChrome, tabBarInset, useViewport } from '../ui/bits';
-import { avatarStyle, GAP_EFFECTS, GAP_LABELS, ACCENT, ACCENT_RGBA } from '../ui/theme';
+import { GAP_EFFECTS, GAP_LABELS, ACCENT, ACCENT_RGBA } from '../ui/theme';
 
 const BEAT_OPTS: Array<[BeatDisposition, string]> = [
   ['drop', 'Drop'], ['soften', 'Soften'], ['keep', 'Keep'], ['raise', 'Raise']
@@ -379,7 +380,10 @@ export function Sequel() {
                     style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }}
                     onClick={() => patch({ characters: patchCharacter(draft, i, { returning: !c.returning }) })}
                   >
-                    <div style={avatarStyle(ch?.hue ?? 200, 28)} />
+                    <div style={characterAvatarStyle(
+                      ch ?? { hue: 200, portrait: null, portraits: [] },
+                      28
+                    )} />
                     <div style={{ fontSize: 13, fontWeight: 600, flex: 1 }}>{c.name}</div>
                     <div style={{
                       width: 16, height: 16, borderRadius: 6, flexShrink: 0,

@@ -13,6 +13,7 @@ import type {
   Character, ContinuityFact, Episode, Location, OpenThread, Season, StoryStance, World, WorldAISettings
 } from '../types';
 import { Bar, Chip, ErrorNote, Field, Mono, Sheet, Spinner, Toggle } from '../ui/bits';
+import { characterAvatarStyle } from '../ui/avatar';
 import { avatarStyle } from '../ui/theme';
 import {
   applyStanceToAi, advanceMonths, calendarPatch, dayFromParts, emptyCharacter, emptyLocation,
@@ -580,7 +581,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 display: 'flex', gap: 11, alignItems: 'center', padding: '10px 12px', borderRadius: 13,
                 cursor: 'pointer', border: '1px solid var(--rule)', background: 'transparent'
               }}>
-                <div style={avatarStyle(c.hue, 34)} />
+                <div style={characterAvatarStyle(c, 34)} />
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
                   <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>
                     {c.name || 'unnamed'}{c.isPlayer ? ' · player' : ''}
@@ -605,7 +606,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
           <>
             <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
               <button className="btn-quiet" style={{ fontSize: 11, padding: '4px 6px' }} onClick={() => setCharId(null)}>← cast</button>
-              <div style={avatarStyle(selected.hue, 30)} />
+              <div style={characterAvatarStyle(selected, 30)} />
               <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink-heading)', flex: 1 }}>
                 {selected.name || 'unnamed'}{selected.isPlayer ? ' · player' : ''}
               </div>

@@ -11,6 +11,11 @@ describe('classifyError', () => {
     expect(err.userMessage).not.toMatch(/cloud sync/i);
   });
 
+  it('keeps portrait instructions instead of a generic model failure', () => {
+    const err = classifyError(new AIError('Set an image model in Settings before generating a portrait.'));
+    expect(err.userMessage).toBe('Set an image model in Settings before generating a portrait.');
+  });
+
   it('maps missing writing model the same way', () => {
     const err = classifyError(new Error('No writing model configured. Add a provider and pick a model in Settings.'));
     expect(err.code).toBe('provider');

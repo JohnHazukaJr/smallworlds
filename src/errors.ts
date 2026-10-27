@@ -102,6 +102,15 @@ function looksLikeVault(msg: string): boolean {
   return m.includes('vault') || m.includes('passphrase') || m.includes('decrypt');
 }
 
+function looksLikePortrait(msg: string): boolean {
+  const m = msg.toLowerCase();
+  return (
+    m.includes('generating a portrait') ||
+    m.includes('sent for a portrait') ||
+    m.includes('portrait generation needs')
+  );
+}
+
 function looksLikeMissingModel(msg: string): boolean {
   return /no (writing|utility|image) model configured/i.test(msg);
 }
@@ -300,6 +309,16 @@ export function classifyError(e: unknown): AppError {
       code: 'vault',
       userMessage: 'Vault error. Check your passphrase, or restore a backup.',
       detail: msg,
+      cause: e
+    });
+  }
+
+  if (looksLikePortrait(msg)) {
+    return new AppError({
+      code: 'provider',
+      userMessage: msg.trim(),
+      detail: msg,
+      status,
       cause: e
     });
   }

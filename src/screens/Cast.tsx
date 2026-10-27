@@ -1,6 +1,7 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef, useState } from 'react';
 import { draftCharacter, fleshOutCharacter, fleshOutRelationships } from '../ai/engine';
+import { CharacterPortraitTools } from '../components/CharacterPortraitTools';
 import { RelationshipMap, type RelationshipMapMode } from '../components/RelationshipMap';
 import { db, recordTombstones, safeWrite } from '../db';
 import { formatUserError } from '../errors';
@@ -10,10 +11,10 @@ import {
 } from '../relationships';
 import { useApp } from '../store/app';
 import type { Character, Relationship } from '../types';
+import { characterAvatarStyle } from '../ui/avatar';
 import { Chip, ConfirmBar, ErrorNote, Field, Mono, Spinner, editorsStacked, phoneChrome, useViewport } from '../ui/bits';
-import { fileToPortraitImage } from '../ui/image';
-import { avatarStyle, ACCENT, ACCENT_RGBA } from '../ui/theme';
-import { characterPortraits, emptyCharacter, MAX_CHARACTER_PORTRAITS, nextSceneCastIds, portraitsPatch, pruneDeletedCharacterFromEpisodes } from '../worldOps';
+import { ACCENT, ACCENT_RGBA } from '../ui/theme';
+import { characterPortraits, emptyCharacter, nextSceneCastIds, pruneDeletedCharacterFromEpisodes } from '../worldOps';
 import { shouldFlushAutosave } from '../ui/autosave';
 
 type Tab = 'persona' | 'voice' | 'psyche' | 'secrets' | 'relations' | 'anchors' | 'ai';
@@ -87,9 +88,6 @@ export function Cast() {
   const [fleshBusy, setFleshBusy] = useState(false);
   const [fleshError, setFleshError] = useState('');
   const [undoSnapshot, setUndoSnapshot] = useState<Character | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [portraitBusy, setPortraitBusy] = useState(false);
-  const [portraitError, setPortraitError] = useState('');
   const [confirmRemove, setConfirmRemove] = useState(false);
 
   const world = useLiveQuery(
@@ -142,7 +140,6 @@ export function Cast() {
     if (!selected) setDraft(null);
     setFleshError('');
     setUndoSnapshot(null);
-    setPortraitError('');
     setConfirmRemove(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id]);
@@ -150,45 +147,6 @@ export function Cast() {
   const { discard: discardAutosave, release: releaseAutosave } = useAutosave(draft, setError);
 
   const patch = (p: Partial<Character>) => setDraft((d) => (d ? { ...d, ...p } : d));
-
-  const onPortraitFile = async (file: File) => {
-    if (!draft) return;
-    const current = characterPortraits(draft);
-    if (current.length >= MAX_CHARACTER_PORTRAITS) {
-      setPortraitError(`Up to ${MAX_CHARACTER_PORTRAITS} photos per character.`);
-      return;
-    }
-    setPortraitBusy(true);
-    setPortraitError('');
-    try {
-      const url = await fileToPortraitImage(file);
-      const next = portraitsPatch([...current, url]);
-      await db.characters.update(draft.id, { ...next, updatedAt: Date.now() });
-      patch(next);
-    } catch (e) {
-      setPortraitError(formatUserError(e));
-    } finally {
-      setPortraitBusy(false);
-    }
-  };
-
-  const removePortraitAt = async (index: number) => {
-    if (!draft) return;
-    const current = characterPortraits(draft);
-    const next = portraitsPatch(current.filter((_, i) => i !== index));
-    await db.characters.update(draft.id, { ...next, updatedAt: Date.now() });
-    patch(next);
-  };
-
-  const setPrimaryPortrait = async (index: number) => {
-    if (!draft || index <= 0) return;
-    const current = characterPortraits(draft);
-    if (index >= current.length) return;
-    const reordered = [current[index], ...current.filter((_, i) => i !== index)];
-    const next = portraitsPatch(reordered);
-    await db.characters.update(draft.id, { ...next, updatedAt: Date.now() });
-    patch(next);
-  };
 
   const toggleSelfTag = async () => {
     if (!draft) return;
@@ -315,16 +273,7 @@ export function Cast() {
               background: active ? 'var(--rule)' : 'transparent',
               border: `1px solid ${active ? 'var(--glass-rim)' : 'transparent'}`
             }}>
-              {(() => {
-                const face = characterPortraits(c)[0];
-                return (
-                  <div style={{
-                    ...avatarStyle(c.hue, stacked ? 28 : 34),
-                    flexShrink: 0,
-                    ...(face ? { backgroundImage: `url(${face})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {})
-                  }} />
-                );
-              })()}
+                  <div style={characterAvatarStyle(c, stacked ? 28 : 34)} />
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
                 <div style={{ fontSize: stacked ? 12.5 : 13.5, fontWeight: 600, color: 'var(--ink-heading)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {c.name || 'unnamed'}{c.selfTag ? ' · me' : ''}
@@ -408,70 +357,30 @@ export function Cast() {
                           : `linear-gradient(155deg, oklch(0.9 0.04 ${d.hue}), #f7f3ea)`,
                         backgroundSize: 'cover', backgroundPosition: 'center'
                       }}>
-                        {!primary && (
-                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', background: 'transparent',  padding: '5px 8px', borderRadius: 6 }}>
-                            no photo yet
-                          </span>
-                        )}
-                        {d.selfTag && (
-                          <span style={{
-                            position: 'absolute', top: 10, right: 10, fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5,
-                            letterSpacing: '0.06em', color: 'var(--accent-ink)', background: ACCENT, padding: '4px 8px', borderRadius: 4
-                          }}>this is me</span>
-                        )}
-                      </div>
-                      {gallery.length > 0 && (
-                        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                          {gallery.map((url, i) => (
-                            <div key={`${i}-${url.slice(0, 24)}`} style={{ position: 'relative' }}>
-                              <button
-                                type="button"
-                                title={i === 0 ? 'Primary face' : 'Make primary'}
-                                onClick={() => void setPrimaryPortrait(i)}
-                                style={{
-                                  width: 52, height: 52, borderRadius: 10, padding: 0, cursor: 'pointer',
-                                  border: i === 0 ? `2px solid ${ACCENT}` : '1px solid var(--rule)',
-                                  backgroundImage: `url(${url})`, backgroundSize: 'cover', backgroundPosition: 'center'
-                                }}
-                              />
-                              <button
-                                type="button"
-                                className="btn-quiet"
-                                title="Remove photo"
-                                onClick={() => void removePortraitAt(i)}
-                                style={{
-                                  position: 'absolute', top: -6, right: -6, width: 18, height: 18, padding: 0,
-                                  borderRadius: '50%', fontSize: 10, lineHeight: '18px',
-                                  background: 'var(--page)', border: '1px solid var(--rule)'
-                                }}
-                              >×</button>
-                            </div>
-                          ))}
-                        </div>
+                      {gallery.length === 0 && (
+                        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', background: 'transparent', padding: '5px 8px', borderRadius: 6 }}>
+                          no photo yet
+                        </span>
                       )}
-                      <input
-                        ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }}
-                        onChange={(e) => { const f = e.target.files?.[0]; if (f) void onPortraitFile(f); e.target.value = ''; }}
-                      />
-                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                        <button
-                          className="btn-ghost"
-                          style={{ fontSize: 11, padding: '6px 12px' }}
-                          disabled={portraitBusy || gallery.length >= MAX_CHARACTER_PORTRAITS}
-                          onClick={() => fileRef.current?.click()}
-                        >
-                          {portraitBusy ? 'Uploading…' : gallery.length ? 'Add photo' : 'Upload photo'}
-                        </button>
-                        {gallery.length > 0 && (
-                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.45 }}>
-                            {gallery.length}/{MAX_CHARACTER_PORTRAITS} · tap a thumb to set primary
-                          </span>
-                        )}
-                      </div>
-                    </>
-                  );
-                })()}
-                {portraitError && <ErrorNote error={portraitError} onDismiss={() => setPortraitError('')} />}
+                      {d.selfTag && (
+                        <span style={{
+                          position: 'absolute', top: 10, right: 10, fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5,
+                          letterSpacing: '0.06em', color: 'var(--accent-ink)', background: ACCENT, padding: '4px 8px', borderRadius: 4
+                        }}>this is me</span>
+                      )}
+                    </div>
+                    <CharacterPortraitTools
+                      key={d.id}
+                      character={d}
+                      world={world ?? null}
+                      onChange={async (next) => {
+                        await db.characters.update(d.id, { ...next, updatedAt: Date.now() });
+                        patch(next);
+                      }}
+                    />
+                  </>
+                );
+              })()}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <Mono style={{ fontSize: 9 }}>color</Mono>
                   <input

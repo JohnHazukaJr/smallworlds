@@ -34,6 +34,12 @@ export function imageModelFor(world: World | null) {
   );
 }
 
+/** The image model only. Portraits do not fall back to the prose model. */
+export function configuredImageModel(world: World | null) {
+  const s = useSettings.getState();
+  return resolveModel(world?.imageModel ?? s.imageModel ?? null);
+}
+
 /** True when a writing or utility model can actually be resolved (provider + id). */
 export function hasConfiguredModel(world?: World | null): boolean {
   const s = useSettings.getState();

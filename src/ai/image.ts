@@ -1,6 +1,8 @@
 import type { Character, Location, ProviderConfig, World } from '../types';
 import { characterPortraits } from '../worldOps';
 import { AIError, providerTagFor } from './client';
+import { configuredImageModel } from './models';
+import { buildCharacterPortraitPrompt, type PortraitStyle } from './portrait';
 import { isZaiProvider, providerFetch } from './providerFetch';
 
 export interface SceneImageRef {
@@ -136,6 +138,48 @@ export async function generateSceneImage(opts: {
   return { dataUrl, warning };
 }
 
+function portraitSizes(model: string): string[] {
+  return model.toLowerCase().includes('glm-image')
+    ? ['864x1152', '1024x1024']
+    : ['1024x1536', '1024x1024'];
+}
+
+/** Generate a portrait from the character sheet and return a gallery-sized JPEG data URL. */
+export async function generateCharacterPortrait(opts: {
+  world: World;
+  character: Character;
+  style: PortraitStyle;
+  signal?: AbortSignal;
+}): Promise<string> {
+  const built = buildCharacterPortraitPrompt({
+    name: opts.character.name,
+    age: opts.character.age,
+    appearance: opts.character.appearance,
+    mannerisms: opts.character.mannerisms,
+    role: opts.character.role,
+    contentNotes: opts.world.ai.contentNotes ?? '',
+    mature: !!opts.world.ai.mature,
+    style: opts.style
+  });
+  if (!built.ok) throw new AIError(built.error);
+  const resolved = configuredImageModel(opts.world);
+  if (!resolved) {
+    throw new AIError('Set an image model in Settings before generating a portrait.');
+  }
+  if (resolved.provider.kind !== 'openai') {
+    throw new AIError('Portrait generation needs an OpenAI-compatible provider (OpenRouter or Z.ai).');
+  }
+  const url = await requestImage({
+    provider: resolved.provider,
+    model: resolved.model,
+    prompt: built.prompt,
+    refs: [],
+    signal: opts.signal,
+    sizes: portraitSizes(resolved.model)
+  });
+  return urlToJpegDataUrl(url, 720, 0.72);
+}
+
 async function imageHttpError(res: Response, provider?: ProviderConfig): Promise<AIError> {
   let detail = '';
   try {
@@ -149,35 +193,38 @@ async function imageHttpError(res: Response, provider?: ProviderConfig): Promise
   );
 }
 
+function isAbortError(e: unknown): boolean {
+  return e instanceof Error && e.name === 'AbortError';
+}
+
 async function requestImage(opts: {
   provider: ProviderConfig;
   model: string;
   prompt: string;
   refs: SceneImageRef[];
   signal?: AbortSignal;
+  sizes?: string[];
 }): Promise<string> {
   const headers = imageHeaders(opts.provider);
   const base = opts.provider.baseUrl.replace(/\/$/, '');
   const imagesUrl = `${base}/images/generations`;
-  const size = zaiLandscapeSize(opts.model);
+  const sizes = opts.sizes?.length ? opts.sizes : [zaiLandscapeSize(opts.model)];
 
-  const generationsBodies: Record<string, unknown>[] = [
-    {
-      model: opts.model,
-      prompt: opts.prompt,
-      n: 1,
-      size,
-      quality: 'hd',
-      response_format: 'b64_json'
-    }
-  ];
+  const generationsBodies: Record<string, unknown>[] = sizes.map((size) => ({
+    model: opts.model,
+    prompt: opts.prompt,
+    n: 1,
+    size,
+    quality: 'hd',
+    response_format: 'b64_json'
+  }));
   if (opts.refs.length > 0) {
     const urls = opts.refs.map((r) => r.dataUrl);
     generationsBodies.unshift({
       model: opts.model,
       prompt: opts.prompt,
       n: 1,
-      size,
+      size: sizes[0],
       image: urls[0],
       images: urls,
       response_format: 'b64_json'
@@ -185,6 +232,7 @@ async function requestImage(opts: {
   }
 
   for (const body of generationsBodies) {
+    if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     try {
       const res = await providerFetch(imagesUrl, {
         method: 'POST',
@@ -199,7 +247,7 @@ async function requestImage(opts: {
       }
     } catch (e) {
       if (e instanceof AIError && (e.status === 401 || e.status === 402)) throw e;
-      // try next body / chat path
+      if (isAbortError(e)) throw e;
     }
   }
 
@@ -290,10 +338,9 @@ async function readImagePayload(res: Response): Promise<string | null> {
   return null;
 }
 
-async function urlToJpegDataUrl(src: string): Promise<string> {
-  if (src.startsWith('data:image/jpeg')) return src;
+async function urlToJpegDataUrl(src: string, maxDim = 1920, quality = 0.85): Promise<string> {
+  if (src.startsWith('data:image/jpeg') && maxDim >= 1920) return src;
   const img = await loadImage(src);
-  const maxDim = 1920;
   const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
   const w = Math.max(1, Math.round(img.width * scale));
   const h = Math.max(1, Math.round(img.height * scale));
@@ -303,7 +350,7 @@ async function urlToJpegDataUrl(src: string): Promise<string> {
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new AIError('Image processing is not available in this browser.');
   ctx.drawImage(img, 0, 0, w, h);
-  return canvas.toDataURL('image/jpeg', 0.85);
+  return canvas.toDataURL('image/jpeg', quality);
 }
 
 async function downscaleRef(src: string): Promise<string> {

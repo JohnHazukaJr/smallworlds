@@ -5,19 +5,21 @@ import {
   fleshOutNarratorRules, fleshOutPremise, fleshOutRelationships, fleshOutWorldEverything,
   fleshOutWorldLore, interviewWorldIdea, seedOpeningMemory, type WorldInterviewQuestion
 } from '../ai/engine';
+import { CharacterPortraitTools } from '../components/CharacterPortraitTools';
 import { db, deleteWorld, recordTombstones, safeWrite } from '../db';
 import { formatUserError } from '../errors';
 import { normalizeRelationships, pruneRelationshipsToCast } from '../relationships';
 import { useApp } from '../store/app';
 import { resolveModel, useSettings } from '../store/settings';
 import type { Character, Episode, Location, Season, World, WorldAISettings } from '../types';
+import { characterAvatarStyle } from '../ui/avatar';
 import { Bar, Chip, ErrorNote, Field, Spinner, Toggle, editorsStacked, useViewport } from '../ui/bits';
 import { fileToPortraitImage } from '../ui/image';
 import { avatarStyle, ACCENT } from '../ui/theme';
 import { LegalLinks } from './Legal';
 import {
   applyStanceToAi, characterPortraits, createWorld, DEFAULT_AI, emptyCharacter, emptyLocation,
-  evaluateWorldWriteReady, MAX_CHARACTER_PORTRAITS, portraitsPatch, shapeTagFor,
+  evaluateWorldWriteReady, shapeTagFor,
   stanceFromShapeIndex, STORY_STANCES, worldWriteReady
 } from '../worldOps';
 
@@ -1159,6 +1161,12 @@ export function Onboard() {
               <Field label="Appearance">
                 <textarea rows={2} defaultValue={player.appearance} key={`a-${player.updatedAt}`} onBlur={(e) => patchPlayer({ appearance: e.target.value })} />
               </Field>
+              <CharacterPortraitTools
+                key={player.id}
+                character={player}
+                world={worldContext()}
+                onChange={(next) => patchPlayer(next)}
+              />
               {hasAI && (
                 <button className="btn-ghost" style={{ alignSelf: 'flex-start' }} disabled={!!busy} onClick={() => void fleshPlayer()}>
                   {busy === 'Fleshing you…' ? 'Working…' : 'Fill in with AI'}
@@ -1183,6 +1191,7 @@ export function Onboard() {
               {npcCast.map((c) => (
                 <CastCard
                   key={c.id} c={c} expanded={expandedCastId === c.id}
+                  world={worldContext()}
                   hasAI={hasAI}
                   fleshBusy={busy === `Fleshing ${c.name || 'cast'}…`}
                   onToggle={() => setExpandedCastId((id) => (id === c.id ? null : c.id))}
@@ -1508,42 +1517,18 @@ function SliderCard({ label, value, onChange, note, valueLabel }: {
   );
 }
 
-function CastCard({ c, expanded, hasAI, fleshBusy, onToggle, onRemove, onPatch, onToggleSelfTag, onFlesh }: {
-  c: Character; expanded: boolean; hasAI: boolean; fleshBusy: boolean;
+function CastCard({ c, expanded, world, hasAI, fleshBusy, onToggle, onRemove, onPatch, onToggleSelfTag, onFlesh }: {
+  c: Character; expanded: boolean; world: World; hasAI: boolean; fleshBusy: boolean;
   onToggle: () => void; onRemove: () => void;
   onPatch: (p: Partial<Character>) => void; onToggleSelfTag: () => void; onFlesh: () => void;
 }) {
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-
   const gallery = characterPortraits(c);
   const primary = gallery[0] ?? null;
-
-  const onFile = async (file: File) => {
-    if (gallery.length >= MAX_CHARACTER_PORTRAITS) {
-      setError(`Up to ${MAX_CHARACTER_PORTRAITS} photos per character.`);
-      return;
-    }
-    setBusy(true);
-    setError('');
-    try {
-      const url = await fileToPortraitImage(file);
-      onPatch(portraitsPatch([...gallery, url]));
-    } catch (e) {
-      setError(formatUserError(e));
-    } finally {
-      setBusy(false);
-    }
-  };
 
   return (
     <div className="craft-row" style={{ overflow: 'hidden' }}>
       <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }} onClick={onToggle}>
-        <div style={{
-          ...avatarStyle(c.hue, 34), flexShrink: 0,
-          ...(primary ? { backgroundImage: `url(${primary})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {})
-        }} />
+        <div style={characterAvatarStyle(c, 34)} />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
           <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>{c.name || 'unnamed'}{c.selfTag ? ' · me' : ''}</div>
           {c.role && (
@@ -1557,61 +1542,26 @@ function CastCard({ c, expanded, hasAI, fleshBusy, onToggle, onRemove, onPatch, 
       </div>
       {expanded && (
         <div style={{ padding: '2px 14px 14px', display: 'flex', flexDirection: 'column', gap: 10 }} onClick={(e) => e.stopPropagation()}>
-          <input
-            ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }}
-            onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); e.target.value = ''; }}
-          />
-          {gallery.length > 0 && (
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              {gallery.map((url, i) => (
-                <div key={`${i}-${url.slice(0, 20)}`} style={{ position: 'relative' }}>
-                  <button
-                    type="button"
-                    title={i === 0 ? 'Primary face' : 'Make primary'}
-                    onClick={() => {
-                      if (i === 0) return;
-                      onPatch(portraitsPatch([url, ...gallery.filter((_, j) => j !== i)]));
-                    }}
-                    style={{
-                      width: 44, height: 44, borderRadius: 9, padding: 0, cursor: 'pointer',
-                      border: i === 0 ? '2px solid oklch(0.32 0.12 25)' : '1px solid var(--rule)',
-                      backgroundImage: `url(${url})`, backgroundSize: 'cover', backgroundPosition: 'center'
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="btn-quiet"
-                    title="Remove"
-                    onClick={() => onPatch(portraitsPatch(gallery.filter((_, j) => j !== i)))}
-                    style={{
-                      position: 'absolute', top: -5, right: -5, width: 16, height: 16, padding: 0,
-                      borderRadius: '50%', fontSize: 9, lineHeight: '16px',
-                      background: 'var(--page)', border: '1px solid var(--rule)'
-                    }}
-                  >×</button>
-                </div>
-              ))}
-            </div>
+          {primary && (
+            <div style={{
+              height: 140, borderRadius: 12, border: '1px solid var(--rule)',
+              backgroundImage: `url(${primary})`, backgroundSize: 'cover', backgroundPosition: 'center'
+            }} />
           )}
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <button
-              className="btn-ghost"
-              style={{ fontSize: 11, padding: '6px 12px' }}
-              disabled={busy || gallery.length >= MAX_CHARACTER_PORTRAITS}
-              onClick={() => fileRef.current?.click()}
-            >
-              {busy ? 'Uploading…' : gallery.length ? 'Add photo' : 'Upload photo'}
+          <CharacterPortraitTools
+            key={c.id}
+            character={c}
+            world={world}
+            onChange={onPatch}
+          />
+          <button className="btn-quiet" style={{ fontSize: 11, alignSelf: 'flex-start' }} onClick={onToggleSelfTag}>
+            {c.selfTag ? '✓ tagged as me — untag' : 'tag as "this is me"'}
+          </button>
+          {hasAI && (
+            <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px', alignSelf: 'flex-start' }} disabled={fleshBusy} onClick={onFlesh}>
+              {fleshBusy ? 'Working…' : 'Fill in this sheet'}
             </button>
-            <button className="btn-quiet" style={{ fontSize: 11 }} onClick={onToggleSelfTag}>
-              {c.selfTag ? '✓ tagged as me — untag' : 'tag as "this is me"'}
-            </button>
-            {hasAI && (
-              <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }} disabled={fleshBusy || busy} onClick={onFlesh}>
-                {fleshBusy ? 'Working…' : 'Fill in this sheet'}
-              </button>
-            )}
-          </div>
-          {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
+          )}
           <Field label="Role"><input defaultValue={c.role} onBlur={(e) => onPatch({ role: e.target.value })} /></Field>
           <Field label="Who they are"><textarea rows={3} defaultValue={c.summary} onBlur={(e) => onPatch({ summary: e.target.value })} /></Field>
           <Field label="Backstory"><textarea rows={2} defaultValue={c.backstory} onBlur={(e) => onPatch({ backstory: e.target.value })} /></Field>

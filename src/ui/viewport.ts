@@ -33,6 +33,11 @@ export function sheetsFromBottom(band: ViewportBand): boolean {
   return band === 'compact';
 }
 
+/** Open Fold (and a small tablet) reads as a book. The keyboard returns to the scroll. */
+export function bookStageOpen(band: ViewportBand, keyboardOpen: boolean): boolean {
+  return band === 'regular' && !keyboardOpen;
+}
+
 /** Direct / End episode / mood chips overflow — use a More sheet. */
 export function shortStoryChrome(band: ViewportBand, height: number): boolean {
   return band === 'compact' || height < TALL_CHROME_MIN;

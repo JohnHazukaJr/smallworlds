@@ -95,7 +95,7 @@ export function Settings() {
           <div className="craft-row" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>Image model</div>
             <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
-              Chapter pictures. Recommended: glm-image. Falls back to prose if unset.
+              Character portraits. Recommended: glm-image. A prose model is not used for pictures.
             </div>
             <ModelPicker value={s.imageModel ?? null} onChange={s.setImageModel} />
           </div>
