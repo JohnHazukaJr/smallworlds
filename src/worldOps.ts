@@ -335,8 +335,8 @@ export const DEFAULT_AI: WorldAISettings = {
 };
 
 export const STORY_STANCES: Array<{ id: StoryStance; label: string; line: string }> = [
-  { id: 'longform', label: 'One long story I keep returning to', line: 'Seasons, episodes, a cast that ages and remembers.' },
-  { id: 'wander', label: 'A world I want to wander', line: 'Loose scenes, many characters, no fixed plot.' },
+  { id: 'longform', label: 'One long story I keep returning to', line: 'Chapters, a cast that ages and remembers.' },
+  { id: 'wander', label: 'A world I want to wander', line: 'Loose places, many characters, no fixed plot.' },
   { id: 'intimate', label: 'A single character I want to know', line: 'One person, deeply modelled, many conversations.' },
   { id: 'sandbox', label: 'I want to see what happens', line: 'Start blank. Decide later.' }
 ];
@@ -357,7 +357,7 @@ export function shapeIndexFromStance(stance: StoryStance): number {
 
 export function isGeneratedShapeTag(custom: string): boolean {
   const t = custom.trim();
-  return STORY_STANCES.some((s) => t === `Shape: ${s.label} — ${s.line}`);
+  return STORY_STANCES.some((s) => t === `Shape: ${s.label} — ${s.line}` || t.startsWith(`Shape: ${s.label}`));
 }
 
 export function inferStanceFromInstructions(custom: string): StoryStance | null {
@@ -659,7 +659,7 @@ export function evaluateWorldWriteReady(opts: {
     missing.push(`Expand the world bible (at least ${BIBLE_MIN_CHARS} characters)`);
   }
   if (storyStanceOf(world) === 'longform' && !season?.premise?.trim()) {
-    missing.push('Write a season premise (what’s live this season)');
+    missing.push('Write an opening premise (what this chapter is about)');
   }
 
   const player = characters.find((c) => c.isPlayer);
@@ -667,7 +667,7 @@ export function evaluateWorldWriteReady(opts: {
   else if (!player.summary.trim() && !player.state.goal.trim()) {
     missing.push('Fill who you are (summary or current goal)');
   } else if (!player.appearance.trim() && !player.desires.trim()) {
-    warnings.push('Player sheet is thin — appearance or desires help the first scene');
+    warnings.push('Player sheet is thin — appearance or desires help the opening');
   }
 
   const castIds = new Set(episode?.castIds ?? []);
@@ -676,16 +676,16 @@ export function evaluateWorldWriteReady(opts: {
     (c) => c.summary.trim() && c.speechStyle.trim() && c.anchors.some((a) => a.trim())
   );
   if (!readyNpc) {
-    missing.push('Add at least one NPC in the scene with voice, summary, and an anchor');
+    missing.push('Add at least one NPC to this chapter with voice, summary, and an anchor');
   } else {
     if (!readyNpc.exampleLines.some((l) => l.trim())) {
-      warnings.push('Scene NPC has no example lines — voice lands cleaner with 1–2 samples');
+      warnings.push('This NPC has no example lines — voice lands cleaner with 1–2 samples');
     }
     if (isVagueSpeechStyle(readyNpc.speechStyle)) {
-      warnings.push('Scene NPC voice is vague — replace “normal/casual” with rhythm, diction, or tic');
+      warnings.push('This NPC’s voice is vague — replace “normal/casual” with rhythm, diction, or tic');
     }
     if (!readyNpc.mannerisms.trim()) {
-      warnings.push('Scene NPC has no mannerisms — one recurring tic makes bodies feel real');
+      warnings.push('This NPC has no mannerisms — one recurring tic makes bodies feel real');
     }
   }
 
@@ -696,14 +696,14 @@ export function evaluateWorldWriteReady(opts: {
   if (!openLoc) {
     missing.push(
       epNum <= 1
-        ? 'Link an opening location to episode 1'
-        : `Link a location to episode ${epNum}`
+        ? 'Link an opening location to chapter 1'
+        : `Link a location to chapter ${epNum}`
     );
   } else if (openLoc.rules.filter((r) => r.trim()).length === 0) {
     missing.push(
       epNum <= 1
         ? 'Give the opening location at least one hard rule'
-        : 'Give this episode’s location at least one hard rule'
+        : 'Give this chapter’s location at least one hard rule'
     );
   } else {
     if (!openLoc.atmosphere.trim()) {

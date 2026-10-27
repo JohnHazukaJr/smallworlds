@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   matchPlotTargets, mergeStateField, mergeLiveRelationshipPatch, normalizeBeats, capSceneLedger, capSoftWrapExtract,
-  dedupeSoftWrapExtract, directorFallbackNarrationBrief, softWrapAlreadyFiled, SCENE_LEDGER_CAP,
+  dedupeSoftWrapExtract, directorFallbackNarrationBrief, chapterNarrationBrief, softWrapAlreadyFiled, SCENE_LEDGER_CAP,
   isBlankWorldBrief, isEmptyRosterProposal, pendingBeatsToKeep
 } from './engine';
 import {
@@ -484,6 +484,18 @@ describe('directorFallbackNarrationBrief', () => {
     expect(brief).toContain('Ada');
     expect(brief).toMatch(/sensory job/i);
   });
+
+  it('does not tell the narrator to stop', () => {
+    const brief = chapterNarrationBrief({
+      mode: 'play',
+      playerText: 'I set the cup down.',
+      location: 'the long room'
+    });
+    expect(brief).toContain('the long room');
+    expect(brief).toContain('I set the cup down.');
+    expect(brief).not.toMatch(/Stop while/);
+    expect(brief).not.toMatch(/\bbeat\b/i);
+  });
 });
 
 describe('capSoftWrapExtract', () => {
@@ -572,6 +584,7 @@ describe('SPEAK_FORMAT_RULES immersion', () => {
     expect(SPEAK_FORMAT_RULES).not.toMatch(/dimples/i);
     expect(SPEAK_FORMAT_RULES).not.toMatch(/smiled shyly/i);
     expect(SPEAK_FORMAT_RULES).toMatch(/ledger/i);
+    expect(SPEAK_FORMAT_RULES).toMatch(/leaves the rest unsaid/i);
   });
 });
 

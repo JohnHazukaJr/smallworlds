@@ -236,11 +236,12 @@ export const SPEAK_FORMAT_RULES =
   '- Physical looks, gestures, mannerisms, and body language go inside *asterisks* outside the spoken quotes.\n' +
   '- Words said aloud go inside "double quotes" only.\n' +
   '- Vocal stress on a word: wrap it in *asterisks* or **double asterisks** inside the quotes (shown bold). Example: "I *said* leave."\n' +
-  '- Prefer one tight reply: a short *action* plus one spoken line (two only if the second is a single short question).\n' +
+  '- Write a real reply: action and speech across more than one sentence. Do not stop after a single spoken line.\n' +
   '- At most one question. If you ask the player something, stop there — do not keep talking, pile on follow-ups, or answer yourself.\n' +
+  '- Do not write the player\'s actions, speech, or thoughts, and do not repeat their line.\n' +
   '- Use a blank line only when tone truly shifts mid-reply; most replies need none.\n' +
   '- Examples (match the speaker\'s own voice — these are format only):\n' +
-  '  *doesn\'t look up from the ledger* "Say it again. Slower."\n' +
-  '  *wipes salt off his mouth with the back of his hand* "You\'re early. That\'s either brave or stupid."\n' +
+  '  *sets the stamp on the ledger and doesn\'t look up* "Say it again. Slower." *The nib scratches once, then waits.*\n' +
+  '  *wipes salt off his mouth with the back of his hand* "You\'re early. That\'s either brave or stupid." *He nods at the empty chair and leaves the rest unsaid.*\n' +
   '- You may use dialogue-only. Action-only (*gestures* with no quotes) is allowed only when the beat brief says so; otherwise prefer at least one spoken line. ' +
   'Do NOT prefix with your name. Do NOT wrap the whole reply in one outer quote.';

@@ -201,7 +201,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
 
         {tab === 'plot' && (
           <>
-            <Field label={`Season ${season.number} premise`} note="what’s live this season — updates when you wrap an episode">
+            <Field label="Opening" note="the situation this story opens on">
               <textarea key={season.id + '-premise-' + aiVersion} rows={5} defaultValue={season.premise}
                 onBlur={(e) => patchSeason({ premise: e.target.value })}
                 style={{ fontSize: 14.5, lineHeight: 1.65 }} />
@@ -219,7 +219,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 <ErrorNote error={flesh.error} onDismiss={() => setFlesh({ busy: null, error: '', errorFor: null })} />
               )}
             </div>
-            <Field label="Calendar" note="full tracker also lives in Story → Direct; advances on episode end by your rule">
+            <Field label="Calendar" note="lives here, and advances when a chapter ends">
               {(() => {
                 const cal = worldCalendar(world);
                 const today = partsForDay(cal, cal.currentDay);
@@ -308,7 +308,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                       />
                     </label>
                     <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, opacity: 0.75 }}>
-                      Days to advance when an episode ends
+                      Days to advance when a chapter ends
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
                         {[0, 1, 2, 7, 14].map((n) => (
                           <Chip key={n} active={cal.episodeAdvanceDays === n} onClick={() => patchCal({ episodeAdvanceDays: n })}>
@@ -414,15 +414,15 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 );
               })()}
             </Field>
-            <Field label="Season title" note="optional">
+            <Field label="Heading" note="optional">
               <input key={season.id + '-title'} defaultValue={season.title}
                 onBlur={(e) => patchSeason({ title: e.target.value })} />
             </Field>
-            <Field label={`Episode ${episode.number} title`} note="optional">
+            <Field label={`Chapter ${episode.number} title`} note="optional">
               <input key={episode.id + '-title'} defaultValue={episode.title}
                 onBlur={(e) => patchEpisode({ title: e.target.value })} />
             </Field>
-            <Field label="Episode location note" note="free text · pick a saved location from the Places tab or Story Direct">
+            <Field label="This chapter's place note" note="free text · pick a saved place from Places">
               <textarea key={episode.id + '-loc'} rows={2} defaultValue={episode.location}
                 onBlur={(e) => {
                   const text = e.target.value;
@@ -439,7 +439,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 }} />
             </Field>
             {season.bible && (
-              <Field label="Season recap — previously on" note="carried from the last season">
+              <Field label="Previously" note="carried into this story">
                 <textarea key={season.id + '-recap'} rows={6} defaultValue={season.bible.recap}
                   onBlur={(e) => patchSeason({ bible: { ...season.bible!, recap: e.target.value } })}
                   style={{ fontSize: 14, lineHeight: 1.6 }} />
@@ -471,7 +471,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
             <Field label="Narrator hard rules" note="one per line — never broken">
               <textarea key={world.id + '-rules-' + aiVersion} rows={4} defaultValue={world.ai.narratorRules.join('\n')}
                 onBlur={(e) => patchAI({ narratorRules: e.target.value.split('\n').filter((l) => l.trim()) })}
-                placeholder={'Never skip time without asking.\nNever kill a named character without the player in the scene.'} />
+                placeholder={'Never skip time without asking.\nNever kill a named character without the player in the chapter.'} />
             </Field>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -621,7 +621,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                   onBlur={(e) => patchChar(selected.id, { role: e.target.value })} />
               </Field>
             </div>
-            <Field label="Who they are" note="summary when in scene (narrator / speak)">
+            <Field label="Who they are" note="summary when in this chapter">
               <textarea key={selected.id + '-summary'} rows={4} defaultValue={selected.summary}
                 onBlur={(e) => patchChar(selected.id, { summary: e.target.value })} />
             </Field>
@@ -659,11 +659,11 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <textarea key={selected.id + '-mnk'} rows={2} defaultValue={selected.mustNotKnow}
                 onBlur={(e) => patchChar(selected.id, { mustNotKnow: e.target.value })} />
             </Field>
-            <Field label="Behaviour anchors" note="one per line — when in scene (narrator / speak)">
+            <Field label="Behaviour anchors" note="one per line — when in this chapter">
               <textarea key={selected.id + '-anchors'} rows={3} defaultValue={selected.anchors.join('\n')}
                 onBlur={(e) => patchChar(selected.id, { anchors: e.target.value.split('\n').filter((l) => l.trim()) })} />
             </Field>
-            <Field label="AI directives for this character" note="verbatim when in scene (narrator / speak)">
+            <Field label="AI directives for this character" note="verbatim when in this chapter">
               <textarea key={selected.id + '-ci'} rows={3} defaultValue={selected.customInstructions}
                 onBlur={(e) => patchChar(selected.id, { customInstructions: e.target.value })} />
             </Field>
@@ -692,7 +692,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                   : avatarStyle(l.hue, 34)} />
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
                   <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>
-                    {l.name || 'unnamed'}{episode.locationId === l.id ? ' · scene' : ''}
+                    {l.name || 'unnamed'}{episode.locationId === l.id ? " · this chapter's place" : ''}
                   </div>
                   <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {l.tagline || 'no tagline'}
@@ -726,7 +726,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                   location: selectedLoc.name,
                   ...(selectedLoc.portrait ? { image: selectedLoc.portrait } : {})
                 });
-              }}>use as scene</button>
+              }}>set as the place</button>
               <button className="btn-quiet" style={{ fontSize: 10 }} onClick={() => { onClose(); goLocations(selectedLoc.id); }}>full editor</button>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 12 }}>
@@ -759,7 +759,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <textarea key={selectedLoc.id + '-state'} rows={2} defaultValue={selectedLoc.currentState}
                 onBlur={(e) => patchLoc(selectedLoc.id, { currentState: e.target.value })} />
             </Field>
-            <Field label="AI directives for this location" note="verbatim when this is the current scene">
+            <Field label="AI directives for this location" note="verbatim when this is the chapter's place">
               <textarea key={selectedLoc.id + '-ci'} rows={2} defaultValue={selectedLoc.customInstructions}
                 onBlur={(e) => patchLoc(selectedLoc.id, { customInstructions: e.target.value })} />
             </Field>
@@ -862,19 +862,19 @@ function ContextPreview({
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
       <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
-        What the director plans from on the next turn (soft preview, not a raw dump). Narration also gets the world bible below.
+        What the next turn uses: the place, who is here, the opening, and what came before. The world text is below.
       </div>
 
-      <ContextSection title="now" note="episode · date · place · cast">
+      <ContextSection title="now" note="chapter · date · place · who is here">
         <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: monoPx }}>
-          S{season.number} · E{episode.number}
+          Chapter {episode.number}
           {episode.title ? ` — ${episode.title}` : ''}
         </div>
-        <div>Today (this scene): {formatStoryDateShort(cal, sceneDay)}</div>
+        <div>Today: {formatStoryDateShort(cal, sceneDay)}</div>
         {cal.currentDay !== sceneDay && (
           <div style={{ opacity: 0.7 }}>World clock: {formatStoryDate(cal, cal.currentDay)}</div>
         )}
-        <div style={{ opacity: 0.7 }}>Episode date: {dateLine}</div>
+        <div style={{ opacity: 0.7 }}>Chapter date: {dateLine}</div>
         {episode.dateNote?.trim() && (
           <div style={{ opacity: 0.7 }}>Date note: {episode.dateNote.trim()}</div>
         )}
@@ -889,13 +889,13 @@ function ContextPreview({
           <div style={{ opacity: 0.7 }}>Player: {player.name || 'unnamed'}</div>
         )}
         <div style={{ opacity: 0.7 }}>
-          In scene:{' '}
+          In this chapter:{' '}
           {inScene.length
             ? inScene.map((c) => `${c.name || 'unnamed'}${c.role ? ` (${c.role})` : ''}`).join(', ')
             : '(no NPCs)'}
         </div>
         <div style={{ opacity: 0.7 }}>
-          Off scene:{' '}
+          Not here:{' '}
           {offScene.length
             ? offScene.map((c) => c.name || 'unnamed').join(', ')
             : '(none)'}
@@ -908,7 +908,7 @@ function ContextPreview({
         )}
       </ContextSection>
 
-      <ContextSection title="situation" note="season premise">
+      <ContextSection title="opening" note="where the story starts">
         <div style={{ whiteSpace: 'pre-wrap' }}>
           {season.premise?.trim() || '(unwritten)'}
         </div>
@@ -932,7 +932,7 @@ function ContextPreview({
             )}
             {seaTargets.length > 0 && (
               <>
-                <div style={{ opacity: 0.55, fontSize: 12 }}>Season arc</div>
+                <div style={{ opacity: 0.55, fontSize: 12 }}>Still open</div>
                 <ul style={{ margin: 0, paddingLeft: 18, opacity: 0.85 }}>
                   {seaTargets.slice(0, PLOT_TARGET_CAP).map((t) => (
                     <li key={t.id}>{t.text}</li>
@@ -945,11 +945,11 @@ function ContextPreview({
       })()}
 
       {priorEps.length > 0 && (
-        <ContextSection title="recent episode memory" note="last 2–3 wraps">
+        <ContextSection title="previously" note="the last few chapters">
           {[...priorEps].reverse().map((ep, idx) => (
             <div key={ep.id} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: monoPx, opacity: 0.65 }}>
-                E{ep.number}{ep.title ? ` — ${ep.title}` : ''}{idx === 0 ? ' · immediate prior' : ''}
+                Chapter {ep.number}{ep.title ? ` — ${ep.title}` : ''}{idx === 0 ? ' · the one before' : ''}
               </div>
               <div style={{ whiteSpace: 'pre-wrap' }}>
                 {clipPreview(ep.wrap?.recap ?? '', idx === 0 ? 520 : 220)}
@@ -977,12 +977,12 @@ function ContextPreview({
       )}
 
       {running && (
-        <ContextSection title="earlier this episode" note="running summary · director clip">
+        <ContextSection title="earlier in this chapter" note="what has already happened">
           <div style={{ whiteSpace: 'pre-wrap' }}>{clipPreview(running, 400)}</div>
         </ContextSection>
       )}
 
-      <ContextSection title="continuity" note={`director cap ${facts.length} / ${continuity.length}`}>
+      <ContextSection title="continuity" note={`${facts.length} of ${continuity.length} included`}>
         {facts.length === 0 ? (
           <div style={{ opacity: 0.5 }}>(none yet)</div>
         ) : (
@@ -994,7 +994,7 @@ function ContextPreview({
         )}
       </ContextSection>
 
-      <ContextSection title="open threads" note={`director cap ${openThreads.length} / ${threads.length}`}>
+      <ContextSection title="open threads" note={`${openThreads.length} of ${threads.length} included`}>
         {openThreads.length === 0 ? (
           <div style={{ opacity: 0.5 }}>(none)</div>
         ) : (
@@ -1022,7 +1022,7 @@ function ContextPreview({
       )}
 
       {(bible?.recap?.trim() || carried.length > 0) && (
-        <ContextSection title="season bible" note="prior season handoff">
+        <ContextSection title="carried note" note="brought into this story">
           {bible?.recap?.trim() && (
             <div style={{ whiteSpace: 'pre-wrap' }}>{clipPreview(bible.recap, 320)}</div>
           )}

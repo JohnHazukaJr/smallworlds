@@ -6,7 +6,7 @@
  * decides the plan; this only supplies signals and picks the fallback replier.
  */
 
-import type { Character, EpisodeGuest, Turn } from '../types';
+import type { Character, EpisodeGuest, Turn, TurnLength } from '../types';
 
 export type SpeakerKind = 'cast' | 'guest';
 
@@ -211,6 +211,53 @@ export function rankReplySpeakers(opts: {
       return { ...c, score, address, turnsSince };
     })
     .sort((a, b) => b.score - a.score);
+}
+
+/** How many people may answer on this reply length. A ceiling, not a quota. */
+export function answererCap(length: TurnLength): number {
+  if (length === 'beat') return 1;
+  if (length === 'scene') return 2;
+  return 3;
+}
+
+/**
+ * Who speaks after the player.
+ * Short: the person addressed, or one present person if nobody was named.
+ * Normal: that person plus at most one other who was also spoken to.
+ * Long: up to three who were spoken to. If nobody was named, still only one.
+ * A pinned id goes first and counts toward the cap.
+ */
+export function selectAnswerers(opts: {
+  length: TurnLength;
+  playerText: string;
+  candidates: SpeakerCandidate[];
+  turns?: Turn[];
+  preferId?: string;
+}): SpeakerCandidate[] {
+  const cap = answererCap(opts.length);
+  const ranked = rankReplySpeakers({
+    candidates: opts.candidates,
+    playerText: opts.playerText,
+    turns: opts.turns
+  });
+  const picked: SpeakerCandidate[] = [];
+  const push = (c: SpeakerCandidate | undefined) => {
+    if (!c || picked.some((p) => p.id === c.id) || picked.length >= cap) return;
+    picked.push({ id: c.id, name: c.name, kind: c.kind });
+  };
+
+  if (opts.preferId) push(ranked.find((c) => c.id === opts.preferId));
+
+  const addressed = ranked.filter((c) => c.address === 'vocative' || c.address === 'directed');
+  if (addressed.length > 0) {
+    for (const c of addressed) push(c);
+  } else {
+    const mentions = ranked.filter((c) => c.address === 'mention');
+    const mentionCap = opts.length === 'episode' ? cap : 1;
+    for (const c of mentions.slice(0, mentionCap)) push(c);
+  }
+  if (picked.length === 0) push(ranked[0]);
+  return picked;
 }
 
 /**

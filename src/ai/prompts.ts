@@ -11,22 +11,22 @@ import { SPEAK_FORMAT_RULES } from './dialogueFormat';
 import { lastOpenQuestion, roomDynamicsLines, speakerCandidates } from './roomDynamics';
 import { directorCloseGuidance, narratorCloseGuidance, stancePlaybook } from './storyStance';
 
-/** Shorter budgets when a narrator beat is one slice of a multi-agent turn. */
+/** Narrator passage ceilings. The model should stop earlier when the moment is smaller. */
 const NARRATION_BEAT_TOKENS: Record<TurnLength, number> = {
-  beat: 500,
-  scene: 900,
-  episode: 1400
+  beat: 700,
+  scene: 1200,
+  episode: 2000
 };
 
 /**
- * Character/guest speak budgets — sized for *action* + "dialogue".
- * Soft word hints in speak messages do the real anti-ramble work; tokens are a hard ceiling.
- * These are visible-line floors. Reasoning models get extra headroom via proseCompletionTokens.
+ * Character/guest speak ceilings — a few sentences, a paragraph, or two or three.
+ * Soft word hints do the pacing; tokens are a hard ceiling.
+ * Reasoning models get extra headroom via proseCompletionTokens.
  */
 const CHARACTER_SPEAK_TOKENS: Record<TurnLength, number> = {
-  beat: 280,
-  scene: 450,
-  episode: 700
+  beat: 500,
+  scene: 900,
+  episode: 1400
 };
 
 export function narrationBeatTokens(length: TurnLength): number {
@@ -37,34 +37,33 @@ export function characterSpeakTokens(length: TurnLength = 'scene'): number {
   return CHARACTER_SPEAK_TOKENS[length];
 }
 
-/** Soft word budgets for narration slices (reply-size chips). */
+/** Soft word budgets for the narrator's connective prose. */
 export function narrationSizeHint(length: TurnLength): string {
-  if (length === 'beat') return 'Keep this narration slice short (about 40–100 words).';
-  if (length === 'scene') return 'This narration slice: about 80–180 words.';
-  return 'This narration slice: about 120–250 words.';
+  if (length === 'beat') {
+    return 'A short paragraph (about 60–120 words). Do not stop after one sentence. No spoken dialogue.';
+  }
+  if (length === 'scene') {
+    return 'About a paragraph (120–220 words). Do not stop after one sentence. No spoken dialogue.';
+  }
+  return 'Two or three paragraphs (about 200–400 words). Do not stop after one sentence. No spoken dialogue.';
 }
 
-/** Soft word budgets for character/guest speak — keep replies focused. */
+/** Soft word budgets for one person's reply. A ceiling, not a command to be brief. */
 export function speakSizeHint(length: TurnLength): string {
+  const close =
+    'Do not write the player\'s actions, speech, or thoughts. Do not repeat their line. ' +
+    'Stop on an opening they can answer. At most one question; if you ask, stop there.';
   if (length === 'beat') {
     return (
-      'Keep this reply short (about 15–35 words of speech, plus a brief *action* if needed). ' +
-      'One reaction only — no monologue, no restating what just happened, no repeating a question they just answered. ' +
-      'At most one question; if you ask, stop and wait for the player.'
+      'A few sentences: what you do and what you say (about 40–80 words). ' +
+      'Not a single line, and not a speech. ' +
+      close
     );
   }
   if (length === 'scene') {
-    return (
-      'Aim for about 20–50 words of speech (plus a short *action*). ' +
-      'Say what this beat needs and stop. If they just answered you, do not ask it again. ' +
-      'At most one question; if you ask the player something, do not keep talking after it.'
-    );
+    return `About a paragraph (80–160 words), action and speech together. ${close}`;
   }
-  return (
-    'About 30–70 words of speech max (plus short *actions*). ' +
-    'Still one focused reply, not a speech; cut any filler or repeated points. ' +
-    'At most one question, then yield the floor.'
-  );
+  return `Two or three paragraphs (about 160–320 words). Still one focused reply, not a speech. ${close}`;
 }
 
 /** Shared anti-generic-prose rules for narrator and speak agents. */
@@ -337,7 +336,7 @@ function proseDensityLine(ai: World['ai']): string {
 
 function pacingLine(ai: World['ai']): string {
   return ai.pacing < 34 ? 'Slow-burn pacing: linger in moments, let tension accumulate.'
-    : ai.pacing < 67 ? 'Measured pacing: scenes develop naturally, no rushing to payoffs.'
+    : ai.pacing < 67 ? 'Measured pacing: moments develop naturally, no rushing to payoffs.'
     : 'Propulsive pacing: keep events moving, cut the connective tissue.';
 }
 
@@ -644,7 +643,7 @@ function calendarBlock(
   const note = episode.dateNote?.trim();
   if (mode === 'full') {
     const worldClock = cal.currentDay !== scene
-      ? `\nWorld clock (not this scene): ${formatStoryDate(cal, cal.currentDay)}.`
+      ? `\nWorld clock (world clock): ${formatStoryDate(cal, cal.currentDay)}.`
       : '';
     const custom = calendarSchemaIsCustom(world);
     const schema = custom
@@ -655,8 +654,8 @@ function calendarBlock(
       `## Calendar\n` +
       (cal.system ? `${cal.system}\n` : '') +
       schema +
-      `Today (this scene) is ${formatStoryDate(cal, scene)}.\n` +
-      `This episode's date: ${dateLine}.` +
+      `Today is ${formatStoryDate(cal, scene)}.\n` +
+      `This chapter's date: ${dateLine}.` +
       worldClock +
       (note ? `\nDate note: ${note}` : '')
     );
@@ -665,7 +664,7 @@ function calendarBlock(
     return (
       `Episode ${episode.number}${episode.location ? ` @ ${episode.location}` : ''} · ${dateLine}` +
       (note ? ` · ${note}` : '') + `\n` +
-      `Today (this scene): ${formatStoryDate(cal, scene)}` +
+      `Today: ${formatStoryDate(cal, scene)}` +
       (cal.currentDay !== scene ? ` · World clock: ${formatStoryDate(cal, cal.currentDay)}` : '')
     );
   }
@@ -674,9 +673,9 @@ function calendarBlock(
     ? ` World clock: ${formatStoryDate(cal, cal.currentDay)}.`
     : '';
   return (
-    `## Current episode\nEpisode ${episode.number}${episode.title ? ` — ${episode.title}` : ''}.` +
+    `## Current chapter\nChapter ${episode.number}${episode.title ? ` — ${episode.title}` : ''}.` +
     `${episode.location ? ` Location: ${episode.location}.` : ''} Date: ${dateLine}.` +
-    ` Today (this scene): ${formatStoryDate(cal, scene)}.` +
+    ` Today: ${formatStoryDate(cal, scene)}.` +
     worldClock +
     (note ? ` Note: ${note}.` : '')
   );
@@ -685,7 +684,7 @@ function calendarBlock(
 /** Episode title + location only (dates live in calendarBlock). */
 function episodeHeader(episode: Episode): string {
   return (
-    `## Current episode\nEpisode ${episode.number}${episode.title ? ` — ${episode.title}` : ''}.` +
+    `## Current chapter\nChapter ${episode.number}${episode.title ? ` — ${episode.title}` : ''}.` +
     `${episode.location ? ` Location: ${episode.location}.` : ''}`
   );
 }
@@ -726,7 +725,7 @@ export function sceneLedgerSection(episode: Episode, cap = 8): string | null {
     .slice(0, cap);
   if (details.length === 0) return null;
   return (
-    `## Already true in this room (established earlier in this scene)\n` +
+    `## Already true in this room (established earlier in this chapter)\n` +
     `Stay consistent with these. Do not re-introduce them as if new, and do not quietly ` +
     `undo one without showing it change:\n` +
     details.map((d) => `- ${d}`).join('\n')
@@ -737,7 +736,7 @@ function runningSummaryFor(episode: Episode, cap: number): string | null {
   const running = episode.runningSummary?.trim();
   if (!running) return null;
   return (
-    `## Earlier this episode (running summary)\n` +
+    `## Earlier in this chapter (running summary)\n` +
     `Glue only — what just happened after early turns dropped. Continuity facts and the room ledger outrank this if they conflict.\n` +
     clipText(running, cap)
   );
@@ -800,12 +799,12 @@ function situationPremise(ctx: PromptContext, opts?: { includeSeasonMeta?: boole
   const live = season.premise || 'unwritten; discover it in play.';
   if (opts?.includeSeasonMeta) {
     return (
-      `## This season\nSeason ${season.number}${season.title ? ` — ${season.title}` : ''}. ` +
+      `## Opening\n${season.title ? `${season.title}. ` : ''}` +
       `What's live: ${live}` +
-      `${season.timeGap ? ` It opens ${season.timeGap.toLowerCase()} after the previous season.` : ''}`
+      `${season.timeGap ? ` It opens ${season.timeGap.toLowerCase()} after what came before.` : ''}`
     );
   }
-  return `## This season\nWhat's live: ${live}`;
+  return `## Opening\nWhat's live: ${live}`;
 }
 
 function currentLocationBlock(
@@ -890,15 +889,15 @@ function formatPriorEpisodesSection(
     const title = ep.title ? ` — ${ep.title}` : '';
     const body = clipText(recap, immediate ? immediateCap : opts.recapDigestChars);
     const heading = immediate
-      ? `### Episode ${ep.number}${title} (immediate prior)`
-      : `### Episode ${ep.number}${title}`;
+      ? `### Chapter ${ep.number}${title} (the one before)`
+      : `### Chapter ${ep.number}${title}`;
     return (
       `${heading}\n${body}` +
-      (beats ? `\n\n${immediate ? 'Carried episode beats' : 'Beats that still matter'}:\n${beats}` : '') +
+      (beats ? `\n\nWhat still matters:\n${beats}` : '') +
       (guestFx ? `\n\nWalk-on effects that still matter:\n${guestFx}` : '')
     );
   });
-  return `## Recent episodes this season\n${blocks.join('\n\n')}`;
+  return `## Earlier chapters\n${blocks.join('\n\n')}`;
 }
 
 function seasonBibleSection(season: Season, recapCap = SEASON_BIBLE_RECAP_CAP): string | null {
@@ -909,9 +908,9 @@ function seasonBibleSection(season: Season, recapCap = SEASON_BIBLE_RECAP_CAP): 
     .map((b) => `- [${b.disposition.toUpperCase()}] ${clipText(b.text, 200)} → ${clipText(b.consequence, 160)}`)
     .join('\n');
   return (
-    `## Previously (season ${season.number - 1} recap)\n${clipText(season.bible.recap, recapCap)}` +
+    `## Previously\n${clipText(season.bible.recap, recapCap)}` +
     (beats
-      ? `\n\nCarried beats — ambient situation from the prior season (RAISE = hot background, KEEP = alive, SOFTEN = distant echo; not the author hit-list):\n${beats}`
+      ? `\n\nCarried forward — ambient situation from before (RAISE = hot background, KEEP = alive, SOFTEN = distant echo; not the author hit-list):\n${beats}`
       : '') +
     (season.bible.offscreenChanges
       ? `\n\nWhat changed during the gap:\n${clipText(season.bible.offscreenChanges, 800)}`
@@ -1008,7 +1007,7 @@ function calendarSpineSection(
   }
   const cal = worldCalendar(ctx.world);
   const scene = episodeSceneDay(ctx.episode, cal);
-  const dateLine = `Today (this scene): ${formatStoryDate(cal, scene)}.`;
+  const dateLine = `Today: ${formatStoryDate(cal, scene)}.`;
   if (!events) return `## Calendar\n${dateLine}`;
   return `## Calendar\n${dateLine}\n${events}`;
 }
@@ -1070,7 +1069,7 @@ function storyCacheSections(ctx: PromptContext, opts: PromptBuildOpts = {}): str
   ].filter((s) => s && s.trim());
   if (sensoryBits.length > 0) {
     sections.push(
-      `## Sensory contract for this scene\n` +
+      `## Sensory contract for this place\n` +
       `Hold the place in the body of the prose. From the notes below, keep returning to one or two concrete sensory anchors (sight, sound, smell, temperature, or touch) — never all at once, never as a tourist catalogue:\n` +
       sensoryBits.map((s) => `- ${s!.trim()}`).join('\n')
     );
@@ -1081,7 +1080,7 @@ function storyCacheSections(ctx: PromptContext, opts: PromptBuildOpts = {}): str
   }
   if (inScene.length > 0) {
     sections.push(
-      `## Characters in the scene\n` +
+      `## People here\n` +
       inScene.map((c) => presenceSheet(c, characters)).join('\n\n')
     );
   }
@@ -1089,7 +1088,7 @@ function storyCacheSections(ctx: PromptContext, opts: PromptBuildOpts = {}): str
   const guests = activeGuests(episode);
   if (guests.length > 0) {
     sections.push(
-      `## Walk-ons in this episode (not Cast cards — temporary)\n` +
+      `## Walk-ons in this chapter (not cast cards — temporary)\n` +
       guests.map((g) => `- ${g.name}: ${g.brief}${g.voice ? ` Voice: ${g.voice}` : ''}`).join('\n')
     );
   }
@@ -1113,14 +1112,14 @@ function speakScenePrefix(ctx: PromptContext): string {
   if (player) sections.push(`## The player\n${presenceSheet(player, characters)}`);
   if (inScene.length > 0) {
     sections.push(
-      `## Characters in the scene\n` +
+      `## People here\n` +
       inScene.map((c) => presenceSheet(c, characters)).join('\n\n')
     );
   }
   const guests = activeGuests(episode);
   if (guests.length > 0) {
     sections.push(
-      `## Walk-ons in this episode (not Cast cards — temporary)\n` +
+      `## Walk-ons in this chapter (not cast cards — temporary)\n` +
       guests.map((g) => `- ${g.name}: ${g.brief}${g.voice ? ` Voice: ${g.voice}` : ''}`).join('\n')
     );
   }
@@ -1187,7 +1186,7 @@ function narratorFocusTail(ctx: PromptContext, opts: PromptBuildOpts = {}): stri
       })
       .filter(Boolean);
     if (deeper.length > 0) {
-      sections.push(`## This beat (deeper sheet)\n${deeper.join('\n\n')}`);
+      sections.push(`## Who is here\n${deeper.join('\n\n')}`);
     }
   }
   const offSceneFocused = characters.filter(
@@ -1195,7 +1194,7 @@ function narratorFocusTail(ctx: PromptContext, opts: PromptBuildOpts = {}): stri
   );
   if (offSceneFocused.length > 0) {
     sections.push(
-      `## Named off-scene (this beat only)\n` +
+      `## Not in this chapter\n` +
       offSceneFocused.map((c) => presenceSheet(c, characters)).join('\n\n')
     );
   }
@@ -1285,7 +1284,7 @@ export function buildNarratorSystemPrompt(ctx: PromptContext, opts: PromptBuildO
     `- ${proseDensityLine(ai)}\n` +
     `- ${pacingLine(ai)}\n` +
     `- Never write the player's dialogue, decisions, or inner monologue. Leave space for them to act.\n` +
-    `- NEVER write spoken dialogue, quoted speech, or lines in the form CharacterName: "…". Named characters speak in separate turns — do not stage mute pantomime, prolonged silence, or "about to answer" beats in place of their words; cover setting and physical action, then stop.\n` +
+    `- NEVER write spoken dialogue, quoted speech, or lines in the form CharacterName: "…". Named characters speak in their own turns. Write the consequence through to the length asked on this turn. Do not stop after the first physical beat, and do not write the player's next move.\n` +
     `- ${narratorCloseGuidance(storyStanceOf(world))}` +
     (rules.length > 0 ? `\n${rules.map((r) => `- ${r}`).join('\n')}` : '')
   );
@@ -1361,16 +1360,16 @@ export function buildGuestSystemPrompt(
 
   sections.push(
     `You ARE ${guest.name}, a temporary walk-on in "${world.title}" (not a permanent cast member). ` +
-    `You speak and act only as yourself for this scene.`
+    `You speak and act only as yourself in this chapter.`
   );
 
   sections.push(...leanAgentFrame(ctx, 'guest', frameOpts));
 
-  sections.push(`## Who you are this scene\n${guest.brief}`);
+  sections.push(`## Who you are here\n${guest.brief}`);
 
   sections.push(
     `## How you respond\n` +
-    (guest.voice ? `- Voice guide — match this exactly; it is your whole identity this scene: ${guest.voice}\n` : '') +
+    (guest.voice ? `- Voice guide — match this exactly; it is your whole identity here: ${guest.voice}\n` : '') +
     `- If the player just answered a question, take the answer as heard — do not ask it again.\n` +
     `- Never prefix your reply with your name or "Name:" — only *action* and "speech".\n` +
     `- Do not steal the scene from the main cast; add texture.`
@@ -1632,7 +1631,7 @@ function earlierEpisodePrefix(
   if (!digest) return null;
   return {
     role: 'user',
-    content: `(Earlier this episode — compressed; recent turns follow.)\n\nCompressed earlier beats:\n${digest}`
+    content: `(Earlier in this chapter — compressed; recent turns follow.)\n\nCompressed earlier beats:\n${digest}`
   };
 }
 
@@ -1686,8 +1685,9 @@ export function buildNarrationBeatMessages(
   const messages = historyMessages(turns, characters, guests, episode, systemChars, pack);
   const userContent =
     `(Narration only — no spoken dialogue, no CharacterName: "…" lines.)\n` +
-    `Beat brief: ${brief}\n` +
-    `Show this beat on named bodies in the room; do not recap; one or two sensory anchors from the scene contract.\n\n` +
+    `Do not write the player's actions, speech, or thoughts. Do not repeat their line. Leave them room to answer.\n` +
+    `Write this: ${brief}\n` +
+    `Show this moment on named bodies in the room; do not recap. Carry the consequence through the length below.\n\n` +
     `${narrationSizeHint(length)}`;
   return mergeMessages([...messages, { role: 'user', content: userContent }]);
 }
@@ -2120,9 +2120,9 @@ export function directorUserPrompt(
   const running = runningSummaryFor(ctx.episode, PRIOR_CAPS.director.runningCap);
   const runningLine = running
     ? running.replace(
-      '## Earlier this episode (running summary)\n' +
+      '## Earlier in this chapter (running summary)\n' +
       'Glue only — what just happened after early turns dropped. Continuity facts and the room ledger outrank this if they conflict.\n',
-      'Earlier this episode (summary — glue only; Continuity facts outrank this): '
+      'Earlier in this chapter (summary — glue only; Continuity facts outrank this): '
     )
     : '';
   const targets = (stance === 'wander' || stance === 'sandbox')

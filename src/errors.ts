@@ -242,7 +242,7 @@ export function classifyError(e: unknown): AppError {
   if (isContextOverflowError(e)) {
     return new AppError({
       code: 'provider',
-      userMessage: 'The prompt is too large for this model. Wrap the episode or try a larger-context model.',
+      userMessage: 'The prompt is too large for this model. End the chapter or try a larger-context model.',
       detail: msg,
       status,
       cause: e

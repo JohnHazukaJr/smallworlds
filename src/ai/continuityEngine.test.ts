@@ -616,6 +616,8 @@ describe('narration brief contract', () => {
     const prompt = buildNarratorSystemPrompt(ctx({ world: { ...world(), storyStance: 'wander' } }));
     expect(prompt).toMatch(/Story stance: wander/i);
     expect(prompt).not.toMatch(/End every response on tension/i);
+    expect(prompt).toMatch(/do not stop after the first physical beat/i);
+    expect(prompt).not.toMatch(/then stop/i);
   });
 
   it('tells the narrator not to recap and to use named bodies', () => {
@@ -623,7 +625,19 @@ describe('narration brief contract', () => {
     const last = msgs.at(-1)?.content ?? '';
     expect(last).toMatch(/named bodies/i);
     expect(last).toMatch(/do not recap/i);
+    expect(last).toMatch(/do not write the player's/i);
+    expect(last).toMatch(/no spoken dialogue/i);
     expect(last).toContain('Ada crosses to the desk.');
+    expect(last).not.toMatch(/Stop while they can still act/);
+    expect(last).not.toMatch(/Beat brief/);
+  });
+
+  it('frames the narrator prompt as a chapter', () => {
+    const prompt = buildNarratorSystemPrompt(ctx());
+    expect(prompt).toMatch(/Current chapter/);
+    expect(prompt).toMatch(/## Opening/);
+    expect(prompt).not.toMatch(/Current episode/);
+    expect(prompt).not.toMatch(/This season/);
   });
 });
 
@@ -680,7 +694,7 @@ describe('token-efficient packing', () => {
     expect(speak).not.toMatch(/## The world/);
     expect(speak).not.toContain('A coastal city of ledgers.');
     expect(speak.length).toBeLessThan(narr.length);
-    expect(speak).toMatch(/## Characters in the scene/);
+    expect(speak).toMatch(/## People here/);
   });
 
   it('sends a smaller director payload than the narrator frame', () => {
@@ -713,10 +727,10 @@ describe('engine context pack', () => {
       }),
       ada
     );
-    expect(prompt).toMatch(/## Characters in the scene/);
+    expect(prompt).toMatch(/## People here/);
     expect(prompt).not.toMatch(/## Others present/);
     expect(prompt).not.toMatch(/## Walk-ons present/);
-    expect((prompt.match(/Walk-ons in this episode/g) ?? []).length).toBe(1);
+    expect((prompt.match(/Walk-ons in this chapter/g) ?? []).length).toBe(1);
     expect(prompt).toContain('Clerk');
     expect(prompt).toContain('Ben');
   });

@@ -245,8 +245,8 @@ describe('evaluateWorldWriteReady episode copy', () => {
       locations: [],
       continuityCount: 2
     });
-    expect(result.missing.some((m) => /episode 3/i.test(m))).toBe(true);
-    expect(result.missing.some((m) => /episode 1/i.test(m))).toBe(false);
+    expect(result.missing.some((m) => /chapter 3/i.test(m))).toBe(true);
+    expect(result.missing.some((m) => /chapter 1/i.test(m))).toBe(false);
   });
 });
 

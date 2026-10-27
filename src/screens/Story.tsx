@@ -1,11 +1,11 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
 import {
-  analyzeEpisode, commitEpisodeWrap, commitSoftEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, draftColdOpenNarration,
+  commitSoftEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, draftColdOpenNarration,
   rollbackTurnSnapshot,
   snapshotTurnsAfter, snapshotTurnsFrom, writeTurn,
   discardPendingPlan,
-  WriteAbortedError, type EpisodeWrapDraft, type StreamMeta
+  WriteAbortedError, type StreamMeta
 } from '../ai/engine';
 import {
   parseDeliveryTone,
@@ -32,8 +32,8 @@ import {
 import { hasWritingModel } from '../ai/models';
 import { useSettings } from '../store/settings';
 import type {
-  Character, ComposeMode, Episode, EpisodeGuest, EpisodeWrapBeat,
-  Location, Turn, TurnLength, World, ActionWeight
+  Character, ComposeMode, Episode, EpisodeGuest,
+  Location, Turn, TurnLength, ActionWeight
 } from '../types';
 import { AppError, classifyError } from '../errors';
 import {
@@ -48,122 +48,6 @@ import {
   characterPortraits, evaluateWorldWriteReady, formatStoryDate,
   buildEpisodePlotTargets, latestEndedEpisode, nextEpisode, worldCalendar
 } from '../worldOps';
-
-/** Editable wrap draft with Keep/Drop flags for the review UI. */
-interface WrapReviewDraft {
-  recap: string;
-  beats: Array<EpisodeWrapBeat & { keep: boolean; aim: boolean }>;
-  facts: Array<{ text: string; keep: boolean }>;
-  threads: Array<{ text: string; keep: boolean }>;
-  guestEffects: Array<{ text: string; keep: boolean }>;
-  resolvedThreads: Array<{ text: string; keep: boolean }>;
-  staleFacts: Array<{ text: string; keep: boolean }>;
-  hitTargets: Array<{ text: string; keep: boolean }>;
-  hitCalendarEvents: Array<{ id: string; title: string; kind?: string; storyDay?: number; keep: boolean }>;
-  characterUpdates: Array<{
-    name: string;
-    goal: string;
-    emotion: string;
-    location: string;
-    condition: string;
-    keep: boolean;
-  }>;
-  knowledgeUpdates: Array<{
-    name: string;
-    nowKnows: string;
-    clearMustNotKnow: string;
-    keep: boolean;
-  }>;
-  relationshipUpdates: Array<{
-    from: string;
-    to: string;
-    kind: string;
-    note: string;
-    keep: boolean;
-  }>;
-  premisePreview: string;
-  storyDayStart: number;
-  storyDayEnd: number;
-  /** Day the next episode opens on */
-  nextStoryDay: number;
-  dateNote: string;
-  place: {
-    name: string;
-    currentState: string;
-    atmosphere: string;
-    keep: boolean;
-  } | null;
-  elsewhere: Array<{
-    name: string;
-    currentState: string;
-    atmosphere: string;
-    keep: boolean;
-  }>;
-  meanwhile: string;
-  meanwhileKeep: boolean;
-}
-
-function draftFromAnalysis(d: EpisodeWrapDraft): WrapReviewDraft {
-  return {
-    recap: d.recap,
-    beats: d.beats.map((b) => ({ ...b, keep: true, aim: false })),
-    facts: d.facts.map((text) => ({ text, keep: true })),
-    threads: d.threads.map((text) => ({ text, keep: true })),
-    guestEffects: d.guestEffects.map((text) => ({ text, keep: true })),
-    resolvedThreads: d.resolvedThreads.map((text) => ({ text, keep: true })),
-    staleFacts: (d.staleFacts ?? []).map((text) => ({ text, keep: true })),
-    hitTargets: (d.hitTargets ?? []).map((text) => ({ text, keep: true })),
-    hitCalendarEvents: (d.hitCalendarEvents ?? []).map((row) => ({
-      id: row.id,
-      title: row.title,
-      kind: row.kind,
-      storyDay: row.storyDay,
-      keep: true
-    })),
-    characterUpdates: d.characterUpdates.map((u) => ({
-      name: u.name,
-      goal: u.goal ?? '',
-      emotion: u.emotion ?? '',
-      location: u.location ?? '',
-      condition: u.condition ?? '',
-      keep: true
-    })),
-    knowledgeUpdates: d.knowledgeUpdates.map((u) => ({
-      name: u.name,
-      nowKnows: u.nowKnows ?? '',
-      clearMustNotKnow: u.clearMustNotKnow ?? '',
-      keep: true
-    })),
-    relationshipUpdates: d.relationshipUpdates.map((u) => ({
-      from: u.from,
-      to: u.to,
-      kind: u.kind ?? '',
-      note: u.note ?? '',
-      keep: true
-    })),
-    premisePreview: d.premisePreview,
-    storyDayStart: d.storyDayStart,
-    storyDayEnd: d.storyDayEnd,
-    nextStoryDay: Math.max(d.storyDayEnd, d.nextStoryDay),
-    dateNote: d.dateNote,
-    place: d.place
-      ? {
-        name: d.place.name,
-        currentState: d.place.currentState ?? '',
-        atmosphere: d.place.atmosphere ?? '',
-        keep: true
-      }
-      : null,
-    elsewhere: d.elsewhere.map((p) => ({
-      name: p.name,
-      currentState: p.currentState ?? '',
-      atmosphere: p.atmosphere ?? '',
-      keep: true
-    })),
-    meanwhile: d.meanwhile,
-    meanwhileKeep: !!d.meanwhile.trim()
-  };
-}
 
 // ---------- prose rendering ----------
 
@@ -843,7 +727,6 @@ export function Story() {
   const [recoverBusy, setRecoverBusy] = useState(false);
   const recoverBusyRef = useRef(false);
   const wrapBusyRef = useRef(false);
-  const wrapAbortRef = useRef<AbortController | null>(null);
   /** How many turns from the end are mounted — keeps long episodes responsive. */
   const [turnWindow, setTurnWindow] = useState(60);
   useEffect(() => { setTurnWindow(60); }, [episode?.id]);
@@ -852,10 +735,7 @@ export function Story() {
     if (!currentWorldId || world === undefined) return;
     if (world === null) closeWorld();
   }, [currentWorldId, world, closeWorld]);
-  const [wrapOpen, setWrapOpen] = useState<null | 'episode'>(null);
   const [wrapBusy, setWrapBusy] = useState(false);
-  const [wrapPhase, setWrapPhase] = useState<'ready' | 'analyzing' | 'review'>('ready');
-  const [wrapDraft, setWrapDraft] = useState<WrapReviewDraft | null>(null);
   const [worldEditOpen, setWorldEditOpen] = useState(false);
   const [displayOpen, setDisplayOpen] = useState(false);
   const [moreSheet, setMoreSheet] = useState(false);
@@ -898,18 +778,6 @@ export function Story() {
       window.clearTimeout(idle);
     };
   }, [readMode, composerOpen, episode?.id]);
-
-  // Fresh wrap draft only when opening from closed.
-  const prevWrapOpen = useRef(wrapOpen);
-  useEffect(() => {
-    const wasClosed = prevWrapOpen.current === null;
-    prevWrapOpen.current = wrapOpen;
-    if (wrapOpen !== null && wasClosed) {
-      setWrapPhase('ready');
-      setWrapDraft(null);
-      setWrapBusy(false);
-    }
-  }, [wrapOpen]);
 
   // Location hue → mood when the episode hasn't pinned a mood.
   useEffect(() => {
@@ -1061,152 +929,19 @@ export function Story() {
     void retryFrom(ask.turn);
   };
 
-  const closeWrapSheet = () => {
-    wrapAbortRef.current?.abort();
-    wrapAbortRef.current = null;
-    setWrapOpen(null);
-    setWrapPhase('ready');
-    setWrapDraft(null);
-  };
-
-  const resetAfterEpisodeEnd = () => {
-    closeWrapSheet();
-  };
-
-  /** Analyze the episode transcript into a reviewable wrap draft. */
-  const runEpisodeAnalyze = async () => {
-    if (!world || !season || !episode) return;
-    wrapAbortRef.current?.abort();
-    const controller = new AbortController();
-    wrapAbortRef.current = controller;
-    setWrapBusy(true);
-    setWrapPhase('analyzing');
-    setError('');
-    try {
-      const draft = await analyzeEpisode(world, season, episode, controller.signal);
-      // Stale run (superseded by a newer Analyze) — do not touch UI.
-      if (wrapAbortRef.current !== controller) return;
-      if (controller.signal.aborted) {
-        setWrapPhase('ready');
-        setNotice('Analyze cancelled.');
-        return;
-      }
-      setWrapDraft(draftFromAnalysis(draft));
-      setWrapPhase('review');
-    } catch (e) {
-      if (wrapAbortRef.current !== controller) return;
-      setWrapPhase('ready');
-      if ((e as Error).name === 'AbortError' || controller.signal.aborted) {
-        setNotice('Analyze cancelled.');
-      } else {
-        setError(classifyError(e));
-      }
-    } finally {
-      // Only the active controller clears busy — avoids cancel racing a second Analyze.
-      if (wrapAbortRef.current === controller) {
-        setWrapBusy(false);
-        wrapAbortRef.current = null;
-      }
-    }
-  };
-
-  /** End with a minimal recap so prior-episode memory survives (no full analyze review). */
+  /** End with a minimal recap so the next chapter still has memory. An empty chapter just opens the next one. */
   const skipWrapAndEnd = async () => {
     if (!world || !season || !episode) return;
     if (wrapBusyRef.current) return;
     wrapBusyRef.current = true;
     setWrapBusy(true);
     setError('');
-    let memoryNote = '';
     try {
-      // Soft wrap does not advance; nextEpisode below opens the next active episode.
-      await commitSoftEpisodeWrap(world, season, episode, {
-        onNotice: (m) => { memoryNote = m; }
-      });
+      if (turns.length > 0) {
+        await commitSoftEpisodeWrap(world, season, episode);
+      }
       await nextEpisode(episode);
-      resetAfterEpisodeEnd();
-      const filed = 'Episode ended. The next episode is open.';
-      setNotice(memoryNote ? `${memoryNote} ${filed}` : filed);
-    } catch (e) {
-      setError(classifyError(e));
-    } finally {
-      wrapBusyRef.current = false;
-      setWrapBusy(false);
-    }
-  };
-
-  /** Commit kept wrap items, file continuity, open the next episode. */
-  const confirmEpisodeWrap = async () => {
-    if (!world || !season || !episode || !wrapDraft) return;
-    if (wrapBusyRef.current) return;
-    wrapBusyRef.current = true;
-    setWrapBusy(true);
-    setError('');
-    try {
-      // commitEpisodeWrap advances via nextEpisode; do not call nextEpisode again here.
-      await commitEpisodeWrap(world, season, episode, {
-        recap: wrapDraft.recap,
-        beats: wrapDraft.beats
-          .filter((b) => b.keep && b.text.trim())
-          .map(({ text, consequence }) => ({ text, consequence })),
-        aimedBeatTexts: wrapDraft.beats
-          .filter((b) => b.keep && b.aim && b.text.trim())
-          .map((b) => `${b.text.trim()}${b.consequence.trim() ? ` → ${b.consequence.trim()}` : ''}`),
-        hitTargets: wrapDraft.hitTargets.filter((t) => t.keep).map((t) => t.text),
-        hitCalendarEvents: wrapDraft.hitCalendarEvents
-          .filter((t) => t.keep)
-          .map((t) => ({ id: t.id, title: t.title })),
-        facts: wrapDraft.facts.filter((f) => f.keep).map((f) => f.text),
-        threads: wrapDraft.threads.filter((t) => t.keep).map((t) => t.text),
-        guestEffects: wrapDraft.guestEffects.filter((g) => g.keep).map((g) => g.text),
-        resolvedThreads: wrapDraft.resolvedThreads.filter((t) => t.keep).map((t) => t.text),
-        staleFacts: wrapDraft.staleFacts.filter((t) => t.keep).map((t) => t.text),
-        characterUpdates: wrapDraft.characterUpdates
-          .filter((u) => u.keep && u.name.trim())
-          .map(({ name, goal, emotion, location, condition }) => ({
-            name,
-            goal: goal || undefined,
-            emotion: emotion || undefined,
-            location: location || undefined,
-            condition: condition || undefined
-          })),
-        knowledgeUpdates: wrapDraft.knowledgeUpdates
-          .filter((u) => u.keep && u.name.trim())
-          .map(({ name, nowKnows, clearMustNotKnow }) => ({
-            name,
-            nowKnows: nowKnows || undefined,
-            clearMustNotKnow: clearMustNotKnow || undefined
-          })),
-        relationshipUpdates: wrapDraft.relationshipUpdates
-          .filter((u) => u.keep && u.from.trim() && u.to.trim())
-          .map(({ from, to, kind, note }) => ({
-            from, to,
-            kind: kind || undefined,
-            note: note || undefined
-          })),
-        premisePreview: wrapDraft.premisePreview,
-        storyDayStart: wrapDraft.storyDayStart,
-        storyDayEnd: wrapDraft.storyDayEnd,
-        nextStoryDay: wrapDraft.nextStoryDay,
-        dateNote: wrapDraft.dateNote,
-        place: wrapDraft.place?.keep
-          ? {
-            name: wrapDraft.place.name,
-            currentState: wrapDraft.place.currentState || undefined,
-            atmosphere: wrapDraft.place.atmosphere || undefined
-          }
-          : null,
-        elsewhere: wrapDraft.elsewhere
-          .filter((p) => p.keep && (p.currentState.trim() || p.atmosphere.trim()))
-          .map((p) => ({
-            name: p.name,
-            currentState: p.currentState || undefined,
-            atmosphere: p.atmosphere || undefined
-          })),
-        meanwhile: wrapDraft.meanwhileKeep ? wrapDraft.meanwhile : ''
-      });
-      resetAfterEpisodeEnd();
-      setNotice('Episode ended. The next episode is open.');
+      setNotice('Chapter ended. The next chapter is open.');
     } catch (e) {
       setError(classifyError(e));
     } finally {
@@ -1294,8 +1029,8 @@ export function Story() {
   if (season === null) {
     return (
       <div className="fade-in" style={recoverPad}>
-        <Mono>no season</Mono>
-        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: 'var(--ink-heading)' }}>This world has no season open.</div>
+        <Mono>no chapter</Mono>
+        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: 'var(--ink-heading)' }}>This world has no chapter open.</div>
         {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           <button className="btn-primary" onClick={() => go('library')}>Worlds</button>
@@ -1306,20 +1041,19 @@ export function Story() {
   if (!episode) {
     return (
       <div className="fade-in" style={recoverPad}>
-        <Mono>episode ended</Mono>
+        <Mono>chapter ended</Mono>
         <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: 'var(--ink-heading)' }}>
           {lastEndedEpisode
-            ? `Episode ${lastEndedEpisode.number} is filed. Open the next, or review the season.`
-            : 'No episodes in this season yet.'}
+            ? `Chapter ${lastEndedEpisode.number} is filed. Open the next chapter.`
+            : 'No chapters yet.'}
         </div>
         {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           {lastEndedEpisode && (
             <button className="btn-primary" disabled={recoverBusy} onClick={() => void openNextFromEnded()}>
-              {recoverBusy ? 'Opening…' : 'Open the next episode'}
+              {recoverBusy ? 'Opening…' : 'Open the next chapter'}
             </button>
           )}
-          <button className="btn-ghost" onClick={() => go('sequel')}>Next season</button>
           <button className="btn-quiet" onClick={() => go('library')}>Worlds</button>
         </div>
       </div>
@@ -1336,6 +1070,10 @@ export function Story() {
   const locLabel = (activeLocation?.name || episode.location || '')
     .split(',')[0].split('.')[0].toLowerCase();
   // Chapter head: where and when this episode opens, in reading order rather than chrome.
+  const openingNote = (episode.number === 1
+    ? season.bible?.recap
+    : seasonEpisodes?.find((e) => e.number === episode.number - 1)?.wrap?.recap
+  )?.trim() || '';
   const sceneDate = formatStoryDate(
     worldCalendar(world),
     episode.storyDay && episode.storyDay > 0 ? episode.storyDay : worldCalendar(world).currentDay
@@ -1395,7 +1133,7 @@ export function Story() {
             ) : (
               <>
                 <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
-                  onClick={() => setWrapOpen('episode')}>End episode</button>
+                  disabled={wrapBusy} onClick={() => void skipWrapAndEnd()}>End chapter</button>
                 <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
                   onClick={() => setLayout('write')}>Exit read</button>
               </>
@@ -1422,7 +1160,7 @@ export function Story() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
               <div className="serif" style={{ fontSize: 16, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{world.title}</div>
               <div className="label" style={{ fontSize: 11 }}>
-                Season {season.number} · Episode {episode.number}{locLabel ? ` · ${locLabel}` : ''} · {formatStoryDate(worldCalendar(world), worldCalendar(world).currentDay)}
+                Chapter {episode.number}{locLabel ? ` · ${locLabel}` : ''} · {formatStoryDate(worldCalendar(world), worldCalendar(world).currentDay)}
               </div>
             </div>
           </div>
@@ -1438,7 +1176,7 @@ export function Story() {
               ))}
             </div>
             {!short && (
-              <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setWrapOpen('episode')}>End episode</button>
+              <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} disabled={wrapBusy} onClick={() => void skipWrapAndEnd()}>End chapter</button>
             )}
             {short ? (
               <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setMoreSheet(true)}>More</button>
@@ -1490,7 +1228,7 @@ export function Story() {
                     color: 'var(--ink-muted)',
                     fontWeight: 500
                   }}>
-                    Season {numberWord(season.number)} · Episode {numberWord(episode.number)}
+                    Chapter {numberWord(episode.number)}
                   </div>
                   <div className="serif" style={{
                     fontSize: narrow ? 26 : 32,
@@ -1499,7 +1237,7 @@ export function Story() {
                     margin: '12px 0 0',
                     color: 'var(--ink-heading)'
                   }}>
-                    {episode.title.trim() || activeLocation?.name || episode.location || 'Untitled episode'}
+                    {episode.title.trim() || activeLocation?.name || episode.location || 'Untitled chapter'}
                   </div>
                   {sceneDate && (
                     <div className="serif" style={{
@@ -1537,7 +1275,7 @@ export function Story() {
               )}
             </header>
 
-            {season.bible && turns.length === 0 && (
+            {openingNote && turns.length === 0 && (
               <div style={{ marginBottom: 32 }}>
                 <div className="serif" style={{
                   fontSize: 11, letterSpacing: '0.16em', textTransform: 'uppercase',
@@ -1549,28 +1287,28 @@ export function Story() {
                   fontSize: fontPx, lineHeight: 1.82, margin: 0, fontStyle: 'italic',
                   color: 'var(--paper)', textWrap: 'pretty'
                 }}>
-                  {season.bible.recap}
+                  {openingNote}
                 </p>
               </div>
             )}
 
             {turns.length === 0 && !streaming && (
               <div style={{ fontSize: 14, lineHeight: 1.7, display: 'flex', flexDirection: 'column', gap: 16, marginBottom: 8 }}>
-                {season.premise ? (
+                {episode.number === 1 && season.premise ? (
                   <p className="serif" style={{
                     fontSize: fontPx, lineHeight: 1.82, margin: 0, fontStyle: 'italic',
                     color: 'var(--ink-muted)', textWrap: 'pretty'
                   }}>
                     {season.premise}
                   </p>
-                ) : (
+                ) : !openingNote ? (
                   <p className="serif" style={{
                     fontSize: fontPx, lineHeight: 1.82, margin: 0, fontWeight: 300,
                     color: 'var(--ink-muted)'
                   }}>
                     Nothing here yet. Write the first turn.
                   </p>
-                )}
+                ) : null}
                 {!(activeLocation?.name || episode.location) && (
                   <div className="label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     No place linked yet
@@ -1661,7 +1399,7 @@ export function Story() {
                 const showBreak = chapter.id !== prevEpisodeId
                   && !(prevEpisodeId === '' && chapter.id === episode.id);
                 prevEpisodeId = chapter.id;
-                const chapterTitle = chapter.title.trim() || chapter.location || `Episode ${chapter.number}`;
+                const chapterTitle = chapter.title.trim() || chapter.location || `Chapter ${chapter.number}`;
                 return (
                   <div key={turn.id}>
                     {showBreak && (
@@ -1670,7 +1408,7 @@ export function Story() {
                           fontSize: 11, letterSpacing: '0.2em', textTransform: 'uppercase',
                           color: 'var(--ink-muted)'
                         }}>
-                          Episode {chapter.number}
+                          Chapter {chapter.number}
                         </div>
                         <div style={{ width: 48, height: 1, margin: '10px auto 0', background: 'var(--rule)' }} />
                         <div className="serif" style={{
@@ -1883,149 +1621,6 @@ export function Story() {
         </div>
       )}
 
-      {/* wrap sheet — sticky footer keeps CTAs reachable in portrait */}
-      <Sheet
-        open={wrapOpen !== null}
-        onClose={closeWrapSheet}
-        narrow={sheetBottom}
-        footer={
-          wrapPhase === 'review' ? (
-            <>
-              <button
-                className="btn-primary"
-                style={{ width: '100%', minHeight: 44 }}
-                disabled={wrapBusy || !wrapDraft}
-                onClick={() => void confirmEpisodeWrap()}
-              >
-                {wrapBusy ? (
-                  'Ending episode…'
-                ) : (
-                  <span style={{ display: 'flex', flexDirection: 'column', gap: 2, lineHeight: 1.25 }}>
-                    <span>Close episode · open episode {episode.number + 1}</span>
-                    <span style={{ fontSize: 11, fontWeight: 500, opacity: 0.8 }}>
-                      {formatStoryDate(worldCalendar(world), wrapDraft?.nextStoryDay ?? worldCalendar(world).currentDay).toLowerCase()}
-                    </span>
-                  </span>
-                )}
-              </button>
-              <button
-                className="btn-quiet"
-                style={{ width: '100%', minHeight: 40, fontSize: 12 }}
-                disabled={wrapBusy}
-                onClick={() => void skipWrapAndEnd()}
-              >
-                Skip full review · keep a short recap
-              </button>
-            </>
-          ) : wrapPhase === 'analyzing' ? (
-            <button
-              className="btn-ghost"
-              style={{ width: '100%', minHeight: 44 }}
-              onClick={() => {
-                // Abort only — leave wrapBusy/ref for the run's finally so a
-                // follow-up Analyze cannot look idle while the old request settles.
-                wrapAbortRef.current?.abort();
-                setNotice('Analyze cancelled.');
-                setWrapPhase('ready');
-              }}
-            >
-              Cancel analyze
-            </button>
-          ) : (
-            <>
-              <button
-                className="btn-primary"
-                style={{ width: '100%', minHeight: 44 }}
-                disabled={wrapBusy}
-                onClick={() => void runEpisodeAnalyze()}
-              >
-                Review episode
-              </button>
-              <button
-                className="btn-quiet"
-                style={{ width: '100%', minHeight: 40, fontSize: 12 }}
-                disabled={wrapBusy}
-                onClick={() => void skipWrapAndEnd()}
-              >
-                Skip full review · keep a short recap
-              </button>
-            </>
-          )
-        }
-      >
-        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 14 }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: '0.14em', textTransform: 'uppercase', opacity: 0.5 }}>
-              season {season.number} · episode {episode.number}
-            </div>
-            <div className="serif" style={{ fontWeight: 300, fontSize: 27, lineHeight: 1.15, color: 'var(--ink-heading)' }}>
-              End episode.
-            </div>
-            <div style={{ fontSize: 13, lineHeight: 1.6, opacity: 0.62, maxWidth: '48ch', color: 'var(--paper)' }}>
-              {wrapPhase === 'review'
-                ? 'Edit the recap and time skip, Keep or Drop anything new or stale, then close the episode. Facts from play are already saved.'
-                : 'Review the episode, then open the next one. Skipping still keeps a short recap.'}
-            </div>
-          </div>
-          <button className="btn-ghost" aria-label="Close" style={{ width: 30, height: 30, padding: 0, flexShrink: 0 }} onClick={closeWrapSheet}>×</button>
-        </div>
-
-        <div style={{ display: 'flex', gap: 7, flexWrap: 'wrap', alignItems: 'center' }}>
-          <Chip active>Episode wrap</Chip>
-          <button
-            className="btn-quiet"
-            style={{ fontSize: 12, minHeight: 36 }}
-            onClick={() => { closeWrapSheet(); go('sequel'); }}
-          >
-            Next season →
-          </button>
-        </div>
-
-        {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
-        {notice && (
-          <div style={{
-            fontSize: 12.5, lineHeight: 1.5, color: 'var(--paper)',
-            border: '1px solid var(--rule)', borderRadius: 10, padding: '10px 12px',
-            background: 'rgba(0,0,0,0.04)', display: 'flex', gap: 10, alignItems: 'flex-start'
-          }}>
-            <span style={{ flex: 1 }}>{notice}</span>
-            <button className="btn-quiet" style={{ fontSize: 11, minHeight: 28 }} onClick={() => setNotice('')}>dismiss</button>
-          </div>
-        )}
-
-        {wrapPhase === 'analyzing' ? (
-          <div style={{ padding: '20px 0' }}>
-            <Spinner label="ending episode" />
-          </div>
-        ) : wrapPhase === 'review' && wrapDraft ? (
-          <WrapReviewBody draft={wrapDraft} onChange={setWrapDraft} guests={guests} world={world} />
-        ) : (
-          <>
-            <div style={{
-              fontSize: 12.5, lineHeight: 1.55, color: 'var(--paper)',
-              border: '1px solid var(--rule)', borderRadius: 12, padding: '12px 14px',
-              background: 'transparent'
-            }}>
-              Analyze closes the episode: recap, time skip, next opening, plus Keep/Drop only for new or stale facts and threads
-              {guests.length > 0 ? ', and walk-on effects' : ''}. Episode prose stays saved; only the active episode stays in the writing loop.
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-              <Mono style={{ fontSize: 9 }}>saved facts</Mono>
-              {continuity.slice(-6).map((f) => (
-                <div key={f.id} className="craft-row" style={{ padding: '12px 14px', fontSize: 13, lineHeight: 1.5, color: 'var(--ink-muted)' }}>
-                  {f.text}
-                </div>
-              ))}
-              {continuity.length === 0 && (
-                <div style={{ fontSize: 12.5, opacity: 0.5, color: 'var(--paper)' }}>
-                  Nothing saved yet. Facts are saved as the scene unfolds.
-                </div>
-              )}
-            </div>
-          </>
-        )}
-      </Sheet>
-
       {/* narrow overflow: the rest of the binding */}
       <Sheet open={moreSheet} onClose={() => setMoreSheet(false)} narrow={sheetBottom}
         footer={
@@ -2036,8 +1631,8 @@ export function Story() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {(readMode || short) && (
             <>
-              <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setWrapOpen('episode'); }}>
-                End episode
+              <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} disabled={wrapBusy} onClick={() => { setMoreSheet(false); void skipWrapAndEnd(); }}>
+                End chapter
               </button>
               {readMode && (
                 <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setLayout('write'); }}>
@@ -2060,9 +1655,6 @@ export function Story() {
           </button>
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); go('profile'); }}>
             Profile
-          </button>
-          <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); go('sequel'); }}>
-            Next season
           </button>
         </div>
       </Sheet>
@@ -2199,8 +1791,6 @@ function TurnRow({ turn, blocks, accent, prose, fontPx, avatarPx, dialogueStyle,
   );
 }
 
-// ---------- director sub-panels ----------
-
 function locationThumb(l: Location, size = 30): CSSProperties {
   if (l.portrait) {
     return {
@@ -2211,662 +1801,6 @@ function locationThumb(l: Location, size = 30): CSSProperties {
     };
   }
   return { ...avatarStyle(l.hue, size), borderRadius: '50%' };
-}
-
-function KeepDropChips({
-  keep, onKeep, onDrop
-}: {
-  keep: boolean;
-  onKeep: () => void;
-  onDrop: () => void;
-}) {
-  const btn = (active: boolean, label: string, onClick: () => void) => (
-    <button
-      type="button"
-      onClick={onClick}
-      style={{
-        flex: 1,
-        minHeight: 44,
-        border: `1px solid ${active ? 'rgba(0,0,0,0.28)' : 'var(--rule)'}`,
-        background: active ? ACCENT_RGBA.a85 : 'rgba(0,0,0,0.04)',
-        color: active ? 'var(--accent-ink)' : 'var(--paper)',
-        borderRadius: 4,
-        fontSize: 13,
-        fontWeight: active ? 600 : 500,
-        cursor: 'pointer'
-      }}
-    >
-      {label}
-    </button>
-  );
-  return (
-    <div style={{ display: 'flex', gap: 8, width: '100%' }}>
-      {btn(keep, 'Keep', onKeep)}
-      {btn(!keep, 'Drop', onDrop)}
-    </div>
-  );
-}
-
-function WrapReviewBody({
-  draft, onChange, guests, world
-}: {
-  draft: WrapReviewDraft;
-  onChange: (d: WrapReviewDraft) => void;
-  guests: EpisodeGuest[];
-  world: World;
-}) {
-  const cal = worldCalendar(world);
-  const patchBeat = (i: number, p: Partial<WrapReviewDraft['beats'][number]>) => {
-    onChange({ ...draft, beats: draft.beats.map((b, j) => (j === i ? { ...b, ...p } : b)) });
-  };
-  const patchLine = (
-    key: 'facts' | 'threads' | 'guestEffects' | 'resolvedThreads' | 'staleFacts',
-    i: number,
-    p: Partial<{ text: string; keep: boolean }>
-  ) => {
-    onChange({
-      ...draft,
-      [key]: draft[key].map((row, j) => (j === i ? { ...row, ...p } : row))
-    });
-  };
-  const patchCast = (i: number, p: Partial<WrapReviewDraft['characterUpdates'][number]>) => {
-    onChange({
-      ...draft,
-      characterUpdates: draft.characterUpdates.map((u, j) => (j === i ? { ...u, ...p } : u))
-    });
-  };
-  const setNextDay = (day: number) => {
-    onChange({ ...draft, nextStoryDay: Math.max(draft.storyDayEnd, Math.floor(day)) });
-  };
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <Mono style={{ fontSize: 9 }}>previously-on · next episode</Mono>
-        <textarea
-          className="serif"
-          rows={7}
-          value={draft.recap}
-          onChange={(e) => onChange({ ...draft, recap: e.target.value })}
-          style={{
-            fontSize: 15.5, lineHeight: 1.65, color: 'var(--paper)',
-            width: '100%', background: 'transparent'
-          }}
-        />
-      </div>
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <Mono style={{ fontSize: 9 }}>what's live → next episode</Mono>
-        <textarea
-          className="serif"
-          rows={4}
-          value={draft.premisePreview}
-          onChange={(e) => onChange({ ...draft, premisePreview: e.target.value })}
-          style={{
-            fontSize: 14.5, lineHeight: 1.6, color: 'var(--paper)',
-            width: '100%', background: 'transparent'
-          }}
-        />
-      </div>
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        <Mono style={{ fontSize: 9 }}>episode date</Mono>
-        <div style={{
-          border: '1px solid var(--rule)', borderRadius: 14, padding: '12px 14px',
-          background: 'transparent', display: 'flex', flexDirection: 'column', gap: 10
-        }}>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 100px' }}>
-              <Mono style={{ fontSize: 8, opacity: 0.5 }}>opens day</Mono>
-              <input
-                type="number"
-                min={1}
-                value={draft.storyDayStart}
-                onChange={(e) => {
-                  const start = Math.max(1, Number(e.target.value) || 1);
-                  const end = Math.max(start, draft.storyDayEnd);
-                  onChange({
-                    ...draft,
-                    storyDayStart: start,
-                    storyDayEnd: end,
-                    nextStoryDay: Math.max(end, draft.nextStoryDay)
-                  });
-                }}
-                style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: 'var(--paper)' }}
-              />
-            </label>
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 100px' }}>
-              <Mono style={{ fontSize: 8, opacity: 0.5 }}>ends day</Mono>
-              <input
-                type="number"
-                min={draft.storyDayStart}
-                value={draft.storyDayEnd}
-                onChange={(e) => {
-                  const end = Math.max(draft.storyDayStart, Number(e.target.value) || draft.storyDayStart);
-                  onChange({
-                    ...draft,
-                    storyDayEnd: end,
-                    nextStoryDay: Math.max(end, draft.nextStoryDay)
-                  });
-                }}
-                style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: 'var(--paper)' }}
-              />
-            </label>
-          </div>
-          <textarea
-            rows={2}
-            value={draft.dateNote}
-            onChange={(e) => onChange({ ...draft, dateNote: e.target.value })}
-            placeholder="How time passed — overnight, two days on the road, same afternoon…"
-            style={{ fontSize: 13, lineHeight: 1.5, color: 'var(--paper)', background: 'transparent', border: 0, padding: 0 }}
-          />
-
-          <div style={{
-            borderTop: '1px solid var(--rule)', paddingTop: 12,
-            display: 'flex', flexDirection: 'column', gap: 10
-          }}>
-            <Mono style={{ fontSize: 8, opacity: 0.5 }}>next episode opens</Mono>
-            <div className="serif" style={{ fontSize: 17, color: 'var(--paper)' }}>
-              {formatStoryDate(cal, draft.nextStoryDay)}
-            </div>
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-              <Chip
-                active={draft.nextStoryDay === draft.storyDayEnd}
-                onClick={() => setNextDay(draft.storyDayEnd)}
-              >
-                same day
-              </Chip>
-              <Chip
-                active={draft.nextStoryDay === draft.storyDayEnd + 1}
-                onClick={() => setNextDay(draft.storyDayEnd + 1)}
-              >
-                +1 day
-              </Chip>
-              <Chip
-                active={draft.nextStoryDay === draft.storyDayEnd + 2}
-                onClick={() => setNextDay(draft.storyDayEnd + 2)}
-              >
-                +2
-              </Chip>
-              <Chip
-                active={draft.nextStoryDay === draft.storyDayEnd + 7}
-                onClick={() => setNextDay(draft.storyDayEnd + 7)}
-              >
-                +7
-              </Chip>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, opacity: 0.8 }}>
-                day
-                <input
-                  type="number"
-                  min={draft.storyDayEnd}
-                  value={draft.nextStoryDay}
-                  onChange={(e) => setNextDay(Number(e.target.value) || draft.storyDayEnd)}
-                  style={{
-                    width: 64, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12,
-                    background: 'rgba(0,0,0,0.05)', border: '1px solid var(--rule)',
-                    borderRadius: 8, padding: '6px 8px', color: 'var(--paper)'
-                  }}
-                />
-              </label>
-            </div>
-            <div style={{ fontSize: 12, opacity: 0.55, lineHeight: 1.4 }}>
-              Confirm opens the next episode on {formatStoryDate(cal, draft.nextStoryDay).toLowerCase()}.
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {(draft.place || draft.elsewhere.length > 0) && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <Mono style={{ fontSize: 9 }}>the world as you left it</Mono>
-          <div style={{ fontSize: 12, lineHeight: 1.45, opacity: 0.5 }}>
-            Places keep this condition into the next episode. Weather is only for the next opening.
-          </div>
-          {draft.place && (
-            <div style={{
-              display: 'flex', flexDirection: 'column', gap: 10,
-              border: '1px solid var(--rule)', borderRadius: 14, padding: '14px 14px',
-              background: 'transparent',
-              opacity: draft.place.keep ? 1 : 0.42
-            }}>
-              <Mono style={{ fontSize: 8, opacity: 0.5 }}>
-                {draft.place.name || 'this scene'}
-              </Mono>
-              <textarea
-                rows={2}
-                value={draft.place.currentState}
-                onChange={(e) => onChange({
-                  ...draft,
-                  place: { ...draft.place!, currentState: e.target.value }
-                })}
-                placeholder="How the place is left — lamp smashed, quay empty…"
-                style={{ fontSize: 13.5, lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, color: 'var(--paper)' }}
-              />
-              <textarea
-                rows={2}
-                value={draft.place.atmosphere}
-                onChange={(e) => onChange({
-                  ...draft,
-                  place: { ...draft.place!, atmosphere: e.target.value }
-                })}
-                placeholder="Weather / light for the next opening (optional)"
-                style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-muted)', background: 'transparent', border: 0, padding: 0 }}
-              />
-              <KeepDropChips
-                keep={draft.place.keep}
-                onKeep={() => onChange({ ...draft, place: { ...draft.place!, keep: true } })}
-                onDrop={() => onChange({ ...draft, place: { ...draft.place!, keep: false } })}
-              />
-            </div>
-          )}
-          {draft.elsewhere.map((p, i) => (
-            <div key={`${p.name}-${i}`} style={{
-              display: 'flex', flexDirection: 'column', gap: 10,
-              border: '1px solid var(--rule)', borderRadius: 14, padding: '14px 14px',
-              background: 'transparent',
-              opacity: p.keep ? 1 : 0.42
-            }}>
-              <input
-                value={p.name}
-                onChange={(e) => {
-                  const elsewhere = draft.elsewhere.map((row, j) =>
-                    j === i ? { ...row, name: e.target.value } : row
-                  );
-                  onChange({ ...draft, elsewhere });
-                }}
-                placeholder="Place name"
-                style={{ fontSize: 13, background: 'transparent', border: 0, padding: 0, color: 'var(--paper)' }}
-              />
-              <textarea
-                rows={2}
-                value={p.currentState}
-                onChange={(e) => {
-                  const elsewhere = draft.elsewhere.map((row, j) =>
-                    j === i ? { ...row, currentState: e.target.value } : row
-                  );
-                  onChange({ ...draft, elsewhere });
-                }}
-                placeholder="How that place changed"
-                style={{ fontSize: 13, lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, color: 'var(--paper)' }}
-              />
-              <KeepDropChips
-                keep={p.keep}
-                onKeep={() => {
-                  const elsewhere = draft.elsewhere.map((row, j) =>
-                    j === i ? { ...row, keep: true } : row
-                  );
-                  onChange({ ...draft, elsewhere });
-                }}
-                onDrop={() => {
-                  const elsewhere = draft.elsewhere.map((row, j) =>
-                    j === i ? { ...row, keep: false } : row
-                  );
-                  onChange({ ...draft, elsewhere });
-                }}
-              />
-            </div>
-          ))}
-        </div>
-      )}
-
-      {draft.nextStoryDay > draft.storyDayEnd && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <Mono style={{ fontSize: 9 }}>meanwhile</Mono>
-          <div style={{ fontSize: 12, lineHeight: 1.45, opacity: 0.5 }}>
-            Off-screen life during the {draft.nextStoryDay - draft.storyDayEnd} day
-            {draft.nextStoryDay - draft.storyDayEnd === 1 ? '' : 's'} before the next episode opens.
-          </div>
-          <div style={{
-            display: 'flex', flexDirection: 'column', gap: 10,
-            border: '1px solid var(--rule)', borderRadius: 14, padding: '14px 14px',
-            background: 'transparent',
-            opacity: draft.meanwhileKeep ? 1 : 0.42
-          }}>
-            <textarea
-              className="serif"
-              rows={4}
-              value={draft.meanwhile}
-              onChange={(e) => onChange({ ...draft, meanwhile: e.target.value })}
-              placeholder="Who waited, who travelled, what healed, what got worse…"
-              style={{
-                fontSize: 15, lineHeight: 1.6, color: 'var(--paper)',
-                width: '100%', background: 'transparent', border: 0, padding: 0
-              }}
-            />
-            <KeepDropChips
-              keep={draft.meanwhileKeep}
-              onKeep={() => onChange({ ...draft, meanwhileKeep: true })}
-              onDrop={() => onChange({ ...draft, meanwhileKeep: false })}
-            />
-          </div>
-        </div>
-      )}
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        <Mono style={{ fontSize: 9 }}>beats</Mono>
-        <div style={{ fontSize: 12, lineHeight: 1.45, opacity: 0.5 }}>
-          Aimed beats become the next episode’s plot targets.
-        </div>
-        {draft.beats.length === 0 && (
-          <div style={{ fontSize: 12.5, opacity: 0.5 }}>No standout beats proposed — you can still confirm.</div>
-        )}
-        {draft.beats.map((b, i) => (
-          <div key={i} style={{
-            display: 'flex', flexDirection: 'column', gap: 10,
-            border: '1px solid var(--rule)', borderRadius: 14, padding: '14px 14px',
-            background: 'transparent',
-            opacity: b.keep ? 1 : 0.42
-          }}>
-            <textarea
-              className="serif"
-              rows={2}
-              value={b.text}
-              onChange={(e) => patchBeat(i, { text: e.target.value })}
-              style={{ fontSize: 16, lineHeight: 1.45, background: 'transparent', border: 0, padding: 0, color: 'var(--paper)' }}
-            />
-            <textarea
-              rows={2}
-              value={b.consequence}
-              onChange={(e) => patchBeat(i, { consequence: e.target.value })}
-              placeholder="what it leaves for later…"
-              style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-muted)', background: 'transparent', border: 0, padding: 0 }}
-            />
-            <KeepDropChips
-              keep={b.keep}
-              onKeep={() => patchBeat(i, { keep: true })}
-              onDrop={() => patchBeat(i, { keep: false, aim: false })}
-            />
-            {b.keep && (
-              <Chip
-                active={b.aim}
-                onClick={() => patchBeat(i, { aim: !b.aim })}
-              >
-                {b.aim ? 'Aim next · on' : 'Aim next'}
-              </Chip>
-            )}
-          </div>
-        ))}
-      </div>
-
-      {draft.hitTargets.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <Mono style={{ fontSize: 9 }}>plot targets hit this episode</Mono>
-          <div style={{ fontSize: 12, lineHeight: 1.45, opacity: 0.5 }}>
-            Keep to mark these pending targets as hit. Drop to leave them pending for the next episode.
-          </div>
-          {draft.hitTargets.map((row, i) => (
-            <div key={i} style={{
-              display: 'flex', flexDirection: 'column', gap: 10,
-              border: '1px solid var(--rule)', borderRadius: 14, padding: '12px 14px',
-              background: 'transparent',
-              opacity: row.keep ? 1 : 0.42
-            }}>
-              <textarea
-                rows={2}
-                value={row.text}
-                onChange={(e) => {
-                  const hitTargets = draft.hitTargets.map((r, j) =>
-                    j === i ? { ...r, text: e.target.value } : r
-                  );
-                  onChange({ ...draft, hitTargets });
-                }}
-                style={{ fontSize: 13.5, lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, color: 'var(--paper)' }}
-              />
-              <KeepDropChips
-                keep={row.keep}
-                onKeep={() => {
-                  const hitTargets = draft.hitTargets.map((r, j) =>
-                    j === i ? { ...r, keep: true } : r
-                  );
-                  onChange({ ...draft, hitTargets });
-                }}
-                onDrop={() => {
-                  const hitTargets = draft.hitTargets.map((r, j) =>
-                    j === i ? { ...r, keep: false } : r
-                  );
-                  onChange({ ...draft, hitTargets });
-                }}
-              />
-            </div>
-          ))}
-        </div>
-      )}
-
-      {draft.hitCalendarEvents.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <Mono style={{ fontSize: 9 }}>calendar events played this episode</Mono>
-          <div style={{ fontSize: 12, lineHeight: 1.45, opacity: 0.5 }}>
-            Keep to mark these dated events as played (and file a continuity note). Drop to leave them due.
-          </div>
-          {draft.hitCalendarEvents.map((row, i) => (
-            <div key={row.id || i} style={{
-              display: 'flex', flexDirection: 'column', gap: 10,
-              border: '1px solid var(--rule)', borderRadius: 14, padding: '12px 14px',
-              background: 'transparent',
-              opacity: row.keep ? 1 : 0.42
-            }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--paper)' }}>{row.title}</div>
-              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.45 }}>
-                {[row.kind, row.storyDay != null ? `day ${row.storyDay}` : null].filter(Boolean).join(' · ')}
-              </div>
-              <KeepDropChips
-                keep={row.keep}
-                onKeep={() => {
-                  const hitCalendarEvents = draft.hitCalendarEvents.map((r, j) =>
-                    j === i ? { ...r, keep: true } : r
-                  );
-                  onChange({ ...draft, hitCalendarEvents });
-                }}
-                onDrop={() => {
-                  const hitCalendarEvents = draft.hitCalendarEvents.map((r, j) =>
-                    j === i ? { ...r, keep: false } : r
-                  );
-                  onChange({ ...draft, hitCalendarEvents });
-                }}
-              />
-            </div>
-          ))}
-        </div>
-      )}
-
-      {([
-        ['facts', 'new continuity facts'] as const,
-        ['staleFacts', 'facts no longer true — Keep to drop from memory'] as const,
-        ['threads', 'new open threads'] as const,
-        ['resolvedThreads', 'threads resolved this episode'] as const,
-        ['guestEffects', 'walk-on effects'] as const
-      ]).map(([key, label]) => {
-        if (key === 'guestEffects' && draft.guestEffects.length === 0 && guests.length === 0) return null;
-        if (key === 'resolvedThreads' && draft.resolvedThreads.length === 0) return null;
-        if (key === 'staleFacts' && draft.staleFacts.length === 0) return null;
-        return (
-          <div key={key} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <Mono style={{ fontSize: 9 }}>{label}</Mono>
-            {draft[key].length === 0 && (
-              <div style={{ fontSize: 12.5, opacity: 0.5 }}>
-                {key === 'facts' || key === 'threads'
-                  ? 'Already on file from play — nothing new or conflicting to review.'
-                  : 'None proposed.'}
-              </div>
-            )}
-            {draft[key].map((row, i) => (
-              <div key={i} style={{
-                display: 'flex', flexDirection: 'column', gap: 10,
-                border: '1px solid var(--rule)', borderRadius: 14, padding: '12px 14px',
-                background: 'transparent',
-                opacity: row.keep ? 1 : 0.42
-              }}>
-                <textarea
-                  rows={2}
-                  value={row.text}
-                  onChange={(e) => patchLine(key, i, { text: e.target.value })}
-                  style={{ fontSize: 13.5, lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, color: 'var(--paper)' }}
-                />
-                <KeepDropChips
-                  keep={row.keep}
-                  onKeep={() => patchLine(key, i, { keep: true })}
-                  onDrop={() => patchLine(key, i, { keep: false })}
-                />
-              </div>
-            ))}
-          </div>
-        );
-      })}
-
-      {draft.characterUpdates.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <Mono style={{ fontSize: 9 }}>live state → next episode · voice & anchors unchanged</Mono>
-          {draft.characterUpdates.map((u, i) => (
-            <div key={i} style={{
-              display: 'flex', flexDirection: 'column', gap: 8,
-              border: '1px solid var(--rule)', borderRadius: 14, padding: '12px 14px',
-              background: 'transparent',
-              opacity: u.keep ? 1 : 0.42
-            }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--paper)' }}>{u.name}</div>
-              {([
-                ['goal', 'goal'] as const,
-                ['emotion', 'emotion'] as const,
-                ['location', 'location'] as const,
-                ['condition', 'condition'] as const
-              ]).map(([field, label]) => (
-                <label key={field} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <Mono style={{ fontSize: 8, opacity: 0.55 }}>{label}</Mono>
-                  <input
-                    value={u[field]}
-                    onChange={(e) => patchCast(i, { [field]: e.target.value })}
-                    style={{
-                      fontSize: 13, lineHeight: 1.4, color: 'var(--paper)',
-                      background: 'transparent', border: 0, padding: 0
-                    }}
-                  />
-                </label>
-              ))}
-              <KeepDropChips
-                keep={u.keep}
-                onKeep={() => patchCast(i, { keep: true })}
-                onDrop={() => patchCast(i, { keep: false })}
-              />
-            </div>
-          ))}
-        </div>
-      )}
-
-      {draft.knowledgeUpdates.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <Mono style={{ fontSize: 9 }}>knowledge updates</Mono>
-          {draft.knowledgeUpdates.map((u, i) => (
-            <div key={i} style={{
-              display: 'flex', flexDirection: 'column', gap: 8,
-              border: '1px solid var(--rule)', borderRadius: 14, padding: '12px 14px',
-              background: 'transparent',
-              opacity: u.keep ? 1 : 0.42
-            }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--paper)' }}>{u.name}</div>
-              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <Mono style={{ fontSize: 8, opacity: 0.55 }}>now knows</Mono>
-                <textarea
-                  rows={2}
-                  value={u.nowKnows}
-                  onChange={(e) => {
-                    const knowledgeUpdates = draft.knowledgeUpdates.map((row, j) =>
-                      j === i ? { ...row, nowKnows: e.target.value } : row
-                    );
-                    onChange({ ...draft, knowledgeUpdates });
-                  }}
-                  style={{ fontSize: 13, lineHeight: 1.45, color: 'var(--paper)', background: 'transparent', border: 0, padding: 0 }}
-                />
-              </label>
-              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <Mono style={{ fontSize: 8, opacity: 0.55 }}>clear from must-not-know</Mono>
-                <input
-                  value={u.clearMustNotKnow}
-                  onChange={(e) => {
-                    const knowledgeUpdates = draft.knowledgeUpdates.map((row, j) =>
-                      j === i ? { ...row, clearMustNotKnow: e.target.value } : row
-                    );
-                    onChange({ ...draft, knowledgeUpdates });
-                  }}
-                  style={{ fontSize: 13, color: 'var(--paper)', background: 'transparent', border: 0, padding: 0 }}
-                />
-              </label>
-              <KeepDropChips
-                keep={u.keep}
-                onKeep={() => {
-                  const knowledgeUpdates = draft.knowledgeUpdates.map((row, j) =>
-                    j === i ? { ...row, keep: true } : row
-                  );
-                  onChange({ ...draft, knowledgeUpdates });
-                }}
-                onDrop={() => {
-                  const knowledgeUpdates = draft.knowledgeUpdates.map((row, j) =>
-                    j === i ? { ...row, keep: false } : row
-                  );
-                  onChange({ ...draft, knowledgeUpdates });
-                }}
-              />
-            </div>
-          ))}
-        </div>
-      )}
-
-      {draft.relationshipUpdates.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <Mono style={{ fontSize: 9 }}>relationship shifts</Mono>
-          {draft.relationshipUpdates.map((u, i) => (
-            <div key={i} style={{
-              display: 'flex', flexDirection: 'column', gap: 8,
-              border: '1px solid var(--rule)', borderRadius: 14, padding: '12px 14px',
-              background: 'transparent',
-              opacity: u.keep ? 1 : 0.42
-            }}>
-              <div style={{ fontSize: 14, color: 'var(--paper)' }}>
-                <strong>{u.from}</strong> → <strong>{u.to}</strong>
-              </div>
-              <input
-                value={u.kind}
-                onChange={(e) => {
-                  const relationshipUpdates = draft.relationshipUpdates.map((row, j) =>
-                    j === i ? { ...row, kind: e.target.value } : row
-                  );
-                  onChange({ ...draft, relationshipUpdates });
-                }}
-                placeholder="kind (ally, rival…)"
-                style={{ fontSize: 13, color: 'var(--paper)', background: 'transparent', border: 0, padding: 0 }}
-              />
-              <textarea
-                rows={2}
-                value={u.note}
-                onChange={(e) => {
-                  const relationshipUpdates = draft.relationshipUpdates.map((row, j) =>
-                    j === i ? { ...row, note: e.target.value } : row
-                  );
-                  onChange({ ...draft, relationshipUpdates });
-                }}
-                placeholder="what changed…"
-                style={{ fontSize: 13, lineHeight: 1.45, color: 'var(--paper)', background: 'transparent', border: 0, padding: 0 }}
-              />
-              <KeepDropChips
-                keep={u.keep}
-                onKeep={() => {
-                  const relationshipUpdates = draft.relationshipUpdates.map((row, j) =>
-                    j === i ? { ...row, keep: true } : row
-                  );
-                  onChange({ ...draft, relationshipUpdates });
-                }}
-                onDrop={() => {
-                  const relationshipUpdates = draft.relationshipUpdates.map((row, j) =>
-                    j === i ? { ...row, keep: false } : row
-                  );
-                  onChange({ ...draft, relationshipUpdates });
-                }}
-              />
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
 }
 
 function numberWord(n: number): string {

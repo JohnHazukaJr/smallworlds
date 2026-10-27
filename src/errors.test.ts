@@ -36,12 +36,12 @@ describe('classifyError', () => {
 
   it('keeps real overflow copy for context_length_exceeded', () => {
     const err = classifyError(new Error('context_length_exceeded'));
-    expect(err.userMessage).toMatch(/too large|wrap the episode/i);
+    expect(err.userMessage).toMatch(/too large|end the chapter/i);
   });
 
   it('uses overflow copy for HTTP 400 context_length_exceeded', () => {
     const err = classifyError(new AIError('context_length_exceeded', 400));
-    expect(err.userMessage).toMatch(/too large|wrap the episode/i);
+    expect(err.userMessage).toMatch(/too large|end the chapter/i);
     expect(err.userMessage).not.toMatch(/rejected the request/i);
   });
 
@@ -92,7 +92,7 @@ describe('classifyError', () => {
 
   it('keeps write-loop AIError copy instead of generic Settings', () => {
     const spoken = classifyError(new AIError(
-      'No character replied aloud. Try again, pin who should answer, or add cast to the scene.'
+      'No character replied aloud. Try again, or add someone to this chapter.'
     ));
     expect(spoken.userMessage).toMatch(/No character replied aloud/);
     expect(spoken.userMessage).not.toMatch(/Check Settings/);

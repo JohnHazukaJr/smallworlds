@@ -115,7 +115,7 @@ export function Library() {
     if (compactingId) return;
     const ok = confirm(
       `Create a condensed copy of "${title}"?\n\n` +
-      'The original stays in your library. The copy starts at Season 1 with rewritten lore, sheets, and a new opening. ' +
+      'The original stays in your library. The copy starts at chapter 1 with rewritten lore, sheets, and a new opening. ' +
       'This uses your utility model and can take a few minutes.'
     );
     if (!ok) return;
@@ -175,7 +175,7 @@ export function Library() {
           </div>
           <div style={{ fontSize: 14, lineHeight: 1.65, color: 'var(--ink-muted)', maxWidth: '42ch' }}>
             Create a world of your own, or open the starter — a harbour city, a false name, a debt in the public record —
-            to see how cast, continuity and seasons work. Everything in it is editable.
+            to see how characters, continuity, and chapters work. Everything in it is editable.
           </div>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 4 }}>
             <button className="btn-primary" onClick={() => go('onboard')}>Create my world</button>
@@ -214,7 +214,7 @@ export function Library() {
                   color: 'var(--paper)', background: 'rgba(247,243,234,0.8)',
                   padding: '4px 7px', borderRadius: 2
                 }}>
-                  {st ? `${st.seasons} season${st.seasons === 1 ? '' : 's'} · ${st.episodes} episode${st.episodes === 1 ? '' : 's'}` : '—'}
+                  {st ? `${st.episodes} chapter${st.episodes === 1 ? '' : 's'}` : '—'}
                 </span>
                 <span className="label" style={{
                   color: 'var(--ink-muted)', background: 'rgba(247,243,234,0.8)',

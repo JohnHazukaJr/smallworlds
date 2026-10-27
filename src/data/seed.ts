@@ -62,7 +62,7 @@ export async function seedStarterWorld(): Promise<string> {
     mustNotKnow: 'That Ivo took guild money to cover the debt — she must not learn this until the story reveals it.',
     anchors: [
       'Never lies in writing. Will omit, will refuse, will not falsify.',
-      'Does not warm to you quickly. Trust moves one notch per episode at most.',
+      'Does not warm to you quickly. Trust moves one notch per chapter at most.',
       'Will not be the one to name what is between you.',
       'If cornered, she goes procedural — the ledger, the forms, the rules.'
     ],
@@ -174,21 +174,29 @@ export async function seedStarterWorld(): Promise<string> {
         status: 'active', createdAt: now
       });
       await db.characters.bulkAdd(characters);
-      await db.turns.add({
-        id: uid(), episodeId, worldId, role: 'narrator', mode: null,
-        text:
-          'The long room keeps its own weather. Lamp-smoke gathers along the ceiling beams and stays there, and the tide sound comes up through the floor rather than the windows, so that every conversation held here has the shape of something overheard.\n\nThe Cartwright has not touched the cup you poured. That is the first thing you notice. The second is that he has arranged the manifest pages so the false signature faces you.\n\nThe Cartwright: "You write a steady hand. Steadier than the name deserves."\n\nYou could tell him the truth. You could tell him a better lie. Marisol is on the tide stairs outside and will hear either one, because the long room keeps its own weather and gives nothing back.',
-        createdAt: now
-      });
+      await db.turns.bulkAdd([
+        {
+          id: uid(), episodeId, worldId, role: 'narrator', mode: null,
+          text:
+            'The long room keeps its own weather. Lamp-smoke gathers along the ceiling beams and stays there, and the tide sound comes up through the floor rather than the windows, so that every conversation held here has the shape of something overheard.\n\nThe Cartwright has not touched the cup you poured. He has arranged the manifest pages so the false signature faces you. Marisol is on the tide stairs outside and will hear whatever is said, because the long room keeps its own weather and gives nothing back.',
+          createdAt: now
+        },
+        {
+          id: uid(), episodeId, worldId, role: 'character', mode: null,
+          characterId: cartwright.id,
+          text: '*leaves the cup where it is and turns the manifest toward you* "You write a steady hand. Steadier than the name deserves." *He waits, and does not repeat the offer.*',
+          createdAt: now + 1
+        }
+      ]);
       await db.continuity.bulkAdd([
         { id: uid(), worldId, seasonId, episodeId, text: 'Your name on the manifest is false and Marisol knows.', source: 'manual', createdAt: now },
         { id: uid(), worldId, seasonId, episodeId, text: 'Ivo\u2019s guild debt is unspoken between you.', source: 'manual', createdAt: now },
         { id: uid(), worldId, seasonId, episodeId, text: 'The Cartwright trades, never threatens.', source: 'manual', createdAt: now }
       ]);
       await db.threads.bulkAdd([
-        { id: uid(), worldId, seasonId, text: 'The Cartwright\u2019s trade is on the table, unanswered.', openedLabel: 'opened S1 · E1', status: 'open', createdAt: now },
-        { id: uid(), worldId, seasonId, text: 'Ivo has not told you the terms of the guild money.', openedLabel: 'opened S1 · E1', status: 'open', createdAt: now },
-        { id: uid(), worldId, seasonId, text: 'Emine saw you at the tide stairs.', openedLabel: 'opened S1 · E1', status: 'open', createdAt: now }
+        { id: uid(), worldId, seasonId, text: 'The Cartwright\u2019s trade is on the table, unanswered.', openedLabel: 'opened chapter 1', status: 'open', createdAt: now },
+        { id: uid(), worldId, seasonId, text: 'Ivo has not told you the terms of the guild money.', openedLabel: 'opened chapter 1', status: 'open', createdAt: now },
+        { id: uid(), worldId, seasonId, text: 'Emine saw you at the tide stairs.', openedLabel: 'opened chapter 1', status: 'open', createdAt: now }
       ]);
     });
 

@@ -6,6 +6,7 @@ import {
   lastSpeaker,
   rankReplySpeakers,
   roomDynamicsLines,
+  selectAnswerers,
   speakerCandidates,
   turnsSinceSpoke,
   type SpeakerCandidate
@@ -238,5 +239,54 @@ describe('lastOpenQuestion', () => {
   it('does not treat a question asked after the player as already answered', () => {
     const turns = [player('Hello.'), said('c1', '"Where were you?"')];
     expect(lastOpenQuestion(turns, trio)).toBeNull();
+  });
+});
+
+describe('selectAnswerers', () => {
+  it('gives a short reply to the one person addressed', () => {
+    const ids = selectAnswerers({
+      length: 'beat',
+      playerText: 'Ada, put the ledger down.',
+      candidates: trio
+    }).map((c) => c.id);
+    expect(ids).toEqual(['c1']);
+  });
+
+  it('lets a normal reply include a second person who was also spoken to', () => {
+    const ids = selectAnswerers({
+      length: 'scene',
+      playerText: 'Ada, tell Ben what you saw.',
+      candidates: trio
+    }).map((c) => c.id);
+    expect(ids).toContain('c1');
+    expect(ids).toContain('c2');
+    expect(ids.length).toBeLessThanOrEqual(2);
+  });
+
+  it('caps a long reply at three named people and stays at one when nobody is named', () => {
+    const named = selectAnswerers({
+      length: 'episode',
+      playerText: 'Ada, Ben, Clerk — all of you, answer me.',
+      candidates: trio
+    });
+    expect(named.length).toBeLessThanOrEqual(3);
+    expect(named.length).toBeGreaterThan(1);
+
+    const unnamed = selectAnswerers({
+      length: 'episode',
+      playerText: 'I wait.',
+      candidates: trio
+    });
+    expect(unnamed).toHaveLength(1);
+  });
+
+  it('puts a pinned person first and still respects the short cap', () => {
+    const ids = selectAnswerers({
+      length: 'beat',
+      playerText: 'Ada, look at this.',
+      candidates: trio,
+      preferId: 'c2'
+    }).map((c) => c.id);
+    expect(ids).toEqual(['c2']);
   });
 });

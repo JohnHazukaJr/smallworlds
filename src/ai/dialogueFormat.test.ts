@@ -15,11 +15,16 @@ describe('SPEAK_FORMAT_RULES', () => {
   it('uses contrasting concrete examples instead of soft RP stock', () => {
     expect(SPEAK_FORMAT_RULES).not.toMatch(/dimples|shyly/i);
     expect(SPEAK_FORMAT_RULES).toMatch(/ledger|salt/i);
+    expect(SPEAK_FORMAT_RULES).toMatch(/leaves the rest unsaid/i);
   });
 
   it('tells the speaker to stop after one question', () => {
     expect(SPEAK_FORMAT_RULES).toMatch(/at most one question/i);
     expect(SPEAK_FORMAT_RULES).toMatch(/stop there/i);
+    expect(SPEAK_FORMAT_RULES).toMatch(/more than one sentence/i);
+    expect(SPEAK_FORMAT_RULES).toMatch(/do not stop after a single spoken line/i);
+    expect(SPEAK_FORMAT_RULES).toMatch(/do not write the player/i);
+    expect(SPEAK_FORMAT_RULES).not.toMatch(/prefer one tight reply/i);
   });
 });
 

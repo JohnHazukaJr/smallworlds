@@ -49,13 +49,13 @@ export function Profile() {
 
   const worlds = useLiveQuery(() => db.worlds.toArray(), []) ?? [];
   const stats = useLiveQuery(async () => {
-    const [seasons, cast, turns] = await Promise.all([
-      db.seasons.count(),
+    const [chapters, cast, turns] = await Promise.all([
+      db.episodes.count(),
       db.characters.count(),
       db.turns.toArray()
     ]);
     const words = turns.reduce((n, t) => n + t.text.split(/\s+/).length, 0);
-    return { seasons, cast, words };
+    return { chapters, cast, words };
   }, []);
 
   useEffect(() => {
@@ -163,7 +163,7 @@ export function Profile() {
       <div style={{ display: 'flex', gap: 26, flexWrap: 'wrap', borderTop: '1px solid var(--rule)', borderBottom: '1px solid var(--rule)', padding: '16px 0', marginBottom: 34 }}>
         {[
           ['worlds', String(worlds.length)],
-          ['seasons', String(stats?.seasons ?? '—')],
+          ['chapters', String(stats?.chapters ?? '—')],
           ['words written', stats ? `${Math.round(stats.words / 100) / 10}k` : '—'],
           ['cast created', String(stats?.cast ?? '—')],
           ['storage', storage?.label ?? '—']

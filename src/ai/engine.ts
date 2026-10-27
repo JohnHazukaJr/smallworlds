@@ -20,7 +20,7 @@ import {
 } from '../worldOps';
 import { AIError, streamChat, isPromptPackRetryError, type ChatMessage, type StreamRequest } from './client';
 import { imageModelFor, proseModelFor, utilityModelFor } from './models';
-import { ANALYZE_EPISODE_TOOL, LIVE_MEMORY_TOOL, PLAN_TURN_TOOL, utilityCall, type ToolSpec } from './utilityCall';
+import { ANALYZE_EPISODE_TOOL, LIVE_MEMORY_TOOL, utilityCall, type ToolSpec } from './utilityCall';
 import { promptCharBudget } from './contextBudget';
 import { proseCompletionTokens } from './modelProfile';
 import { applyDeliveryTone, parseDeliveryTone } from './deliveryTone';
@@ -38,9 +38,6 @@ import {
   characterSpeakTokens,
   historyTailFor,
   compressOmittedTurns,
-  DIRECTOR_PLAN_TOKENS,
-  directorSystemPrompt,
-  directorUserPrompt,
   memoryFocusQuery,
   episodeContextPressure,
   episodeHistoryChars,
@@ -55,7 +52,7 @@ import {
   narrationBeatTokens,
   planCapsForLength
 } from './prompts';
-import { detectAddressee, rankReplySpeakers, speakerCandidates, type RankedSpeaker } from './roomDynamics';
+import { detectAddressee, rankReplySpeakers, selectAnswerers, speakerCandidates, type RankedSpeaker } from './roomDynamics';
 import {
   isNearDuplicate,
   knowledgeFactLine,
@@ -457,6 +454,66 @@ function pickReplySpeaker(
   return null;
 }
 
+/** Connective prose for this turn: consequence and place, never anyone's spoken lines. */
+export function chapterNarrationBrief(opts: {
+  mode: ComposeMode;
+  playerText: string;
+  location: string;
+}): string {
+  const move = opts.playerText.trim().replace(/\s+/g, ' ').slice(0, 280);
+  const loc = opts.location.trim() || 'the current place';
+  const moveBit = move
+    ? `The player just did this (${opts.mode}) — show the consequence here, do not repeat their words, do not write their next action, and do not write anyone's spoken dialogue: "${move}".`
+    : 'Continue from where the place left off. No spoken dialogue.';
+  return `Place: ${loc}. ${moveBit} Write the consequence through to the length asked on this turn, and leave them room to answer.`;
+}
+
+/** Narrator first, then the people who were actually addressed. */
+function beatsForTurn(opts: {
+  length: TurnLength;
+  mode: ComposeMode;
+  playerText: string;
+  location: string;
+  inScene: Character[];
+  guests: EpisodeGuest[];
+  turns: Turn[];
+  preferCharacterId?: string;
+  preferGuestId?: string;
+}): DirectorBeat[] {
+  const answerers = selectAnswerers({
+    length: opts.length,
+    playerText: opts.playerText,
+    candidates: speakerCandidates(opts.inScene, opts.guests),
+    turns: opts.turns,
+    preferId: opts.preferCharacterId || opts.preferGuestId
+  });
+  const narration: DirectorBeat = {
+    type: 'narration',
+    brief: chapterNarrationBrief(opts)
+  };
+  const speaks: DirectorBeat[] = answerers.map((a) => {
+    if (a.kind === 'guest') {
+      const g = opts.guests.find((x) => x.id === a.id);
+      return {
+        type: 'speak',
+        guestId: a.id,
+        brief: g
+          ? injectedSpeakBriefForGuest(g, 'The place has already been described. Add only what you do and say. Do not retell it. Do not speak for the player.')
+          : 'The place has already been described. Add only what you do and say. Do not retell it. Do not speak for the player.'
+      };
+    }
+    const c = opts.inScene.find((x) => x.id === a.id);
+    return {
+      type: 'speak',
+      characterId: a.id,
+      brief: c
+        ? injectedSpeakBriefForCharacter(c, 'The place has already been described. Add only what you do and say. Do not retell it. Do not speak for the player.')
+        : 'The place has already been described. Add only what you do and say. Do not retell it. Do not speak for the player.'
+    };
+  });
+  return [narration, ...speaks];
+}
+
 /** Fallback narration when the director fails — names the room, the move, and who is on stage. */
 export function directorFallbackNarrationBrief(opts: {
   mode: ComposeMode;
@@ -475,7 +532,7 @@ export function directorFallbackNarrationBrief(opts: {
   const bodies = onStage.length > 0 ? ` On stage: ${onStage.join('; ')}.` : '';
   const moveBit = move
     ? ` Continue from the player's ${opts.mode}: "${move}".`
-    : ' Continue the scene.';
+    : ' Continue from the place.';
   return (
     `${moveBit} Location: ${loc}.${bodies} ` +
     'Show named bodies and one sensory job; leave space for the player.'
@@ -653,106 +710,6 @@ function withTimeoutSignal(outer: AbortSignal | undefined, ms: number): { signal
   };
 }
 
-/** Resolve a cast NPC by id or case-insensitive name (never the player). */
-function resolveNpcId(raw: string, characters: Character[]): string | null {
-  const key = raw.trim();
-  if (!key) return null;
-  const npcs = characters.filter((c) => !c.isPlayer);
-  if (npcs.some((c) => c.id === key)) return key;
-  const byName = npcs.find((c) => c.name.toLowerCase() === key.toLowerCase());
-  return byName?.id ?? null;
-}
-
-/** Apply director enter/leave to episode cast; ids or exact names may enter/leave. */
-function applyCastDelta(
-  castIds: string[],
-  characters: Character[],
-  delta?: { enter?: string[]; leave?: string[] },
-  protectId?: string
-): string[] {
-  const npcIds = new Set(characters.filter((c) => !c.isPlayer).map((c) => c.id));
-  const playerId = characters.find((c) => c.isPlayer)?.id;
-  const enter = (delta?.enter ?? [])
-    .map((raw) => resolveNpcId(raw, characters))
-    .filter((id): id is string => !!id && npcIds.has(id));
-  const leave = new Set(
-    (delta?.leave ?? [])
-      .map((raw) => resolveNpcId(raw, characters))
-      .filter((id): id is string => !!id && npcIds.has(id) && id !== protectId)
-  );
-  const known = (id: string) => id === playerId || npcIds.has(id);
-  const next = [...new Set([...castIds.filter(known), ...enter])].filter((id) => !leave.has(id));
-  if (playerId && castIds.includes(playerId) && !next.includes(playerId)) next.unshift(playerId);
-  if (protectId && npcIds.has(protectId) && !next.includes(protectId)) next.push(protectId);
-  return next;
-}
-
-const MAX_INTRODUCE_GUESTS = 2;
-
-interface IntroduceSpec {
-  name?: string;
-  brief?: string;
-  voice?: string;
-}
-
-/** Merge new walk-ons into episode guests; returns updated episode fields + name→id map. */
-function applyGuestDelta(
-  episode: Episode,
-  introduce: IntroduceSpec[] | undefined,
-  leaveIds: string[] | undefined,
-  protectGuestId?: string
-): {
-  guests: EpisodeGuest[];
-  activeGuestIds: string[];
-  nameToId: Map<string, string>;
-} {
-  const guests = [...(episode.guests ?? [])];
-  let active = episode.activeGuestIds
-    ? [...episode.activeGuestIds]
-    : guests.map((g) => g.id);
-  const nameToId = new Map<string, string>();
-  for (const g of guests) nameToId.set(g.name.toLowerCase(), g.id);
-
-  let introduced = 0;
-  for (const spec of introduce ?? []) {
-    if (introduced >= MAX_INTRODUCE_GUESTS) break;
-    const name = (spec.name ?? '').trim();
-    const brief = (spec.brief ?? '').trim();
-    if (!name || !brief) continue;
-    const key = name.toLowerCase();
-    const existing = guests.find((g) => g.name.toLowerCase() === key);
-    if (existing) {
-      nameToId.set(key, existing.id);
-      if (!active.includes(existing.id)) active.push(existing.id);
-      introduced++;
-      continue;
-    }
-    const guest: EpisodeGuest = {
-      id: uid(),
-      name,
-      brief,
-      ...(spec.voice?.trim() ? { voice: spec.voice.trim() } : {})
-    };
-    guests.push(guest);
-    active.push(guest.id);
-    nameToId.set(key, guest.id);
-    introduced++;
-  }
-
-  // Resolve leave by guest id or name (director often emits names).
-  const leaveResolved = new Set<string>();
-  for (const raw of leaveIds ?? []) {
-    const id = resolveGuestSpeakerId(raw, guests, nameToId);
-    if (id && id !== protectGuestId) leaveResolved.add(id);
-  }
-  active = active.filter((id) => !leaveResolved.has(id));
-  if (protectGuestId && guests.some((g) => g.id === protectGuestId) && !active.includes(protectGuestId)) {
-    active.push(protectGuestId);
-  }
-
-  return { guests, activeGuestIds: active, nameToId };
-}
-
 /** Thrown when the user aborts mid-write; completed beats are already persisted. */
 export class WriteAbortedError extends Error {
   readonly name = 'AbortError';
@@ -860,12 +817,8 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
   throwIfAborted(opts.signal, 0);
   const { provider, model } = proseModelFor(opts.world);
   const ctx = await loadContext(opts.world, opts.season, opts.episode);
-  let castIds = [...opts.episode.castIds];
-  let inScene = ctx.characters.filter((c) => castIds.includes(c.id) && !c.isPlayer);
-  let guests = [...(ctx.episode.guests ?? [])];
-  let activeGuestIds = ctx.episode.activeGuestIds
-    ? [...ctx.episode.activeGuestIds]
-    : guests.map((g) => g.id);
+  const castIds = [...opts.episode.castIds];
+  const inScene = ctx.characters.filter((c) => castIds.includes(c.id) && !c.isPlayer);
   let beatsCompleted = 0;
   let userTurnId: string | null = null;
   // Pre-delta scene — restored if we abort/fail with zero beats after director mutated cast.
@@ -924,145 +877,26 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
     proseModel: model
   });
 
-  // Director plans cast/guest changes + ordered narration / speak beats (utility model).
-  // Resume path skips planning and runs leftover beats from a prior Stop/error.
+  // Who answers comes from the player's line. Resume still runs leftover replies after Stop.
   let beats: DirectorBeat[];
-  let enterIds: string[] = [];
+  const enterIds: string[] = [];
   if (opts.resumeBeats && opts.resumeBeats.length > 0) {
-    progress('the page turns');
+    progress('Writing…');
     beats = opts.resumeBeats;
   } else {
-    try {
-      progress('the page turns');
-      const speakersPresent = inScene.length > 0 || activeGuests(ctx.episode).length > 0;
-      const prefer = {
-        characterId: opts.preferCharacterId,
-        guestId: opts.preferGuestId
-      };
-      const utilityModel = utilityModelFor(opts.world).model;
-      const directorCap = promptCharBudget(utilityModel, DIRECTOR_PLAN_TOKENS);
-      const directorSystem = directorSystemPrompt(
-        opts.mode, speakersPresent, opts.length, storyStanceOf(opts.world)
-      );
-      const planDirector = (pack: PromptBuildOpts['pack'] = 'normal') => {
-        const tail = historyTailFor(utilityModel, 'director', pack);
-        return utilityJson<{
-          castDelta?: { enter?: string[]; leave?: string[]; introduce?: IntroduceSpec[] };
-          beats: Array<{ type?: string; brief?: string; characterId?: string; guestId?: string }>;
-        }>(
-          opts.world,
-          directorSystem,
-          directorUserPrompt(ctx, opts.mode, playerText, {
-            preferCharacterId: opts.preferCharacterId,
-            preferGuestId: opts.preferGuestId,
-            pack,
-            totalCap: directorCap,
-            systemChars: directorSystem.length,
-            historyTailChars: tail.charBudget,
-            historyTailMaxTurns: tail.maxTurns
-          }),
-          DIRECTOR_PLAN_TOKENS,
-          opts.signal,
-          UTILITY_TIMEOUT_MS,
-          'utility',
-          PLAN_TURN_TOOL
-        );
-      };
-      let plan: Awaited<ReturnType<typeof planDirector>>;
-      try {
-        plan = await planDirector('normal');
-      } catch (first) {
-        if ((first as Error).name === 'AbortError') asWriteAbort(first, beatsCompleted);
-        if (isPromptPackRetryError(first)) {
-          opts.onNotice?.(OVERFLOW_NOTICE);
-          plan = await planDirector('tight');
-        } else {
-          logAppError(first, 'director plan (retrying)');
-          try {
-            plan = await planDirector('normal');
-          } catch (second) {
-            if ((second as Error).name === 'AbortError') asWriteAbort(second, beatsCompleted);
-            if (isPromptPackRetryError(second)) {
-              opts.onNotice?.(OVERFLOW_NOTICE);
-              plan = await planDirector('tight');
-            } else {
-              throw second;
-            }
-          }
-        }
-      }
-      const nextCast = applyCastDelta(
-        castIds, ctx.characters, plan.castDelta, opts.preferCharacterId
-      );
-      const guestDelta = applyGuestDelta(
-        { ...ctx.episode, castIds, guests, activeGuestIds },
-        plan.castDelta?.introduce,
-        plan.castDelta?.leave,
-        opts.preferGuestId
-      );
-      guests = guestDelta.guests;
-      activeGuestIds = guestDelta.activeGuestIds;
-
-      const episodePatch: Partial<Episode> = { updatedAt: Date.now() };
-      let changed = false;
-      if (nextCast.join('\0') !== castIds.join('\0')) {
-        castIds = nextCast;
-        episodePatch.castIds = nextCast;
-        changed = true;
-      }
-      const prevGuestKey = JSON.stringify({
-        g: ctx.episode.guests ?? [],
-        a: ctx.episode.activeGuestIds ?? (ctx.episode.guests ?? []).map((g) => g.id)
-      });
-      const nextGuestKey = JSON.stringify({ g: guests, a: activeGuestIds });
-      if (prevGuestKey !== nextGuestKey) {
-        episodePatch.guests = guests;
-        episodePatch.activeGuestIds = activeGuestIds;
-        changed = true;
-      }
-      if (changed) {
-        await db.episodes.update(opts.episode.id, episodePatch);
-        sceneMutated = true;
-        ctx.episode = { ...ctx.episode, ...episodePatch, castIds, guests, activeGuestIds };
-        inScene = ctx.characters.filter((c) => castIds.includes(c.id) && !c.isPlayer);
-      }
-      beats = normalizeBeats(
-        plan, inScene, activeGuests(ctx.episode), guestDelta.nameToId, opts.mode, playerText,
-        opts.length, prefer, ctx.turns
-      );
-      enterIds = (plan.castDelta?.enter ?? [])
-        .map((raw) => resolveNpcId(raw, ctx.characters))
-        .filter((id): id is string => !!id);
-      await clearPendingPlan(opts.episode.id);
-    } catch (e) {
-      if ((e as Error).name === 'AbortError') {
-        await rollbackSceneIfNeeded();
-        if (userTurnId) {
-          await db.turns.delete(userTurnId).catch(() => undefined);
-          ctx.turns = ctx.turns.filter((t) => t.id !== userTurnId);
-        }
-        asWriteAbort(e, 0);
-      }
-      logAppError(e, 'director plan (fallback)');
-      opts.onNotice?.(
-        'Director planning failed — using a simple beat so the scene can continue. ' +
-        'Check your utility model if this keeps happening.'
-      );
-      const fallback: DirectorBeat[] = [{
-        type: 'narration',
-        brief: directorFallbackNarrationBrief({
-          mode: opts.mode,
-          playerText,
-          location: ctx.episode.location,
-          inScene
-        })
-      }];
-      beats = ensurePlayerReplySpeak(
-        fallback, opts.mode, playerText, inScene, activeGuests(ctx.episode),
-        planCapsForLength(opts.length),
-        { characterId: opts.preferCharacterId, guestId: opts.preferGuestId }
-      );
-    }
+    progress('Writing…');
+    beats = beatsForTurn({
+      length: opts.length,
+      mode: opts.mode,
+      playerText,
+      location: ctx.episode.location,
+      inScene,
+      guests: activeGuests(ctx.episode),
+      turns: ctx.turns,
+      preferCharacterId: opts.preferCharacterId,
+      preferGuestId: opts.preferGuestId
+    });
+    await clearPendingPlan(opts.episode.id);
   }
 
   const sceneGuests = () => activeGuests(ctx.episode);
@@ -1290,7 +1124,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
       await clearPendingPlan(opts.episode.id);
     }
     const err = new AIError(
-      'No character replied aloud. Try again, pin who should answer, or add cast to the scene.'
+      'No character replied aloud. Try again, or add someone to this chapter.'
     ) as AIError & { beatsCompleted?: number; remainingBeats?: DirectorBeat[] };
     err.beatsCompleted = beatsCompleted;
     err.remainingBeats = leftover;
@@ -2125,8 +1959,7 @@ export function softWrapAlreadyFiled(episode: Pick<Episode, 'wrap'>): boolean {
 export async function commitSoftEpisodeWrap(
   world: World,
   season: Season,
-  episode: Episode,
-  opts?: { onNotice?: (message: string) => void }
+  episode: Episode
 ): Promise<EpisodeWrap> {
   if (softWrapAlreadyFiled(episode) && episode.wrap) {
     return episode.wrap;
@@ -2149,12 +1982,12 @@ export async function commitSoftEpisodeWrap(
           provider,
           model,
           system:
-            'Summarize an interactive-fiction episode for a previously-on card. ' +
+            'Summarize a chapter of an interactive story for a previously-on card. ' +
             'Write 80–160 words in past tense. No dialogue quotes. No preamble.',
           messages: [{
             role: 'user',
             content:
-              `World: ${world.title}. Season ${season.number}, episode ${episode.number}` +
+              `World: ${world.title}. Chapter ${episode.number}` +
               `${episode.title ? ` (${episode.title})` : ''}.\n\n${digest.slice(0, 12000)}`
           }],
           maxTokens: 400
@@ -2168,8 +2001,8 @@ export async function commitSoftEpisodeWrap(
   if (!recap) {
     const last = turns.slice(-3).map((t) => t.text.trim()).filter(Boolean);
     recap = last.length > 0
-      ? `Episode ${episode.number} ended without a full wrap. Last beats: ${last.map((t) => t.slice(0, 120)).join(' / ')}`
-      : `Episode ${episode.number} ended without a filed summary.`;
+      ? `Chapter ${episode.number} ended. Last of it: ${last.map((t) => t.slice(0, 120)).join(' / ')}`
+      : `Chapter ${episode.number} ended without a filed summary.`;
   }
   recap = recap.slice(0, 1200);
 
@@ -2207,19 +2040,19 @@ export async function commitSoftEpisodeWrap(
       place?: { name?: string; currentState?: string; atmosphere?: string };
     }>(
       world,
-      'You are a continuity editor filing a skipped episode wrap. Call return_json with this shape: ' +
+      'You are a continuity editor filing the end of a chapter. Call return_json with this shape: ' +
       '{"facts":["..."],"threads":["..."],' +
-      '"characterUpdates":[{"name":"<exact in-scene name>","goal":"","emotion":"","location":"","condition":""}],' +
-      '"place":{"name":"<scene place>","currentState":"<how the room is left>"}}. ' +
+      '"characterUpdates":[{"name":"<exact name of someone present>","goal":"","emotion":"","location":"","condition":""}],' +
+      '"place":{"name":"<place>","currentState":"<how the room is left>"}}. ' +
       `At most ${SOFT_WRAP_FACT_CAP} durable facts and ${SOFT_WRAP_THREAD_CAP} unresolved threads. ` +
-      'Facts must still be true next episode (revelations, injuries, promises, debts). ' +
-      'characterUpdates: only named in-scene NPCs; omit empties. ' +
-      'place.currentState: lasting physical condition of the scene as left; omit if nothing changed. ' +
+      'Facts must still be true in the next chapter (revelations, injuries, promises, debts). ' +
+      'characterUpdates: only named people who are present; omit empties. ' +
+      'place.currentState: lasting physical condition of the place as left; omit if nothing changed. ' +
       'Do not invent people, relationships, or calendar hits.',
-      `World: ${world.title}. Season ${season.number}, episode ${episode.number}.\n` +
+      `World: ${world.title}. Chapter ${episode.number}.\n` +
       `Place: ${episode.location || '(unnamed)'}\n` +
-      `In-scene cast: ${inScene.map((c) => c.name).join(', ') || '(none)'}\n\n` +
-      `Recap:\n${recap}\n\nEpisode material:\n${source}`,
+      `Present: ${inScene.map((c) => c.name).join(', ') || '(none)'}\n\n` +
+      `Recap:\n${recap}\n\nChapter material:\n${source}`,
       1400,
       undefined,
       45_000,
@@ -2229,7 +2062,6 @@ export async function commitSoftEpisodeWrap(
     await fileSoftWrapContinuity(world, season, episode, capped);
   } catch (e) {
     logAppError(e, 'soft wrap continuity');
-    opts?.onNotice?.('Couldn’t file extra memory on skip — recap was kept.');
   }
 
   return wrap;

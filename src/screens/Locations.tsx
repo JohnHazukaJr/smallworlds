@@ -287,7 +287,7 @@ export function Locations() {
                 <div style={{ fontSize: stacked ? 12.5 : 13.5, fontWeight: 600, color: 'var(--ink-heading)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{l.name || 'unnamed'}</div>
                 {!narrow && (
                   <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {inScene ? 'this scene' : (l.tagline || 'no tagline yet')}
+                    {inScene ? "this chapter's place" : (l.tagline || 'no tagline yet')}
                   </div>
                 )}
               </div>
@@ -296,7 +296,7 @@ export function Locations() {
                   type="button"
                   className="btn-quiet"
                   style={{ fontSize: 10, padding: '2px 6px', flexShrink: 0, whiteSpace: 'nowrap' }}
-                  title={inScene ? 'Clear this scene' : 'Set as this scene'}
+                  title={inScene ? "Clear this chapter's place" : 'Set as the place'}
                   onClick={(e) => {
                     e.stopPropagation();
                     void safeWrite(
@@ -307,7 +307,7 @@ export function Locations() {
                       setError
                     );
                   }}
-                >{stacked ? (inScene ? 'clear' : 'set') : (inScene ? 'this scene — clear' : 'set scene')}</button>
+                >{stacked ? (inScene ? 'clear' : 'set') : (inScene ? "this chapter's place — clear" : 'set as the place')}</button>
               )}
             </div>
           );
@@ -411,7 +411,7 @@ export function Locations() {
                           setError
                         );
                       }}
-                    >{episode.locationId === d.id ? '✓ this scene — clear' : 'set as this scene'}</button>
+                    >{episode.locationId === d.id ? "✓ this chapter's place — clear" : 'set as the place'}</button>
                   )}
                   <button
                     className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
@@ -555,7 +555,7 @@ export function Locations() {
               )}
 
               {tab === 'ai' && (
-                <Field label="Custom AI instructions" note="verbatim when this location is the current scene">
+                <Field label="Custom AI instructions" note="verbatim when this place is the chapter's place">
                   <textarea
                     rows={5} value={d.customInstructions}
                     onChange={(e) => patch({ customInstructions: e.target.value })}

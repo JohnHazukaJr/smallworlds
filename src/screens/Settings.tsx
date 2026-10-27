@@ -88,14 +88,14 @@ export function Settings() {
           <div className="craft-row" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>Utility model</div>
             <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
-              Director, wrap, drafts, live canon. Recommended: glm-5.2. Falls back to prose if unset.
+              Chapter memory, drafts, live canon. Recommended: glm-5.2. Falls back to prose if unset.
             </div>
             <ModelPicker value={s.utilityModel} onChange={s.setUtilityModel} />
           </div>
           <div className="craft-row" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>Image model</div>
             <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
-              Scene backdrops. Recommended: glm-image. Falls back to prose if unset.
+              Chapter pictures. Recommended: glm-image. Falls back to prose if unset.
             </div>
             <ModelPicker value={s.imageModel ?? null} onChange={s.setImageModel} />
           </div>
@@ -276,7 +276,7 @@ function SecuritySection() {
           </div>
           <button className="btn-quiet" style={{ color: 'oklch(0.4 0.12 25)', borderColor: 'oklch(0.4 0.1 25)' }} onClick={() => {
             if (!confirm('Delete ALL data on this device? This cannot be undone. Cloud copies are kept.')) return;
-            if (!confirm('Last chance — every world, season and key on this device will be erased. Continue?')) return;
+            if (!confirm('Last chance — every world and key on this device will be erased. Continue?')) return;
             void wipeAllData().catch((e) => setSectionError(formatUserError(e)));
           }}>Erase this device</button>
         </div>
@@ -664,7 +664,7 @@ function WorldSettings({ world }: { world: World }) {
             defaultValue={world.ai.narratorRules.join('\n')}
             key={world.id + '-rules'}
             onBlur={(e) => patchAI({ narratorRules: e.target.value.split('\n').filter((l) => l.trim()) })}
-            placeholder={'Never skip time without asking.\nNever kill a named character without the player in the scene.'}
+            placeholder={'Never skip time without asking.\nNever kill a named character without the player in the chapter.'}
           />
         </Field>
         <Field label="Content boundaries" note="free text, e.g. lines that are never crossed">

@@ -741,8 +741,8 @@ export function Onboard() {
         setInterviewQs([
           { id: 'who', question: 'Who are you in this story, and what do you want as it opens?', hint: 'e.g. A smuggler under a false name, trying to keep the ledger quiet.' },
           { id: 'situation', question: 'What is true as it opens?', hint: 'e.g. Someone is asking about your handwriting — or nothing urgent, just the weather and who is in the room.' },
-          { id: 'cast', question: 'Who shares the opening scene with you?', hint: 'e.g. The registrar who saw the false signature.' },
-          { id: 'place', question: 'Where does episode 1 open, and what rule does that place enforce?', hint: 'e.g. The long room above customs — nothing spoken there is public unless carried downstairs.' },
+          { id: 'cast', question: 'Who is in the first chapter with you?', hint: 'e.g. The registrar who saw the false signature.' },
+          { id: 'place', question: 'Where does chapter 1 open, and what rule does that place enforce?', hint: 'e.g. The long room above customs — nothing spoken there is public unless carried downstairs.' },
           { id: 'walls', question: 'What must the narrator never do, and what content is off-limits?', hint: 'e.g. Never kill a named character off-page. No sexual content involving minors.' }
         ]);
       } else {
@@ -978,7 +978,7 @@ export function Onboard() {
         }
       : {
           title: 'How should this world write?',
-          body: 'These ride in every prompt for this world. Set defaults now so the first scene already feels right — change them later from Story → Edit world.',
+          body: 'These ride in every prompt for this world. Set defaults now so the first chapter already feels right — change them later from Write → Edit world.',
           cta: 'Next — who you are',
           content: (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -1026,16 +1026,16 @@ export function Onboard() {
               </div>
 
               <Field
-                label="Season 1 premise"
-                note={premiseRequired ? 'required — what’s live this season' : 'optional — what’s live this season'}
+                label="Opening"
+                note={premiseRequired ? 'required — the opening' : 'optional — the opening'}
               >
                 <textarea
                   rows={3}
                   value={premise}
                   onChange={(e) => setPremiseAndSave(e.target.value)}
                   placeholder={premiseRequired
-                    ? "What's live this season — concrete situation, present tense. Required before you enter."
-                    : "What's live this season — optional for this story shape."}
+                    ? 'The opening — concrete situation, present tense. Required before you enter.'
+                    : 'The opening — optional for this story shape.'}
                 />
               </Field>
               {hasAI && (
@@ -1054,7 +1054,7 @@ export function Onboard() {
                   onBlur={() => patchAI({
                     narratorRules: ai.narratorRules.map((l) => l.trim()).filter(Boolean)
                   })}
-                  placeholder={'Never skip time without asking.\nNever kill a named character without the player in the scene.'}
+                  placeholder={'Never skip time without asking.\nNever kill a named character without the player in the chapter.'}
                 />
               </Field>
               {hasAI && (
@@ -1086,21 +1086,21 @@ export function Onboard() {
         },
     {
       title: 'Who are you in this world?',
-      body: 'Your sheet is the protagonist the cast reacts to. Summary or a live goal is required before Enter — desires, fears, and state help the first scene land.',
+      body: 'Your sheet is the protagonist the cast reacts to. Summary or a live goal is required before Enter — desires, fears, and state help the first chapter land.',
       cta: 'Next — the cast',
       content: (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           {checklistPanel(true)}
           {ideaLane && (
             <Field
-              label="Season 1 premise"
-              note={premiseRequired ? 'required — what’s live this season' : 'optional — what’s live this season'}
+              label="Opening"
+              note={premiseRequired ? 'required — the opening' : 'optional — the opening'}
             >
               <textarea
                 rows={3}
                 value={premise}
                 onChange={(e) => setPremiseAndSave(e.target.value)}
-                placeholder="What's live this season"
+                placeholder="The opening"
               />
             </Field>
           )}
@@ -1172,7 +1172,7 @@ export function Onboard() {
     {
       title: 'Who is in it with you?',
       body: hasAI
-        ? 'Add NPCs with voice, anchors, and live state. At least one scene NPC with speech style, summary, and an anchor is required before Enter.'
+        ? 'Add people with voice, anchors, and live state. At least one person in the first chapter, with speech style, summary, and an anchor, is required before Enter.'
         : 'No AI provider yet — add characters by hand now; configure a key in Settings before writing.',
       cta: 'Next — the opening place',
       content: (
@@ -1235,7 +1235,7 @@ export function Onboard() {
     {
       title: 'Where does it begin?',
       body: hasAI
-        ? 'Opening location needs a name and at least one hard rule, linked to episode 1. Mark which place the story opens in.'
+        ? 'Opening location needs a name and at least one hard rule, linked to chapter 1. Mark which place the story opens in.'
         : 'Add a location by hand and give it a hard rule. Link it as the opening place.',
       cta: 'Next — memory & enter',
       content: (
@@ -1297,7 +1297,7 @@ export function Onboard() {
     },
     {
       title: 'Memory, then enter.',
-      body: 'Seed opening continuity and threads so episode 1 already has a situation to lean on. Enter is blocked until the write-ready checklist passes.',
+      body: 'Seed opening continuity and threads so chapter 1 already has a situation to lean on. Enter is blocked until the write-ready checklist passes.',
       cta: busy ? busy : 'Enter the world',
       content: (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -1426,7 +1426,7 @@ export function Onboard() {
         return; // generateFromInterview sets step to 3
       }
       if (premiseRequired && !premise.trim()) {
-        setError('Season premise is required for a long story — write what’s live this season, or flesh it with AI.');
+        setError('An opening is required for a long story — write what is happening, or fill it in with AI.');
         return;
       }
       setStep(3);

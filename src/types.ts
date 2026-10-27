@@ -249,7 +249,7 @@ export function resolveComposeMode(
 }
 /**
  * Reply-size preset for a Write-on (not story structure).
- * Story units remain Season → Episode → Turns; director plans micro-beats inside a turn.
+ * Story units are chapters. Stored length ids stay beat / scene / episode.
  * UI labels: Short / Medium / Long.
  */
 export type TurnLength = 'beat' | 'scene' | 'episode';

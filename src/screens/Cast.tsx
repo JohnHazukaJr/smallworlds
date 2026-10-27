@@ -332,7 +332,7 @@ export function Cast() {
                 {!narrow && (
                   <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                     {c.role || (c.isPlayer ? 'protagonist' : 'no role yet')}
-                    {episode && !c.isPlayer ? (inScene ? ' · in scene' : ' · off-page') : ''}
+                    {episode && !c.isPlayer ? (inScene ? ' · in this chapter' : ' · not here') : ''}
                   </div>
                 )}
               </div>
@@ -351,7 +351,7 @@ export function Cast() {
                       setError
                     );
                   }}
-                >{inScene ? 'in scene' : 'add'}</button>
+                >{inScene ? 'in this chapter' : 'add'}</button>
               )}
             </div>
           );
@@ -509,7 +509,7 @@ export function Cast() {
                       }),
                       setError
                     )}
-                  >{episode.castIds.includes(d.id) ? '✓ in this scene — remove' : 'add to this scene'}</button>
+                  >{episode.castIds.includes(d.id) ? '✓ in this chapter — remove' : 'add to this chapter'}</button>
                 )}
                 {!d.isPlayer && (
                   <button
@@ -717,7 +717,7 @@ export function Cast() {
                     </div>
                   </div>
                   <div style={{ fontSize: 13, lineHeight: 1.65, color: 'var(--ink-muted)' }}>
-                    Hard rules, rendered as a non-negotiable block when this character is in scene (narrator / speak).
+                    Hard rules, rendered as a non-negotiable block when this character is in the chapter.
                     One per line.
                   </div>
                   <textarea
@@ -727,7 +727,7 @@ export function Cast() {
                     onBlur={() => patch({
                       anchors: d.anchors.map((l) => l.trim()).filter(Boolean)
                     })}
-                    placeholder={'Never lies in writing. Will omit, will refuse, will not falsify.\nDoes not warm to you quickly. Trust moves one notch per episode at most.'}
+                    placeholder={'Never lies in writing. Will omit, will refuse, will not falsify.\nDoes not warm to you quickly. Trust moves one notch per chapter at most.'}
                   />
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     {d.anchors.filter((a) => a.trim()).map((a, i) => (
@@ -743,7 +743,7 @@ export function Cast() {
               )}
 
               {tab === 'ai' && (
-                <Field label="Custom AI instructions" note="verbatim when this character is in scene (narrator / speak)">
+                <Field label="Custom AI instructions" note="verbatim when this character is in the chapter">
                   <textarea
                     rows={5} value={d.customInstructions}
                     onChange={(e) => patch({ customInstructions: e.target.value })}
