@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { presetFor } from '../ai/providers';
+import { isHostedProvider, presetFor } from '../ai/providers';
 import { formatUserError, logAppError } from '../errors';
 import type { AppSettings, ModelRef, ProviderConfig } from '../types';
 
@@ -53,11 +53,24 @@ export const useSettings = create<SettingsStore>()(
       addProvider: (p) => {
         const suggested = presetFor(p)?.suggestedModels.find((m) => m.trim()) ?? '';
         const ref: ModelRef | null = suggested ? { providerId: p.id, model: suggested } : null;
-        set((s) => ({
-          providers: [...s.providers, p],
-          proseModel: s.proseModel ?? ref,
-          utilityModel: s.utilityModel ?? ref
-        }));
+        const newIsHosted = isHostedProvider(p);
+        set((s) => {
+          const byId = new Map(s.providers.map((x) => [x.id, x]));
+          // A BYOK provider claims a slot that is empty or still pointing at
+          // hosted. It never steals a slot from another BYOK pick, and hosted
+          // never steals a slot from BYOK.
+          const claim = (slot: ModelRef | null): ModelRef | null => {
+            if (!ref || !slot) return slot ?? ref;
+            const current = byId.get(slot.providerId);
+            if (!newIsHosted && current && isHostedProvider(current)) return ref;
+            return slot;
+          };
+          return {
+            providers: [...s.providers, p],
+            proseModel: claim(s.proseModel),
+            utilityModel: claim(s.utilityModel)
+          };
+        });
         void syncVaultSafe(set);
       },
       updateProvider: (id, patch) => {

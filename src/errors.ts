@@ -58,6 +58,16 @@ function statusOf(e: unknown): number | undefined {
   return undefined;
 }
 
+/** Provider tag carried by AIError, when the failing call knew its provider. */
+function providerTagOf(e: unknown): { label?: string; hosted?: boolean } | null {
+  if (!e || typeof e !== 'object') return null;
+  const o = e as { providerLabel?: unknown; hostedProvider?: unknown };
+  const label = typeof o.providerLabel === 'string' ? o.providerLabel : undefined;
+  const hosted = typeof o.hostedProvider === 'boolean' ? o.hostedProvider : undefined;
+  if (label === undefined && hosted === undefined) return null;
+  return { label, hosted };
+}
+
 function looksLikeNetwork(msg: string): boolean {
   const m = msg.toLowerCase();
   return (
@@ -150,7 +160,11 @@ export function classifyError(e: unknown): AppError {
     });
   }
 
-  if (status === 402 || /not enough small worlds credits/i.test(msg)) {
+  const providerTag = providerTagOf(e);
+  const hostedCreditMsg = /not enough small worlds credits/i.test(msg);
+  // Only hosted can run out of Small Worlds credits. A BYOK provider's 402 is
+  // that provider's own balance or key limit, not a subscription prompt.
+  if (hostedCreditMsg || (status === 402 && providerTag?.hosted === true)) {
     return new AppError({
       code: 'provider',
       userMessage: 'Not enough Small Worlds credits. Subscribe or buy a pack in Profile.',
@@ -160,7 +174,21 @@ export function classifyError(e: unknown): AppError {
     });
   }
 
-  if ((status === 401 || status === 403) && /sign in/i.test(msg)) {
+  if (status === 402) {
+    const who = providerTag?.label ? `${providerTag.label} asked for payment` : 'The model provider asked for payment';
+    return new AppError({
+      code: 'provider',
+      userMessage: `${who} (402). Check your balance or key limit with that provider — this is not a Small Worlds charge.`,
+      detail: msg,
+      status,
+      cause: e
+    });
+  }
+
+  if (
+    (status === 401 || status === 403) && /sign in/i.test(msg)
+    && (providerTag?.hosted === true || providerTag === null)
+  ) {
     return new AppError({
       code: 'auth',
       userMessage: 'Sign in to use Small Worlds hosted models.',

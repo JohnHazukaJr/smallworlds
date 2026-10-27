@@ -1,6 +1,6 @@
 /**
- * What sits behind the story scroll, under the dim-wash glass.
- * Auto lets a scene photo you or the AI set win, then the place photo, then climate.
+ * The thin endpaper at the head of the page. Not a room behind the type.
+ * Auto uses a chapter picture, then the place, then only the stain.
  */
 
 export const SCROLL_BACKDROPS = ['auto', 'scene', 'location', 'climate', 'off'] as const;
@@ -8,10 +8,10 @@ export type ScrollBackdrop = (typeof SCROLL_BACKDROPS)[number];
 
 export const SCROLL_BACKDROP_LABEL: Record<ScrollBackdrop, string> = {
   auto: 'Auto',
-  scene: 'Scene photo',
-  location: 'Place photo',
-  climate: 'Climate',
-  off: 'Off'
+  scene: 'Chapter picture',
+  location: 'Place',
+  climate: 'Stain',
+  off: 'Plain page'
 };
 
 export function normalizeScrollBackdrop(raw: unknown): ScrollBackdrop {

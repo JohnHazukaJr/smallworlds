@@ -803,6 +803,11 @@ async function clearPendingPlan(episodeId: string): Promise<void> {
   await db.episodes.update(episodeId, { pendingPlan: null, updatedAt: Date.now() }).catch(() => undefined);
 }
 
+/** Drop a saved plan the page will not resume. */
+export function discardPendingPlan(episodeId: string): Promise<void> {
+  return clearPendingPlan(episodeId);
+}
+
 /** Leftover director beats to persist after Stop/error — kept even if nothing has saved yet. */
 export function pendingBeatsToKeep(remaining: DirectorBeat[]): DirectorBeat[] {
   return remaining.length > 0 ? remaining : [];

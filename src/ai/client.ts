@@ -4,6 +4,7 @@ import {
   thinkingOnForJob,
   type ChatJob
 } from './modelProfile';
+import { isHostedProvider } from './providers';
 import { isZaiProvider, providerFetch } from './providerFetch';
 
 export interface ToolSpec {
@@ -44,11 +45,30 @@ export interface StreamResult {
   sawReasoning?: boolean;
 }
 
+export interface AIErrorProviderTag {
+  label?: string;
+  hosted?: boolean;
+}
+
 export class AIError extends Error {
-  constructor(message: string, public status?: number) {
+  /** Provider that produced this failure, when known. */
+  providerLabel?: string;
+  /** True when the failure came from Small Worlds hosted, not a BYOK provider. */
+  hostedProvider?: boolean;
+
+  constructor(message: string, public status?: number, provider?: AIErrorProviderTag) {
     super(message);
     this.name = 'AIError';
+    if (provider) {
+      this.providerLabel = provider.label;
+      this.hostedProvider = provider.hosted;
+    }
   }
+}
+
+/** Tag a provider failure so error copy can tell hosted from BYOK. */
+export function providerTagFor(provider: ProviderConfig): AIErrorProviderTag {
+  return { label: provider.label, hosted: isHostedProvider(provider) };
 }
 
 export function isContextOverflowError(e: unknown): boolean {
@@ -328,7 +348,7 @@ async function readSSE(
   }
 }
 
-async function throwHttpError(res: Response): Promise<never> {
+async function throwHttpError(res: Response, provider?: ProviderConfig): Promise<never> {
   let detail = '';
   try {
     const body = await res.json();
@@ -336,7 +356,11 @@ async function throwHttpError(res: Response): Promise<never> {
   } catch {
     try { detail = await res.text(); } catch { /* ignore */ }
   }
-  const err = new AIError(`${res.status} ${res.statusText}${detail ? ` — ${detail}` : ''}`, res.status);
+  const err = new AIError(
+    `${res.status} ${res.statusText}${detail ? ` — ${detail}` : ''}`,
+    res.status,
+    provider ? providerTagFor(provider) : undefined
+  );
   if (isRetryableStatus(res.status)) {
     (err as AIError & { retryAfterMs?: number }).retryAfterMs = retryDelayMs(res);
   }
@@ -359,7 +383,7 @@ async function streamOpenAI(req: StreamRequest): Promise<StreamResult> {
     signal: req.signal,
     body: JSON.stringify(buildOpenAIChatBody(req))
   });
-  if (!res.ok) await throwHttpError(res);
+  if (!res.ok) await throwHttpError(res, req.provider);
   let full = '';
   let truncated = false;
   let finishReason = '';
@@ -429,7 +453,7 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
       messages: req.messages
     }, req.model, req.temperature))
   });
-  if (!res.ok) await throwHttpError(res);
+  if (!res.ok) await throwHttpError(res, req.provider);
   let full = '';
   let truncated = false;
   let finishReason = '';
@@ -445,7 +469,7 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
         if (reason) finishReason = reason;
         if (isLengthStop(reason)) truncated = true;
       }
-      if (json.type === 'error') throw new AIError(json.error?.message ?? 'Provider error');
+      if (json.type === 'error') throw new AIError(json.error?.message ?? 'Provider error', undefined, providerTagFor(req.provider));
     } catch (e) {
       if (e instanceof AIError) throw e;
     }
@@ -471,7 +495,7 @@ async function streamGemini(req: StreamRequest): Promise<StreamResult> {
       }, req.model, req.temperature)
     })
   });
-  if (!res.ok) await throwHttpError(res);
+  if (!res.ok) await throwHttpError(res, req.provider);
   let full = '';
   let truncated = false;
   let finishReason = '';

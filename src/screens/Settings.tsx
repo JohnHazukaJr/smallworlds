@@ -33,7 +33,7 @@ export function Settings() {
     },
     [currentWorldId]
   );
-  const [addOpen, setAddOpen] = useState(false);
+  const [addOpen, setAddOpen] = useState(() => !s.providers.some((p) => !isHostedProvider(p)));
 
   return (
     <div className="fade-in" style={{
@@ -53,17 +53,15 @@ export function Settings() {
         </button>
       </div>
 
-      <HostedSection />
-
-      {/* providers */}
+      {/* providers — your own key first; hosted is optional and lives below */}
       <Section
         title="Your AI providers"
         note="keys live in this device's storage, sent only to the endpoint you name"
       >
         <div style={{ fontSize: 13, lineHeight: 1.6, color: 'var(--ink-muted)', maxWidth: '68ch', marginBottom: 4 }}>
-          Bring your own key, or use Small Worlds hosted credits above. Any OpenAI-compatible endpoint, Anthropic, or
-          Gemini — and any model ID, including ones released after this app was built. OpenRouter is the easiest start:
-          one key, hundreds of models to compare.
+          Start here with your own key — no Small Worlds account, subscription, or credits needed. Any OpenAI-compatible
+          endpoint, Anthropic, or Gemini — and any model ID, including ones released after this app was built. OpenRouter
+          is the easiest start: one key, hundreds of models to compare.
         </div>
         {s.providers.map((p) => (
           <ProviderCard key={p.id} config={p} />
@@ -74,6 +72,8 @@ export function Settings() {
           <AddProvider onDone={() => setAddOpen(false)} />
         )}
       </Section>
+
+      <HostedSection />
 
       {/* default models */}
       <Section title="Default models" note="per-world overrides live below">
@@ -138,6 +138,12 @@ function HostedSection() {
   const go = useApp((a) => a.go);
   if (!isCloudConfigured()) return null;
   const hosted = s.providers.find(isHostedProvider);
+  const proseProvider = s.proseModel
+    ? s.providers.find((p) => p.id === s.proseModel?.providerId)
+    : undefined;
+  const byokWriting = !!proseProvider && !isHostedProvider(proseProvider);
+  const hostedWritingWithByok = !!proseProvider && isHostedProvider(proseProvider)
+    && s.providers.some((p) => !isHostedProvider(p));
 
   const enable = () => {
     if (hosted) return;
@@ -158,7 +164,17 @@ function HostedSection() {
         Prose costs {COST_BEAT} credits, short utility calls cost {COST_UTILITY}, images cost {COST_IMAGE}.
         Sign in to spend credits. The model key stays on the server.
       </div>
-      {!user ? (
+      {byokWriting ? (
+        <div style={{ fontSize: 13, lineHeight: 1.55, color: 'var(--paper)' }}>
+          Your own key is in use — {proseProvider?.label} writes the story. Hosted is off for writing, so no
+          Small Worlds credits or subscription are needed.
+        </div>
+      ) : hostedWritingWithByok ? (
+        <div style={{ fontSize: 13, lineHeight: 1.55, color: 'var(--paper)' }}>
+          Your writing model still points at Small Worlds hosted, which uses credits. To use your own key instead,
+          pick your provider under Default models below.
+        </div>
+      ) : !user ? (
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           <div style={{ fontSize: 13, color: 'var(--paper)' }}>Sign in on Profile to use hosted models.</div>
           <button className="btn-ghost" onClick={() => go('profile')}>Open Profile</button>

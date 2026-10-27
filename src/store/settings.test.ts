@@ -50,6 +50,56 @@ describe('addProvider', () => {
     expect(s.utilityModel).toBeNull();
   });
 
+  it('lets a BYOK provider claim prose and utility from hosted', () => {
+    const hosted = {
+      id: 'hosted1',
+      kind: 'openai' as const,
+      label: 'Small Worlds',
+      baseUrl: 'https://example.supabase.co/functions/v1/hosted-ai',
+      apiKey: ''
+    };
+    useSettings.setState({
+      providers: [hosted],
+      proseModel: { providerId: 'hosted1', model: 'small-worlds/prose' },
+      utilityModel: { providerId: 'hosted1', model: 'small-worlds/utility' }
+    });
+    useSettings.getState().addProvider({
+      id: 'or1',
+      kind: 'openai',
+      label: 'OpenRouter',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      apiKey: 'sk-or-test'
+    });
+    const s = useSettings.getState();
+    expect(s.proseModel).toEqual({ providerId: 'or1', model: 'z-ai/glm-5.2' });
+    expect(s.utilityModel).toEqual({ providerId: 'or1', model: 'z-ai/glm-5.2' });
+  });
+
+  it('does not let hosted claim prose and utility from a BYOK provider', () => {
+    const openRouter = {
+      id: 'or1',
+      kind: 'openai' as const,
+      label: 'OpenRouter',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      apiKey: 'sk-or-test'
+    };
+    useSettings.setState({
+      providers: [openRouter],
+      proseModel: { providerId: 'or1', model: 'z-ai/glm-5.2' },
+      utilityModel: { providerId: 'or1', model: 'z-ai/glm-5.2' }
+    });
+    useSettings.getState().addProvider({
+      id: 'hosted1',
+      kind: 'openai',
+      label: 'Small Worlds',
+      baseUrl: 'https://example.supabase.co/functions/v1/hosted-ai',
+      apiKey: ''
+    });
+    const s = useSettings.getState();
+    expect(s.proseModel).toEqual({ providerId: 'or1', model: 'z-ai/glm-5.2' });
+    expect(s.utilityModel).toEqual({ providerId: 'or1', model: 'z-ai/glm-5.2' });
+  });
+
   it('leaves existing model refs in place', () => {
     useSettings.setState({
       proseModel: { providerId: 'old', model: 'keep-me' },

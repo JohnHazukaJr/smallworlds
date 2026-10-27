@@ -1,10 +1,11 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
 import {
   analyzeEpisode, commitEpisodeWrap, commitSoftEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, draftColdOpenNarration, imageModelFor,
   clearEpisodeRunningSummary, regenerateBeat, rollbackTurnSnapshot,
-  snapshotTurnsAfter, snapshotTurnsFrom, writeTurn, seedSeasonCalendarEvents,
-  WriteAbortedError, type EpisodeWrapDraft, type StreamMeta, type SeedCalendarEventDraft
+  snapshotTurnsAfter, snapshotTurnsFrom, writeTurn,
+  discardPendingPlan,
+  WriteAbortedError, type EpisodeWrapDraft, type StreamMeta
 } from '../ai/engine';
 import {
   parseDeliveryTone,
@@ -21,15 +22,11 @@ import {
 import { collectSceneImageRefs, generateSceneImage, sceneHasPortraitRefs } from '../ai/image';
 import {
   episodeContextPressure, episodeHistoryChars, HISTORY_CHAR_BUDGET,
-  preferBucketsForEpisodes, resolveSpeakerName, selectDirectorFacts, selectDirectorThreads,
+  resolveSpeakerName,
   type DirectorBeat
 } from '../ai/prompts';
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
-import { db, guardStorage, recordTombstones, safeWrite, uid } from '../db';
-import {
-  CALENDAR_EVENT_KINDS, CALENDAR_EVENT_SCALES, CALENDAR_EVENT_VISIBILITIES,
-  emptyCalendarEvent, evaluateCalendarEvents
-} from '../calendarEvents';
+import { db, guardStorage, recordTombstones, safeWrite } from '../db';
 import {
   AVATAR_PX, DEFAULT_DISPLAY, moodFromHue, storyAvatarHeight, useApp,
   type AvatarSize, type DialogueStyle, type StoryLayout
@@ -37,14 +34,10 @@ import {
 import { hasWritingModel } from '../ai/models';
 import { useSettings } from '../store/settings';
 import type {
-  CalendarEvent, CalendarEventKind, CalendarEventScale, CalendarEventVisibility,
-  Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, EpisodeWrap, EpisodeWrapBeat,
-  Location, OpenThread, PlotTarget, PlotTargetStatus, Season, Turn, TurnLength, World, ActionWeight
+  Character, ComposeMode, Episode, EpisodeGuest, EpisodeWrapBeat,
+  Location, Turn, TurnLength, World, ActionWeight
 } from '../types';
-import {
-  defaultVisibilityForKind, PAGE_LENGTH_LABELS,
-  worldCalendarEventPrefs, CALENDAR_EVENT_CAP
-} from '../types';
+import { PAGE_LENGTH_LABELS } from '../types';
 import { AppError, classifyError, formatUserError } from '../errors';
 import {
   Chip, ConfirmBar, ErrorNote, Mono, Sheet, Spinner, Toggle,
@@ -57,11 +50,10 @@ import { abortWriteNotice, unfinishedWriteNotice, NOTICE_ADD_MODEL, noticeNavAct
 import {
   SCROLL_BACKDROP_LABEL, SCROLL_BACKDROPS, resolveScrollBackdrop
 } from '../ui/scrollBackdrop';
-import { avatarStyle, speakerInk, BACKDROPS, MOODS, STRIPE, ACCENT, ACCENT_RGBA } from '../ui/theme';
+import { avatarStyle, speakerInk, BACKDROPS, MOODS, ACCENT, ACCENT_RGBA } from '../ui/theme';
 import {
-  calendarPatch, characterPortraits, dayFromParts, emptyLocation, evaluateWorldWriteReady, formatStoryDate,
-  advanceMonths, buildEpisodePlotTargets, formatStoryDateShort, latestEndedEpisode, nextEpisode, nextSceneCastIds, partsForDay,
-  PLOT_TARGET_CAP, weekdayForDay, worldCalendar
+  characterPortraits, evaluateWorldWriteReady, formatStoryDate,
+  buildEpisodePlotTargets, latestEndedEpisode, nextEpisode, worldCalendar
 } from '../worldOps';
 
 /** Editable wrap draft with Keep/Drop flags for the review UI. */
@@ -765,7 +757,7 @@ export function Story() {
   const short = shortStoryChrome(band, height);
   const sheetBottom = sheetsFromBottom(band);
   const narrow = phone;
-  const { currentWorldId, layout, setLayout, mood, setMood, backdrop, go, display, setDisplay, goLocations: openLocations, goCast: openCast, closeWorld } = useApp();
+  const { currentWorldId, layout, setLayout, mood, setMood, backdrop, go, display, goLocations: openLocations, goCast: openCast, closeWorld } = useApp();
   useSettings((s) => s.proseModel);
   const M = MOODS[mood];
   const BD = BACKDROPS[backdrop];
@@ -837,10 +829,7 @@ export function Story() {
   const storyRowsReady = !episode
     || (bookTurnsLive !== undefined && charactersLive !== undefined && locationsLive !== undefined);
 
-  // writing state — Continue/Steer exclusive; Speak/Act independent toggles → speak|act|play
-  const [, setComposeBase] = useState<'continue' | 'steer'>('continue');
-  const [, setSpeakOn] = useState(false);
-  const [, setActOn] = useState(false);
+  // writing state — whose hands, how much this action matters, how long the page is
   const [length, setLength] = useState<TurnLength>(() => {
     try {
       const saved = localStorage.getItem('sw-reply-size');
@@ -850,10 +839,6 @@ export function Story() {
   });
   const [weight, setWeight] = useState<ActionWeight>('matters');
   const [asCharacterId, setAsCharacterId] = useState<string | null>(null);
-  /** Pin who should answer on Speak/Act — null = director chooses. */
-  const [preferSpeaker, setPreferSpeaker] = useState<
-    null | { kind: 'cast'; id: string } | { kind: 'guest'; id: string }
-  >(null);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [tailHasText, setTailHasText] = useState(false);
@@ -879,7 +864,6 @@ export function Story() {
   const [wrapBusy, setWrapBusy] = useState(false);
   const [wrapPhase, setWrapPhase] = useState<'ready' | 'analyzing' | 'review'>('ready');
   const [wrapDraft, setWrapDraft] = useState<WrapReviewDraft | null>(null);
-  const [directorSheet, setDirectorSheet] = useState(false);
   const [worldEditOpen, setWorldEditOpen] = useState(false);
   const [displayOpen, setDisplayOpen] = useState(false);
   const [moreSheet, setMoreSheet] = useState(false);
@@ -903,51 +887,6 @@ export function Story() {
   useEffect(() => {
     try { localStorage.setItem('sw-reply-size', length); } catch { /* ignore */ }
   }, [length]);
-
-  // Restore prefer-speaker pin per episode; clear when target leaves.
-  useEffect(() => {
-    if (!episode?.id) {
-      setPreferSpeaker(null);
-      return;
-    }
-    try {
-      const raw = localStorage.getItem(`sw-prefer-speaker:${episode.id}`);
-      if (!raw) {
-        setPreferSpeaker(null);
-        return;
-      }
-      const parsed = JSON.parse(raw) as { kind?: string; id?: string };
-      if ((parsed.kind === 'cast' || parsed.kind === 'guest') && typeof parsed.id === 'string') {
-        setPreferSpeaker({ kind: parsed.kind, id: parsed.id });
-      } else {
-        setPreferSpeaker(null);
-      }
-    } catch {
-      setPreferSpeaker(null);
-    }
-  }, [episode?.id]);
-
-  useEffect(() => {
-    if (!episode?.id) return;
-    try {
-      if (!preferSpeaker) localStorage.removeItem(`sw-prefer-speaker:${episode.id}`);
-      else localStorage.setItem(`sw-prefer-speaker:${episode.id}`, JSON.stringify(preferSpeaker));
-    } catch { /* ignore */ }
-  }, [episode?.id, preferSpeaker]);
-
-  // Drop pinned speaker when they leave the scene / episode.
-  useEffect(() => {
-    if (!preferSpeaker || !episode) return;
-    if (preferSpeaker.kind === 'cast') {
-      if (!episode.castIds.includes(preferSpeaker.id)) setPreferSpeaker(null);
-    } else {
-      const guests = episode.guests ?? [];
-      const active = episode.activeGuestIds;
-      const stillThere = guests.some((g) => g.id === preferSpeaker.id)
-        && (active == null || active.includes(preferSpeaker.id));
-      if (!stillThere) setPreferSpeaker(null);
-    }
-  }, [episode?.castIds, episode?.guests, episode?.activeGuestIds, preferSpeaker]);
 
   const activeLocation = locations.find((l) => l.id === episode?.locationId)
     ?? locations.find((l) => episode?.location && l.name && episode.location.toLowerCase().includes(l.name.toLowerCase()));
@@ -1021,16 +960,6 @@ export function Story() {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [turns.length]);
 
-  const pinMood = (id: typeof mood) => {
-    setMood(id);
-    if (episode) {
-      void safeWrite(
-        () => db.episodes.update(episode.id, { moodPinned: true, updatedAt: Date.now() }),
-        () => undefined
-      );
-    }
-  };
-
   const dismissWrapNudge = () => {
     setNudgeDismissedAtChars(episodeChars);
     setNudgeDismissedLocId(episode?.locationId ?? null);
@@ -1073,6 +1002,7 @@ export function Story() {
       if (e instanceof WriteAbortedError || (e as Error).name === 'AbortError') {
         const n = e instanceof WriteAbortedError ? e.beatsCompleted : 0;
         const left = e instanceof WriteAbortedError ? e.remainingBeats.length : 0;
+        if (left > 0) void discardPendingPlan(episode.id);
         setNotice(abortWriteNotice(n, left));
         return { status: 'aborted', beatsCompleted: n, remaining: left };
       }
@@ -1083,8 +1013,7 @@ export function Story() {
         ? Math.max(0, ((e as { remainingBeats?: unknown[] }).remainingBeats ?? []).length)
         : 0;
       if (left > 0) {
-        // Some beats are recoverable — surface the continue-plan notice as the
-        // primary action and suppress the error banner so they aren't competing.
+        void discardPendingPlan(episode.id);
         setNotice(unfinishedWriteNotice(n, left));
       } else {
         setError(classifyError(e));
@@ -1168,35 +1097,6 @@ export function Story() {
       setStreaming(false);
       setProgressLabel('');
       abortRef.current = null;
-    }
-  };
-
-  const pickBaseMode = (m: 'continue' | 'steer') => {
-    setComposeBase(m);
-    setSpeakOn(false);
-    setActOn(false);
-    setPreferSpeaker(null);
-  };
-
-  /** Steer from Director nudge — exclusive base mode. */
-  const setComposeModeSafe = (m: ComposeMode) => {
-    if (m === 'steer' || m === 'continue') {
-      pickBaseMode(m);
-      return;
-    }
-    if (m === 'speak') {
-      setSpeakOn(true);
-      setActOn(false);
-      return;
-    }
-    if (m === 'act') {
-      setActOn(true);
-      setSpeakOn(false);
-      return;
-    }
-    if (m === 'play') {
-      setSpeakOn(true);
-      setActOn(true);
     }
   };
 
@@ -1552,15 +1452,6 @@ export function Story() {
 
   const inScene = characters.filter((c) => episode.castIds.includes(c.id));
   const guests = episode.guests ?? [];
-  const directorContent = (
-    <DirectorContent
-      world={world} season={season} episode={episode} characters={characters} locations={locations}
-      continuity={continuity} threads={threads} accent={ACCENT} narrow={narrow}
-      onGoLocations={goLocations}
-      onGoCast={goCast}
-      onNudge={(text) => { setComposeModeSafe('steer'); setInput(text); setDirectorSheet(false); setComposerOpen(true); }}
-    />
-  );
 
   const shellHeight = '100%';
   const locLabel = (activeLocation?.name || episode.location || '')
@@ -1676,40 +1567,12 @@ export function Story() {
               ))}
             </div>
             {!short && (
-              <>
-                <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setWrapOpen('episode')}>End chapter</button>
-              </>
+              <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setWrapOpen('episode')}>End chapter</button>
             )}
             {short ? (
               <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setMoreSheet(true)}>More</button>
             ) : (
               <>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 7, flexWrap: 'wrap', maxWidth: '100%', border: '1px solid var(--rule)', borderRadius: 10, padding: '6px 9px' }} className="glass-clear">
-                    <span className="label" style={{ fontSize: 11, opacity: 0.55 }}>Scroll</span>
-                    {SCROLL_BACKDROPS.map((id) => (
-                      <Chip key={id} active={display.scrollBackdrop === id} onClick={() => setDisplay({ scrollBackdrop: id })}>
-                        {SCROLL_BACKDROP_LABEL[id]}
-                      </Chip>
-                    ))}
-                  </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', border: '1px solid var(--rule)', borderRadius: 10, padding: '6px 9px', background: 'rgba(28,22,18,0.04)', maxWidth: '100%' }}>
-                  <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.45 }}>
-                    mood{episode.moodPinned ? ' · pinned' : ''}
-                  </span>
-                  {(Object.entries(MOODS) as Array<[typeof mood, typeof M]>).map(([id, m]) => (
-                    <button key={id} type="button" title={m.label} onClick={() => pinMood(id)} aria-label={m.label} style={{
-                      display: 'inline-flex', alignItems: 'center', gap: 4,
-                      height: 22, padding: '0 6px', borderRadius: 2, cursor: 'pointer',
-                      background: mood === id ? m.accent : 'transparent',
-                      border: `1px solid ${mood === id ? 'var(--accent)' : 'var(--rule)'}`,
-                      opacity: mood === id ? 1 : 0.55, color: mood === id ? 'var(--accent-ink)' : 'var(--paper)',
-                      fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, letterSpacing: '0.04em'
-                    }}>
-                      <span style={{ width: 8, height: 8, borderRadius: 1, background: m.accent, flexShrink: 0 }} />
-                      {m.label}
-                    </button>
-                  ))}
-                </div>
                 <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setDisplayOpen(true)}>Display</button>
                 <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setWorldEditOpen(true)}>Edit world</button>
               </>
@@ -1718,7 +1581,7 @@ export function Story() {
         </div>
       )}
 
-      {/* body — single column; Director is always a sheet overlay */}
+      {/* body — the manuscript column */}
       <div style={{
         position: 'relative', zIndex: 2, flex: 1, display: 'grid', minHeight: 0,
         gridTemplateColumns: 'minmax(0, 1fr)'
@@ -2405,7 +2268,7 @@ export function Story() {
             <div className="serif" style={{ fontWeight: 300, fontSize: 27, lineHeight: 1.15, color: 'var(--ink-heading)' }}>
               End the chapter.
             </div>
-            <div style={{ fontSize: 13, lineHeight: 1.6, opacity: 0.62, maxWidth: '48ch', color: '#eceae6' }}>
+            <div style={{ fontSize: 13, lineHeight: 1.6, opacity: 0.62, maxWidth: '48ch', color: 'var(--paper)' }}>
               {wrapPhase === 'review'
                 ? 'Edit the recap and time skip, Keep or Drop anything new or stale, then close the chapter. Facts from play are already on file.'
                 : 'Read the chapter back, then open the next one. Skipping still keeps a short recap.'}
@@ -2461,7 +2324,7 @@ export function Story() {
                 </div>
               ))}
               {continuity.length === 0 && (
-                <div style={{ fontSize: 12.5, opacity: 0.5, color: '#eceae6' }}>
+                <div style={{ fontSize: 12.5, opacity: 0.5, color: 'var(--paper)' }}>
                   Nothing filed yet — play files facts as the scene unfolds.
                 </div>
               )}
@@ -2470,25 +2333,7 @@ export function Story() {
         )}
       </Sheet>
 
-      {/* director overlay — cast, places, continuity, threads (all widths) */}
-      <Sheet
-        open={directorSheet}
-        onClose={() => setDirectorSheet(false)}
-        narrow={sheetBottom}
-        footer={
-          <button className="btn-primary" style={{ width: '100%', minHeight: 44 }} onClick={() => setDirectorSheet(false)}>
-            Done
-          </button>
-        }
-      >
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <div className="serif" style={{ fontWeight: 300, fontSize: 24, color: 'var(--ink-heading)' }}>Director</div>
-          <button className="btn-ghost" aria-label="Close" style={{ width: 44, height: 44, padding: 0, fontSize: 18 }} onClick={() => setDirectorSheet(false)}>×</button>
-        </div>
-        {directorContent}
-      </Sheet>
-
-      {/* narrow overflow: display / edit / mood */}
+      {/* narrow overflow: the rest of the binding */}
       <Sheet open={moreSheet} onClose={() => setMoreSheet(false)} narrow={sheetBottom}
         footer={
           <button className="btn-primary" style={{ width: '100%', minHeight: 44 }} onClick={() => setMoreSheet(false)}>Done</button>
@@ -2511,14 +2356,6 @@ export function Story() {
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setDisplayOpen(true); }}>
             Display
           </button>
-          <Mono style={{ fontSize: 11 }}>scroll background</Mono>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-            {SCROLL_BACKDROPS.map((id) => (
-              <Chip key={id} active={display.scrollBackdrop === id} onClick={() => setDisplay({ scrollBackdrop: id })}>
-                {SCROLL_BACKDROP_LABEL[id]}
-              </Chip>
-            ))}
-          </div>
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setWorldEditOpen(true); }}>
             Edit world
           </button>
@@ -2534,22 +2371,6 @@ export function Story() {
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); go('sequel'); }}>
             The next book
           </button>
-          <Mono style={{ fontSize: 11 }}>mood{episode.moodPinned ? ' · pinned' : ''}</Mono>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-            {(Object.entries(MOODS) as Array<[typeof mood, typeof M]>).map(([id, m]) => (
-              <button key={id} type="button" title={m.label} onClick={() => pinMood(id)} aria-label={m.label} style={{
-                display: 'inline-flex', alignItems: 'center', gap: 6,
-                height: 28, padding: '0 10px', borderRadius: 2, cursor: 'pointer',
-                background: mood === id ? m.accent : 'transparent',
-                border: `1px solid ${mood === id ? 'var(--accent)' : 'var(--rule)'}`,
-                opacity: mood === id ? 1 : 0.55, color: mood === id ? 'var(--accent-ink)' : 'var(--paper)',
-                fontFamily: "'IBM Plex Mono', monospace", fontSize: 11, letterSpacing: '0.04em'
-              }}>
-                <span style={{ width: 10, height: 10, borderRadius: 1, background: m.accent, flexShrink: 0 }} />
-                {m.label}
-              </button>
-            ))}
-          </div>
         </div>
       </Sheet>
 
@@ -2663,7 +2484,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
           <div className="serif" style={{ fontWeight: 300, fontSize: 24, color: 'var(--ink-heading)' }}>Display</div>
-          <Mono style={{ fontSize: 9 }}>sizes & plate settings stay on this device · the image stays with the episode</Mono>
+          <Mono style={{ fontSize: 9 }}>type size stays on this device · a picture stays with the chapter</Mono>
         </div>
         <button className="btn-ghost" style={{ width: 30, height: 30, padding: 0, flexShrink: 0 }} onClick={onClose}>×</button>
       </div>
@@ -2671,10 +2492,10 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 22, paddingRight: 2 }}>
         {/* atmosphere */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <Mono style={{ fontSize: 9 }}>atmosphere for this scene</Mono>
+          <Mono style={{ fontSize: 9 }}>atmosphere for this chapter</Mono>
           <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
-            Weather, time of day, or a sensory note the narrator should keep returning to.
-            Location hue also suggests mood unless you pin it.
+            Weather, time of day, or a sensory note the book should keep returning to.
+            The place suggests a stain on the page unless you pin one.
           </div>
           <textarea
             rows={2}
@@ -2697,9 +2518,9 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
 
           {(episode.sceneLedger?.length ?? 0) > 0 && (
             <div className="craft-row" style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <Mono style={{ fontSize: 9 }}>already true in this room</Mono>
+              <Mono style={{ fontSize: 9 }}>already true in this chapter</Mono>
               <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--ink-muted)' }}>
-                Tracked from the prose as you play. The narrator and cast are held to these.
+                Tracked from the prose. The book is held to these.
               </div>
               <ul style={{ margin: 0, paddingLeft: 16, display: 'flex', flexDirection: 'column', gap: 4 }}>
                 {episode.sceneLedger!.map((d, i) => (
@@ -2711,11 +2532,11 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
             </div>
           )}
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.5 }}>
-              mood {episode.moodPinned ? 'pinned' : 'follows location'}
+            <span className="label" style={{ fontSize: 11 }}>
+              page stain {episode.moodPinned ? 'pinned' : 'follows the place'}
             </span>
             <Toggle
-              label="Pin mood to this episode"
+              label="Pin the stain to this chapter"
               on={!!episode.moodPinned}
               onClick={() => {
                 const next = !episode.moodPinned;
@@ -2750,10 +2571,10 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
 
         {/* scroll background */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <Mono style={{ fontSize: 9 }}>scroll background — under the glass</Mono>
+          <Mono style={{ fontSize: 9 }}>endpaper</Mono>
           <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
-            What you see behind the story. Auto uses a scene photo you or the AI set, then the place photo, then climate.
-            Dim wash keeps the type readable without hiding the room.
+            A thin picture at the head of the page. It does not sit behind the type.
+            Auto uses a chapter picture, then the place, then only the stain. Off leaves the page plain.
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             {SCROLL_BACKDROPS.map((id) => (
@@ -2764,10 +2585,10 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
             <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.5 }}>
-              AI may set the scene photo
+              AI may set the chapter picture
             </span>
             <Toggle
-              label="AI may set the scene photo"
+              label="AI may set the chapter picture"
               on={display.aiSetsScrollBg}
               onClick={() => setDisplay({ aiSetsScrollBg: !display.aiSetsScrollBg })}
             />
@@ -2776,10 +2597,9 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
 
         {/* scene image */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <Mono style={{ fontSize: 9 }}>scene image — episode {episode.number}</Mono>
+          <Mono style={{ fontSize: 9 }}>chapter picture — chapter {episode.number}</Mono>
           <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
-            A picture of what's happening right now, shown behind the story text. Swap it whenever
-            the scene changes; each episode keeps its own.
+            An optional picture for the endpaper. Swap it when the chapter changes; each chapter keeps its own.
           </div>
           {episode.image && (
             <div style={{
@@ -2790,7 +2610,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
           {imgError && <ErrorNote error={imgError} onDismiss={() => setImgError('')} />}
           {canMatchFaces && (
             <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <Toggle label="Match faces in the scene image" on={matchCast} onClick={() => setMatchCast((v) => !v)} />
+              <Toggle label="Match faces in the chapter picture" on={matchCast} onClick={() => setMatchCast((v) => !v)} />
               <div style={{ fontSize: 12.5, lineHeight: 1.45, color: 'var(--paper)' }}>
                 Match cast photos — keep uploaded faces when the image model accepts references.
               </div>
@@ -2817,18 +2637,16 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
               onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); e.target.value = ''; }}
             />
           </div>
-          <SliderRow label="dim wash" value={display.imageDim} min={0} max={90} unit="%"
+          <SliderRow label="paper over the picture" value={display.imageDim} min={0} max={90} unit="%"
             onChange={(v) => setDisplay({ imageDim: v })} />
-          <SliderRow label="image blur" value={display.imageBlur} min={0} max={20} unit="px"
+          <SliderRow label="soften" value={display.imageBlur} min={0} max={20} unit="px"
             onChange={(v) => setDisplay({ imageBlur: v })} />
         </div>
 
-        {/* text visibility */}
+        {/* text */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12, borderTop: '1px solid var(--rule)', paddingTop: 16 }}>
-          <Mono style={{ fontSize: 9 }}>text</Mono>
-          <SliderRow label="air behind text" value={display.textScrim} min={0} max={80} unit="%"
-            onChange={(v) => setDisplay({ textScrim: v })} />
-          <SliderRow label="text size" value={display.textSize} min={15} max={24} unit="px"
+          <Mono style={{ fontSize: 9 }}>type</Mono>
+          <SliderRow label="type size" value={display.textSize} min={15} max={24} unit="px"
             onChange={(v) => setDisplay({ textSize: v })} />
         </div>
 
@@ -2858,7 +2676,7 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
 
         {/* avatars */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: '1px solid var(--rule)', paddingTop: 16 }}>
-            <Mono style={{ fontSize: 9 }}>plate size in the scroll</Mono>
+            <Mono style={{ fontSize: 9 }}>plate size on the page</Mono>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               {(['S', 'M', 'L'] as AvatarSize[]).map((s) => (
                 <Chip key={s} active={display.avatarSize === s} onClick={() => setDisplay({ avatarSize: s })}>
@@ -3004,233 +2822,6 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, di
 
 // ---------- director sub-panels ----------
 
-function SceneCastPanel({ episode, characters, accent, onGoCast }: {
-  episode: Episode; characters: Character[]; accent: string; onGoCast: () => void;
-}) {
-  const guests = episode.guests ?? [];
-  const activeGuestIds = episode.activeGuestIds;
-  const [castError, setCastError] = useState('');
-  const [addingWalkOn, setAddingWalkOn] = useState(false);
-  const [walkName, setWalkName] = useState('');
-  const [walkBrief, setWalkBrief] = useState('');
-  const [walkVoice, setWalkVoice] = useState('');
-  const [editGuestId, setEditGuestId] = useState<string | null>(null);
-  const [editName, setEditName] = useState('');
-  const [editBrief, setEditBrief] = useState('');
-  const [editVoice, setEditVoice] = useState('');
-
-  const toggleCast = async (id: string, isPlayer: boolean) => {
-    if (isPlayer) return;
-    const castIds = nextSceneCastIds(episode.castIds, id, isPlayer);
-    await safeWrite(
-      () => db.episodes.update(episode.id, { castIds, updatedAt: Date.now() }),
-      setCastError
-    );
-  };
-  const toggleGuest = async (guestId: string) => {
-    const allIds = guests.map((g) => g.id);
-    // Materialize omitted (= all active) into an explicit list before toggling.
-    const current = activeGuestIds == null ? [...allIds] : [...activeGuestIds];
-    const next = current.includes(guestId)
-      ? current.filter((x) => x !== guestId)
-      : [...current, guestId];
-    await safeWrite(
-      () => db.episodes.update(episode.id, { activeGuestIds: next, updatedAt: Date.now() }),
-      setCastError
-    );
-  };
-
-  const addWalkOn = async () => {
-    const name = walkName.trim();
-    if (!name) return;
-    const guest: EpisodeGuest = {
-      id: uid(),
-      name,
-      brief: walkBrief.trim() || 'A temporary walk-on in this episode.',
-      ...(walkVoice.trim() ? { voice: walkVoice.trim() } : {})
-    };
-    const nextGuests = [...guests, guest];
-    const nextActive = activeGuestIds == null
-      ? undefined
-      : [...activeGuestIds, guest.id];
-    await safeWrite(
-      () => db.episodes.update(episode.id, {
-        guests: nextGuests,
-        ...(nextActive ? { activeGuestIds: nextActive } : {}),
-        updatedAt: Date.now()
-      }),
-      setCastError
-    );
-    setWalkName('');
-    setWalkBrief('');
-    setWalkVoice('');
-    setAddingWalkOn(false);
-  };
-
-  const beginEditGuest = (g: EpisodeGuest) => {
-    setEditGuestId(g.id);
-    setEditName(g.name);
-    setEditBrief(g.brief);
-    setEditVoice(g.voice ?? '');
-  };
-
-  const saveGuestEdit = async (g: EpisodeGuest) => {
-    const next = guests.map((x) => (x.id === g.id ? {
-      ...x,
-      name: editName.trim() || g.name,
-      brief: editBrief.trim() || g.brief,
-      ...(editVoice.trim() ? { voice: editVoice.trim() } : { voice: undefined })
-    } : x));
-    await safeWrite(
-      () => db.episodes.update(episode.id, { guests: next, updatedAt: Date.now() }),
-      setCastError
-    );
-    setEditGuestId(null);
-  };
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-        <Mono style={{ fontSize: 9 }}>in the scene</Mono>
-        <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} onClick={onGoCast}>full editor → Cast</button>
-      </div>
-      {castError && <ErrorNote error={castError} onDismiss={() => setCastError('')} />}
-      {characters.map((c) => {
-        const active = c.isPlayer || episode.castIds.includes(c.id);
-        return (
-          <div
-            key={c.id}
-            onClick={() => void toggleCast(c.id, !!c.isPlayer)}
-            style={{
-              display: 'flex', gap: 10, alignItems: 'center', padding: 8, borderRadius: 12,
-              cursor: c.isPlayer ? 'default' : 'pointer',
-              background: active ? 'rgba(28,22,18,0.04)' : 'transparent',
-              border: `1px solid ${active ? 'var(--rule)' : 'transparent'}`,
-              opacity: active ? 1 : 0.45
-            }}
-          >
-            <Face hue={c.hue} size={30} portrait={characterPortraits(c)[0]} name={c.name} />
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: '#f0eee9' }}>{c.name}</div>
-              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {c.isPlayer
-                  ? 'player · always in scene'
-                  : active ? (c.state.emotion || c.role || 'in scene') : 'off-page'}
-              </div>
-            </div>
-            <div style={{
-              width: 14, height: 14, borderRadius: 5, flexShrink: 0,
-              border: `1px solid ${active ? accent : 'var(--rule)'}`,
-              background: active ? accent : 'transparent',
-              opacity: c.isPlayer ? 0.85 : 1
-            }} />
-          </div>
-        );
-      })}
-      <Mono style={{ fontSize: 9, marginTop: 8 }}>walk-ons · this episode only</Mono>
-      {guests.map((g) => {
-        // Omitted activeGuestIds ⇒ all guests; explicit [] ⇒ none (matches prompts).
-        const active = activeGuestIds == null || activeGuestIds.includes(g.id);
-        const editing = editGuestId === g.id;
-        return (
-          <div key={g.id} style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-            <div
-              style={{
-                display: 'flex', gap: 10, alignItems: 'center', padding: 8, borderRadius: 12,
-                background: active ? 'transparent' : 'transparent',
-                border: `1px solid ${active ? 'var(--rule)' : 'var(--rule)'}`,
-                opacity: active ? 1 : 0.4
-              }}
-            >
-              <div
-                onClick={() => void toggleGuest(g.id)}
-                style={{ display: 'flex', gap: 10, alignItems: 'center', flex: 1, minWidth: 0, cursor: 'pointer' }}
-              >
-                <Face hue={guestHue(g.id)} size={30} name={g.name} />
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: '#f0eee9' }}>{g.name}</div>
-                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {active ? (g.brief || 'walk-on') : 'off-page'}
-                  </div>
-                </div>
-              </div>
-              <button
-                type="button"
-                className="btn-quiet"
-                style={{ fontSize: 10, padding: '4px 8px', minHeight: 32 }}
-                onClick={() => (editing ? setEditGuestId(null) : beginEditGuest(g))}
-              >
-                {editing ? 'close' : 'edit'}
-              </button>
-              <div
-                onClick={() => void toggleGuest(g.id)}
-                style={{
-                  width: 14, height: 14, borderRadius: 5, flexShrink: 0, cursor: 'pointer',
-                  border: `1px solid ${active ? accent : 'var(--rule)'}`,
-                  background: active ? accent : 'transparent'
-                }}
-              />
-            </div>
-            {editing && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '0 4px 8px' }}>
-                <input
-                  value={editName}
-                  onChange={(e) => setEditName(e.target.value)}
-                  placeholder="Name"
-                  style={{ fontSize: 13 }}
-                />
-                <textarea
-                  value={editBrief}
-                  onChange={(e) => setEditBrief(e.target.value)}
-                  placeholder="Who they are this episode"
-                  rows={2}
-                  style={{ fontSize: 12.5 }}
-                />
-                <input
-                  value={editVoice}
-                  onChange={(e) => setEditVoice(e.target.value)}
-                  placeholder="Voice note (optional)"
-                  style={{ fontSize: 12.5 }}
-                />
-                <button
-                  type="button"
-                  className="btn-primary"
-                  style={{ alignSelf: 'flex-start', padding: '6px 12px', fontSize: 12 }}
-                  onClick={() => void saveGuestEdit(g)}
-                >
-                  Save walk-on
-                </button>
-              </div>
-            )}
-          </div>
-        );
-      })}
-      {addingWalkOn ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: 8, borderRadius: 12, border: '1px solid var(--rule)' }}>
-          <input value={walkName} onChange={(e) => setWalkName(e.target.value)} placeholder="Walk-on name" style={{ fontSize: 13 }} />
-          <textarea value={walkBrief} onChange={(e) => setWalkBrief(e.target.value)} placeholder="Who they are (one sentence)" rows={2} style={{ fontSize: 12.5 }} />
-          <input value={walkVoice} onChange={(e) => setWalkVoice(e.target.value)} placeholder="Voice note (optional)" style={{ fontSize: 12.5 }} />
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button type="button" className="btn-primary" style={{ padding: '6px 12px', fontSize: 12 }} disabled={!walkName.trim()} onClick={() => void addWalkOn()}>
-              Add
-            </button>
-            <button type="button" className="btn-quiet" style={{ fontSize: 11 }} onClick={() => setAddingWalkOn(false)}>cancel</button>
-          </div>
-        </div>
-      ) : (
-        <button
-          type="button"
-          className="btn-ghost"
-          style={{ alignSelf: 'flex-start', fontSize: 12, minHeight: 40 }}
-          onClick={() => setAddingWalkOn(true)}
-        >
-          + Add walk-on
-        </button>
-      )}
-    </div>
-  );
-}
-
 function locationThumb(l: Location, size = 30): CSSProperties {
   if (l.portrait) {
     return {
@@ -3241,1506 +2832,6 @@ function locationThumb(l: Location, size = 30): CSSProperties {
     };
   }
   return { ...avatarStyle(l.hue, size), borderRadius: '50%' };
-}
-
-function SceneLocationsPanel({ episode, locations, accent, world, characters, onGoLocations }: {
-  episode: Episode; locations: Location[]; accent: string; world?: World;
-  characters: Character[]; onGoLocations: () => void;
-}) {
-  const { setMood, display, setDisplay } = useApp();
-  const [genBusy, setGenBusy] = useState(false);
-  const [genError, setGenError] = useState('');
-
-  const activeLoc = locations.find((l) => l.id === episode.locationId)
-    ?? locations.find((l) => !!episode.location && l.name.trim()
-      && (episode.location.toLowerCase().includes(l.name.toLowerCase())
-        || l.name.toLowerCase().includes(episode.location.trim().toLowerCase())));
-
-  const select = async (l: Location) => {
-    const active = episode.locationId === l.id;
-    if (active) {
-      await safeWrite(
-        () => db.episodes.update(episode.id, {
-          locationId: null, location: '', updatedAt: Date.now()
-        }),
-        setGenError
-      );
-      return;
-    }
-    const patch: Partial<Episode> = {
-      locationId: l.id,
-      location: l.name,
-      updatedAt: Date.now(),
-      // Keep place and picture honest — portrait if any, else clear stale image.
-      image: l.portrait || null
-    };
-    if (!(episode.atmosphereNote ?? '').trim() && l.atmosphere.trim()) {
-      patch.atmosphereNote = l.atmosphere.trim();
-    }
-    await safeWrite(() => db.episodes.update(episode.id, patch), setGenError);
-    if (!episode.moodPinned) setMood(moodFromHue(l.hue));
-  };
-
-  const addQuick = async () => {
-    const l = emptyLocation(episode.worldId, { name: 'New location' });
-    await safeWrite(async () => {
-      await db.locations.add(l);
-      await db.episodes.update(episode.id, {
-        locationId: l.id, location: l.name, updatedAt: Date.now(),
-        ...(l.portrait ? { image: l.portrait } : {})
-      });
-    }, setGenError);
-    if (!episode.moodPinned) setMood(moodFromHue(l.hue));
-  };
-
-  const generate = async () => {
-    if (!world || !activeLoc) return;
-    setGenBusy(true);
-    setGenError('');
-    try {
-      const { provider, model } = imageModelFor(world);
-      const refs = collectSceneImageRefs({
-        characters, castIds: episode.castIds, location: activeLoc
-      });
-      const result = await generateSceneImage({
-        provider, model, world, location: activeLoc,
-        atmosphereNote: episode.atmosphereNote,
-        matchCast: sceneHasPortraitRefs(characters, episode.castIds),
-        refs
-      });
-      await guardStorage(() => db.episodes.update(episode.id, { image: result.dataUrl, updatedAt: Date.now() }));
-      if (result.warning) setGenError(result.warning);
-      if (display.aiSetsScrollBg) setDisplay({ scrollBackdrop: 'auto' });
-    } catch (e) {
-      setGenError(formatUserError(e));
-    } finally {
-      setGenBusy(false);
-    }
-  };
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-      <Mono style={{ fontSize: 9 }}>locations</Mono>
-      {locations.map((l) => {
-        const active = episode.locationId === l.id
-          || (!episode.locationId && !!episode.location && l.name.trim()
-            && (episode.location.toLowerCase().includes(l.name.toLowerCase())
-              || l.name.toLowerCase().includes(episode.location.trim().toLowerCase())));
-        return (
-          <div key={l.id} onClick={() => void select(l)} style={{
-            display: 'flex', gap: 10, alignItems: 'center', padding: 8, borderRadius: 12, cursor: 'pointer',
-            background: active ? 'rgba(28,22,18,0.04)' : 'transparent',
-            border: `1px solid ${active ? 'var(--rule)' : 'transparent'}`,
-            opacity: active ? 1 : 0.45
-          }}>
-            <div style={locationThumb(l, 30)} />
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: '#f0eee9' }}>{l.name || 'unnamed'}</div>
-              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {active ? (l.tagline || l.currentState || 'scene setting') : (l.tagline || 'off-scene')}
-              </div>
-            </div>
-            <div style={{
-              width: 14, height: 14, borderRadius: 5, flexShrink: 0,
-              border: `1px solid ${active ? accent : 'var(--rule)'}`,
-              background: active ? accent : 'transparent'
-            }} />
-          </div>
-        );
-      })}
-      {locations.length === 0 && (
-        <div style={{ fontSize: 12, opacity: 0.5, color: '#eceae6' }}>No saved locations yet.</div>
-      )}
-      {genError && <ErrorNote error={genError} onDismiss={() => setGenError('')} />}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} onClick={() => void addQuick()}>+ new</button>
-        {activeLoc && world && (
-          <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} disabled={genBusy}
-            onClick={() => void generate()}>
-            {genBusy ? 'generating…' : 'generate scene image'}
-          </button>
-        )}
-        <button className="btn-quiet" style={{ fontSize: 10, padding: '2px 4px' }} onClick={onGoLocations}>full editor → Places</button>
-      </div>
-    </div>
-  );
-}
-
-function ScenePlatePanel({ episode, bd }: { episode: Episode; bd: { tag: string; a: string; b: string } }) {
-  const [editing, setEditing] = useState(false);
-  const [value, setValue] = useState(episode.location);
-  useEffect(() => setValue(episode.location), [episode.id, episode.location]);
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-      <Mono style={{ fontSize: 9 }}>scene note — free text</Mono>
-      <div style={{ border: '1px solid var(--rule)', borderRadius: 12, overflow: 'hidden', background: 'transparent' }}>
-        <div style={{
-          height: 98, display: 'flex', alignItems: 'flex-end', padding: 9,
-          background: episode.image
-            ? `linear-gradient(rgba(243,239,230,0.35), rgba(243,239,230,0.55)), url(${episode.image}) center / cover`
-            : `linear-gradient(155deg, ${bd.a}, ${bd.b}), ${STRIPE('var(--rule)', 'rgba(28,22,18,0.02)')}`
-        }}>
-          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, color: 'var(--ink-muted)', background: 'rgba(247,243,234,0.82)', padding: '4px 7px', borderRadius: 5 }}>
-            {bd.tag}
-          </span>
-        </div>
-        {editing ? (
-          <div style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
-            <textarea rows={2} value={value} onChange={(e) => setValue(e.target.value)} style={{ fontSize: 12 }}
-              placeholder="One-off spot not in the library…" />
-            <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 10px' }} onClick={() => {
-              // Free-text override clears the library link so the cards don't fight it.
-              void safeWrite(
-                () => db.episodes.update(episode.id, {
-                  location: value, locationId: null, updatedAt: Date.now()
-                }),
-                () => undefined
-              );
-              setEditing(false);
-            }}>Save</button>
-          </div>
-        ) : (
-          <div onClick={() => setEditing(true)} style={{ padding: '10px 12px', fontSize: 12, lineHeight: 1.5, opacity: 0.7, cursor: 'pointer', color: '#eceae6' }}>
-            {episode.location || 'Optional free-text override — or pick a location card above.'}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/** Mid-episode digest injected into prompts — edit or clear so junk does not keep resurfacing. */
-function RunningSummaryPanel({ episode }: { episode: Episode }) {
-  const [error, setError] = useState('');
-  const running = episode.runningSummary?.trim();
-  if (!running && !episode.runningSummary) {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <Mono style={{ fontSize: 9 }}>this episode · running summary</Mono>
-        <div style={{ fontSize: 12, opacity: 0.45, color: '#eceae6' }}>
-          None yet — built automatically when the transcript grows long.
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
-        <Mono style={{ fontSize: 9 }}>this episode · running summary</Mono>
-        <button
-          type="button"
-          className="btn-quiet"
-          style={{ padding: 0, fontSize: 10 }}
-          onClick={() => void safeWrite(
-            () => db.episodes.update(episode.id, {
-              runningSummary: null, runningSummaryAtChars: 0, updatedAt: Date.now()
-            }),
-            setError
-          )}
-        >
-          Clear
-        </button>
-      </div>
-      {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
-      <textarea
-        key={episode.id + '-running-' + (episode.runningSummaryAtChars ?? 0)}
-        rows={4}
-        defaultValue={episode.runningSummary ?? ''}
-        onBlur={(e) => {
-          const next = e.target.value;
-          if (next === (episode.runningSummary ?? '')) return;
-          void safeWrite(
-            () => db.episodes.update(episode.id, {
-              runningSummary: next.trim() ? next : null,
-              runningSummaryAtChars: next.trim() ? (episode.runningSummaryAtChars ?? 0) : 0,
-              updatedAt: Date.now()
-            }),
-            setError
-          );
-        }}
-        placeholder="Compressed earlier beats for this episode…"
-        style={{ fontSize: 12.5, lineHeight: 1.45, color: '#eceae6' }}
-      />
-    </div>
-  );
-}
-
-/** Filed wrap memory from recent priors — prune recap / beats / walk-on effects that keep returning. */
-function PriorWrapMemoryPanel({ priorEpisodes }: { priorEpisodes: Episode[] }) {
-  const [error, setError] = useState('');
-  const patchWrap = (ep: Episode, wrap: EpisodeWrap) => {
-    void safeWrite(
-      () => db.episodes.update(ep.id, { wrap, updatedAt: Date.now() }),
-      setError
-    );
-  };
-  if (priorEpisodes.length === 0) {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-        <Mono style={{ fontSize: 9 }}>recent episode memory</Mono>
-        <div style={{ fontSize: 12, opacity: 0.45, color: '#eceae6' }}>
-          No filed episode wraps yet.
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      <Mono style={{ fontSize: 9 }}>recent episode memory · last {priorEpisodes.length}</Mono>
-      {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
-      {[...priorEpisodes].reverse().map((ep, idx) => {
-        const wrap = ep.wrap ?? { recap: '', beats: [], guestEffects: [] };
-        return (
-          <div
-            key={ep.id}
-            style={{
-              border: '1px solid var(--rule)', borderRadius: 12, padding: '12px 12px',
-              background: 'transparent', display: 'flex', flexDirection: 'column', gap: 10
-            }}
-          >
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.65 }}>
-              E{ep.number}{ep.title ? ` — ${ep.title}` : ''}{idx === 0 ? ' · immediate prior' : ''}
-            </div>
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <Mono style={{ fontSize: 8, opacity: 0.5 }}>recap</Mono>
-              <textarea
-                key={ep.id + '-recap-' + (ep.updatedAt ?? ep.id)}
-                rows={3}
-                defaultValue={wrap.recap}
-                onBlur={(e) => {
-                  if (e.target.value === wrap.recap) return;
-                  patchWrap(ep, { ...wrap, recap: e.target.value });
-                }}
-                style={{ fontSize: 12.5, lineHeight: 1.45, color: '#eceae6' }}
-              />
-            </label>
-            {(wrap.beats.length > 0 || wrap.guestEffects.length > 0) && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                {wrap.beats.map((b, i) => (
-                  <div key={`b${i}`} style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
-                    <div style={{
-                      fontSize: 12, lineHeight: 1.4, flex: 1, color: '#eceae6', opacity: 0.88,
-                      paddingLeft: 10, borderLeft: '1px solid var(--rule)'
-                    }}>
-                      {b.text}
-                      {b.consequence ? (
-                        <span style={{ opacity: 0.55 }}> → {b.consequence}</span>
-                      ) : null}
-                    </div>
-                    <button
-                      type="button"
-                      className="btn-quiet"
-                      style={{ padding: '0 2px', fontSize: 12 }}
-                      title="Remove beat from memory"
-                      onClick={() => patchWrap(ep, {
-                        ...wrap,
-                        beats: wrap.beats.filter((_, j) => j !== i)
-                      })}
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-                {wrap.guestEffects.map((g, i) => (
-                  <div key={`g${i}`} style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
-                    <div style={{
-                      fontSize: 12, lineHeight: 1.4, flex: 1, color: '#eceae6', opacity: 0.75,
-                      paddingLeft: 10, borderLeft: `1px solid ${ACCENT_RGBA.a28}`
-                    }}>
-                      <span style={{
-                        fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, opacity: 0.6,
-                        display: 'block', marginBottom: 2
-                      }}>walk-on</span>
-                      {g}
-                    </div>
-                    <button
-                      type="button"
-                      className="btn-quiet"
-                      style={{ padding: '0 2px', fontSize: 12 }}
-                      title="Remove walk-on effect"
-                      onClick={() => patchWrap(ep, {
-                        ...wrap,
-                        guestEffects: wrap.guestEffects.filter((_, j) => j !== i)
-                      })}
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function PlotTargetsPanel({ episode, season }: { episode: Episode; season: Season }) {
-  const [error, setError] = useState('');
-  const [adding, setAdding] = useState('');
-  const [addScope, setAddScope] = useState<'episode' | 'season'>('episode');
-
-  const writeEpisode = (plotTargets: PlotTarget[]) => {
-    void safeWrite(
-      () => db.episodes.update(episode.id, { plotTargets, updatedAt: Date.now() }),
-      setError
-    );
-  };
-  const writeSeason = (plotTargets: PlotTarget[]) => {
-    void safeWrite(
-      () => db.seasons.update(season.id, { plotTargets, updatedAt: Date.now() }),
-      setError
-    );
-  };
-
-  const setStatus = (
-    scope: 'episode' | 'season',
-    id: string,
-    status: PlotTargetStatus
-  ) => {
-    if (scope === 'episode') {
-      writeEpisode((episode.plotTargets ?? []).map((t) => (t.id === id ? { ...t, status } : t)));
-    } else {
-      writeSeason((season.plotTargets ?? []).map((t) => (t.id === id ? { ...t, status } : t)));
-    }
-  };
-
-  const patchText = (scope: 'episode' | 'season', id: string, text: string) => {
-    if (scope === 'episode') {
-      writeEpisode((episode.plotTargets ?? []).map((t) => (t.id === id ? { ...t, text } : t)));
-    } else {
-      writeSeason((season.plotTargets ?? []).map((t) => (t.id === id ? { ...t, text } : t)));
-    }
-  };
-
-  const addManual = () => {
-    const text = adding.trim();
-    if (!text) return;
-    const row: PlotTarget = {
-      id: uid(), text, status: 'pending', source: 'manual'
-    };
-    if (addScope === 'episode') {
-      const cur = episode.plotTargets ?? [];
-      if (cur.filter((t) => t.status === 'pending').length >= PLOT_TARGET_CAP) return;
-      writeEpisode([...cur, row]);
-    } else {
-      const cur = season.plotTargets ?? [];
-      if (cur.filter((t) => t.status === 'pending').length >= PLOT_TARGET_CAP) return;
-      writeSeason([...cur, row]);
-    }
-    setAdding('');
-  };
-
-  const renderRow = (t: PlotTarget, scope: 'episode' | 'season') => (
-    <div
-      key={`${scope}-${t.id}`}
-      style={{
-        display: 'flex', flexDirection: 'column', gap: 6,
-        border: '1px solid var(--rule)', borderRadius: 11, padding: '10px 12px',
-        background: 'transparent',
-        opacity: t.status === 'pending' ? 1 : 0.5
-      }}
-    >
-      <textarea
-        key={t.id + t.status}
-        rows={2}
-        defaultValue={t.text}
-        onBlur={(e) => {
-          if (e.target.value !== t.text) patchText(scope, t.id, e.target.value);
-        }}
-        style={{
-          fontSize: 12.5, lineHeight: 1.4, color: '#eceae6',
-          background: 'transparent', border: 0, padding: 0
-        }}
-      />
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
-        <span style={{
-          fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, opacity: 0.45, flex: 1
-        }}>
-          {scope === 'season' ? 'season arc' : 'episode'} · {t.source} · {t.status}
-        </span>
-        {t.status !== 'pending' && (
-          <button type="button" className="btn-quiet" style={{ padding: 0, fontSize: 10 }}
-            onClick={() => setStatus(scope, t.id, 'pending')}>pending</button>
-        )}
-        {t.status !== 'hit' && (
-          <button type="button" className="btn-quiet" style={{ padding: 0, fontSize: 10 }}
-            onClick={() => setStatus(scope, t.id, 'hit')}>hit</button>
-        )}
-        {t.status !== 'dropped' && (
-          <button type="button" className="btn-quiet" style={{ padding: 0, fontSize: 10 }}
-            onClick={() => setStatus(scope, t.id, 'dropped')}>drop</button>
-        )}
-      </div>
-    </div>
-  );
-
-  const epList = episode.plotTargets ?? [];
-  const seaList = season.plotTargets ?? [];
-  const epPending = epList.filter((t) => t.status === 'pending');
-  const seaPending = seaList.filter((t) => t.status === 'pending');
-  const settled = [
-    ...epList.filter((t) => t.status !== 'pending').map((t) => ({ t, scope: 'episode' as const })),
-    ...seaList.filter((t) => t.status !== 'pending').map((t) => ({ t, scope: 'season' as const }))
-  ];
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <Mono style={{ fontSize: 9 }}>
-        plot targets · {epPending.length} episode · {seaPending.length} season pending
-      </Mono>
-      <div style={{ fontSize: 11.5, lineHeight: 1.45, opacity: 0.45, color: '#eceae6' }}>
-        Author-selected beats the director works toward. Stronger than open threads; weaker than a one-shot steer.
-      </div>
-      {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
-      {epList.length === 0 && seaPending.length === 0 && (
-        <div style={{ fontSize: 12, opacity: 0.5, color: '#eceae6' }}>
-          None yet — Aim beats at episode wrap, or Raise at season review.
-        </div>
-      )}
-      {epList.filter((t) => t.status === 'pending').map((t) => renderRow(t, 'episode'))}
-      {seaPending.map((t) => renderRow(t, 'season'))}
-      {settled.length > 0 && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <Mono style={{ fontSize: 8, opacity: 0.5 }}>hit / dropped</Mono>
-          {settled.map(({ t, scope }) => renderRow(t, scope))}
-        </div>
-      )}
-      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-        <Chip active={addScope === 'episode'} onClick={() => setAddScope('episode')}>episode</Chip>
-        <Chip active={addScope === 'season'} onClick={() => setAddScope('season')}>season</Chip>
-        <input
-          value={adding}
-          onChange={(e) => setAdding(e.target.value)}
-          placeholder="add a target…"
-          style={{ fontSize: 11.5, padding: '7px 9px', flex: 1, minWidth: 140 }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') addManual();
-          }}
-        />
-      </div>
-    </div>
-  );
-}
-
-function ContinuityPanel({ continuity, world, season, episode, priorEpisodes }: {
-  continuity: ContinuityFact[]; world: World; season: Season; episode: Episode;
-  priorEpisodes?: Episode[];
-}) {
-  const [adding, setAdding] = useState('');
-  const [error, setError] = useState('');
-  const prefer = preferBucketsForEpisodes(priorEpisodes ?? [], episode);
-  const inPlanIds = new Set(selectDirectorFacts(continuity, prefer).map((f) => f.id));
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <Mono style={{ fontSize: 9 }}>
-        continuity held · {inPlanIds.size}/{continuity.length} in director plan
-      </Mono>
-      <div style={{ fontSize: 11, lineHeight: 1.4, opacity: 0.45, color: '#eceae6' }}>
-        Held facts outside the director cap may still reach narration (up to 24).
-      </div>
-      {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
-      {continuity.map((f) => {
-        const inPlan = inPlanIds.has(f.id);
-        return (
-          <div key={f.id} style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
-            <div style={{
-              fontSize: 12, lineHeight: 1.45, paddingLeft: 12,
-              borderLeft: `1px solid ${f.pinned || inPlan ? 'rgba(28,22,18,0.28)' : 'var(--rule)'}`,
-              flex: 1, color: '#eceae6', opacity: f.pinned || inPlan ? 0.88 : 0.45
-            }}>
-              {f.text}
-              <span style={{
-                display: 'block', marginTop: 2,
-                fontFamily: "'IBM Plex Mono', monospace", fontSize: 9, opacity: 0.7
-              }}>
-                {f.pinned ? 'pinned · always in director plan' : inPlan ? 'in director plan' : 'held · not in director cap'}
-              </span>
-            </div>
-            <button
-              className="btn-quiet"
-              style={{ padding: '0 6px', fontSize: 11, minHeight: 36 }}
-              title={f.pinned ? 'Unpin from director plan' : 'Pin into director plan'}
-              onClick={() => void safeWrite(
-                () => db.continuity.update(f.id, { pinned: !f.pinned, updatedAt: Date.now() }),
-                setError
-              )}
-            >{f.pinned ? 'unpin' : 'pin'}</button>
-            <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 12 }} onClick={() => void safeWrite(async () => {
-              await recordTombstones([{
-                table: 'continuity', id: f.id, worldId: f.worldId, seasonId: f.seasonId, payload: f
-              }]);
-              await db.continuity.delete(f.id);
-            }, setError)}>×</button>
-          </div>
-        );
-      })}
-      <div style={{ display: 'flex', gap: 6 }}>
-        <input
-          value={adding} onChange={(e) => setAdding(e.target.value)} placeholder="add a fact…"
-          style={{ fontSize: 11.5, padding: '7px 9px' }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && adding.trim()) {
-              const text = adding.trim();
-              void safeWrite(async () => {
-                await db.continuity.add({
-                  id: uid(), worldId: world.id, seasonId: season.id, episodeId: episode.id,
-                  text, source: 'manual', createdAt: Date.now(), updatedAt: Date.now()
-                });
-              }, setError);
-              setAdding('');
-            }
-          }}
-        />
-      </div>
-    </div>
-  );
-}
-
-function ThreadsPanel({ threads, episode, priorEpisodes }: {
-  threads: OpenThread[]; episode: Episode; priorEpisodes?: Episode[];
-}) {
-  const [error, setError] = useState('');
-  const prefer = preferBucketsForEpisodes(priorEpisodes ?? [], episode);
-  const inPlanIds = new Set(selectDirectorThreads(threads, prefer).map((t) => t.id));
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-      <Mono style={{ fontSize: 9 }}>
-        open threads · {inPlanIds.size}/{threads.length} in director plan
-      </Mono>
-      {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
-      {threads.map((t) => {
-        const inPlan = inPlanIds.has(t.id);
-        return (
-          <div key={t.id} style={{
-            border: `1px solid ${t.pinned || inPlan ? 'var(--rule)' : 'var(--rule)'}`,
-            borderRadius: 11, padding: '10px 12px',
-            background: 'transparent', display: 'flex', flexDirection: 'column', gap: 5,
-            opacity: t.pinned || inPlan ? 1 : 0.55
-          }}>
-            <div style={{ fontSize: 12.5, lineHeight: 1.4, color: '#eceae6' }}>{t.text}</div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.45 }}>
-                {t.openedLabel}{t.pinned ? ' · pinned' : !inPlan ? ' · held' : ''}
-              </div>
-              <div style={{ display: 'flex', gap: 8 }}>
-                <button
-                  className="btn-quiet"
-                  style={{ padding: 0, fontSize: 10 }}
-                  onClick={() => void safeWrite(
-                    () => db.threads.update(t.id, { pinned: !t.pinned, updatedAt: Date.now() }),
-                    setError
-                  )}
-                >
-                  {t.pinned ? 'unpin' : 'pin'}
-                </button>
-                <button
-                  className="btn-quiet"
-                  style={{ padding: 0, fontSize: 10 }}
-                  onClick={() => void safeWrite(
-                    () => db.threads.update(t.id, { status: 'resolved', updatedAt: Date.now() }),
-                    setError
-                  )}
-                >
-                  resolve
-                </button>
-              </div>
-            </div>
-          </div>
-        );
-      })}
-      {threads.length === 0 && <div style={{ fontSize: 12, opacity: 0.5, color: '#eceae6' }}>No open threads yet.</div>}
-    </div>
-  );
-}
-
-function NudgesPanel({
-  threads, inScene, episodeTargets, seasonTargets, onNudge
-}: {
-  threads: OpenThread[];
-  inScene: Character[];
-  episodeTargets?: PlotTarget[];
-  seasonTargets?: PlotTarget[];
-  onNudge: (t: string) => void;
-}) {
-  const topTarget =
-    (episodeTargets ?? []).find((t) => t.status === 'pending' && t.text.trim())
-    ?? (seasonTargets ?? []).find((t) => t.status === 'pending' && t.text.trim());
-  const nudges = [
-    'Let the silence run — do not fill it for me.',
-    ...inScene.filter((c) => !c.isPlayer).slice(0, 2).map((c) => `${c.name} presses toward what they want.`),
-    ...(topTarget ? [`Advance toward: ${topTarget.text}`] : []),
-    ...threads.slice(0, 2).map((t) => `Bring this to the surface: ${t.text}`),
-    'Cut away — a different place, right after.'
-  ];
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-      <Mono style={{ fontSize: 9 }}>nudge the scene</Mono>
-      {nudges.map((n, i) => (
-        <button key={i} onClick={() => onNudge(n)} style={{
-          textAlign: 'left', border: '1px solid var(--rule)', background: 'transparent',
-          color: 'inherit', borderRadius: 11, padding: '10px 12px', fontSize: 12.5, cursor: 'pointer', lineHeight: 1.4
-        }} className="hover-border">
-          {n}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function DirectorAccordion({
-  title, open, onToggle, children, labelSize
-}: {
-  title: string;
-  open: boolean;
-  onToggle: () => void;
-  children: ReactNode;
-  labelSize: number;
-}) {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: open ? 12 : 0 }}>
-      <button
-        type="button"
-        onClick={onToggle}
-        style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-          minHeight: 44, padding: '10px 0', border: 0, borderBottom: '1px solid var(--rule)',
-          background: 'transparent', color: 'inherit', cursor: 'pointer', textAlign: 'left'
-        }}
-      >
-        <Mono style={{ fontSize: labelSize }}>{title}</Mono>
-        <span style={{ opacity: 0.5, fontSize: 14 }}>{open ? '−' : '+'}</span>
-      </button>
-      {open && children}
-    </div>
-  );
-}
-
-function DirectorContent(props: {
-  world: World; season: Season; episode: Episode; characters: Character[]; locations: Location[];
-  continuity: ContinuityFact[]; threads: OpenThread[]; accent: string;
-  narrow?: boolean;
-  onGoLocations: () => void;
-  onGoCast: () => void;
-  onNudge: (t: string) => void;
-}) {
-  const inScene = props.characters.filter((c) => props.episode.castIds.includes(c.id));
-  const labelSize = props.narrow ? 11 : 9;
-  const hasPlotTargets = [
-    ...(props.episode.plotTargets ?? []),
-    ...(props.season.plotTargets ?? [])
-  ].some((t) => t.status === 'pending' && t.text.trim());
-  const [open, setOpen] = useState(() => {
-    let openMemory = false;
-    if (hasPlotTargets) {
-      try {
-        if (localStorage.getItem('sw-direct-memory-opened') !== '1') {
-          openMemory = true;
-          localStorage.setItem('sw-direct-memory-opened', '1');
-        }
-      } catch { /* ignore */ }
-    }
-    return { calendar: true, scene: true, memory: openMemory, nudges: false };
-  });
-  const toggle = (key: keyof typeof open) => {
-    setOpen((o) => ({ ...o, [key]: !o[key] }));
-    if (key === 'memory') {
-      try { localStorage.setItem('sw-direct-memory-opened', '1'); } catch { /* ignore */ }
-    }
-  };
-  // Wrap presence for prune UI; recap-bearing for director-cap badges (matches prompts).
-  const priorForPrune = useLiveQuery(
-    async () => {
-      const all = await db.episodes.where('seasonId').equals(props.season.id).toArray();
-      return all
-        .filter((e) => e.number < props.episode.number && !!e.wrap)
-        .sort((a, b) => a.number - b.number)
-        .slice(-3);
-    },
-    [props.season.id, props.episode.number]
-  ) ?? [];
-  const priorForCaps = useLiveQuery(
-    async () => {
-      const all = await db.episodes.where('seasonId').equals(props.season.id).toArray();
-      return all
-        .filter((e) => e.number < props.episode.number && e.status === 'ended' && !!e.wrap?.recap?.trim())
-        .sort((a, b) => a.number - b.number)
-        .slice(-3);
-    },
-    [props.season.id, props.episode.number]
-  ) ?? [];
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, overflow: 'auto' }}>
-      <DirectorAccordion title="calendar" open={open.calendar} onToggle={() => toggle('calendar')} labelSize={labelSize}>
-        <CalendarTrackerPanel
-          world={props.world} season={props.season} episode={props.episode}
-          narrow={!!props.narrow}
-        />
-      </DirectorAccordion>
-      <DirectorAccordion title="scene" open={open.scene} onToggle={() => toggle('scene')} labelSize={labelSize}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-          <SceneCastPanel episode={props.episode} characters={props.characters} accent={props.accent} onGoCast={props.onGoCast} />
-          <SceneLocationsPanel
-            episode={props.episode} locations={props.locations} accent={props.accent}
-            world={props.world} characters={props.characters} onGoLocations={props.onGoLocations}
-          />
-          <ScenePlatePanel episode={props.episode} bd={BACKDROPS.scene} />
-        </div>
-      </DirectorAccordion>
-      <DirectorAccordion title="memory" open={open.memory} onToggle={() => toggle('memory')} labelSize={labelSize}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-          <RunningSummaryPanel episode={props.episode} />
-          <PriorWrapMemoryPanel priorEpisodes={priorForPrune} />
-          <PlotTargetsPanel episode={props.episode} season={props.season} />
-          <div style={{ fontSize: 11.5, lineHeight: 1.45, opacity: 0.45, color: '#eceae6' }}>
-            Older worlds may still have walk-on effects filed as continuity facts — delete those separately if they linger.
-          </div>
-          <ContinuityPanel
-            continuity={props.continuity} world={props.world} season={props.season} episode={props.episode}
-            priorEpisodes={priorForCaps}
-          />
-          <ThreadsPanel threads={props.threads} episode={props.episode} priorEpisodes={priorForCaps} />
-        </div>
-      </DirectorAccordion>
-      <DirectorAccordion title="nudges" open={open.nudges} onToggle={() => toggle('nudges')} labelSize={labelSize}>
-        <NudgesPanel
-          threads={props.threads}
-          inScene={inScene}
-          episodeTargets={props.episode.plotTargets}
-          seasonTargets={props.season.plotTargets}
-          onNudge={props.onNudge}
-        />
-      </DirectorAccordion>
-    </div>
-  );
-}
-
-/** Season calendar events — dated texture with spoil/hide + optional AI seed. */
-function CalendarSeasonEventsPanel({ world, season }: { world: World; season: Season }) {
-  const prefs = worldCalendarEventPrefs(world);
-  const events = useLiveQuery(
-    () => db.calendarEvents.where('seasonId').equals(season.id).toArray(),
-    [season.id]
-  ) ?? [];
-  const cal = worldCalendar(world);
-  const [err, setErr] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [editId, setEditId] = useState<string | null>(null);
-  const [peeked, setPeeked] = useState<Set<string>>(() => new Set());
-  const [drafts, setDrafts] = useState<Array<SeedCalendarEventDraft & { keep: boolean }>>([]);
-  const sorted = useMemo(
-    () => [...events].sort((a, b) => a.storyDay - b.storyDay || a.title.localeCompare(b.title)),
-    [events]
-  );
-  const dueCount = events.filter((e) => e.status === 'due').length;
-  const scheduledCount = events.filter((e) => e.status === 'scheduled').length;
-  const selectStyle: CSSProperties = {
-    fontFamily: "'IBM Plex Mono', monospace", fontSize: 12,
-    background: 'rgba(28,22,18,0.05)', border: '1px solid var(--rule)',
-    borderRadius: 8, padding: '6px 8px', color: '#f0eee9', width: '100%'
-  };
-
-  const patchPrefs = (patch: Partial<typeof prefs>) => {
-    void safeWrite(
-      () => db.worlds.update(world.id, {
-        calendarEventPrefs: { ...prefs, ...patch },
-        updatedAt: Date.now()
-      }),
-      setErr
-    );
-  };
-
-  const addManual = () => {
-    const ev = emptyCalendarEvent(
-      world.id,
-      season.id,
-      {
-        title: 'New beat',
-        summary: '',
-        kind: 'mundane',
-        storyDay: cal.currentDay,
-        visibility: prefs.defaultVisibility,
-        source: 'manual'
-      },
-      { currentDay: cal.currentDay }
-    );
-    void safeWrite(async () => {
-      await db.calendarEvents.add(ev);
-      setEditId(ev.id);
-    }, setErr);
-  };
-
-  const generate = async () => {
-    setBusy(true);
-    setErr('');
-    try {
-      const proposed = await seedSeasonCalendarEvents(world, season, { autoCommit: false });
-      setDrafts(proposed.map((d) => ({ ...d, keep: true })));
-      if (proposed.length === 0) {
-        const active = events.filter((e) => e.status === 'scheduled' || e.status === 'due').length;
-        setErr(`No room or no proposals — ${active}/${CALENDAR_EVENT_CAP} active. Cancel some events first.`);
-      }
-    } catch (e) {
-      setErr(formatUserError(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const commitDrafts = () => {
-    const kept = drafts.filter((d) => d.keep);
-    if (kept.length === 0) {
-      setDrafts([]);
-      return;
-    }
-    void safeWrite(async () => {
-      const active = events.filter((e) => e.status === 'scheduled' || e.status === 'due').length;
-      const room = Math.max(0, CALENDAR_EVENT_CAP - active);
-      if (room === 0) {
-        setErr(`Season already has ${CALENDAR_EVENT_CAP} active events.`);
-        return;
-      }
-      const now = Date.now();
-      const toAdd = kept.slice(0, room).map((d) => emptyCalendarEvent(
-        world.id,
-        season.id,
-        {
-          ...d,
-          visibility: defaultVisibilityForKind(d.kind),
-          source: 'ai-seed',
-          createdAt: now,
-          updatedAt: now
-        },
-        { currentDay: cal.currentDay }
-      ));
-      await db.calendarEvents.bulkAdd(toAdd);
-      setDrafts([]);
-      if (kept.length > room) {
-        setErr(`Committed ${room}; ${kept.length - room} skipped (cap ${CALENDAR_EVENT_CAP}).`);
-      }
-    }, setErr);
-  };
-
-  const patchEvent = (id: string, patch: Partial<CalendarEvent>) => {
-    void safeWrite(
-      () => db.calendarEvents.update(id, { ...patch, updatedAt: Date.now() }),
-      setErr
-    );
-  };
-
-  const deleteEvent = (ev: CalendarEvent) => {
-    void safeWrite(async () => {
-      await recordTombstones([{
-        table: 'calendarEvents',
-        id: ev.id,
-        worldId: ev.worldId,
-        seasonId: ev.seasonId,
-        payload: ev
-      }]);
-      await db.calendarEvents.delete(ev.id);
-      setEditId((cur) => (cur === ev.id ? null : cur));
-    }, setErr);
-  };
-
-  const togglePeek = (id: string) => {
-    setPeeked((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  return (
-    <div style={{
-      marginTop: 8, paddingTop: 14, borderTop: '1px solid var(--rule)',
-      display: 'flex', flexDirection: 'column', gap: 12
-    }}>
-      <Mono style={{ fontSize: 9 }}>
-        season calendar · {dueCount} due · {scheduledCount} scheduled
-      </Mono>
-      <div style={{ fontSize: 12, lineHeight: 1.45, color: 'var(--ink-muted)' }}>
-        Dated texture as the calendar ticks. Peek shows a summary once; visibility is the lasting spoil policy.
-        The narrator always gets the full beat when due.
-      </div>
-
-      {err && <ErrorNote error={err} onDismiss={() => setErr('')} />}
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}>
-          <Toggle label="Enable calendar events" on={prefs.enabled} onClick={() => patchPrefs({ enabled: !prefs.enabled })} />
-          enable calendar events
-        </label>
-        {!prefs.enabled && (
-          <Mono style={{ fontSize: 10, opacity: 0.5 }}>Ignored by narrator while off.</Mono>
-        )}
-        <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}>
-          <Toggle label="AI-seed calendar on season start" on={prefs.aiSeedOnSeasonStart} onClick={() => patchPrefs({ aiSeedOnSeasonStart: !prefs.aiSeedOnSeasonStart })} />
-          AI-seed on season start
-        </label>
-        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <Mono style={{ fontSize: 8, opacity: 0.5 }}>default visibility</Mono>
-          <select
-            value={prefs.defaultVisibility}
-            onChange={(e) => patchPrefs({ defaultVisibility: e.target.value as CalendarEventVisibility })}
-            style={selectStyle}
-          >
-            {CALENDAR_EVENT_VISIBILITIES.map((v) => (
-              <option key={v} value={v}>{v}</option>
-            ))}
-          </select>
-        </label>
-      </div>
-
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-        <button className="btn-ghost" style={{ fontSize: 12, minHeight: 36 }} onClick={addManual} disabled={!prefs.enabled || busy}>
-          Add event
-        </button>
-        <button className="btn-ghost" style={{ fontSize: 12, minHeight: 36 }} onClick={() => void generate()} disabled={!prefs.enabled || busy}>
-          Generate season texture
-        </button>
-        {busy && <Spinner label="seeding calendar" />}
-      </div>
-
-      {drafts.length > 0 && (
-        <div style={{
-          display: 'flex', flexDirection: 'column', gap: 8, padding: 12,
-          border: '1px solid var(--rule)', borderRadius: 11,
-          background: 'transparent'
-        }}>
-          <Mono style={{ fontSize: 9 }}>review generated</Mono>
-          {drafts.map((d, i) => (
-            <div key={i} style={{ opacity: d.keep ? 1 : 0.4, display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>{d.title} · day {d.storyDay} · {d.kind}</div>
-              <div style={{ fontSize: 12, opacity: 0.65 }}>{d.summary}</div>
-              <KeepDropChips
-                keep={d.keep}
-                onKeep={() => setDrafts((rows) => rows.map((r, j) => j === i ? { ...r, keep: true } : r))}
-                onDrop={() => setDrafts((rows) => rows.map((r, j) => j === i ? { ...r, keep: false } : r))}
-              />
-            </div>
-          ))}
-          <button className="btn-primary" style={{ minHeight: 40 }} onClick={commitDrafts}>Commit kept</button>
-          <button className="btn-quiet" style={{ fontSize: 12 }} onClick={() => setDrafts([])}>Discard</button>
-        </div>
-      )}
-
-      {sorted.length === 0 && prefs.enabled && (
-        <div style={{ fontSize: 12, opacity: 0.55, lineHeight: 1.45 }}>
-          No events yet this season.{' '}
-          <button className="btn-quiet" style={{ fontSize: 12 }} onClick={addManual}>Add event</button>
-          {' · '}
-          <button className="btn-quiet" style={{ fontSize: 12 }} onClick={() => void generate()} disabled={busy}>
-            Generate…
-          </button>
-        </div>
-      )}
-      {sorted.length === 0 && !prefs.enabled && (
-        <div style={{ fontSize: 12, opacity: 0.45 }}>Enable calendar events to add season texture.</div>
-      )}
-
-      {sorted.map((ev) => {
-        const open = editId === ev.id;
-        const peekedOn = peeked.has(ev.id);
-        const settled = ev.status === 'played' || ev.status === 'missed' || ev.status === 'cancelled';
-        const hiddenCollapsed = ev.visibility === 'hidden' && !peekedOn && !open;
-        const title = hiddenCollapsed ? 'Hidden beat' : (ev.title || '(untitled)');
-        const showSummary = ev.visibility === 'spoiler' || peekedOn;
-        return (
-          <div key={ev.id} style={{
-            border: '1px solid var(--rule)', borderRadius: 11, padding: '12px 14px',
-            background: 'transparent', display: 'flex', flexDirection: 'column', gap: 8,
-            opacity: settled ? 0.45 : 1
-          }}>
-            <button
-              type="button"
-              onClick={() => setEditId(open ? null : ev.id)}
-              style={{
-                border: 0, background: 'transparent', color: 'inherit', textAlign: 'left',
-                cursor: 'pointer', padding: 0, display: 'flex', flexDirection: 'column', gap: 2
-              }}
-            >
-              <span style={{ fontSize: 13, fontWeight: 600 }}>
-                {formatStoryDateShort(cal, ev.storyDay)} · {title}
-              </span>
-              <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.45 }}>
-                {hiddenCollapsed
-                  ? ev.status
-                  : `${ev.status}${ev.kind ? ` · ${ev.kind}` : ''}${ev.scale !== 'small' ? ` · ${ev.scale}` : ''}`}
-              </span>
-              {showSummary && !hiddenCollapsed && ev.summary.trim() && (
-                <span style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>{ev.summary}</span>
-              )}
-            </button>
-            {(ev.visibility === 'hidden' || ev.visibility === 'title') && (
-              <button className="btn-quiet" style={{ fontSize: 11, alignSelf: 'flex-start' }}
-                onClick={() => togglePeek(ev.id)}>
-                {peekedOn ? 'Hide peek' : 'Peek'}
-              </button>
-            )}
-            {open && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <input
-                  value={ev.title}
-                  onChange={(e) => patchEvent(ev.id, { title: e.target.value })}
-                  placeholder="Title"
-                  style={{ fontSize: 13 }}
-                />
-                <textarea
-                  rows={3}
-                  value={ev.summary}
-                  onChange={(e) => patchEvent(ev.id, { summary: e.target.value })}
-                  placeholder="Full beat (model always sees this when due)"
-                  style={{ fontSize: 12.5, lineHeight: 1.45 }}
-                />
-                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <Mono style={{ fontSize: 8, opacity: 0.5 }}>kind</Mono>
-                  <select value={ev.kind} onChange={(e) => patchEvent(ev.id, { kind: e.target.value as CalendarEventKind })} style={selectStyle}>
-                    {CALENDAR_EVENT_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
-                  </select>
-                </label>
-                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <Mono style={{ fontSize: 8, opacity: 0.5 }}>scale</Mono>
-                  <select value={ev.scale} onChange={(e) => patchEvent(ev.id, { scale: e.target.value as CalendarEventScale })} style={selectStyle}>
-                    {CALENDAR_EVENT_SCALES.map((s) => <option key={s} value={s}>{s}</option>)}
-                  </select>
-                </label>
-                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <Mono style={{ fontSize: 8, opacity: 0.5 }}>visibility (lasting)</Mono>
-                  <select value={ev.visibility} onChange={(e) => patchEvent(ev.id, { visibility: e.target.value as CalendarEventVisibility })} style={selectStyle}>
-                    {CALENDAR_EVENT_VISIBILITIES.map((v) => <option key={v} value={v}>{v}</option>)}
-                  </select>
-                </label>
-                <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                  <Mono style={{ fontSize: 8, opacity: 0.5 }}>prompt policy</Mono>
-                  <select value={ev.promptPolicy} onChange={(e) => patchEvent(ev.id, { promptPolicy: e.target.value as 'soft' | 'hard' })} style={selectStyle}>
-                    <option value="soft">soft</option>
-                    <option value="hard">hard</option>
-                  </select>
-                </label>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                  {(['scheduled', 'due', 'played', 'cancelled'] as const).map((st) => (
-                    <button
-                      key={st}
-                      type="button"
-                      className="btn-quiet"
-                      style={{ fontSize: 11, opacity: ev.status === st ? 1 : 0.55, fontWeight: ev.status === st ? 600 : 500 }}
-                      onClick={() => patchEvent(ev.id, { status: st })}
-                    >
-                      {st}
-                    </button>
-                  ))}
-                </div>
-                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
-                    day
-                    <input
-                      type="number"
-                      min={1}
-                      value={ev.storyDay}
-                      onChange={(e) => patchEvent(ev.id, { storyDay: Math.max(1, Math.floor(Number(e.target.value) || 1)) })}
-                      style={{ width: 72, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}
-                    />
-                  </label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
-                    end day
-                    <input
-                      type="number"
-                      min={ev.storyDay}
-                      value={ev.endDay ?? ''}
-                      placeholder="—"
-                      onChange={(e) => {
-                        const v = e.target.value.trim();
-                        if (!v) {
-                          patchEvent(ev.id, { endDay: undefined });
-                          return;
-                        }
-                        const n = Math.floor(Number(v));
-                        if (Number.isFinite(n) && n >= ev.storyDay) patchEvent(ev.id, { endDay: n });
-                      }}
-                      style={{ width: 72, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}
-                    />
-                  </label>
-                </div>
-                <button className="btn-quiet" style={{ fontSize: 11, alignSelf: 'flex-start' }}
-                  onClick={() => deleteEvent(ev)}>
-                  Delete
-                </button>
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-/** Controllable in-fiction calendar: day / month / year, weekday, episode stamp. */
-function CalendarTrackerPanel({
-  world, season, episode, narrow
-}: {
-  world: World;
-  season: Season;
-  episode: Episode;
-  narrow?: boolean;
-}) {
-  const cal = worldCalendar(world);
-  const today = partsForDay(cal, cal.currentDay);
-  const epDay = episode.storyDay && episode.storyDay > 0 ? episode.storyDay : cal.currentDay;
-  const loc = episode.location.trim() || 'no location set';
-  const [calError, setCalError] = useState('');
-  const [setupOpen, setSetupOpen] = useState(false);
-  // Number fields draft locally; commit on blur/Enter (avoids intermediate DB writes).
-  const [dayDraft, setDayDraft] = useState(String(today.dayOfMonth));
-  const [yearDraft, setYearDraft] = useState(String(today.year));
-  const [absDraft, setAbsDraft] = useState(String(cal.currentDay));
-  const [dayOneDateDraft, setDayOneDateDraft] = useState(String(cal.dayOneDate));
-  const [advanceDraft, setAdvanceDraft] = useState(String(cal.episodeAdvanceDays));
-  useEffect(() => { setDayDraft(String(today.dayOfMonth)); }, [today.dayOfMonth, world.id]);
-  useEffect(() => { setYearDraft(String(today.year)); }, [today.year, world.id]);
-  useEffect(() => { setAbsDraft(String(cal.currentDay)); }, [cal.currentDay, world.id]);
-  useEffect(() => { setDayOneDateDraft(String(cal.dayOneDate)); }, [cal.dayOneDate, world.id]);
-  useEffect(() => { setAdvanceDraft(String(cal.episodeAdvanceDays)); }, [cal.episodeAdvanceDays, world.id]);
-
-  const inputStyle: CSSProperties = {
-    fontFamily: "'IBM Plex Mono', monospace", fontSize: 12,
-    background: 'rgba(28,22,18,0.05)', border: '1px solid var(--rule)',
-    borderRadius: 8, padding: '6px 8px', color: '#f0eee9'
-  };
-  const ymdGrid = narrow ? '1fr' : '1fr 1.4fr 0.9fr';
-  const day1Grid = narrow ? '1fr' : '1.4fr 0.9fr';
-
-  const patchCal = (p: Parameters<typeof calendarPatch>[1]) => {
-    setCalError('');
-    void safeWrite(
-      () => db.worlds.update(world.id, { calendar: calendarPatch(world, p), updatedAt: Date.now() }),
-      setCalError
-    );
-  };
-
-  // Stamp open day once for legacy episodes — do not re-stamp when "today" moves.
-  useEffect(() => {
-    if (episode.storyDay == null || episode.storyDay < 1) {
-      void safeWrite(
-        () => db.episodes.update(episode.id, { storyDay: cal.currentDay, updatedAt: Date.now() }),
-        setCalError
-      );
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only when episode id / missing storyDay
-  }, [episode.id, episode.storyDay]);
-
-  const setDay = (day: number) => {
-    const next = Math.max(1, Math.floor(day));
-    const fromDay = cal.currentDay;
-    setCalError('');
-    void safeWrite(async () => {
-      await db.worlds.update(world.id, {
-        calendar: calendarPatch(world, { currentDay: next }),
-        updatedAt: Date.now()
-      });
-      // Keep active episode scene day in sync when the author advances "today".
-      if (episode.status === 'active') {
-        await db.episodes.update(episode.id, { storyDay: next, updatedAt: Date.now() });
-      }
-      if (next > fromDay) {
-        await evaluateCalendarEvents({
-          worldId: world.id,
-          seasonId: season.id,
-          fromDay,
-          toDay: next,
-          mode: 'advance',
-          world
-        });
-      }
-    }, setCalError);
-  };
-
-  const setParts = (year: number, monthIndex: number, dayOfMonth: number) => {
-    setDay(dayFromParts(cal, year, monthIndex, dayOfMonth));
-  };
-
-  const monthLen = cal.monthLengths[today.monthIndex] ?? 30;
-
-  const commitDayDraft = () => {
-    const n = Math.max(1, Math.min(monthLen, Math.floor(Number(dayDraft) || 1)));
-    setDayDraft(String(n));
-    if (n !== today.dayOfMonth) setParts(today.year, today.monthIndex, n);
-  };
-  const commitYearDraft = () => {
-    const n = Math.floor(Number(yearDraft) || cal.yearOne);
-    setYearDraft(String(n));
-    if (n !== today.year) setParts(n, today.monthIndex, today.dayOfMonth);
-  };
-  const commitAbsDraft = () => {
-    const n = Math.max(1, Math.floor(Number(absDraft) || 1));
-    setAbsDraft(String(n));
-    if (n !== cal.currentDay) setDay(n);
-  };
-  const commitDayOneDateDraft = () => {
-    const max = cal.monthLengths[cal.dayOneMonth] ?? 30;
-    const n = Math.max(1, Math.min(max, Math.floor(Number(dayOneDateDraft) || 1)));
-    setDayOneDateDraft(String(n));
-    if (n !== cal.dayOneDate) patchCal({ dayOneDate: n });
-  };
-  const setAdvance = (n: number) => {
-    patchCal({ episodeAdvanceDays: Math.max(0, Math.min(365, Math.floor(n))) });
-  };
-  const commitAdvanceDraft = () => {
-    const n = Math.max(0, Math.min(365, Math.floor(Number(advanceDraft) || 0)));
-    setAdvanceDraft(String(n));
-    if (n !== cal.episodeAdvanceDays) setAdvance(n);
-  };
-
-  const onNumKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') e.currentTarget.blur();
-  };
-
-  const setDayOneWeekday = (idx: number) => {
-    patchCal({ dayOneWeekday: idx });
-  };
-
-  const stampEpisodeDay = () => {
-    setCalError('');
-    void safeWrite(
-      () => db.episodes.update(episode.id, { storyDay: cal.currentDay, updatedAt: Date.now() }),
-      setCalError
-    );
-  };
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <Mono style={{ fontSize: 9 }}>calendar tracker</Mono>
-      {calError && <ErrorNote error={calError} onDismiss={() => setCalError('')} />}
-      <div style={{
-        border: '1px solid var(--rule)', borderRadius: 14, padding: '14px 14px',
-        background: 'transparent', display: 'flex', flexDirection: 'column', gap: 12
-      }}>
-        <div className="serif" style={{ fontSize: 20, lineHeight: 1.3, color: '#f0eee9' }}>
-          {formatStoryDateShort(cal, cal.currentDay)}
-        </div>
-        <div style={{ fontSize: 12.5, lineHeight: 1.45, opacity: 0.65, color: '#eceae6' }}>
-          Absolute day {cal.currentDay} · S{season.number} · E{episode.number} · {loc}
-          <br />
-          Episode opened {formatStoryDateShort(cal, epDay)}
-          {episode.storyDayEnd ? ` → ended ${formatStoryDateShort(cal, episode.storyDayEnd)}` : ''}
-        </div>
-
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-          <Chip onClick={() => setDay(cal.currentDay - 1)}>−1</Chip>
-          <Chip onClick={() => setDay(cal.currentDay + 1)}>+1 day</Chip>
-          <Chip onClick={() => setDay(cal.currentDay + 7)}>+7</Chip>
-          <Chip onClick={() => setDay(advanceMonths(cal, cal.currentDay, 1))}>+1 month</Chip>
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: ymdGrid, gap: 8 }}>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <Mono style={{ fontSize: 8, opacity: 0.5 }}>day</Mono>
-            <input
-              type="number"
-              min={1}
-              max={monthLen}
-              value={dayDraft}
-              onChange={(e) => setDayDraft(e.target.value)}
-              onBlur={commitDayDraft}
-              onKeyDown={onNumKeyDown}
-              style={inputStyle}
-            />
-          </label>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <Mono style={{ fontSize: 8, opacity: 0.5 }}>month</Mono>
-            <select
-              value={today.monthIndex}
-              onChange={(e) => setParts(today.year, Number(e.target.value), today.dayOfMonth)}
-              style={{ ...inputStyle, width: '100%' }}
-            >
-              {cal.months.map((name, i) => (
-                <option key={name + i} value={i}>{name}</option>
-              ))}
-            </select>
-          </label>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <Mono style={{ fontSize: 8, opacity: 0.5 }}>year</Mono>
-            <input
-              type="number"
-              value={yearDraft}
-              onChange={(e) => setYearDraft(e.target.value)}
-              onBlur={commitYearDraft}
-              onKeyDown={onNumKeyDown}
-              style={inputStyle}
-            />
-          </label>
-        </div>
-
-        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, opacity: 0.75 }}>
-          absolute day
-          <input
-            type="number"
-            min={1}
-            value={absDraft}
-            onChange={(e) => setAbsDraft(e.target.value)}
-            onBlur={commitAbsDraft}
-            onKeyDown={onNumKeyDown}
-            style={{ ...inputStyle, width: 72 }}
-          />
-        </label>
-
-        <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <Mono style={{ fontSize: 8, opacity: 0.5 }}>days to advance when episode ends</Mono>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-            {[0, 1, 2, 7, 14].map((n) => (
-              <Chip key={n} active={cal.episodeAdvanceDays === n} onClick={() => setAdvance(n)}>
-                {n === 0 ? 'same day' : n === 1 ? '+1 day' : `+${n}`}
-              </Chip>
-            ))}
-            <input
-              type="number"
-              min={0}
-              max={365}
-              value={advanceDraft}
-              onChange={(e) => setAdvanceDraft(e.target.value)}
-              onBlur={commitAdvanceDraft}
-              onKeyDown={onNumKeyDown}
-              style={{ ...inputStyle, width: 64 }}
-              title="Custom advance days"
-            />
-          </div>
-        </label>
-
-        {epDay !== cal.currentDay && (
-          <button className="btn-ghost" style={{ fontSize: 11, alignSelf: 'flex-start' }} onClick={stampEpisodeDay}>
-            Stamp episode open day → {formatStoryDateShort(cal, cal.currentDay)}
-          </button>
-        )}
-
-        <button
-          type="button"
-          className="btn-quiet"
-          style={{ fontSize: 11, alignSelf: 'flex-start' }}
-          onClick={() => setSetupOpen((o) => !o)}
-        >
-          {setupOpen ? 'Hide calendar setup' : 'Calendar setup'}
-        </button>
-
-        {setupOpen && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingTop: 4 }}>
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <Mono style={{ fontSize: 8, opacity: 0.5 }}>weekday of day 1</Mono>
-              <select
-                value={cal.dayOneWeekday}
-                onChange={(e) => setDayOneWeekday(Number(e.target.value))}
-                style={{ ...inputStyle, width: '100%', fontSize: 13, padding: '8px 10px' }}
-              >
-                {cal.weekdays.map((name, i) => (
-                  <option key={name + i} value={i}>
-                    Day 1 = {name} → today {weekdayForDay({ ...cal, dayOneWeekday: i }, cal.currentDay)}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <div style={{ display: 'grid', gridTemplateColumns: day1Grid, gap: 8 }}>
-              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <Mono style={{ fontSize: 8, opacity: 0.5 }}>month of day 1</Mono>
-                <select
-                  value={cal.dayOneMonth}
-                  onChange={(e) => patchCal({ dayOneMonth: Number(e.target.value) })}
-                  style={{ ...inputStyle, width: '100%' }}
-                >
-                  {cal.months.map((name, i) => (
-                    <option key={name + i} value={i}>{name}</option>
-                  ))}
-                </select>
-              </label>
-              <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                <Mono style={{ fontSize: 8, opacity: 0.5 }}>date of day 1</Mono>
-                <input
-                  type="number"
-                  min={1}
-                  max={cal.monthLengths[cal.dayOneMonth] ?? 30}
-                  value={dayOneDateDraft}
-                  onChange={(e) => setDayOneDateDraft(e.target.value)}
-                  onBlur={commitDayOneDateDraft}
-                  onKeyDown={onNumKeyDown}
-                  style={inputStyle}
-                />
-              </label>
-            </div>
-
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <Mono style={{ fontSize: 8, opacity: 0.5 }}>calendar system (optional notes)</Mono>
-              <textarea
-                key={world.id + '-dir-cal-system'}
-                rows={2}
-                defaultValue={cal.system}
-                onBlur={(e) => patchCal({ system: e.target.value })}
-                placeholder="Feast days, era name — narrator follows this verbatim. Month lengths are fixed (no leap days)."
-                style={{ fontSize: 12.5, lineHeight: 1.45, color: '#eceae6' }}
-              />
-            </label>
-            <div style={{ fontSize: 11.5, opacity: 0.45, lineHeight: 1.4 }}>
-              Story day 1 is the earliest date ({cal.dayOneDate} {cal.months[cal.dayOneMonth]} Y{cal.yearOne}). Dates before that clamp to day 1.
-              Advancing today on an active episode also stamps the episode open day.
-            </div>
-
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <Mono style={{ fontSize: 8, opacity: 0.5 }}>months (comma-separated)</Mono>
-              <input
-                key={world.id + '-months'}
-                defaultValue={cal.months.join(', ')}
-                onBlur={(e) => {
-                  const months = e.target.value.split(',').map((s) => s.trim()).filter(Boolean);
-                  if (months.length === 0) return;
-                  const monthLengths = months.map((_, i) => cal.monthLengths[i] ?? 30);
-                  patchCal({
-                    months,
-                    monthLengths,
-                    dayOneMonth: Math.min(cal.dayOneMonth, months.length - 1)
-                  });
-                }}
-                style={{ fontSize: 12.5, color: '#eceae6' }}
-              />
-            </label>
-
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <Mono style={{ fontSize: 8, opacity: 0.5 }}>days per month (comma-separated, same order)</Mono>
-              <input
-                key={world.id + '-month-lengths'}
-                defaultValue={cal.monthLengths.join(', ')}
-                onBlur={(e) => {
-                  const monthLengths = e.target.value.split(',').map((s) => Math.max(1, Math.min(90, Number(s.trim()) || 30)));
-                  if (monthLengths.length === 0) return;
-                  while (monthLengths.length < cal.months.length) monthLengths.push(30);
-                  patchCal({ monthLengths: monthLengths.slice(0, cal.months.length) });
-                }}
-                style={{ fontSize: 12.5, color: '#eceae6' }}
-              />
-            </label>
-
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <Mono style={{ fontSize: 8, opacity: 0.5 }}>custom weekdays (comma-separated)</Mono>
-              <input
-                key={world.id + '-weekdays'}
-                defaultValue={cal.weekdays.join(', ')}
-                onBlur={(e) => {
-                  const weekdays = e.target.value.split(',').map((s) => s.trim()).filter(Boolean);
-                  if (weekdays.length === 0) return;
-                  patchCal({
-                    weekdays,
-                    dayOneWeekday: Math.min(cal.dayOneWeekday, weekdays.length - 1)
-                  });
-                }}
-                style={{ fontSize: 12.5, color: '#eceae6' }}
-              />
-            </label>
-          </div>
-        )}
-      </div>
-
-      <CalendarSeasonEventsPanel world={world} season={season} />
-    </div>
-  );
 }
 
 function KeepDropChips({
@@ -4888,7 +2979,7 @@ function WrapReviewBody({
             value={draft.dateNote}
             onChange={(e) => onChange({ ...draft, dateNote: e.target.value })}
             placeholder="How time passed — overnight, two days on the road, same afternoon…"
-            style={{ fontSize: 13, lineHeight: 1.5, color: '#eceae6', background: 'transparent', border: 0, padding: 0 }}
+            style={{ fontSize: 13, lineHeight: 1.5, color: 'var(--paper)', background: 'transparent', border: 0, padding: 0 }}
           />
 
           <div style={{
@@ -4970,7 +3061,7 @@ function WrapReviewBody({
                   place: { ...draft.place!, currentState: e.target.value }
                 })}
                 placeholder="How the place is left — lamp smashed, quay empty…"
-                style={{ fontSize: 13.5, lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, color: '#eceae6' }}
+                style={{ fontSize: 13.5, lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, color: 'var(--paper)' }}
               />
               <textarea
                 rows={2}
@@ -5017,7 +3108,7 @@ function WrapReviewBody({
                   onChange({ ...draft, elsewhere });
                 }}
                 placeholder="How that place changed"
-                style={{ fontSize: 13, lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, color: '#eceae6' }}
+                style={{ fontSize: 13, lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, color: 'var(--paper)' }}
               />
               <KeepDropChips
                 keep={p.keep}
@@ -5140,7 +3231,7 @@ function WrapReviewBody({
                   );
                   onChange({ ...draft, hitTargets });
                 }}
-                style={{ fontSize: 13.5, lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, color: '#eceae6' }}
+                style={{ fontSize: 13.5, lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, color: 'var(--paper)' }}
               />
               <KeepDropChips
                 keep={row.keep}
@@ -5175,7 +3266,7 @@ function WrapReviewBody({
               background: 'transparent',
               opacity: row.keep ? 1 : 0.42
             }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: '#eceae6' }}>{row.title}</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--paper)' }}>{row.title}</div>
               <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.45 }}>
                 {[row.kind, row.storyDay != null ? `day ${row.storyDay}` : null].filter(Boolean).join(' · ')}
               </div>
@@ -5230,7 +3321,7 @@ function WrapReviewBody({
                   rows={2}
                   value={row.text}
                   onChange={(e) => patchLine(key, i, { text: e.target.value })}
-                  style={{ fontSize: 13.5, lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, color: '#eceae6' }}
+                  style={{ fontSize: 13.5, lineHeight: 1.5, background: 'transparent', border: 0, padding: 0, color: 'var(--paper)' }}
                 />
                 <KeepDropChips
                   keep={row.keep}
@@ -5266,7 +3357,7 @@ function WrapReviewBody({
                     value={u[field]}
                     onChange={(e) => patchCast(i, { [field]: e.target.value })}
                     style={{
-                      fontSize: 13, lineHeight: 1.4, color: '#eceae6',
+                      fontSize: 13, lineHeight: 1.4, color: 'var(--paper)',
                       background: 'transparent', border: 0, padding: 0
                     }}
                   />
@@ -5304,7 +3395,7 @@ function WrapReviewBody({
                     );
                     onChange({ ...draft, knowledgeUpdates });
                   }}
-                  style={{ fontSize: 13, lineHeight: 1.45, color: '#eceae6', background: 'transparent', border: 0, padding: 0 }}
+                  style={{ fontSize: 13, lineHeight: 1.45, color: 'var(--paper)', background: 'transparent', border: 0, padding: 0 }}
                 />
               </label>
               <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -5317,7 +3408,7 @@ function WrapReviewBody({
                     );
                     onChange({ ...draft, knowledgeUpdates });
                   }}
-                  style={{ fontSize: 13, color: '#eceae6', background: 'transparent', border: 0, padding: 0 }}
+                  style={{ fontSize: 13, color: 'var(--paper)', background: 'transparent', border: 0, padding: 0 }}
                 />
               </label>
               <KeepDropChips
@@ -5362,7 +3453,7 @@ function WrapReviewBody({
                   onChange({ ...draft, relationshipUpdates });
                 }}
                 placeholder="kind (ally, rival…)"
-                style={{ fontSize: 13, color: '#eceae6', background: 'transparent', border: 0, padding: 0 }}
+                style={{ fontSize: 13, color: 'var(--paper)', background: 'transparent', border: 0, padding: 0 }}
               />
               <textarea
                 rows={2}
@@ -5374,7 +3465,7 @@ function WrapReviewBody({
                   onChange({ ...draft, relationshipUpdates });
                 }}
                 placeholder="what changed…"
-                style={{ fontSize: 13, lineHeight: 1.45, color: '#eceae6', background: 'transparent', border: 0, padding: 0 }}
+                style={{ fontSize: 13, lineHeight: 1.45, color: 'var(--paper)', background: 'transparent', border: 0, padding: 0 }}
               />
               <KeepDropChips
                 keep={u.keep}

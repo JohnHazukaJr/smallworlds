@@ -1,6 +1,6 @@
 import type { Character, Location, ProviderConfig, World } from '../types';
 import { characterPortraits } from '../worldOps';
-import { AIError } from './client';
+import { AIError, providerTagFor } from './client';
 import { isZaiProvider, providerFetch } from './providerFetch';
 
 export interface SceneImageRef {
@@ -136,13 +136,17 @@ export async function generateSceneImage(opts: {
   return { dataUrl, warning };
 }
 
-async function imageHttpError(res: Response): Promise<AIError> {
+async function imageHttpError(res: Response, provider?: ProviderConfig): Promise<AIError> {
   let detail = '';
   try {
     const body = await res.json();
     detail = body?.error?.message ?? body?.message ?? '';
   } catch { /* ignore */ }
-  return new AIError(detail || `Image request failed (${res.status}).`, res.status);
+  return new AIError(
+    detail || `Image request failed (${res.status}).`,
+    res.status,
+    provider ? providerTagFor(provider) : undefined
+  );
 }
 
 async function requestImage(opts: {
@@ -188,7 +192,7 @@ async function requestImage(opts: {
         signal: opts.signal,
         body: JSON.stringify(body)
       });
-      if (res.status === 401 || res.status === 402) throw await imageHttpError(res);
+      if (res.status === 401 || res.status === 402) throw await imageHttpError(res, opts.provider);
       if (res.ok) {
         const parsed = await readImagePayload(res);
         if (parsed) return parsed;
@@ -232,7 +236,7 @@ async function requestImageViaChat(opts: {
     })
   });
   if (!res.ok) {
-    if (res.status === 401 || res.status === 402) throw await imageHttpError(res);
+    if (res.status === 401 || res.status === 402) throw await imageHttpError(res, opts.provider);
     let detail = '';
     try {
       const body = await res.json();
