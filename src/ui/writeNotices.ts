@@ -6,10 +6,10 @@ export const NOTICE_ADD_MODEL = 'Add a writing model in Settings first.';
 export function abortWriteNotice(beatsCompleted: number, remaining: number): string {
   if (remaining > 0) {
     if (beatsCompleted === 0) {
-      return 'The page stopped before a reply. Nothing new was kept.';
+      return 'Stopped before any reply. Nothing new was kept.';
     }
     return (
-      `The page stopped after ${beatsCompleted} line${beatsCompleted === 1 ? '' : 's'}. ` +
+      `Stopped after ${beatsCompleted} line${beatsCompleted === 1 ? '' : 's'}. ` +
       `Those lines were kept.`
     );
   }
@@ -23,10 +23,10 @@ export function abortWriteNotice(beatsCompleted: number, remaining: number): str
 export function unfinishedWriteNotice(beatsCompleted: number, remaining: number): string {
   if (remaining <= 0) return '';
   if (beatsCompleted === 0) {
-    return 'The page stopped before a reply. Nothing new was kept.';
+    return 'Stopped before any reply. Nothing new was kept.';
   }
   return (
-    `The page stopped after ${beatsCompleted} line${beatsCompleted === 1 ? '' : 's'}. ` +
+    `Stopped after ${beatsCompleted} line${beatsCompleted === 1 ? '' : 's'}. ` +
     `Those lines were kept.`
   );
 }

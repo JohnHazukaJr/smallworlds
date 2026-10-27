@@ -1,8 +1,8 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
 import {
-  analyzeEpisode, commitEpisodeWrap, commitSoftEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, draftColdOpenNarration, imageModelFor,
-  clearEpisodeRunningSummary, regenerateBeat, rollbackTurnSnapshot,
+  analyzeEpisode, commitEpisodeWrap, commitSoftEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, draftColdOpenNarration,
+  rollbackTurnSnapshot,
   snapshotTurnsAfter, snapshotTurnsFrom, writeTurn,
   discardPendingPlan,
   WriteAbortedError, type EpisodeWrapDraft, type StreamMeta
@@ -19,17 +19,15 @@ import {
   stripNarratorEmbeddedDialogue,
   type SpeakSegment
 } from '../ai/dialogueFormat';
-import { collectSceneImageRefs, generateSceneImage, sceneHasPortraitRefs } from '../ai/image';
 import {
-  episodeContextPressure, episodeHistoryChars, HISTORY_CHAR_BUDGET,
   resolveSpeakerName,
   type DirectorBeat
 } from '../ai/prompts';
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
-import { db, guardStorage, recordTombstones, safeWrite } from '../db';
+import { db, recordTombstones } from '../db';
 import {
-  AVATAR_PX, DEFAULT_DISPLAY, moodFromHue, storyAvatarHeight, useApp,
-  type AvatarSize, type DialogueStyle, type StoryLayout
+  DEFAULT_DISPLAY, moodFromHue, storyAvatarHeight, useApp,
+  type DialogueStyle, type StoryLayout
 } from '../store/app';
 import { hasWritingModel } from '../ai/models';
 import { useSettings } from '../store/settings';
@@ -37,20 +35,15 @@ import type {
   Character, ComposeMode, Episode, EpisodeGuest, EpisodeWrapBeat,
   Location, Turn, TurnLength, World, ActionWeight
 } from '../types';
-import { PAGE_LENGTH_LABELS } from '../types';
-import { AppError, classifyError, formatUserError } from '../errors';
+import { AppError, classifyError } from '../errors';
 import {
-  Chip, ConfirmBar, ErrorNote, Mono, Sheet, Spinner, Toggle,
+  Chip, ConfirmBar, ErrorNote, Mono, Sheet, Spinner,
   phoneChrome, sheetsFromBottom, shortStoryChrome, useViewport
 } from '../ui/bits';
 import { Face } from '../ui/Face';
-import { fileToSceneImage } from '../ui/image';
 import { attributionRun, isDialogueBlock, lastSpokenBy } from '../ui/attribution';
 import { abortWriteNotice, unfinishedWriteNotice, NOTICE_ADD_MODEL, noticeNavAction } from '../ui/writeNotices';
-import {
-  SCROLL_BACKDROP_LABEL, SCROLL_BACKDROPS, resolveScrollBackdrop
-} from '../ui/scrollBackdrop';
-import { avatarStyle, speakerInk, BACKDROPS, MOODS, ACCENT, ACCENT_RGBA } from '../ui/theme';
+import { avatarStyle, speakerInk, MOODS, ACCENT, ACCENT_RGBA } from '../ui/theme';
 import {
   characterPortraits, evaluateWorldWriteReady, formatStoryDate,
   buildEpisodePlotTargets, latestEndedEpisode, nextEpisode, worldCalendar
@@ -757,10 +750,9 @@ export function Story() {
   const short = shortStoryChrome(band, height);
   const sheetBottom = sheetsFromBottom(band);
   const narrow = phone;
-  const { currentWorldId, layout, setLayout, mood, setMood, backdrop, go, display, goLocations: openLocations, goCast: openCast, closeWorld } = useApp();
+  const { currentWorldId, layout, setLayout, mood, setMood, go, display, goLocations: openLocations, goCast: openCast, closeWorld } = useApp();
   useSettings((s) => s.proseModel);
   const M = MOODS[mood];
-  const BD = BACKDROPS[backdrop];
   const readMode = layout === 'read';
   const avatarPx = storyAvatarHeight(display.avatarSize, compact);
   const fontPx = readMode ? display.textSize + 1 : display.textSize;
@@ -841,10 +833,10 @@ export function Story() {
   const [asCharacterId, setAsCharacterId] = useState<string | null>(null);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
-  const [tailHasText, setTailHasText] = useState(false);
+  const [, setTailHasText] = useState(false);
   const streamSink = useRef<StreamSink>(() => {});
   const onTailText = useCallback((hasText: boolean) => setTailHasText(hasText), []);
-  const [progressLabel, setProgressLabel] = useState('writing…');
+  const [, setProgressLabel] = useState('writing…');
   const [error, setError] = useState<string | AppError>('');
   const [notice, setNotice] = useState('');
   const [writeAnyway, setWriteAnyway] = useState(false);
@@ -868,19 +860,12 @@ export function Story() {
   const [displayOpen, setDisplayOpen] = useState(false);
   const [moreSheet, setMoreSheet] = useState(false);
   const [confirmAsk, setConfirmAsk] = useState<null | {
-    kind: 'reroll' | 'delete' | 'deleteBelow' | 'retryFrom';
+    kind: 'retryFrom';
     turn: Turn;
   }>(null);
-  const [showReadCoach, setShowReadCoach] = useState(() => {
-    try { return localStorage.getItem('sw-read-coach') !== '1'; } catch { return false; }
-  });
   const [composerOpen, setComposerOpen] = useState(false);
-  const [composeMore, setComposeMore] = useState(false);
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const [hudTucked, setHudTucked] = useState(false);
-  const [sceneFadeKey, setSceneFadeKey] = useState(0);
-  /** Context-pressure nudge: dismiss until chars rise ~10% of budget or location changes. */
-  const [nudgeDismissedAtChars, setNudgeDismissedAtChars] = useState(0);
-  const [nudgeDismissedLocId, setNudgeDismissedLocId] = useState<string | null | undefined>(undefined);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLElement>(null);
 
@@ -891,30 +876,12 @@ export function Story() {
   const activeLocation = locations.find((l) => l.id === episode?.locationId)
     ?? locations.find((l) => episode?.location && l.name && episode.location.toLowerCase().includes(l.name.toLowerCase()));
 
-  const episodeChars = useMemo(() => episodeHistoryChars(turns), [turns]);
-  const pressure = episodeContextPressure(episodeChars);
-  const locationShiftNudge = nudgeDismissedLocId !== undefined
-    && (episode?.locationId ?? null) !== nudgeDismissedLocId
-    && episodeChars >= HISTORY_CHAR_BUDGET * 0.25;
-  const pressurePastDismiss = (pressure === 'warn' || pressure === 'escalate')
-    && episodeChars >= nudgeDismissedAtChars + HISTORY_CHAR_BUDGET * 0.1;
-  const showWrapNudge = !!episode && turns.length > 0 && (
-    ((pressure === 'warn' || pressure === 'escalate') && (nudgeDismissedAtChars === 0 || pressurePastDismiss))
-    || locationShiftNudge
-  );
-
-  useEffect(() => {
-    setSceneFadeKey((k) => k + 1);
-  }, [episode?.image, mood, episode?.locationId]);
-
   useEffect(() => {
     if (!readMode) {
       setComposerOpen(true);
       setHudTucked(false);
-      setComposeMore(false);
     } else {
       setComposerOpen(false);
-      setComposeMore(false);
     }
   }, [readMode]);
 
@@ -931,12 +898,6 @@ export function Story() {
       window.clearTimeout(idle);
     };
   }, [readMode, composerOpen, episode?.id]);
-
-  // Reset nudge baseline when the active episode changes.
-  useEffect(() => {
-    setNudgeDismissedAtChars(0);
-    setNudgeDismissedLocId(episode?.locationId ?? null);
-  }, [episode?.id]);
 
   // Fresh wrap draft only when opening from closed.
   const prevWrapOpen = useRef(wrapOpen);
@@ -960,12 +921,7 @@ export function Story() {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [turns.length]);
 
-  const dismissWrapNudge = () => {
-    setNudgeDismissedAtChars(episodeChars);
-    setNudgeDismissedLocId(episode?.locationId ?? null);
-  };
-
-  /** Shared streaming runner behind write / rewrite / retry / continue-plan. */
+  /** Shared streaming runner behind write / rewrite / retry. */
   const runNarration = async (
     mode: ComposeMode,
     text: string,
@@ -979,7 +935,7 @@ export function Story() {
     setNotice('');
     setStreaming(true);
     setTailHasText(false);
-    setProgressLabel('the page turns');
+    setProgressLabel('Writing…');
     const controller = new AbortController();
     abortRef.current = controller;
     try {
@@ -989,7 +945,7 @@ export function Story() {
         weight: actionWeight ?? weight,
         asCharacterId: handsId === undefined ? (asCharacterId ?? undefined) : (handsId ?? undefined),
         signal: controller.signal,
-        onProgress: () => setProgressLabel('the page turns'),
+        onProgress: () => setProgressLabel('Writing…'),
         onNotice: setNotice,
         onDelta: (p, meta) => {
           streamSink.current(p, meta);
@@ -1046,7 +1002,7 @@ export function Story() {
       return;
     }
     if (writeReady && writeReady.missing.length > 0 && !writeAnyway) {
-      setNotice('Fix the checklist above, or press Write anyway.');
+      setNotice('Add the missing items above, or press Write anyway.');
       return;
     }
     if (!input.trim()) return;
@@ -1057,46 +1013,6 @@ export function Story() {
     const result = await runNarration(mode, text, undefined, undefined, weight, asCharacterId);
     if (result.status !== 'ok' && result.beatsCompleted === 0 && result.remaining === 0) {
       setInput(text);
-    }
-  };
-
-  const rerollBeat = async (turn: Turn) => {
-    if (!world || !season || !episode || streaming) return;
-    if (turn.role !== 'narrator' && turn.role !== 'character') return;
-    setError('');
-    setNotice('');
-    setStreaming(true);
-    setTailHasText(false);
-    streamSink.current('', {
-      role: turn.role === 'narrator' ? 'narrator' : 'character',
-      characterId: turn.characterId,
-      guestId: turn.guestId
-    });
-    setProgressLabel('re-rolling…');
-    const controller = new AbortController();
-    abortRef.current = controller;
-    try {
-      await regenerateBeat({
-        world, season, episode, turn, length,
-        signal: controller.signal,
-        onProgress: setProgressLabel,
-        onDelta: (p, meta) => {
-          streamSink.current(p, meta);
-        }
-      });
-      setTailHasText(false);
-      setNotice('Beat re-rolled. Mid-episode summary was cleared.');
-    } catch (e) {
-      setTailHasText(false);
-      if (e instanceof WriteAbortedError || (e as Error).name === 'AbortError') {
-        setNotice('Re-roll stopped.');
-      } else {
-        setError(classifyError(e));
-      }
-    } finally {
-      setStreaming(false);
-      setProgressLabel('');
-      abortRef.current = null;
     }
   };
 
@@ -1138,46 +1054,11 @@ export function Story() {
     }
   };
 
-  /** Delete everything after a turn, keeping the turn itself. */
-  const deleteBelow = async (turn: Turn) => {
-    if (!episode || streaming) return;
-    const idx = turns.findIndex((t) => t.id === turn.id);
-    const below = turns.length - idx - 1;
-    if (idx < 0 || below === 0) return;
-    const snapshot = await snapshotTurnsAfter(turn.id, episode.id);
-    await deleteTurnsAfter(turn.id, episode.id);
-    if (snapshot.length > 0) {
-      await recordTombstones(snapshot.map((t) => ({
-        table: 'turns' as const,
-        id: t.id,
-        worldId: t.worldId,
-        episodeId: t.episodeId,
-        payload: t
-      })));
-    }
-  };
-
-  const deleteTurn = async (turn: Turn) => {
-    await recordTombstones([{
-      table: 'turns', id: turn.id, worldId: turn.worldId, episodeId: turn.episodeId, payload: turn
-    }]);
-    await db.turns.delete(turn.id);
-    if (turn.episodeId) await clearEpisodeRunningSummary(turn.episodeId);
-  };
-
   const runConfirmAsk = () => {
     if (!confirmAsk) return;
     const ask = confirmAsk;
     setConfirmAsk(null);
-    if (ask.kind === 'reroll') void rerollBeat(ask.turn);
-    else if (ask.kind === 'delete') void deleteTurn(ask.turn);
-    else if (ask.kind === 'retryFrom') void retryFrom(ask.turn);
-    else void deleteBelow(ask.turn);
-  };
-
-  const dismissReadCoach = () => {
-    setShowReadCoach(false);
-    try { localStorage.setItem('sw-read-coach', '1'); } catch { /* ignore */ }
+    void retryFrom(ask.turn);
   };
 
   const closeWrapSheet = () => {
@@ -1190,8 +1071,6 @@ export function Story() {
 
   const resetAfterEpisodeEnd = () => {
     closeWrapSheet();
-    setNudgeDismissedAtChars(0);
-    setNudgeDismissedLocId(null);
   };
 
   /** Analyze the episode transcript into a reviewable wrap draft. */
@@ -1246,7 +1125,7 @@ export function Story() {
       });
       await nextEpisode(episode);
       resetAfterEpisodeEnd();
-      const filed = 'Chapter filed · the next chapter is open.';
+      const filed = 'Episode ended. The next episode is open.';
       setNotice(memoryNote ? `${memoryNote} ${filed}` : filed);
     } catch (e) {
       setError(classifyError(e));
@@ -1327,7 +1206,7 @@ export function Story() {
         meanwhile: wrapDraft.meanwhileKeep ? wrapDraft.meanwhile : ''
       });
       resetAfterEpisodeEnd();
-      setNotice('Chapter filed · the next chapter is open.');
+      setNotice('Episode ended. The next episode is open.');
     } catch (e) {
       setError(classifyError(e));
     } finally {
@@ -1427,7 +1306,7 @@ export function Story() {
   if (!episode) {
     return (
       <div className="fade-in" style={recoverPad}>
-        <Mono>chapter filed</Mono>
+        <Mono>episode ended</Mono>
         <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: 'var(--ink-heading)' }}>
           {lastEndedEpisode
             ? `Episode ${lastEndedEpisode.number} is filed. Open the next, or review the season.`
@@ -1440,7 +1319,7 @@ export function Story() {
               {recoverBusy ? 'Opening…' : 'Open the next episode'}
             </button>
           )}
-          <button className="btn-ghost" onClick={() => go('sequel')}>The next book</button>
+          <button className="btn-ghost" onClick={() => go('sequel')}>Next season</button>
           <button className="btn-quiet" onClick={() => go('library')}>Worlds</button>
         </div>
       </div>
@@ -1456,8 +1335,6 @@ export function Story() {
   const shellHeight = '100%';
   const locLabel = (activeLocation?.name || episode.location || '')
     .split(',')[0].split('.')[0].toLowerCase();
-  const climateLine = (episode.atmosphereNote || activeLocation?.atmosphere || '')
-    .split(/[.\n]/)[0].trim();
   // Chapter head: where and when this episode opens, in reading order rather than chrome.
   const sceneDate = formatStoryDate(
     worldCalendar(world),
@@ -1467,12 +1344,6 @@ export function Story() {
   const stageGuests = episode.activeGuestIds == null
     ? guests
     : guests.filter((g) => episode.activeGuestIds!.includes(g.id));
-  const scrollBg = resolveScrollBackdrop({
-    mode: display.scrollBackdrop,
-    episodeImage: episode.image,
-    locationPortrait: activeLocation?.portrait
-  });
-  const scrollPhoto = scrollBg.kind === 'image' ? scrollBg.src : null;
 
   return (
     <div
@@ -1524,7 +1395,7 @@ export function Story() {
             ) : (
               <>
                 <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
-                  onClick={() => setWrapOpen('episode')}>End chapter</button>
+                  onClick={() => setWrapOpen('episode')}>End episode</button>
                 <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
                   onClick={() => setLayout('write')}>Exit read</button>
               </>
@@ -1551,7 +1422,7 @@ export function Story() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
               <div className="serif" style={{ fontSize: 16, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{world.title}</div>
               <div className="label" style={{ fontSize: 11 }}>
-                Book {season.number} · chapter {episode.number}{locLabel ? ` · ${locLabel}` : ''} · {formatStoryDate(worldCalendar(world), worldCalendar(world).currentDay)} · {M.label}
+                Season {season.number} · Episode {episode.number}{locLabel ? ` · ${locLabel}` : ''} · {formatStoryDate(worldCalendar(world), worldCalendar(world).currentDay)}
               </div>
             </div>
           </div>
@@ -1567,7 +1438,7 @@ export function Story() {
               ))}
             </div>
             {!short && (
-              <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setWrapOpen('episode')}>End chapter</button>
+              <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setWrapOpen('episode')}>End episode</button>
             )}
             {short ? (
               <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setMoreSheet(true)}>More</button>
@@ -1587,22 +1458,6 @@ export function Story() {
         gridTemplateColumns: 'minmax(0, 1fr)'
       }}>
         <section ref={scrollRef} style={{ overflow: 'auto', display: 'flex', flexDirection: 'column', position: 'relative' }}>
-          {readMode && showReadCoach && (
-            <div className="glass-nudge" style={{ margin: narrow ? '12px 16px 0' : '16px 28px 0', display: 'flex', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-              <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, lineHeight: 1.55, color: 'var(--paper)' }}>
-                End the chapter from this bar. Switch to Write to take an action.
-              </div>
-              <button type="button" className="btn-quiet" style={{ fontSize: 11 }} onClick={dismissReadCoach}>Got it</button>
-            </div>
-          )}
-          {climateLine && (
-            <div className="climate-breath" style={{
-              padding: narrow ? '18px 20px 0' : '22px 28px 0',
-              fontSize: narrow ? 14 : 16
-            }}>
-              {climateLine}
-            </div>
-          )}
 
           <div
             className="page-plane"
@@ -1610,29 +1465,13 @@ export function Story() {
               maxWidth: '40rem',
               margin: readMode ? '12px auto 28px' : '12px auto 18px',
               width: 'calc(100% - 32px)',
-              background: scrollBg.kind === 'off'
-                ? 'var(--page)'
-                : `linear-gradient(90deg, ${M.tint}, transparent 8%, transparent 92%, ${M.tint}), var(--page)`,
-              boxShadow: '0 0 0 1px rgba(28, 22, 18, 0.1)',
+              background: 'var(--page)',
+              border: '1px solid var(--rule)',
               padding: narrow
                 ? (readMode ? '28px 22px 48px' : '22px 18px 40px')
                 : (readMode ? '44px 48px 80px' : '36px 44px 68px')
             }}
           >
-            {(scrollPhoto || backdrop !== 'none') && scrollBg.kind !== 'off' && (
-              <div
-                key={`plate-${sceneFadeKey}`}
-                aria-hidden
-                style={{
-                  height: 7,
-                  marginBottom: 22,
-                  background: scrollPhoto
-                    ? `linear-gradient(90deg, rgba(247,243,234,${(display.imageDim / 140).toFixed(2)}), transparent 24%, transparent 76%, rgba(247,243,234,${(display.imageDim / 140).toFixed(2)})), url(${JSON.stringify(scrollPhoto)}) center/cover`
-                    : `linear-gradient(90deg, ${BD.a}, ${BD.b})`,
-                  filter: scrollPhoto && display.imageBlur > 0 ? `blur(${Math.min(display.imageBlur, 6)}px)` : undefined
-                }}
-              />
-            )}
             <header style={{ marginBottom: turns.length === 0 ? 28 : 22 }}>
               <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
                 {activeLocation && (
@@ -1651,7 +1490,7 @@ export function Story() {
                     color: 'var(--ink-muted)',
                     fontWeight: 500
                   }}>
-                    Book {numberWord(season.number)} · chapter {numberWord(episode.number)}
+                    Season {numberWord(season.number)} · Episode {numberWord(episode.number)}
                   </div>
                   <div className="serif" style={{
                     fontSize: narrow ? 26 : 32,
@@ -1660,7 +1499,7 @@ export function Story() {
                     margin: '12px 0 0',
                     color: 'var(--ink-heading)'
                   }}>
-                    {episode.title.trim() || activeLocation?.name || episode.location || 'Untitled chapter'}
+                    {episode.title.trim() || activeLocation?.name || episode.location || 'Untitled episode'}
                   </div>
                   {sceneDate && (
                     <div className="serif" style={{
@@ -1729,35 +1568,19 @@ export function Story() {
                     fontSize: fontPx, lineHeight: 1.82, margin: 0, fontWeight: 300,
                     color: 'var(--ink-muted)'
                   }}>
-                    The page is blank. Write on, and the narrator takes the first beat.
+                    Nothing here yet. Write the first turn.
                   </p>
                 )}
                 {!(activeLocation?.name || episode.location) && (
                   <div className="label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span className="seed-mark" />
                     No place linked yet
                   </div>
                 )}
                 {writeReady && writeReady.missing.length > 0 && !writeAnyway && (
-                  <div style={{
-                    border: '1px solid var(--rule)', borderRadius: 6, padding: '12px 14px',
-                    background: 'transparent', display: 'flex', flexDirection: 'column', gap: 10
-                  }}>
-                    <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, lineHeight: 1.55, color: 'var(--paper)' }}>
-                      {writeReady.missing.map((m) => (
-                        <li key={m}>{m}</li>
-                      ))}
-                    </ul>
-                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                      <button className="btn-ghost" style={{ fontSize: 11, padding: '7px 12px' }}
-                        onClick={() => setWorldEditOpen(true)}>Edit world</button>
-                      <button className="btn-ghost" style={{ fontSize: 11, padding: '7px 12px' }}
-                        onClick={goCast}>People</button>
-                      <button className="btn-ghost" style={{ fontSize: 11, padding: '7px 12px' }}
-                        onClick={goLocations}>Places</button>
-                      <button className="btn-quiet" style={{ fontSize: 11 }}
-                        onClick={() => setWriteAnyway(true)}>Write anyway</button>
-                    </div>
+                  <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', fontSize: 12.5, lineHeight: 1.55, color: 'var(--paper)' }}>
+                    <span>Still missing: {writeReady.missing.join(' ')}</span>
+                    <button className="btn-quiet" style={{ fontSize: 11 }}
+                      onClick={() => setWriteAnyway(true)}>Write anyway</button>
                   </div>
                 )}
                 {writeReady && writeReady.warnings.length > 0 && (writeAnyway || writeReady.missing.length === 0) && (
@@ -1768,8 +1591,8 @@ export function Story() {
                 {(!hasAI || (writeReady && writeReady.missing.length > 0 && !writeAnyway)) && (
                 <p style={{ fontSize: 14, margin: 0, color: 'var(--paper)' }}>
                   {!hasAI
-                    ? 'Add a writing model in Settings before Write on.'
-                    : 'Fix the checklist above, or press Write anyway, then Write on.'}
+                    ? 'Add a writing model in Settings to write.'
+                    : 'Add the missing items above, or press Write anyway.'}
                 </p>
                 )}
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -1781,7 +1604,7 @@ export function Story() {
                       onClick={() => {
                         void (async () => {
                           setError('');
-                          setProgressLabel('drafting cold open…');
+                          setProgressLabel('Writing opening…');
                           setStreaming(true);
                           try {
                             await draftColdOpenNarration(world, season, episode);
@@ -1794,7 +1617,7 @@ export function Story() {
                         })();
                       }}
                     >
-                      ✦ Draft cold open
+                      Draft opening
                     </button>
                   )}
                   {!hasAI && (
@@ -1818,14 +1641,14 @@ export function Story() {
                   type="button"
                   onClick={() => setTurnWindow((n) => n + 60)}
                   className="serif"
-                  title={`${manuscript.length - turnWindow} earlier pages`}
+                  title={`${manuscript.length - turnWindow} earlier turns`}
                   style={{
                     border: 0, background: 'transparent', cursor: 'pointer',
                     fontSize: 14, fontStyle: 'italic', color: 'var(--ink-muted)',
                     padding: '6px 8px'
                   }}
                 >
-                  · · · earlier pages · · ·
+                  Show earlier turns
                 </button>
               </div>
             )}
@@ -1838,7 +1661,7 @@ export function Story() {
                 const showBreak = chapter.id !== prevEpisodeId
                   && !(prevEpisodeId === '' && chapter.id === episode.id);
                 prevEpisodeId = chapter.id;
-                const chapterTitle = chapter.title.trim() || chapter.location || `Chapter ${chapter.number}`;
+                const chapterTitle = chapter.title.trim() || chapter.location || `Episode ${chapter.number}`;
                 return (
                   <div key={turn.id}>
                     {showBreak && (
@@ -1847,7 +1670,7 @@ export function Story() {
                           fontSize: 11, letterSpacing: '0.2em', textTransform: 'uppercase',
                           color: 'var(--ink-muted)'
                         }}>
-                          Chapter {chapter.number}
+                          Episode {chapter.number}
                         </div>
                         <div style={{ width: 48, height: 1, margin: '10px auto 0', background: 'var(--rule)' }} />
                         <div className="serif" style={{
@@ -1860,7 +1683,6 @@ export function Story() {
                     <TurnRow
                       turn={turn}
                       blocks={bs}
-                      characters={characters}
                       accent={M.accent}
                       prose={M.prose}
                       fontPx={fontPx}
@@ -1868,18 +1690,13 @@ export function Story() {
                       dialogueStyle="prose"
                       prevSpeaker={ti > 0 ? lastSpokenBy(visible[ti - 1].blocks) : null}
                       streaming={streaming}
-                      hasBelow={ti < visible.length - 1 || streaming}
                       opening={manuscript.length <= turnWindow && ti === 0}
-                      bare
                       onRewrite={turn.id === latestPassageId ? () => {
                         const idx = turns.findIndex((t) => t.id === turn.id);
                         const below = idx < 0 ? 0 : turns.length - idx - 1;
                         if (below > 0) setConfirmAsk({ kind: 'retryFrom', turn });
                         else void retryFrom(turn);
                       } : undefined}
-                      onRetry={() => undefined}
-                      onDeleteBelow={() => undefined}
-                      onDelete={() => undefined}
                     />
                   </div>
                 );
@@ -1903,43 +1720,7 @@ export function Story() {
               opening={turns.length === 0}
             />
 
-            {streaming && !tailHasText && (
-              <p className="serif" style={{
-                fontSize: fontPx, lineHeight: 1.82, margin: '0.4em 0 0',
-                fontStyle: 'italic', color: 'var(--ink-muted)'
-              }}>
-                {progressLabel || 'the page turns'}
-                <span className="prose-caret" aria-hidden />
-              </p>
-            )}
-
-            {!streaming && input.trim() && (
-              <div style={{ opacity: 0.46, marginTop: 10 }}>
-                {parseTurn({
-                  id: 'ghost',
-                  episodeId: episode.id,
-                  worldId: world.id,
-                  role: 'user',
-                  mode: 'act',
-                  text: input,
-                  asCharacterId: asCharacterId ?? undefined,
-                  createdAt: 0
-                }, characters, guests).map((b, i, arr) => (
-                  <ProseBlockView
-                    key={`g${i}`}
-                    b={b}
-                    accent={M.accent}
-                    prose={M.prose}
-                    fontPx={fontPx}
-                    avatarPx={avatarPx}
-                    dialogueStyle="prose"
-                    fromPlayer={!asCharacterId}
-                    caret={i === arr.length - 1}
-                  />
-                ))}
-              </div>
-            )}
-
+  
           </div>
         </section>
       </div>
@@ -1952,31 +1733,11 @@ export function Story() {
         }}>
           {confirmAsk && (
             <ConfirmBar
-              title={
-                confirmAsk.kind === 'reroll'
-                  ? 'Re-roll this line only?'
-                  : confirmAsk.kind === 'deleteBelow'
-                    ? 'Delete the turns below this one?'
-                    : confirmAsk.kind === 'retryFrom'
-                      ? (confirmAsk.turn.role === 'narrator' || confirmAsk.turn.role === 'character'
-                        ? 'Rewrite this response?'
-                        : 'Retry from here?')
-                      : 'Delete this turn?'
-              }
-              body={
-                confirmAsk.kind === 'reroll'
-                  ? 'Later turns stay. This line is rewritten in place.'
-                  : confirmAsk.kind === 'deleteBelow'
-                    ? 'This cannot be undone.'
-                    : confirmAsk.kind === 'retryFrom'
-                      ? 'Turns after this one will be replaced. This cannot be undone.'
-                      : 'Turns after it are kept. This cannot be undone.'
-              }
-              confirmLabel={
-                confirmAsk.kind === 'reroll' ? 'Re-roll'
-                  : confirmAsk.kind === 'retryFrom' ? 'Rewrite'
-                    : 'Delete'
-              }
+              title={confirmAsk.turn.role === 'narrator' || confirmAsk.turn.role === 'character'
+                ? 'Rewrite this response?'
+                : 'Retry from here?'}
+              body="Turns after this one will be replaced. This cannot be undone."
+              confirmLabel="Rewrite"
               onConfirm={runConfirmAsk}
               onCancel={() => setConfirmAsk(null)}
             />
@@ -2013,26 +1774,6 @@ export function Story() {
             padding: '8px 16px 12px'
           }}
         >
-          {showWrapNudge && (
-            <div className="glass-nudge" style={{
-              width: '100%',
-              display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
-              background: pressure === 'escalate' ? ACCENT_RGBA.a12 : undefined
-            }}>
-              <div style={{ flex: 1, minWidth: narrow ? 0 : 200, fontSize: 12.5, lineHeight: 1.55, color: 'var(--paper)' }}>
-                {pressure === 'escalate'
-                  ? 'This chapter is getting long. Close it so the season can move — facts from play are already on file.'
-                  : locationShiftNudge && (pressure === 'ok' || pressure === 'warm')
-                    ? 'The scene moved. Close the chapter when you are ready; memory from play is already on file.'
-                    : 'This chapter is getting long. Close it so the season can move.'}
-              </div>
-              <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
-                <button className="btn-primary" style={{ padding: '7px 12px', fontSize: 12 }}
-                  disabled={wrapBusy} onClick={() => setWrapOpen('episode')}>End chapter</button>
-                <button className="btn-quiet" style={{ fontSize: 11 }} onClick={dismissWrapNudge}>Not yet</button>
-              </div>
-            </div>
-          )}
           <button
             onClick={() => { setComposerOpen(true); setHudTucked(false); }}
             className="serif"
@@ -2042,7 +1783,7 @@ export function Story() {
               fontSize: 16, fontStyle: 'italic', opacity: 0.7
             }}
           >
-            Continue the book
+            Write
           </button>
         </div>
       ) : (
@@ -2056,7 +1797,7 @@ export function Story() {
           {!hasAI && turns.length > 0 && (
             <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
               <p style={{ fontSize: 14, margin: 0, color: 'var(--paper)', flex: 1, minWidth: 180 }}>
-                Add a writing model in Settings before Write on.
+                Add a writing model in Settings to write.
               </p>
               <button className="btn-ghost" style={{ fontSize: 12, padding: '7px 12px' }}
                 onClick={() => go('settings')}>
@@ -2064,30 +1805,17 @@ export function Story() {
               </button>
             </div>
           )}
-          {showWrapNudge && (
-            <div className="glass-nudge" style={{
-              display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
-              background: pressure === 'escalate' ? ACCENT_RGBA.a12 : undefined
-            }}>
-              <div style={{ flex: 1, minWidth: narrow ? 0 : 200, fontSize: 12.5, lineHeight: 1.55, color: 'var(--paper)' }}>
-                {pressure === 'escalate'
-                  ? 'This chapter is getting long. Close it so the season can move — facts from play are already on file.'
-                  : locationShiftNudge && (pressure === 'ok' || pressure === 'warm')
-                    ? 'The scene moved. Close the chapter when you are ready; memory from play is already on file.'
-                    : 'This chapter is getting long. Close it so the season can move.'}
-              </div>
-              <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
-                <button className="btn-primary" style={{ padding: '7px 12px', fontSize: 12 }}
-                  disabled={wrapBusy} onClick={() => setWrapOpen('episode')}>End chapter</button>
-                <button className="btn-quiet" style={{ fontSize: 11 }} onClick={dismissWrapNudge}>Not yet</button>
-              </div>
-            </div>
-          )}
-          {(!readMode || composeMore) && (
-          <>
+          <div style={{ maxWidth: '40rem', margin: '0 auto', width: '100%' }}>
+            <button className="btn-quiet" style={{ fontSize: 12, minHeight: 32, padding: '4px 6px' }}
+              onClick={() => setOptionsOpen((o) => !o)}>
+              {optionsOpen ? 'Hide options' : 'Options'}
+            </button>
+          </div>
+          {optionsOpen && (
+          <div style={{ maxWidth: '40rem', margin: '0 auto', width: '100%', display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
             <span className="label" style={{ fontSize: 11 }}>
-              whose hands
+              Write as
             </span>
             <Chip active={asCharacterId === null} onClick={() => setAsCharacterId(null)}>You</Chip>
             {inScene.filter((c) => !c.isPlayer).map((c) => (
@@ -2102,48 +1830,20 @@ export function Story() {
           </div>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
             <span className="label" style={{ fontSize: 11 }}>
-              this action
+              This turn
             </span>
-            <Chip active={weight === 'matters'} onClick={() => setWeight('matters')}>This changes things</Chip>
-            <Chip active={weight === 'moment'} onClick={() => setWeight('moment')}>Only this moment</Chip>
+            <Chip active={weight === 'matters'} onClick={() => setWeight('matters')}>Changes things</Chip>
+            <Chip active={weight === 'moment'} onClick={() => setWeight('moment')}>Just this moment</Chip>
           </div>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between' }}>
-            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-              <span
-                className="label"
-                style={{ fontSize: 11 }}
-                title="How long the book writes back"
-              >
-                the page
-              </span>
-              {(['beat', 'scene', 'episode'] as const).map((l) => (
-                <Chip key={l} active={length === l} onClick={() => setLength(l)}>
-                  {PAGE_LENGTH_LABELS[l]}
-                </Chip>
-              ))}
-            </div>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span className="label" style={{ fontSize: 11 }}>
+              Reply length
+            </span>
+            <Chip active={length === 'beat'} onClick={() => setLength('beat')}>Short</Chip>
+            <Chip active={length === 'scene'} onClick={() => setLength('scene')}>Normal</Chip>
+            <Chip active={length === 'episode'} onClick={() => setLength('episode')}>Long</Chip>
           </div>
-          </>
-          )}
-          {readMode && (
-            <div style={{ display: 'flex', justifyContent: 'center', gap: 16 }}>
-              <button className="btn-quiet" style={{ fontSize: 12, minHeight: 36 }}
-                onClick={() => setComposeMore((o) => !o)}>
-                {composeMore ? 'Less' : 'More'}
-              </button>
-              <button className="btn-quiet" style={{ fontSize: 12, minHeight: 36 }}
-                onClick={() => setComposerOpen(false)}>
-                collapse
-              </button>
-            </div>
-          )}
-          {streaming && !tailHasText && (
-            <p className="serif" style={{
-              margin: 0, fontSize: narrow ? 16 : 18, fontStyle: 'italic',
-              color: 'var(--ink-muted)', textAlign: 'center'
-            }}>
-              the page turns
-            </p>
+          </div>
           )}
           <div style={{
             display: 'flex', gap: 13, alignItems: 'flex-end',
@@ -2163,7 +1863,7 @@ export function Story() {
               disabled={streaming}
               style={{
                 flex: 1, border: 0, background: 'transparent', padding: '4px 0',
-                fontFamily: 'Spectral, serif', fontSize: narrow ? 16 : 18, lineHeight: 1.7,
+                fontSize: narrow ? 16 : 18, lineHeight: 1.7,
                 minHeight: 44
               }}
             />
@@ -2176,17 +1876,10 @@ export function Story() {
                 disabled={writeBlocked || !input.trim()}
                 onClick={() => void write()}
               >
-                Turn the page
+                Send
               </button>
             )}
           </div>
-          {!readMode && (
-            <div style={{ display: 'flex', gap: 16, fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.4, flexWrap: 'wrap' }}>
-              <span>memory: {continuity.length} facts · {threads.length} open threads</span>
-              {!narrow && <span>{world.ai.mature ? 'adult world · unrestricted' : 'general audience'}</span>}
-              {!narrow && <span>{/Mac|iPhone|iPad/i.test(typeof navigator !== 'undefined' ? navigator.platform || navigator.userAgent : '') ? '⌘↵ write on' : 'Ctrl+Enter write on'}</span>}
-            </div>
-          )}
         </div>
       )}
 
@@ -2205,10 +1898,10 @@ export function Story() {
                 onClick={() => void confirmEpisodeWrap()}
               >
                 {wrapBusy ? (
-                  'Closing the chapter…'
+                  'Ending episode…'
                 ) : (
                   <span style={{ display: 'flex', flexDirection: 'column', gap: 2, lineHeight: 1.25 }}>
-                    <span>Close chapter · open chapter {episode.number + 1}</span>
+                    <span>Close episode · open episode {episode.number + 1}</span>
                     <span style={{ fontSize: 11, fontWeight: 500, opacity: 0.8 }}>
                       {formatStoryDate(worldCalendar(world), wrapDraft?.nextStoryDay ?? worldCalendar(world).currentDay).toLowerCase()}
                     </span>
@@ -2246,7 +1939,7 @@ export function Story() {
                 disabled={wrapBusy}
                 onClick={() => void runEpisodeAnalyze()}
               >
-                Read the chapter
+                Review episode
               </button>
               <button
                 className="btn-quiet"
@@ -2263,15 +1956,15 @@ export function Story() {
         <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 14 }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: '0.14em', textTransform: 'uppercase', opacity: 0.5 }}>
-              book {season.number} · chapter {episode.number}
+              season {season.number} · episode {episode.number}
             </div>
             <div className="serif" style={{ fontWeight: 300, fontSize: 27, lineHeight: 1.15, color: 'var(--ink-heading)' }}>
-              End the chapter.
+              End episode.
             </div>
             <div style={{ fontSize: 13, lineHeight: 1.6, opacity: 0.62, maxWidth: '48ch', color: 'var(--paper)' }}>
               {wrapPhase === 'review'
-                ? 'Edit the recap and time skip, Keep or Drop anything new or stale, then close the chapter. Facts from play are already on file.'
-                : 'Read the chapter back, then open the next one. Skipping still keeps a short recap.'}
+                ? 'Edit the recap and time skip, Keep or Drop anything new or stale, then close the episode. Facts from play are already saved.'
+                : 'Review the episode, then open the next one. Skipping still keeps a short recap.'}
             </div>
           </div>
           <button className="btn-ghost" aria-label="Close" style={{ width: 30, height: 30, padding: 0, flexShrink: 0 }} onClick={closeWrapSheet}>×</button>
@@ -2284,7 +1977,7 @@ export function Story() {
             style={{ fontSize: 12, minHeight: 36 }}
             onClick={() => { closeWrapSheet(); go('sequel'); }}
           >
-            The next book →
+            Next season →
           </button>
         </div>
 
@@ -2293,7 +1986,7 @@ export function Story() {
           <div style={{
             fontSize: 12.5, lineHeight: 1.5, color: 'var(--paper)',
             border: '1px solid var(--rule)', borderRadius: 10, padding: '10px 12px',
-            background: 'rgba(28,22,18,0.04)', display: 'flex', gap: 10, alignItems: 'flex-start'
+            background: 'rgba(0,0,0,0.04)', display: 'flex', gap: 10, alignItems: 'flex-start'
           }}>
             <span style={{ flex: 1 }}>{notice}</span>
             <button className="btn-quiet" style={{ fontSize: 11, minHeight: 28 }} onClick={() => setNotice('')}>dismiss</button>
@@ -2302,7 +1995,7 @@ export function Story() {
 
         {wrapPhase === 'analyzing' ? (
           <div style={{ padding: '20px 0' }}>
-            <Spinner label="closing the chapter" />
+            <Spinner label="ending episode" />
           </div>
         ) : wrapPhase === 'review' && wrapDraft ? (
           <WrapReviewBody draft={wrapDraft} onChange={setWrapDraft} guests={guests} world={world} />
@@ -2313,11 +2006,11 @@ export function Story() {
               border: '1px solid var(--rule)', borderRadius: 12, padding: '12px 14px',
               background: 'transparent'
             }}>
-              Analyze closes the chapter: previously-on, time skip, next opening, plus Keep/Drop only for new or stale facts and threads
+              Analyze closes the episode: recap, time skip, next opening, plus Keep/Drop only for new or stale facts and threads
               {guests.length > 0 ? ', and walk-on effects' : ''}. Episode prose stays saved; only the active episode stays in the writing loop.
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-              <Mono style={{ fontSize: 9 }}>already held in continuity</Mono>
+              <Mono style={{ fontSize: 9 }}>saved facts</Mono>
               {continuity.slice(-6).map((f) => (
                 <div key={f.id} className="craft-row" style={{ padding: '12px 14px', fontSize: 13, lineHeight: 1.5, color: 'var(--ink-muted)' }}>
                   {f.text}
@@ -2325,7 +2018,7 @@ export function Story() {
               ))}
               {continuity.length === 0 && (
                 <div style={{ fontSize: 12.5, opacity: 0.5, color: 'var(--paper)' }}>
-                  Nothing filed yet — play files facts as the scene unfolds.
+                  Nothing saved yet. Facts are saved as the scene unfolds.
                 </div>
               )}
             </div>
@@ -2344,7 +2037,7 @@ export function Story() {
           {(readMode || short) && (
             <>
               <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setWrapOpen('episode'); }}>
-                End chapter
+                End episode
               </button>
               {readMode && (
                 <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setLayout('write'); }}>
@@ -2360,7 +2053,7 @@ export function Story() {
             Edit world
           </button>
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); go('cast'); }}>
-            People
+            Characters
           </button>
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); goLocations(); }}>
             Places
@@ -2369,7 +2062,7 @@ export function Story() {
             Profile
           </button>
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); go('sequel'); }}>
-            The next book
+            Next season
           </button>
         </div>
       </Sheet>
@@ -2389,13 +2082,12 @@ export function Story() {
       {/* display settings */}
       <DisplaySheet
         open={displayOpen} onClose={() => setDisplayOpen(false)} narrow={sheetBottom}
-        episode={episode} world={world} locations={locations} characters={characters}
       />
     </div>
   );
 }
 
-// ---------- display settings (scene image, text plate, sizes) ----------
+// ---------- display settings ----------
 
 function SliderRow({ label, value, min, max, unit, onChange }: {
   label: string; value: number; min: number; max: number; unit?: string; onChange: (v: number) => void;
@@ -2404,7 +2096,7 @@ function SliderRow({ label, value, min, max, unit, onChange }: {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
         <Mono style={{ fontSize: 9 }}>{label}</Mono>
-        <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10.5, color: ACCENT }}>
+        <span style={{ fontSize: 10.5, color: 'var(--accent-strong)' }}>
           {value}{unit ?? ''}
         </span>
       </div>
@@ -2417,242 +2109,26 @@ function SliderRow({ label, value, min, max, unit, onChange }: {
   );
 }
 
-function DisplaySheet({ open, onClose, narrow, episode, world, locations, characters }: {
+function DisplaySheet({ open, onClose, narrow }: {
   open: boolean; onClose: () => void; narrow: boolean;
-  episode: Episode; world: World; locations: Location[]; characters: Character[];
 }) {
-  const { display, setDisplay, mood, setMood } = useApp();
-  const [imgError, setImgError] = useState('');
-  const [imgBusy, setImgBusy] = useState(false);
-  const [genBusy, setGenBusy] = useState(false);
-  const [note, setNote] = useState(episode.atmosphereNote ?? '');
-  const canMatchFaces = sceneHasPortraitRefs(characters, episode.castIds);
-  const [matchCast, setMatchCast] = useState(canMatchFaces);
-  const previewFace = characters.find((c) => characterPortraits(c)[0]);
-  const fileRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => { setNote(episode.atmosphereNote ?? ''); }, [episode.id, episode.atmosphereNote]);
-
-  const sceneLoc = locations.find((l) => l.id === episode.locationId)
-    ?? locations.find((l) => episode.location && l.name
-      && (episode.location.toLowerCase().includes(l.name.toLowerCase())
-        || l.name.toLowerCase().includes(episode.location.trim().toLowerCase())));
-
-  const onFile = async (file: File) => {
-    setImgBusy(true);
-    setImgError('');
-    try {
-      const image = await fileToSceneImage(file);
-      await guardStorage(() => db.episodes.update(episode.id, { image, updatedAt: Date.now() }));
-      setDisplay({ scrollBackdrop: 'auto' });
-    } catch (e) {
-      setImgError(formatUserError(e));
-    } finally {
-      setImgBusy(false);
-    }
-  };
-
-  const generateFromLocation = async () => {
-    if (!sceneLoc) {
-      setImgError('Pick a location card first — generation uses its name, atmosphere, and features.');
-      return;
-    }
-    setGenBusy(true);
-    setImgError('');
-    try {
-      const { provider, model } = imageModelFor(world);
-      const refs = collectSceneImageRefs({
-        characters, castIds: episode.castIds, location: sceneLoc
-      });
-      const result = await generateSceneImage({
-        provider, model, world, location: sceneLoc,
-        atmosphereNote: episode.atmosphereNote,
-        matchCast, refs
-      });
-      await guardStorage(() => db.episodes.update(episode.id, { image: result.dataUrl, updatedAt: Date.now() }));
-      if (result.warning) setImgError(result.warning);
-      if (display.aiSetsScrollBg) setDisplay({ scrollBackdrop: 'auto' });
-    } catch (e) {
-      setImgError(formatUserError(e));
-    } finally {
-      setGenBusy(false);
-    }
-  };
-
+  const { display, setDisplay } = useApp();
   return (
     <Sheet open={open} onClose={onClose} narrow={narrow}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-          <div className="serif" style={{ fontWeight: 300, fontSize: 24, color: 'var(--ink-heading)' }}>Display</div>
-          <Mono style={{ fontSize: 9 }}>type size stays on this device · a picture stays with the chapter</Mono>
-        </div>
-        <button className="btn-ghost" style={{ width: 30, height: 30, padding: 0, flexShrink: 0 }} onClick={onClose}>×</button>
+        <div className="serif" style={{ fontWeight: 500, fontSize: 20, color: 'var(--ink-heading)' }}>Display</div>
+        <button className="btn-ghost" style={{ width: 30, height: 30, padding: 0, flexShrink: 0 }} onClick={onClose}>x</button>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 22, paddingRight: 2 }}>
-        {/* atmosphere */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <Mono style={{ fontSize: 9 }}>atmosphere for this chapter</Mono>
-          <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
-            Weather, time of day, or a sensory note the book should keep returning to.
-            The place suggests a stain on the page unless you pin one.
-          </div>
-          <textarea
-            rows={2}
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            onBlur={() => {
-              const next = note.trim();
-              if (next !== (episode.atmosphereNote ?? '')) {
-                void safeWrite(
-                  () => db.episodes.update(episode.id, {
-                    atmosphereNote: next || undefined, updatedAt: Date.now()
-                  }),
-                  setImgError
-                );
-              }
-            }}
-            placeholder="rain on the glass · late afternoon · cold iron smell…"
-            style={{ fontSize: 13 }}
-          />
-
-          {(episode.sceneLedger?.length ?? 0) > 0 && (
-            <div className="craft-row" style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-              <Mono style={{ fontSize: 9 }}>already true in this chapter</Mono>
-              <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--ink-muted)' }}>
-                Tracked from the prose. The book is held to these.
-              </div>
-              <ul style={{ margin: 0, paddingLeft: 16, display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {episode.sceneLedger!.map((d, i) => (
-                  <li key={i} className="serif" style={{ fontSize: 13, lineHeight: 1.5, color: 'var(--paper)' }}>
-                    {d}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <span className="label" style={{ fontSize: 11 }}>
-              page stain {episode.moodPinned ? 'pinned' : 'follows the place'}
-            </span>
-            <Toggle
-              label="Pin the stain to this chapter"
-              on={!!episode.moodPinned}
-              onClick={() => {
-                const next = !episode.moodPinned;
-                void safeWrite(
-                  () => db.episodes.update(episode.id, { moodPinned: next, updatedAt: Date.now() }),
-                  setImgError
-                );
-                if (!next && sceneLoc) setMood(moodFromHue(sceneLoc.hue));
-              }}
-            />
-            {(Object.entries(MOODS) as Array<[typeof mood, (typeof MOODS)[typeof mood]]>).map(([id, m]) => (
-              <button key={id} type="button" title={m.label} onClick={() => {
-                setMood(id);
-                void safeWrite(
-                  () => db.episodes.update(episode.id, { moodPinned: true, updatedAt: Date.now() }),
-                  setImgError
-                );
-              }} aria-label={m.label} style={{
-                display: 'inline-flex', alignItems: 'center', gap: 5,
-                height: 24, padding: '0 8px', borderRadius: 2, cursor: 'pointer',
-                background: mood === id ? m.accent : 'transparent',
-                border: `1px solid ${mood === id ? 'var(--accent)' : 'var(--rule)'}`,
-                opacity: mood === id ? 1 : 0.5, color: mood === id ? 'var(--accent-ink)' : 'var(--paper)',
-                fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.04em'
-              }}>
-                <span style={{ width: 8, height: 8, borderRadius: 1, background: m.accent, flexShrink: 0 }} />
-                {m.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* scroll background */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <Mono style={{ fontSize: 9 }}>endpaper</Mono>
-          <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
-            A thin picture at the head of the page. It does not sit behind the type.
-            Auto uses a chapter picture, then the place, then only the stain. Off leaves the page plain.
-          </div>
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            {SCROLL_BACKDROPS.map((id) => (
-              <Chip key={id} active={display.scrollBackdrop === id} onClick={() => setDisplay({ scrollBackdrop: id })}>
-                {SCROLL_BACKDROP_LABEL[id]}
-              </Chip>
-            ))}
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-            <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, opacity: 0.5 }}>
-              AI may set the chapter picture
-            </span>
-            <Toggle
-              label="AI may set the chapter picture"
-              on={display.aiSetsScrollBg}
-              onClick={() => setDisplay({ aiSetsScrollBg: !display.aiSetsScrollBg })}
-            />
-          </div>
-        </div>
-
-        {/* scene image */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          <Mono style={{ fontSize: 9 }}>chapter picture — chapter {episode.number}</Mono>
-          <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
-            An optional picture for the endpaper. Swap it when the chapter changes; each chapter keeps its own.
-          </div>
-          {episode.image && (
-            <div style={{
-              height: 120, borderRadius: 13, border: '1px solid var(--rule)',
-              backgroundImage: `url(${JSON.stringify(episode.image)})`, backgroundSize: 'cover', backgroundPosition: 'center'
-            }} />
-          )}
-          {imgError && <ErrorNote error={imgError} onDismiss={() => setImgError('')} />}
-          {canMatchFaces && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <Toggle label="Match faces in the chapter picture" on={matchCast} onClick={() => setMatchCast((v) => !v)} />
-              <div style={{ fontSize: 12.5, lineHeight: 1.45, color: 'var(--paper)' }}>
-                Match cast photos — keep uploaded faces when the image model accepts references.
-              </div>
-            </div>
-          )}
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button className="btn-primary" style={{ fontSize: 12, padding: '8px 14px' }}
-              disabled={genBusy || imgBusy || !sceneLoc}
-              onClick={() => void generateFromLocation()}>
-              {genBusy ? 'Generating…' : sceneLoc ? `Generate from ${sceneLoc.name}` : 'Generate from location'}
-            </button>
-            <button className="btn-ghost" style={{ fontSize: 12 }} disabled={imgBusy || genBusy} onClick={() => fileRef.current?.click()}>
-              {imgBusy ? 'Processing…' : episode.image ? 'Replace image' : 'Upload image'}
-            </button>
-            {episode.image && (
-              <button className="btn-quiet" style={{ fontSize: 11 }}
-                onClick={() => void safeWrite(
-                  () => db.episodes.update(episode.id, { image: null, updatedAt: Date.now() }),
-                  setImgError
-                )}>remove</button>
-            )}
-            <input
-              ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }}
-              onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); e.target.value = ''; }}
-            />
-          </div>
-          <SliderRow label="paper over the picture" value={display.imageDim} min={0} max={90} unit="%"
-            onChange={(v) => setDisplay({ imageDim: v })} />
-          <SliderRow label="soften" value={display.imageBlur} min={0} max={20} unit="px"
-            onChange={(v) => setDisplay({ imageBlur: v })} />
-        </div>
-
-        {/* text */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, borderTop: '1px solid var(--rule)', paddingTop: 16 }}>
-          <Mono style={{ fontSize: 9 }}>type</Mono>
-          <SliderRow label="type size" value={display.textSize} min={15} max={24} unit="px"
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <Mono style={{ fontSize: 9 }}>text</Mono>
+          <SliderRow label="Text size" value={display.textSize} min={15} max={24} unit="px"
             onChange={(v) => setDisplay({ textSize: v })} />
         </div>
 
-        {/* dialogue layout */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: '1px solid var(--rule)', paddingTop: 16 }}>
-          <Mono style={{ fontSize: 9 }}>how dialogue sits on the page</Mono>
+          <Mono style={{ fontSize: 9 }}>dialogue</Mono>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <Chip
               active={display.dialogueStyle === 'prose'}
@@ -2669,112 +2145,34 @@ function DisplaySheet({ open, onClose, narrow, episode, world, locations, charac
           </div>
           <div style={{ fontSize: 11.5, lineHeight: 1.5, color: 'var(--ink-muted)' }}>
             {display.dialogueStyle === 'prose'
-              ? 'Speech sits with a portrait plate and the speaker’s name in their colour. A speaker who keeps talking is not re-announced.'
-              : 'Every line gets a portrait plate and a name — a conversation, not a chip list.'}
+              ? 'Speech runs in the text with the speaker named once.'
+              : 'Every line gets a name and portrait.'}
           </div>
         </div>
 
-        {/* avatars */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: '1px solid var(--rule)', paddingTop: 16 }}>
-            <Mono style={{ fontSize: 9 }}>plate size on the page</Mono>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              {(['S', 'M', 'L'] as AvatarSize[]).map((s) => (
-                <Chip key={s} active={display.avatarSize === s} onClick={() => setDisplay({ avatarSize: s })}>
-                  {s === 'S' ? 'Small' : s === 'M' ? 'Medium' : 'Large'}
-                </Chip>
-              ))}
-              <div style={{ marginLeft: 'auto' }}>
-                <Face
-                  hue={previewFace?.hue ?? 200}
-                  size={AVATAR_PX[display.avatarSize]}
-                  portrait={previewFace ? characterPortraits(previewFace)[0] : null}
-                  name={previewFace?.name || 'Ada'}
-                  glow
-                />
-              </div>
-            </div>
-          </div>
-
         <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
-          onClick={() => setDisplay(DEFAULT_DISPLAY)}>reset display to defaults</button>
+          onClick={() => setDisplay(DEFAULT_DISPLAY)}>Reset display to defaults</button>
       </div>
     </Sheet>
   );
 }
 
-// ---------- turn row with edit / retry / delete-below ----------
+// ---------- turn row ----------
 
-function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, dialogueStyle, prevSpeaker, streaming, hasBelow, opening, onRetry, onReroll, onDeleteBelow, onDelete, bare, onRewrite }: {
+function TurnRow({ turn, blocks, accent, prose, fontPx, avatarPx, dialogueStyle, prevSpeaker, streaming, opening, onRewrite }: {
   turn: Turn;
   blocks: ProseBlock[];
-  characters: Character[];
   accent: string;
   prose: string;
   fontPx: number;
   avatarPx: number;
   dialogueStyle: DialogueStyle;
-  /** who held the floor just before this turn, so prose layout can skip a repeat name */
   prevSpeaker: string | null;
   streaming: boolean;
-  hasBelow: boolean;
   opening?: boolean;
-  onRetry: () => void;
-  onReroll?: () => void;
-  onDeleteBelow: () => void;
-  onDelete: () => void;
-  /** Manuscript: prose only, with an optional rewrite on the latest passage. */
-  bare?: boolean;
   onRewrite?: () => void;
 }) {
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState('');
-  const characterName = turn.role === 'character'
-    ? (characters.find((c) => c.id === turn.characterId)?.name ?? 'character')
-    : null;
-  const editLabel =
-    turn.role === 'narrator' ? 'the narrator'
-    : turn.role === 'character' ? characterName!
-    : `your ${turn.mode ?? 'turn'}`;
-  const retryLabel = 'Retry from here';
-  const retryTitle = 'Deletes this turn and everything below, then rewrites from here';
-
-  const save = async () => {
-    const text = draft.trim();
-    if (text && text !== turn.text) {
-      await db.turns.update(turn.id, { text, updatedAt: Date.now() });
-      if (turn.episodeId) await clearEpisodeRunningSummary(turn.episodeId);
-    }
-    setEditing(false);
-  };
-
-  if (editing) {
-    return (
-      <div style={{ marginBottom: 22, display: 'flex', flexDirection: 'column', gap: 9 }}>
-        <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.5 }}>
-          editing {editLabel} — saved into story memory
-        </div>
-        <textarea
-          autoFocus
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          rows={Math.min(16, Math.max(4, Math.ceil(draft.length / 70)))}
-          style={{ fontFamily: 'Spectral, serif', fontSize: 15.5, lineHeight: 1.7, width: '100%' }}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void save(); }
-            if (e.key === 'Escape') setEditing(false);
-          }}
-        />
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <button className="btn-primary" style={{ padding: '7px 14px', fontSize: 12 }} onClick={() => void save()}>Save</button>
-          <button className="btn-quiet" style={{ fontSize: 11 }} onClick={() => setEditing(false)}>cancel</button>
-          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.4, marginLeft: 'auto' }}>⌘↵ save · esc cancel</span>
-        </div>
-      </div>
-    );
-  }
-
   const continued = attributionRun(blocks, prevSpeaker);
-
   return (
     <div className="turn-row" style={{ position: 'relative' }}>
       {blocks.map((b, i) => (
@@ -2797,25 +2195,6 @@ function TurnRow({ turn, blocks, characters, accent, prose, fontPx, avatarPx, di
             onClick={onRewrite}>Rewrite this passage</button>
         </div>
       )}
-      {!bare && (
-      <div className="turn-tools" style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 0, marginBottom: 8 }}>
-        <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
-          onClick={() => { setDraft(turn.text); setEditing(true); }}>Edit</button>
-        <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
-          title={retryTitle}
-          onClick={onRetry}>{retryLabel}</button>
-        {onReroll && (
-          <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
-            onClick={onReroll} title="Replace this line only — later turns stay">Re-roll line</button>
-        )}
-        {hasBelow && (
-          <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
-            onClick={onDeleteBelow}>Delete below</button>
-        )}
-        <button className="btn-quiet" style={{ fontSize: 12, padding: '10px 12px', minHeight: 44 }} disabled={streaming}
-          onClick={onDelete}>Delete</button>
-      </div>
-      )}
     </div>
   );
 }
@@ -2827,7 +2206,7 @@ function locationThumb(l: Location, size = 30): CSSProperties {
     return {
       width: size, height: size, borderRadius: '50%', flexShrink: 0,
       backgroundImage: `url(${JSON.stringify(l.portrait)})`, backgroundSize: 'cover', backgroundPosition: 'center',
-      border: '1px solid rgba(28,22,18,0.28)',
+      border: '1px solid rgba(0,0,0,0.28)',
       boxShadow: 'none'
     };
   }
@@ -2848,8 +2227,8 @@ function KeepDropChips({
       style={{
         flex: 1,
         minHeight: 44,
-        border: `1px solid ${active ? 'rgba(28,22,18,0.28)' : 'var(--rule)'}`,
-        background: active ? ACCENT_RGBA.a85 : 'rgba(28,22,18,0.04)',
+        border: `1px solid ${active ? 'rgba(0,0,0,0.28)' : 'var(--rule)'}`,
+        background: active ? ACCENT_RGBA.a85 : 'rgba(0,0,0,0.04)',
         color: active ? 'var(--accent-ink)' : 'var(--paper)',
         borderRadius: 4,
         fontSize: 13,
@@ -2910,7 +2289,7 @@ function WrapReviewBody({
           value={draft.recap}
           onChange={(e) => onChange({ ...draft, recap: e.target.value })}
           style={{
-            fontFamily: 'Spectral, serif', fontSize: 15.5, lineHeight: 1.65, color: '#f0eee9',
+            fontSize: 15.5, lineHeight: 1.65, color: 'var(--paper)',
             width: '100%', background: 'transparent'
           }}
         />
@@ -2924,7 +2303,7 @@ function WrapReviewBody({
           value={draft.premisePreview}
           onChange={(e) => onChange({ ...draft, premisePreview: e.target.value })}
           style={{
-            fontFamily: 'Spectral, serif', fontSize: 14.5, lineHeight: 1.6, color: '#f0eee9',
+            fontSize: 14.5, lineHeight: 1.6, color: 'var(--paper)',
             width: '100%', background: 'transparent'
           }}
         />
@@ -2953,7 +2332,7 @@ function WrapReviewBody({
                     nextStoryDay: Math.max(end, draft.nextStoryDay)
                   });
                 }}
-                style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: '#f0eee9' }}
+                style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: 'var(--paper)' }}
               />
             </label>
             <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: '1 1 100px' }}>
@@ -2970,7 +2349,7 @@ function WrapReviewBody({
                     nextStoryDay: Math.max(end, draft.nextStoryDay)
                   });
                 }}
-                style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: '#f0eee9' }}
+                style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: 'var(--paper)' }}
               />
             </label>
           </div>
@@ -2987,7 +2366,7 @@ function WrapReviewBody({
             display: 'flex', flexDirection: 'column', gap: 10
           }}>
             <Mono style={{ fontSize: 8, opacity: 0.5 }}>next episode opens</Mono>
-            <div className="serif" style={{ fontSize: 17, color: '#f0eee9' }}>
+            <div className="serif" style={{ fontSize: 17, color: 'var(--paper)' }}>
               {formatStoryDate(cal, draft.nextStoryDay)}
             </div>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
@@ -3024,8 +2403,8 @@ function WrapReviewBody({
                   onChange={(e) => setNextDay(Number(e.target.value) || draft.storyDayEnd)}
                   style={{
                     width: 64, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12,
-                    background: 'rgba(28,22,18,0.05)', border: '1px solid var(--rule)',
-                    borderRadius: 8, padding: '6px 8px', color: '#f0eee9'
+                    background: 'rgba(0,0,0,0.05)', border: '1px solid var(--rule)',
+                    borderRadius: 8, padding: '6px 8px', color: 'var(--paper)'
                   }}
                 />
               </label>
@@ -3096,7 +2475,7 @@ function WrapReviewBody({
                   onChange({ ...draft, elsewhere });
                 }}
                 placeholder="Place name"
-                style={{ fontSize: 13, background: 'transparent', border: 0, padding: 0, color: '#f0eee9' }}
+                style={{ fontSize: 13, background: 'transparent', border: 0, padding: 0, color: 'var(--paper)' }}
               />
               <textarea
                 rows={2}
@@ -3150,7 +2529,7 @@ function WrapReviewBody({
               onChange={(e) => onChange({ ...draft, meanwhile: e.target.value })}
               placeholder="Who waited, who travelled, what healed, what got worse…"
               style={{
-                fontFamily: 'Spectral, serif', fontSize: 15, lineHeight: 1.6, color: '#f0eee9',
+                fontSize: 15, lineHeight: 1.6, color: 'var(--paper)',
                 width: '100%', background: 'transparent', border: 0, padding: 0
               }}
             />
@@ -3183,7 +2562,7 @@ function WrapReviewBody({
               rows={2}
               value={b.text}
               onChange={(e) => patchBeat(i, { text: e.target.value })}
-              style={{ fontFamily: 'Spectral, serif', fontSize: 16, lineHeight: 1.45, background: 'transparent', border: 0, padding: 0, color: '#f0eee9' }}
+              style={{ fontSize: 16, lineHeight: 1.45, background: 'transparent', border: 0, padding: 0, color: 'var(--paper)' }}
             />
             <textarea
               rows={2}
@@ -3344,7 +2723,7 @@ function WrapReviewBody({
               background: 'transparent',
               opacity: u.keep ? 1 : 0.42
             }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: '#f0eee9' }}>{u.name}</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--paper)' }}>{u.name}</div>
               {([
                 ['goal', 'goal'] as const,
                 ['emotion', 'emotion'] as const,
@@ -3383,7 +2762,7 @@ function WrapReviewBody({
               background: 'transparent',
               opacity: u.keep ? 1 : 0.42
             }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: '#f0eee9' }}>{u.name}</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--paper)' }}>{u.name}</div>
               <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 <Mono style={{ fontSize: 8, opacity: 0.55 }}>now knows</Mono>
                 <textarea
@@ -3441,7 +2820,7 @@ function WrapReviewBody({
               background: 'transparent',
               opacity: u.keep ? 1 : 0.42
             }}>
-              <div style={{ fontSize: 14, color: '#f0eee9' }}>
+              <div style={{ fontSize: 14, color: 'var(--paper)' }}>
                 <strong>{u.from}</strong> → <strong>{u.to}</strong>
               </div>
               <input

@@ -301,7 +301,7 @@ export function Sheet({
     <>
       <div
         onClick={onClose}
-        style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(28,22,18,0.28)' }}
+        style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.28)' }}
       />
       <aside
         className="sheet-panel"

@@ -361,7 +361,7 @@ export function Locations() {
                 }}>
                   {!d.portrait && (
                     <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', background: 'transparent',  padding: '5px 8px', borderRadius: 6 }}>
-                      location plate · no photo yet
+                      no photo yet
                     </span>
                   )}
                 </div>
@@ -377,7 +377,7 @@ export function Locations() {
                 </div>
                 {portraitError && <ErrorNote error={portraitError} onDismiss={() => setPortraitError('')} />}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <Mono style={{ fontSize: 9 }}>plate hue</Mono>
+                  <Mono style={{ fontSize: 9 }}>color</Mono>
                   <input
                     type="range" min={0} max={359} value={d.hue}
                     onChange={(e) => patch({ hue: Number(e.target.value) })}
@@ -389,7 +389,7 @@ export function Locations() {
                     <button
                       className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }}
                       disabled={fleshBusy} onClick={() => void fleshOut()}
-                    >{fleshBusy ? 'Working…' : '✦ Flesh out with AI'}</button>
+                    >{fleshBusy ? 'Working…' : 'Fill in with AI'}</button>
                     {undoSnapshot && (
                       <button className="btn-quiet" style={{ fontSize: 11 }} onClick={undoFleshOut}>undo</button>
                     )}
@@ -455,7 +455,7 @@ export function Locations() {
                   <input
                     value={d.name} onChange={(e) => patch({ name: e.target.value })} placeholder="Name"
                     className="serif"
-                    style={{ fontFamily: 'Spectral, serif', fontWeight: 300, fontSize: narrow ? 28 : 38, color: 'var(--ink-heading)', lineHeight: 1.08, background: 'transparent', border: 0, padding: 0, borderRadius: 0 }}
+                    style={{ fontWeight: 300, fontSize: narrow ? 28 : 38, color: 'var(--ink-heading)', lineHeight: 1.08, background: 'transparent', border: 0, padding: 0, borderRadius: 0 }}
                   />
                   <input
                     value={d.tagline} onChange={(e) => patch({ tagline: e.target.value })}
@@ -496,7 +496,7 @@ export function Locations() {
                 <>
                   <Field label="What it is" note="prose, not bullet points — this is the core of the sheet">
                     <textarea rows={4} value={d.summary} onChange={(e) => patch({ summary: e.target.value })}
-                      className="serif" style={{ fontFamily: 'Spectral, serif', fontSize: 15.5, lineHeight: 1.7 }} />
+                      className="serif" style={{ fontSize: 15.5, lineHeight: 1.7 }} />
                   </Field>
                   <Field label="Notable features" note="landmarks, rooms, or geography within it">
                     <textarea rows={3} value={d.features} onChange={(e) => patch({ features: e.target.value })} />

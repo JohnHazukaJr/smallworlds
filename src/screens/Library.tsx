@@ -114,7 +114,7 @@ export function Library() {
   const runCompact = async (worldId: string, title: string) => {
     if (compactingId) return;
     const ok = confirm(
-      `Mint a new volume from "${title}"?\n\n` +
+      `Create a condensed copy of "${title}"?\n\n` +
       'The original stays in your library. The copy starts at Season 1 with rewritten lore, sheets, and a new opening. ' +
       'This uses your utility model and can take a few minutes.'
     );
@@ -147,7 +147,7 @@ export function Library() {
             Small Worlds
           </h1>
           <p style={{ margin: '14px 0 0', fontSize: 15, lineHeight: 1.55, color: 'var(--ink-muted)', maxWidth: '38ch' }}>
-            Make a world. Live in it.
+            Your worlds
           </p>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -171,7 +171,7 @@ export function Library() {
       {worlds && worlds.length === 0 && (
         <div className="craft-row" style={{ padding: narrow ? 24 : 36, display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 560 }}>
           <div className="serif" style={{ fontWeight: 300, fontSize: 28, color: 'var(--ink-heading)', lineHeight: 1.15 }}>
-            An empty workbench.
+            No worlds yet.
           </div>
           <div style={{ fontSize: 14, lineHeight: 1.65, color: 'var(--ink-muted)', maxWidth: '42ch' }}>
             Create a world of your own, or open the starter — a harbour city, a false name, a debt in the public record —
@@ -214,7 +214,7 @@ export function Library() {
                   color: 'var(--paper)', background: 'rgba(247,243,234,0.8)',
                   padding: '4px 7px', borderRadius: 2
                 }}>
-                  {st ? `S${st.seasons} · E${st.episodes}` : '—'}
+                  {st ? `${st.seasons} season${st.seasons === 1 ? '' : 's'} · ${st.episodes} episode${st.episodes === 1 ? '' : 's'}` : '—'}
                 </span>
                 <span className="label" style={{
                   color: 'var(--ink-muted)', background: 'rgba(247,243,234,0.8)',

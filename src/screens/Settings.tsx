@@ -643,7 +643,7 @@ function WorldSettings({ world }: { world: World }) {
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 240px), 1fr))', gap: 13 }}>
           <SliderCard
-            label="Purple-ness"
+            label="Prose detail"
             value={world.ai.proseDensity}
             onChange={(v) => patchAI({ proseDensity: v })}
             note={world.ai.proseDensity < 34 ? 'Concrete over ornamental. Few adverbs.' : world.ai.proseDensity < 67 ? 'Balanced. Texture where it earns its place.' : 'Rich and atmospheric. Imagery leans in.'}
@@ -770,7 +770,7 @@ function WorldBibleEditor({ world, onError }: { world: World; onError: (msg: str
             () => db.worlds.update(world.id, { bible: e.target.value, updatedAt: Date.now() }),
             onError
           )}
-          style={{ fontFamily: 'Spectral, serif', fontSize: 15, lineHeight: 1.7 }}
+          style={{ fontSize: 15, lineHeight: 1.7 }}
         />
       </Field>
       <Field label="Logline" note="the one-line pitch on the world card">

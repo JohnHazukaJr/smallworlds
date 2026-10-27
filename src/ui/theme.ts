@@ -2,44 +2,44 @@ import type { CSSProperties } from 'react';
 import type { MoodId, BackdropId } from '../store/app';
 
 /** Binding color — oxblood, used for the primary mark, not for washes. */
-export const ACCENT = 'oklch(0.32 0.12 25)';
+export const ACCENT = '#5b6b7f';
 
 /** Soft forms of ACCENT for inline styles that need alpha. */
 export const ACCENT_RGBA = {
-  a08: 'oklch(0.32 0.12 25 / 0.08)',
-  a10: 'oklch(0.32 0.12 25 / 0.1)',
-  a12: 'oklch(0.32 0.12 25 / 0.12)',
-  a14: 'oklch(0.32 0.12 25 / 0.14)',
-  a25: 'oklch(0.32 0.12 25 / 0.25)',
-  a28: 'oklch(0.32 0.12 25 / 0.28)',
-  a35: 'oklch(0.32 0.12 25 / 0.35)',
-  a45: 'oklch(0.32 0.12 25 / 0.45)',
-  a55: 'oklch(0.32 0.12 25 / 0.55)',
-  a70: 'oklch(0.32 0.12 25 / 0.7)',
-  a85: 'oklch(0.32 0.12 25 / 0.85)',
+  a08: 'rgba(91, 107, 127, 0.08)',
+  a10: 'rgba(91, 107, 127, 0.1)',
+  a12: 'rgba(91, 107, 127, 0.12)',
+  a14: 'rgba(91, 107, 127, 0.14)',
+  a25: 'rgba(91, 107, 127, 0.25)',
+  a28: 'rgba(91, 107, 127, 0.28)',
+  a35: 'rgba(91, 107, 127, 0.35)',
+  a45: 'rgba(91, 107, 127, 0.45)',
+  a55: 'rgba(91, 107, 127, 0.55)',
+  a70: 'rgba(91, 107, 127, 0.7)',
+  a85: 'rgba(91, 107, 127, 0.85)',
   solid: ACCENT
 };
 
 /** Moods are faint stains on the page. Prose stays ink. */
 export const MOODS: Record<MoodId, { label: string; tint: string; text: string; accent: string; prose: string }> = {
-  ember: { label: 'Ember', tint: 'rgba(160,90,40,0.06)', text: '#1c1612', accent: 'oklch(0.42 0.08 55)', prose: '#2a241c' },
-  ash:   { label: 'Ash',   tint: 'rgba(80,90,100,0.05)', text: '#1c1612', accent: 'oklch(0.4 0.02 250)', prose: '#2a241c' },
-  frost: { label: 'Frost', tint: 'rgba(70,110,130,0.06)', text: '#1c1612', accent: 'oklch(0.4 0.04 210)', prose: '#2a241c' },
-  rot:   { label: 'Rot',   tint: 'rgba(70,100,60,0.06)', text: '#1c1612', accent: 'oklch(0.4 0.06 140)', prose: '#2a241c' },
-  dusk:  { label: 'Dusk',  tint: 'rgba(90,70,110,0.06)', text: '#1c1612', accent: 'oklch(0.4 0.04 295)', prose: '#2a241c' },
-  bloom: { label: 'Bloom', tint: 'rgba(110,120,50,0.06)', text: '#1c1612', accent: 'oklch(0.42 0.06 115)', prose: '#2a241c' },
-  storm: { label: 'Storm', tint: 'rgba(50,70,100,0.07)', text: '#1c1612', accent: 'oklch(0.38 0.04 240)', prose: '#2a241c' },
-  brine: { label: 'Brine', tint: 'rgba(40,110,100,0.06)', text: '#1c1612', accent: 'oklch(0.4 0.05 185)', prose: '#2a241c' }
+  ember: { label: 'Ember', tint: 'transparent', text: '#1a1a1a', accent: '#5b6b7f', prose: '#1a1a1a' },
+  ash:   { label: 'Ash',   tint: 'transparent', text: '#1a1a1a', accent: '#5b6b7f', prose: '#1a1a1a' },
+  frost: { label: 'Frost', tint: 'transparent', text: '#1a1a1a', accent: '#5b6b7f', prose: '#1a1a1a' },
+  rot:   { label: 'Rot',   tint: 'transparent', text: '#1a1a1a', accent: '#5b6b7f', prose: '#1a1a1a' },
+  dusk:  { label: 'Dusk',  tint: 'transparent', text: '#1a1a1a', accent: '#5b6b7f', prose: '#1a1a1a' },
+  bloom: { label: 'Bloom', tint: 'transparent', text: '#1a1a1a', accent: '#5b6b7f', prose: '#1a1a1a' },
+  storm: { label: 'Storm', tint: 'transparent', text: '#1a1a1a', accent: '#5b6b7f', prose: '#1a1a1a' },
+  brine: { label: 'Brine', tint: 'transparent', text: '#1a1a1a', accent: '#5b6b7f', prose: '#1a1a1a' }
 };
 
 export const STRIPE = (a: string, b: string) =>
   `repeating-linear-gradient(135deg, ${a} 0 7px, ${b} 7px 14px)`;
 
 export const BACKDROPS: Record<BackdropId, { tag: string; a: string; b: string }> = {
-  scene: { tag: 'scene plate', a: 'rgba(243,239,230,0.92)', b: 'rgba(247,243,234,0.96)' },
-  moment: { tag: 'moment plate', a: 'rgba(239,230,214,0.9)', b: 'rgba(247,243,234,0.96)' },
-  character: { tag: 'character plate', a: 'rgba(236,228,214,0.9)', b: 'rgba(247,243,234,0.96)' },
-  none: { tag: 'plain page', a: 'rgba(243,239,230,0.4)', b: '#f7f3ea' }
+  scene: { tag: 'scene', a: '#ffffff', b: '#f4f4f5' },
+  moment: { tag: 'moment', a: '#ffffff', b: '#f4f4f5' },
+  character: { tag: 'character', a: '#ffffff', b: '#f4f4f5' },
+  none: { tag: 'none', a: '#ffffff', b: '#ffffff' }
 };
 
 export const VIS: Record<'private' | 'invited' | 'public', { label: string; line: string }> = {
@@ -60,25 +60,25 @@ export const GAP_EFFECTS = [
 ];
 
 /** A speaker's name in the ink of their hue, dark enough to read on paper. */
-export function speakerInk(hue: number): string {
-  return `oklch(0.38 0.09 ${hue})`;
+export function speakerInk(_hue: number): string {
+  return '#46536a';
 }
 
-export function avatarStyle(hue: number, size: number, ring?: string): CSSProperties {
+export function avatarStyle(_hue: number, size: number, ring?: string): CSSProperties {
   const r = size > 30 ? 2 : 2;
   return {
     width: size,
     height: size,
     borderRadius: r,
     flexShrink: 0,
-    border: `1px solid ${ring || 'rgba(28,22,18,0.18)'}`,
-    backgroundImage: `linear-gradient(160deg, oklch(0.78 0.05 ${hue}), oklch(0.9 0.03 ${hue}))`,
+    border: `1px solid ${ring || 'rgba(0,0,0,0.15)'}`,
+    background: '#e4e4e7',
     boxShadow: 'none'
   };
 }
 
 /** Endpaper — a hue stain on the sheet, not a dark plate. */
-export function plateStyle(hue: number, height: number | string): CSSProperties {
+export function plateStyle(_hue: number, height: number | string): CSSProperties {
   return {
     height,
     display: 'flex',
@@ -86,6 +86,6 @@ export function plateStyle(hue: number, height: number | string): CSSProperties 
     justifyContent: 'space-between',
     gap: 8,
     padding: 12,
-    background: `linear-gradient(165deg, oklch(0.9 0.04 ${hue} / 0.55), #f7f3ea)`
+    background: '#f4f4f5'
   };
 }

@@ -7,9 +7,9 @@ import {
 } from './writeNotices';
 
 describe('abortWriteNotice', () => {
-  it('says the page stopped and nothing was kept when no reply landed', () => {
+  it('says writing stopped and nothing was kept when no reply landed', () => {
     const copy = abortWriteNotice(0, 3);
-    expect(copy).toMatch(/page stopped/i);
+    expect(copy).toMatch(/stopped/i);
     expect(copy).toMatch(/Nothing new was kept/);
     expect(copy).not.toMatch(/Continue plan/);
     expect(copy).not.toMatch(/plan/);
@@ -24,16 +24,16 @@ describe('abortWriteNotice', () => {
   });
 
   it('says how many lines were kept when some landed', () => {
-    expect(abortWriteNotice(2, 1)).toMatch(/page stopped after 2 lines/i);
+    expect(abortWriteNotice(2, 1)).toMatch(/stopped after 2 lines/i);
     expect(abortWriteNotice(2, 1)).toMatch(/Those lines were kept/);
     expect(abortWriteNotice(2, 1)).not.toMatch(/plan/);
   });
 });
 
 describe('unfinishedWriteNotice', () => {
-  it('says the page stopped before a reply when the first beat failed', () => {
+  it('says writing stopped before a reply when the first beat failed', () => {
     const copy = unfinishedWriteNotice(0, 3);
-    expect(copy).toMatch(/page stopped/i);
+    expect(copy).toMatch(/stopped/i);
     expect(copy).toMatch(/Nothing new was kept/);
     expect(copy).not.toMatch(/Continue plan/);
     expect(copy).not.toMatch(/plan/);

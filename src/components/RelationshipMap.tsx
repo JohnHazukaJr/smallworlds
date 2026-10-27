@@ -27,7 +27,7 @@ interface NodePos {
 function portraitFill(c: Character, size: number): CSSProperties {
   const portrait = characterPortraits(c)[0];
   return {
-    ...avatarStyle(c.hue, size, 'rgba(28,22,18,0.28)'),
+    ...avatarStyle(c.hue, size, 'rgba(0,0,0,0.28)'),
     ...(portrait
       ? { backgroundImage: `url(${portrait})`, backgroundSize: 'cover', backgroundPosition: 'center' }
       : {})

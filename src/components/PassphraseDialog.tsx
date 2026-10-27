@@ -52,7 +52,7 @@ export function PassphraseDialog(p: PassphraseDialogProps) {
 
   return (
     <>
-      <div onClick={p.onCancel} style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(28,22,18,0.28)' }} />
+      <div onClick={p.onCancel} style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.28)' }} />
       <div className="craft-row fade-in" style={{
         position: 'fixed', zIndex: 51, top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
         width: 'min(420px, calc(100% - 32px))', maxWidth: 'calc(100% - 32px)', padding: '24px 24px 20px',

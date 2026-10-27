@@ -181,13 +181,13 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
             <Field label="World bible — lore" note="setting, rules · narrator / character / guest">
               <textarea key={world.id + '-bible-' + aiVersion} rows={14} defaultValue={world.bible}
                 onBlur={(e) => patchWorld({ bible: e.target.value })}
-                style={{ fontFamily: 'Spectral, serif', fontSize: 14.5, lineHeight: 1.65 }} />
+                style={{ fontSize: 14.5, lineHeight: 1.65 }} />
             </Field>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                 <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }}
                   disabled={flesh.busy === 'lore'} onClick={handleFleshLore}>
-                  {flesh.busy === 'lore' ? 'Working…' : '✦ Flesh out with AI'}
+                  {flesh.busy === 'lore' ? 'Working…' : 'Fill in with AI'}
                 </button>
                 {undoLore && <button className="btn-quiet" style={{ fontSize: 11 }} onClick={undoLoreFn}>undo</button>}
               </div>
@@ -204,13 +204,13 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
             <Field label={`Season ${season.number} premise`} note="what’s live this season — updates when you wrap an episode">
               <textarea key={season.id + '-premise-' + aiVersion} rows={5} defaultValue={season.premise}
                 onBlur={(e) => patchSeason({ premise: e.target.value })}
-                style={{ fontFamily: 'Spectral, serif', fontSize: 14.5, lineHeight: 1.65 }} />
+                style={{ fontSize: 14.5, lineHeight: 1.65 }} />
             </Field>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                 <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }}
                   disabled={flesh.busy === 'plot'} onClick={handleFleshPlot}>
-                  {flesh.busy === 'plot' ? 'Working…' : '✦ Flesh out with AI'}
+                  {flesh.busy === 'plot' ? 'Working…' : 'Fill in with AI'}
                 </button>
                 {undoPlot !== null && <button className="btn-quiet" style={{ fontSize: 11 }} onClick={undoPlotFn}>undo</button>}
               </div>
@@ -442,7 +442,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <Field label="Season recap — previously on" note="carried from the last season">
                 <textarea key={season.id + '-recap'} rows={6} defaultValue={season.bible.recap}
                   onBlur={(e) => patchSeason({ bible: { ...season.bible!, recap: e.target.value } })}
-                  style={{ fontFamily: 'Spectral, serif', fontSize: 14, lineHeight: 1.6 }} />
+                  style={{ fontSize: 14, lineHeight: 1.6 }} />
               </Field>
             )}
           </>
@@ -477,7 +477,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
                 <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }}
                   disabled={flesh.busy === 'rules'} onClick={handleFleshRules}>
-                  {flesh.busy === 'rules' ? 'Working…' : '✦ Flesh out with AI'}
+                  {flesh.busy === 'rules' ? 'Working…' : 'Fill in with AI'}
                 </button>
                 {undoRules && <button className="btn-quiet" style={{ fontSize: 11 }} onClick={undoRulesFn}>undo</button>}
               </div>
@@ -520,7 +520,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
             </div>
 
             <MiniSlider
-              label="Purple-ness"
+              label="Prose detail"
               value={world.ai.proseDensity}
               onChange={(v) => patchAI({ proseDensity: v })}
               valueLabel={world.ai.proseDensity < 34 ? 'restrained' : world.ai.proseDensity < 67 ? 'balanced' : 'ornamental'}

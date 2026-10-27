@@ -38,7 +38,7 @@ const SEED_KINDS = [
 const LANES = [
   {
     label: 'From an idea',
-    line: 'Describe the story. You make a character, the world answers, and you live in the book.'
+    line: 'Describe the story. You make a character, the world answers, and you start writing.'
   },
   {
     label: 'Step by step',
@@ -46,16 +46,6 @@ const LANES = [
   }
 ];
 
-const PROMISES = [
-  { t: 'Idea → you and the story', d: 'Paste a story idea. A few questions, then a world, your character, and the opening of the book — you review before you enter.' },
-  { t: 'Bible, premise, people, place', d: 'Onboard builds a book you can open: lore, what is true now, people with voices, and a place with rules.' },
-  { t: 'Opening memory', d: 'A few facts and open threads so the first chapter already has a situation.' },
-  { t: 'People who hold a line', d: 'They remember how they behave. They can refuse you, and they will.' },
-  { t: 'The book after you enter', d: 'You act on the page. The world writes back. End a chapter when the book should rest, and the next one opens with what mattered.' },
-  { t: 'Your action, their hands', d: 'Write what you do, or take someone else’s hands for a moment. Mark whether it changes the story or is only this moment.' },
-  { t: 'Your key, any model', d: 'OpenRouter, Anthropic, Gemini, Kimi, local models — swap engines per world, any time.' },
-  { t: 'Private by design', d: 'Everything lives on this device. Nothing is sent anywhere but the AI endpoint you name.' }
-];
 
 /** A not-yet-persisted world shape, just enough context for AI drafting before the world exists in the DB. */
 function previewWorld(title: string, seed: string, ai: WorldAISettings, storyStance?: World['storyStance']): World {
@@ -870,7 +860,7 @@ export function Onboard() {
 
   const fleshEverythingPanel = worldId && hasAI ? (
     <div className="craft-row" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>Flesh out everything</div>
+      <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>Fill in everything</div>
       <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
         Fills bible, premise, narrator rules, you, cast to roster targets, places, relationships, and opening memory.
         You review each step after — Story opens only when the write-ready checklist passes.
@@ -881,7 +871,7 @@ export function Onboard() {
         disabled={!!busy}
         onClick={() => void runFleshEverything()}
       >
-        {busy || '✦ Flesh out everything'}
+        {busy || 'Fill in everything'}
       </button>
     </div>
   ) : null;
@@ -919,7 +909,7 @@ export function Onboard() {
                 onChange={(e) => setIdea(e.target.value)}
                 placeholder="e.g. I want a tense harbour intrigue where I’m living under a false name, the debt ledger is public, and the registrar who noticed my handwriting has asked for a meeting in the long room…"
                 className="serif"
-                style={{ fontFamily: 'Spectral, serif', fontSize: 15.5, lineHeight: 1.65 }}
+                style={{ fontSize: 15.5, lineHeight: 1.65 }}
               />
               <input
                 value={title}
@@ -944,13 +934,13 @@ export function Onboard() {
                   'The ice is going out three weeks early, and the town owes its god a winter.',
                   'Paste your notes here — a paragraph or a page.'
                 ][seedKind]}
-                className="serif" style={{ fontFamily: 'Spectral, serif', fontSize: 15.5, lineHeight: 1.65 }}
+                className="serif" style={{ fontSize: 15.5, lineHeight: 1.65 }}
               />
               <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title (optional — one gets drafted if blank)" />
               {hasAI && (
                 <div>
                   <button className="btn-ghost" disabled={!!busy || (!title.trim() && !seed.trim())} onClick={() => void fleshOutSeed()}>
-                    {busy === 'Fleshing out the world…' ? 'Working…' : '✦ Flesh out with AI'}
+                    {busy === 'Fleshing out the world…' ? 'Working…' : 'Fill in with AI'}
                   </button>
                 </div>
               )}
@@ -1011,7 +1001,7 @@ export function Onboard() {
 
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))', gap: 12 }}>
                 <SliderCard
-                  label="Purple-ness"
+                  label="Prose detail"
                   value={ai.proseDensity}
                   onChange={(v) => patchAI({ proseDensity: v })}
                   note={ai.proseDensity < 34 ? 'Concrete over ornamental. Few adverbs.' : ai.proseDensity < 67 ? 'Balanced. Texture where it earns its place.' : 'Rich and atmospheric. Imagery leans in.'}
@@ -1051,7 +1041,7 @@ export function Onboard() {
               {hasAI && (
                 <div>
                   <button className="btn-ghost" disabled={!!busy} onClick={() => void fleshOutPremiseField()}>
-                    {busy === 'Fleshing out the premise…' ? 'Working…' : '✦ Flesh out with AI'}
+                    {busy === 'Fleshing out the premise…' ? 'Working…' : 'Fill in with AI'}
                   </button>
                 </div>
               )}
@@ -1070,7 +1060,7 @@ export function Onboard() {
               {hasAI && (
                 <div>
                   <button className="btn-ghost" disabled={!!busy} onClick={() => void fleshOutRules()}>
-                    {busy === 'Fleshing out the rules…' ? 'Working…' : '✦ Flesh out with AI'}
+                    {busy === 'Fleshing out the rules…' ? 'Working…' : 'Fill in with AI'}
                   </button>
                 </div>
               )}
@@ -1171,7 +1161,7 @@ export function Onboard() {
               </Field>
               {hasAI && (
                 <button className="btn-ghost" style={{ alignSelf: 'flex-start' }} disabled={!!busy} onClick={() => void fleshPlayer()}>
-                  {busy === 'Fleshing you…' ? 'Working…' : '✦ Flesh out with AI'}
+                  {busy === 'Fleshing you…' ? 'Working…' : 'Fill in with AI'}
                 </button>
               )}
             </>
@@ -1448,7 +1438,7 @@ export function Onboard() {
   };
 
   return (
-    <div className="fade-in" style={{ minHeight: 0, height: '100%', flex: 1, display: 'grid', gridTemplateColumns: narrow ? 'minmax(0, 1fr)' : '1.05fr 1fr' }}>
+    <div className="fade-in" style={{ minHeight: 0, height: '100%', flex: 1, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)' }}>
       <div style={{ padding: narrow ? '30px 20px 46px' : '52px 44px 56px', display: 'flex', flexDirection: 'column', gap: 28, maxWidth: 660, minWidth: 0, minHeight: 0, overflow: 'auto' }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           {steps.map((_, i) => (
@@ -1494,36 +1484,6 @@ export function Onboard() {
         </div>
       </div>
 
-      {!narrow && (
-        <div style={{
-          borderLeft: '1px solid var(--rule)', padding: '46px 40px', display: 'flex',
-          flexDirection: 'column', gap: 20, justifyContent: 'center', background: 'var(--page)'
-        }}>
-          <div className="label">What you are making</div>
-          <div style={{
-            height: 200, borderRadius: 4, border: '1px solid var(--rule)',
-            display: 'flex', alignItems: 'flex-end', padding: 14,
-            background: `linear-gradient(165deg, oklch(0.32 0.12 25 / 0.1), #f7f3ea)`
-          }}>
-            <span className="mono meta" style={{
-              color: 'var(--ink-muted)', background: 'rgba(247,243,234,0.85)', padding: '5px 9px', borderRadius: 2
-            }}>
-              Endpaper
-            </span>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-            {PROMISES.map((p) => (
-              <div key={p.t} style={{ display: 'flex', gap: 12, alignItems: 'flex-start', borderTop: '1px solid var(--rule)', paddingTop: 12 }}>
-                <div style={{ width: 2, height: 14, background: 'oklch(0.32 0.12 25)', marginTop: 4, flexShrink: 0 }} />
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                  <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>{p.t}</div>
-                  <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'var(--ink-muted)' }}>{p.d}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -1647,7 +1607,7 @@ function CastCard({ c, expanded, hasAI, fleshBusy, onToggle, onRemove, onPatch, 
             </button>
             {hasAI && (
               <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }} disabled={fleshBusy || busy} onClick={onFlesh}>
-                {fleshBusy ? 'Working…' : '✦ Flesh this sheet'}
+                {fleshBusy ? 'Working…' : 'Fill in this sheet'}
               </button>
             )}
           </div>
@@ -1750,7 +1710,7 @@ function PlaceCard({ l, expanded, isOpening, hasAI, fleshBusy, onToggle, onRemov
             )}
             {hasAI && (
               <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }} disabled={fleshBusy || busy} onClick={onFlesh}>
-                {fleshBusy ? 'Working…' : '✦ Flesh this sheet'}
+                {fleshBusy ? 'Working…' : 'Fill in this sheet'}
               </button>
             )}
           </div>

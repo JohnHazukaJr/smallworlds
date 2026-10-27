@@ -159,7 +159,7 @@ export function Sequel() {
     return (
       <div className="fade-in" style={{ padding: narrow ? '40px 20px' : '80px 60px', display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 560 }}>
         <Mono>no season</Mono>
-        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: 'var(--ink-heading)' }}>This world has no book to review.</div>
+        <div className="serif" style={{ fontWeight: 300, fontSize: 30, color: 'var(--ink-heading)' }}>This world has no season to review.</div>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           <button className="btn-primary" onClick={() => go('story')}>Back to story</button>
           <button className="btn-ghost" onClick={() => go('library')}>Go to Worlds</button>
@@ -180,15 +180,15 @@ export function Sequel() {
     return (
       <div className="fade-in" style={{ ...pagePad, maxWidth: 1020 }}>
         <button className="btn-quiet" style={{ fontSize: 12, marginBottom: 16, alignSelf: 'flex-start' }}
-          onClick={() => go('story')}>← Back to the book</button>
-        <Mono style={{ letterSpacing: '0.16em', marginBottom: 11 }}>book {season.number} · {episodeCount} chapter{episodeCount === 1 ? '' : 's'} so far</Mono>
+          onClick={() => go('story')}>← Back to writing</button>
+        <Mono style={{ letterSpacing: '0.16em', marginBottom: 11 }}>season {season.number} · {episodeCount} episode{episodeCount === 1 ? '' : 's'} so far</Mono>
         <h1 className="serif" style={{ fontWeight: 300, fontSize: compact ? 26 : phone ? 30 : 40, lineHeight: 1.12, margin: '0 0 11px', color: 'var(--ink-heading)' }}>
-          When this book rests, say what mattered.
+          When this season ends, say what mattered.
         </h1>
         <div style={{ fontSize: 14.5, lineHeight: 1.65, color: 'var(--ink-muted)', maxWidth: '62ch', marginBottom: 28 }}>
-          The review reads the book back and proposes what the next one should carry. You mark each
+          The review reads the season back and proposes what the next one should carry. You mark each
           piece — leave it in the past, or let the people arrive already holding it. Then a time gap,
-          who returns, and the premise the next book opens on.
+          who returns, and the premise the next season opens on.
         </div>
         {error && <div style={{ marginBottom: 16 }}><ErrorNote error={error} onDismiss={() => setError('')} /></div>}
         <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -198,7 +198,7 @@ export function Sequel() {
             disabled={busy !== null}
             onClick={() => void run('analyze', async () => { await analyzeSeason(world, season); })}
           >
-            {busy === 'analyze' ? 'Reading the book back…' : `Read book ${season.number} back`}
+            {busy === 'analyze' ? 'Reviewing season…' : `Review season ${season.number}`}
           </button>
           {busy === 'analyze' && <Spinner label="the utility model is extracting beats and outcomes" />}
         </div>
@@ -231,13 +231,13 @@ export function Sequel() {
           onClick={() => go('story')}>← Back to story</button>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 11, marginBottom: 28 }}>
-          <Mono style={{ letterSpacing: '0.16em' }}>book {season.number} closing · book {season.number + 1} setup</Mono>
+          <Mono style={{ letterSpacing: '0.16em' }}>season {season.number} closing · season {season.number + 1} setup</Mono>
           <h1 className="serif" style={{ fontWeight: 300, fontSize: compact ? 26 : phone ? 30 : 40, lineHeight: 1.12, margin: 0, color: 'var(--ink-heading)' }}>
-            Before we go on, tell me what mattered.
+            Before the next season, say what mattered.
           </h1>
           <div style={{ fontSize: 14.5, lineHeight: 1.65, color: 'var(--ink-muted)', maxWidth: '62ch' }}>
-            I read the book back. Here is what I think happened. Mark what should shape the next one — anything
-            you drop stays in the past, anything you raise is carried into book {season.number + 1}.
+            I reviewed the season. Here is what I think happened. Mark what should shape the next one — anything
+            you drop stays in the past, anything you raise is carried into season {season.number + 1}.
           </div>
         </div>
 
@@ -283,7 +283,7 @@ export function Sequel() {
         {/* beats */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 11, marginBottom: 34 }}>
           <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-muted)', marginBottom: 4 }}>
-            Raised pieces become aims the next book works toward. What you keep stays as situation in the book.
+            Raised pieces become aims the next season works toward. What you keep stays as situation.
           </div>
           {draft.beats.map((b, i) => {
             const hot = b.disposition === 'raise';
@@ -307,7 +307,7 @@ export function Sequel() {
                     className="serif"
                     value={b.text}
                     onChange={(e) => patch({ beats: draft.beats.map((x, j) => (j === i ? { ...x, text: e.target.value } : x)) })}
-                    style={{ fontFamily: 'Spectral, serif', fontSize: 18, lineHeight: 1.45, color: 'var(--ink-heading)', background: 'transparent', border: 0, padding: 0, borderRadius: 0, width: '100%' }}
+                    style={{ fontSize: 18, lineHeight: 1.45, color: 'var(--ink-heading)', background: 'transparent', border: 0, padding: 0, borderRadius: 0, width: '100%' }}
                   />
                   <input
                     value={b.consequence}
@@ -390,7 +390,7 @@ export function Sequel() {
                   <textarea
                     rows={2}
                     value={c.evolution || c.outcome}
-                    placeholder="where the book leaves them…"
+                    placeholder="where the season leaves them…"
                     onChange={(e) => patch({
                       characters: patchCharacter(draft, i, { evolution: e.target.value })
                     })}
@@ -567,7 +567,7 @@ export function Sequel() {
                 <Mono style={{ fontSize: 9 }}>extra plot situations · Raise beats already seed targets</Mono>
                 {raised > 0 && (
                   <div style={{ fontSize: 12, color: 'var(--ink-muted)', lineHeight: 1.45 }}>
-                    {raised} piece{raised === 1 ? '' : 's'} will shape the next book.
+                    {raised} piece{raised === 1 ? '' : 's'} will shape the next season.
                   </div>
                 )}
                 {draft.plotArc!.map((p, i) => (
@@ -604,14 +604,14 @@ export function Sequel() {
           padding: narrow ? '18px 18px' : '24px 26px',
           display: 'flex', flexDirection: 'column', gap: 14
         }}>
-          <div className="label">The premise book {season.number + 1} opens on</div>
+          <div className="label">The premise season {season.number + 1} opens on</div>
           <textarea
             rows={3}
             className="serif"
             value={draft.premise}
             onChange={(e) => patch({ premise: e.target.value })}
             placeholder="Write it yourself, or have it drafted from your beat choices…"
-            style={{ fontFamily: 'Spectral, serif', fontSize: narrow ? 17 : 21, lineHeight: 1.55, color: 'var(--ink-heading)', background: 'transparent' }}
+            style={{ fontSize: narrow ? 17 : 21, lineHeight: 1.55, color: 'var(--ink-heading)', background: 'transparent' }}
           />
           {!narrow && (
             <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', paddingTop: 6 }}>
@@ -620,7 +620,7 @@ export function Sequel() {
                 disabled={busy !== null || !draft.premise.trim()}
                 onClick={beginSeason}
               >
-                {busy === 'begin' ? 'Opening the next book…' : `Begin book ${season.number + 1}`}
+                {busy === 'begin' ? 'Starting next season…' : `Begin season ${season.number + 1}`}
               </button>
               <button
                 className="btn-ghost"
@@ -658,7 +658,7 @@ export function Sequel() {
           display: 'flex',
           flexDirection: 'column',
           gap: 8,
-          boxShadow: '0 -8px 24px rgba(28,22,18,0.06)'
+          boxShadow: '0 -8px 24px rgba(0,0,0,0.06)'
         }}>
           <button
             className="btn-primary"
@@ -666,7 +666,7 @@ export function Sequel() {
             disabled={busy !== null || !draft.premise.trim()}
             onClick={beginSeason}
           >
-            {busy === 'begin' ? 'Opening the next book…' : `Begin book ${season.number + 1}`}
+            {busy === 'begin' ? 'Starting next season…' : `Begin season ${season.number + 1}`}
           </button>
           <button
             className="btn-ghost"

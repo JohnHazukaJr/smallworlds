@@ -27,7 +27,7 @@ export function faceStyle(opts: {
     height,
     borderRadius: photo ? 2 : '50%',
     flexShrink: 0,
-    border: `1px solid ${photo ? hueRim(hue, 0.35) : 'rgba(28,22,18,0.18)'}`,
+    border: `1px solid ${photo ? hueRim(hue, 0.35) : 'rgba(0,0,0,0.18)'}`,
     boxShadow: 'none',
     background: photo
       ? `center / cover no-repeat url(${JSON.stringify(photo)})`

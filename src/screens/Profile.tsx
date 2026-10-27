@@ -127,7 +127,7 @@ export function Profile() {
       <div style={{ display: 'flex', gap: 22, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 34 }}>
         <div style={avatarStyle(60, 84, 'var(--rule)')} />
         <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 9 }}>
-          <div className="serif" style={{ fontWeight: 300, fontSize: compact ? 26 : phone ? 28 : 36, lineHeight: 1.1, color: 'var(--ink-heading)' }}>Your shelf</div>
+          <div className="serif" style={{ fontWeight: 300, fontSize: compact ? 26 : phone ? 28 : 36, lineHeight: 1.1, color: 'var(--ink-heading)' }}>Profile</div>
           <div style={{ fontSize: 13.5, lineHeight: 1.65, color: 'var(--ink-muted)', maxWidth: '58ch' }}>
             Worlds live in this browser first. Back up the whole device (stories + settings + encrypted keys), or sign in
             to sync across machines. AI keys never leave your device unencrypted.
