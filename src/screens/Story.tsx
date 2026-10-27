@@ -9,8 +9,10 @@ import {
 } from '../ai/engine';
 import {
   parseDeliveryTone,
+  DELIVERY_TONE_GROUPS,
   type DeliveryTone
 } from '../ai/deliveryTone';
+import { composeOutgoingLine, summaryClearPatch } from '../ai/composeLine';
 import {
   groupSpeakParagraphs,
   parseInlineEmphasis,
@@ -131,12 +133,14 @@ function SceneCastStrip({
 function parseTurn(turn: Turn, characters: Character[], guests: EpisodeGuest[] = []): ProseBlock[] {
   if (turn.role === 'user' && turn.asCharacterId) {
     const who = characters.find((c) => c.id === turn.asCharacterId);
+    const { tone, body } = parseDeliveryTone(turn.text);
     return [{
-      text: turn.text,
+      text: body,
       speaker: who?.name ?? 'they',
       hue: who?.hue ?? 200,
       portrait: who ? characterPortraits(who)[0] : null,
-      kind: 'action'
+      kind: 'action',
+      deliveryTone: tone
     }];
   }
   if (turn.role === 'user') {
@@ -390,11 +394,14 @@ function ProseBlockView({
       b.kind === 'direction' ? 'steer'
       : isDialog ? `speak${fromPlayer ? ' player' : ''}${continues ? ' continues' : ''}`
       : '';
-    const lead = isDialog && b.speaker && !continues ? <SpeakerLead b={b} /> : undefined;
+    const lead = b.speaker && !continues && (isDialog || (b.kind === 'action' && b.deliveryTone))
+      ? <SpeakerLead b={b} />
+      : undefined;
 
     if (b.kind === 'direction') {
       return (
         <div className={`prose-block ${kindClass}`}>
+          <div className="label" style={{ fontSize: 11, marginBottom: 4 }}>Direction</div>
           <p
             className="serif"
             style={{
@@ -732,6 +739,11 @@ export function Story() {
   });
   const [weight, setWeight] = useState<ActionWeight>('matters');
   const [asCharacterId, setAsCharacterId] = useState<string | null>(null);
+  const [direct, setDirect] = useState(false);
+  const [speechTone, setSpeechTone] = useState<DeliveryTone | null>(null);
+  const [toneGroup, setToneGroup] = useState<string | null>(null);
+  const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
+  const [editBusy, setEditBusy] = useState(false);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [tailHasText, setTailHasText] = useState(false);
@@ -894,12 +906,48 @@ export function Story() {
     }
     if (!input.trim()) return;
     const sceneNpcs = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
-    const mode: ComposeMode = asCharacterId || sceneNpcs.length === 0 ? 'act' : 'play';
+    const outgoing = composeOutgoingLine({
+      direct,
+      asCharacterId,
+      sceneHasOthers: sceneNpcs.length > 0,
+      tone: speechTone,
+      text: input
+    });
     const text = input;
     setInput('');
-    const result = await runNarration(mode, text, undefined, undefined, weight, asCharacterId);
+    const result = await runNarration(
+      outgoing.mode,
+      outgoing.text,
+      undefined,
+      undefined,
+      weight,
+      outgoing.asCharacterId
+    );
     if (result.status !== 'ok' && result.beatsCompleted === 0 && result.remaining === 0) {
       setInput(text);
+    }
+  };
+
+  const saveEdit = async () => {
+    if (!editing || !episode || editBusy) return;
+    const text = editing.text.trim();
+    if (!text) return;
+    const current = turns.find((turn) => turn.id === editing.id);
+    if (current?.text === text) {
+      setEditing(null);
+      return;
+    }
+    setEditBusy(true);
+    setError('');
+    try {
+      await db.turns.update(editing.id, { text, updatedAt: Date.now() });
+      const patch = summaryClearPatch(episode.runningSummary);
+      if (patch) await db.episodes.update(episode.id, { ...patch, updatedAt: Date.now() });
+      setEditing(null);
+    } catch (e) {
+      setError(classifyError(e));
+    } finally {
+      setEditBusy(false);
     }
   };
 
@@ -1264,25 +1312,31 @@ export function Story() {
           )
         });
       });
-      if (turn.id === latestPassageId) {
+      const canEdit = turn.role === 'narrator' || turn.role === 'character';
+      const rewrite = turn.id === latestPassageId
+        ? () => {
+          const idx = turns.findIndex((t) => t.id === turn.id);
+          const below = idx < 0 ? 0 : turns.length - idx - 1;
+          if (below > 0) setConfirmAsk({ kind: 'retryFrom', turn });
+          else void retryFrom(turn);
+        }
+        : undefined;
+      if (canEdit || rewrite) {
         bookPieces.push({
-          key: `rewrite-${turn.id}`,
+          key: `tools-${turn.id}`,
           node: (
-            <div style={{ display: 'flex', justifyContent: 'flex-end', margin: '4px 0 10px' }}>
-              <button
-                className="btn-quiet"
-                style={{ fontSize: 12, padding: '6px 10px', minHeight: 36 }}
-                disabled={streaming}
-                onClick={() => {
-                  const idx = turns.findIndex((t) => t.id === turn.id);
-                  const below = idx < 0 ? 0 : turns.length - idx - 1;
-                  if (below > 0) setConfirmAsk({ kind: 'retryFrom', turn });
-                  else void retryFrom(turn);
-                }}
-              >
-                Rewrite this passage
-              </button>
-            </div>
+            <TurnTools
+              streaming={streaming}
+              canEdit={canEdit}
+              editing={editing?.id === turn.id}
+              draft={editing?.id === turn.id ? editing.text : turn.text}
+              busy={editBusy}
+              onEdit={() => setEditing({ id: turn.id, text: turn.text })}
+              onDraft={(text) => setEditing({ id: turn.id, text })}
+              onSave={() => { void saveEdit(); }}
+              onCancel={() => setEditing(null)}
+              onRewrite={rewrite}
+            />
           )
         });
       }
@@ -1295,7 +1349,7 @@ export function Story() {
     }
   }
   const bookSignature = book
-    ? `${episode.id}\n${fontPx}\n${turnWindow}\n${writing ?? ''}\n${manuscript.map((entry) => `${entry.turn.id}:${entry.turn.text.length}`).join('|')}`
+    ? `${episode.id}\n${fontPx}\n${turnWindow}\n${writing ?? ''}\n${editing?.id ?? ''}\n${manuscript.map((entry) => `${entry.turn.id}:${entry.turn.text.length}`).join('|')}`
     : '';
 
   return (
@@ -1686,6 +1740,15 @@ export function Story() {
                         if (below > 0) setConfirmAsk({ kind: 'retryFrom', turn });
                         else void retryFrom(turn);
                       } : undefined}
+                      onEdit={turn.role === 'narrator' || turn.role === 'character'
+                        ? () => setEditing({ id: turn.id, text: turn.text })
+                        : undefined}
+                      editing={editing?.id === turn.id}
+                      draft={editing?.id === turn.id ? editing.text : turn.text}
+                      editBusy={editBusy}
+                      onDraft={(text) => setEditing((current) => current ? { ...current, text } : current)}
+                      onSaveEdit={() => { void saveEdit(); }}
+                      onCancelEdit={() => setEditing(null)}
                     />
                   </div>
                 );
@@ -1807,17 +1870,50 @@ export function Story() {
             <span className="label" style={{ fontSize: 11 }}>
               Write as
             </span>
-            <Chip active={asCharacterId === null} onClick={() => setAsCharacterId(null)}>You</Chip>
+            <Chip active={!direct && asCharacterId === null} onClick={() => { setDirect(false); setAsCharacterId(null); }}>You</Chip>
             {inScene.filter((c) => !c.isPlayer).map((c) => (
               <Chip
                 key={c.id}
-                active={asCharacterId === c.id}
-                onClick={() => setAsCharacterId(asCharacterId === c.id ? null : c.id)}
+                active={!direct && asCharacterId === c.id}
+                onClick={() => { setDirect(false); setAsCharacterId(asCharacterId === c.id ? null : c.id); }}
               >
                 {c.name}
               </Chip>
             ))}
+            <Chip active={direct} onClick={() => setDirect(true)}>Direct</Chip>
           </div>
+          {!direct && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+              <span className="label" style={{ fontSize: 11 }}>
+                How it's said
+              </span>
+              <Chip active={speechTone === null} onClick={() => setSpeechTone(null)}>Plain</Chip>
+              {DELIVERY_TONE_GROUPS.map((group) => (
+                <Chip
+                  key={group.id}
+                  active={toneGroup === group.id || (!!speechTone && group.tones.includes(speechTone))}
+                  onClick={() => setToneGroup((current) => current === group.id ? null : group.id)}
+                >
+                  {group.label}
+                </Chip>
+              ))}
+            </div>
+            {toneGroup && (
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                {DELIVERY_TONE_GROUPS.find((group) => group.id === toneGroup)?.tones.map((tone) => (
+                  <Chip
+                    key={tone}
+                    active={speechTone === tone}
+                    onClick={() => setSpeechTone((current) => current === tone ? null : tone)}
+                  >
+                    {tone}
+                  </Chip>
+                ))}
+              </div>
+            )}
+          </div>
+          )}
           <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
             <span className="label" style={{ fontSize: 11 }}>
               This turn
@@ -1846,7 +1942,9 @@ export function Story() {
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void write(); }
               }}
-              placeholder={asCharacterId
+              placeholder={direct
+                ? 'What should happen next?'
+                : asCharacterId
                 ? 'What do they do?'
                 : 'What do you do, or what do you say?'}
               rows={2}
@@ -2003,7 +2101,69 @@ function DisplaySheet({ open, onClose, narrow }: {
 
 // ---------- turn row ----------
 
-function TurnRow({ turn, blocks, accent, prose, fontPx, avatarPx, dialogueStyle, prevSpeaker, streaming, opening, onRewrite }: {
+function TurnTools({
+  streaming, canEdit, editing, draft, busy, onEdit, onDraft, onSave, onCancel, onRewrite
+}: {
+  streaming: boolean;
+  canEdit: boolean;
+  editing: boolean;
+  draft: string;
+  busy: boolean;
+  onEdit: () => void;
+  onDraft: (text: string) => void;
+  onSave: () => void;
+  onCancel: () => void;
+  onRewrite?: () => void;
+}) {
+  if (editing) {
+    return (
+      <div style={{ margin: '8px 0 12px' }}>
+        <textarea
+          value={draft}
+          rows={5}
+          aria-label="Edit this line"
+          onChange={(e) => onDraft(e.target.value)}
+          style={{
+            width: '100%',
+            resize: 'vertical',
+            fontFamily: 'var(--serif)',
+            fontSize: 16,
+            lineHeight: 1.6,
+            padding: '10px 12px',
+            border: '1px solid var(--rule)',
+            borderRadius: 8,
+            background: 'var(--paper)',
+            color: 'var(--ink)'
+          }}
+        />
+        <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+          <button className="btn" disabled={busy || !draft.trim()} onClick={onSave}>Save</button>
+          <button className="btn-quiet" disabled={busy} onClick={onCancel}>Cancel</button>
+        </div>
+      </div>
+    );
+  }
+  if (!canEdit && !onRewrite) return null;
+  return (
+    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4, marginBottom: 10 }}>
+      {canEdit && (
+        <button className="btn-quiet" style={{ fontSize: 12, padding: '6px 10px', minHeight: 36 }} disabled={streaming} onClick={onEdit}>
+          Edit
+        </button>
+      )}
+      {onRewrite && (
+        <button className="btn-quiet" style={{ fontSize: 12, padding: '6px 10px', minHeight: 36 }} disabled={streaming} onClick={onRewrite}>
+          Rewrite this passage
+        </button>
+      )}
+    </div>
+  );
+}
+
+function TurnRow({
+  turn, blocks, accent, prose, fontPx, avatarPx, dialogueStyle, prevSpeaker, streaming, opening,
+  onRewrite, onEdit, editing, draft, editBusy, onDraft, onSaveEdit, onCancelEdit
+}: {
   turn: Turn;
   blocks: ProseBlock[];
   accent: string;
@@ -2015,6 +2175,13 @@ function TurnRow({ turn, blocks, accent, prose, fontPx, avatarPx, dialogueStyle,
   streaming: boolean;
   opening?: boolean;
   onRewrite?: () => void;
+  onEdit?: () => void;
+  editing?: boolean;
+  draft?: string;
+  editBusy?: boolean;
+  onDraft?: (text: string) => void;
+  onSaveEdit?: () => void;
+  onCancelEdit?: () => void;
 }) {
   const continued = attributionRun(blocks, prevSpeaker);
   return (
@@ -2033,12 +2200,18 @@ function TurnRow({ turn, blocks, accent, prose, fontPx, avatarPx, dialogueStyle,
           fromPlayer={turn.role === 'user'}
         />
       ))}
-      {onRewrite && (
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4, marginBottom: 10 }}>
-          <button className="btn-quiet" style={{ fontSize: 12, padding: '6px 10px', minHeight: 36 }} disabled={streaming}
-            onClick={onRewrite}>Rewrite this passage</button>
-        </div>
-      )}
+      <TurnTools
+        streaming={streaming}
+        canEdit={!!onEdit}
+        editing={!!editing}
+        draft={draft ?? ''}
+        busy={!!editBusy}
+        onEdit={onEdit ?? (() => undefined)}
+        onDraft={onDraft ?? (() => undefined)}
+        onSave={onSaveEdit ?? (() => undefined)}
+        onCancel={onCancelEdit ?? (() => undefined)}
+        onRewrite={onRewrite}
+      />
     </div>
   );
 }
