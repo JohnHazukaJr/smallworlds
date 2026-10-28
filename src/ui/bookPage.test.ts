@@ -6,6 +6,12 @@ import {
   leafMotion,
   leafSettles,
   packPages,
+  flickSettles,
+  heldOpenPiece,
+  pageHolding,
+  pageTurnPending,
+  readingEnd,
+  rememberOpenPiece,
   replyTurn,
   sliceToFit,
   writingLineText
@@ -35,6 +41,30 @@ describe('leaf gestures', () => {
     expect(leafAngle('forward', 0.5)).toBeCloseTo(-90);
     expect(leafAngle('back', 1)).toBeCloseTo(0);
     expect(leafAngle('back', 0)).toBeCloseTo(-180);
+  });
+
+  it('treats a flip back to the first page as a turn in progress', () => {
+    expect(pageTurnPending(0)).toBe(true);
+    expect(pageTurnPending(2)).toBe(true);
+    expect(pageTurnPending(null)).toBe(false);
+  });
+
+  it('commits a flick from the release point', () => {
+    expect(flickSettles('forward', -400, 800, true)).toBe('commit');
+    expect(flickSettles('forward', -20, 800, true)).toBe('cancel');
+    expect(flickSettles('back', 0, 800, false)).toBe('commit');
+  });
+});
+
+describe('held page', () => {
+  it('restores the piece the reader left, including a slice of it', () => {
+    rememberOpenPiece('ep', 'line-2');
+    expect(heldOpenPiece('ep')).toBe('line-2');
+    const pages = [['line-1'], ['line-2::0', 'line-2::1'], ['tools']];
+    expect(pageHolding(pages, 'line-2')).toBe(1);
+    rememberOpenPiece('ep', null);
+    expect(heldOpenPiece('ep')).toBeNull();
+    expect(pageHolding(pages, 'missing')).toBe(-1);
   });
 });
 
@@ -76,6 +106,24 @@ describe('sliceToFit', () => {
 
   it('keeps one long token even when it is taller than the page', () => {
     expect(sliceToFit('supercalifragilistic', 20, byLength)).toEqual(['supercalifragilistic']);
+  });
+});
+
+describe('readingEnd', () => {
+  const story = (key: string) => key === 'prose' || key.startsWith('prose::');
+
+  it('lands on the last page that still has prose', () => {
+    expect(readingEnd([['head'], ['prose'], ['tools']], story)).toBe(1);
+  });
+
+  it('treats a slice of the paragraph as the story', () => {
+    expect(readingEnd([['prose::0'], ['prose::1'], ['tools']], story)).toBe(1);
+  });
+
+  it('keeps the last page when nothing is marked as story', () => {
+    expect(readingEnd([['head'], ['tools']], story)).toBe(1);
+    expect(readingEnd([[]], story)).toBe(0);
+    expect(readingEnd([], story)).toBe(0);
   });
 });
 

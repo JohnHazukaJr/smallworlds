@@ -52,7 +52,9 @@ describe('summaryClearPatch', () => {
   it('clears a summary after an edit', () => {
     expect(summaryClearPatch('The cartwright still held the cup.')).toEqual({
       runningSummary: null,
-      runningSummaryAtChars: 0
+      runningSummaryAtChars: 0,
+      liveStateAtChars: 0,
+      liveCanonAtChars: 0
     });
   });
 

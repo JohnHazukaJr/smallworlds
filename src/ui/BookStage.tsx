@@ -3,7 +3,8 @@ import {
   type ReactNode, type PointerEvent as ReactPointerEvent
 } from 'react';
 import {
-  dragProgress, leafAngle, leafEdge, leafMotion, leafSettles, leafShadow, packPages, replyTurn, sliceToFit
+  dragProgress, flickSettles, heldOpenPiece, leafAngle, leafEdge, leafMotion, leafShadow,
+  packPages, pageHolding, pageTurnPending, readingEnd, rememberOpenPiece, replyTurn, sliceToFit
 } from './bookPage';
 
 export type BookPiece = {
@@ -26,6 +27,8 @@ type Leaf = {
 type Laid = {
   pages: string[][];
   slices: Record<string, string>;
+  /** Pages whose measured copy is taller than the sheet. */
+  scroll: number[];
 };
 
 function useReducedMotion(): boolean {
@@ -68,17 +71,20 @@ export function BookStage({
   const sheetRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLDivElement>(null);
   const probeRef = useRef<HTMLDivElement>(null);
+  const sliceHostRef = useRef<HTMLDivElement>(null);
   const leafRef = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const pageRef = useRef(0);
   const countRef = useRef(1);
   const laidCount = useRef(0);
   const episodeRef = useRef<string | null>(null);
+  const shortArmed = useRef<string | null>(null);
   const lastReveal = useRef(reveal);
   const streamingRef = useRef(false);
   const armCount = useRef<number | null>(null);
   const pendingPage = useRef<number | null>(null);
   const animGen = useRef(0);
+  const endRef = useRef(0);
   const dragRef = useRef<{
     edge: 'back' | 'forward';
     startX: number;
@@ -87,10 +93,30 @@ export function BookStage({
   } | null>(null);
 
   const [box, setBox] = useState({ w: 0, h: 0 });
-  const [laid, setLaid] = useState<Laid>({ pages: [[]], slices: {} });
+  const [laid, setLaid] = useState<Laid>({ pages: [[]], slices: {}, scroll: [] });
+  const laidRef = useRef(laid);
+  laidRef.current = laid;
   const [page, setPage] = useState(0);
   const [leaf, setLeaf] = useState<Leaf | null>(null);
+  const [scrollFlow, setScrollFlow] = useState(false);
   pageRef.current = page;
+
+  const storyKey = (key: string) => {
+    const piece = piecesRef.current.find((item) => item.key === baseKey(key));
+    return !!piece?.text;
+  };
+
+  const openPieceKey = () => {
+    const keys = laidRef.current.pages[pageRef.current] ?? [];
+    const key = keys.find((item) => storyKey(item)) ?? keys[0];
+    return key ? baseKey(key) : null;
+  };
+
+  useLayoutEffect(() => {
+    return () => {
+      rememberOpenPiece(episodeId, follow.current ? null : openPieceKey());
+    };
+  }, [episodeId]);
 
   useLayoutEffect(() => {
     const sheet = sheetRef.current;
@@ -107,14 +133,60 @@ export function BookStage({
     const probe = probeRef.current;
     const limit = box.h - PAD.top - PAD.bottom;
     const width = box.w - PAD.left - PAD.right;
-    if (!host || !probe || limit < 80 || width < 80) return;
+    if (!host || !probe || limit < 80 || width < 80) {
+      const keys = piecesRef.current.map((piece) => piece.key);
+      countRef.current = 1;
+      endRef.current = 0;
+      setScrollFlow(true);
+      setLaid((current) => {
+        const row = current.pages[0] ?? [];
+        const same = current.pages.length === 1
+          && row.length === keys.length
+          && row.every((key, index) => key === keys[index])
+          && Object.keys(current.slices).length === 0
+          && current.scroll.length === 0;
+        return same ? current : { pages: [keys], slices: {}, scroll: [] };
+      });
+      if (!pageTurnPending(pendingPage.current) && shortArmed.current !== episodeId) {
+        shortArmed.current = episodeId;
+        follow.current = heldOpenPiece(episodeId) == null;
+        pendingPage.current = null;
+        setLeaf(null);
+        setPage(0);
+      }
+      return;
+    }
+    setScrollFlow(false);
     host.style.width = `${width}px`;
     probe.style.width = `${width}px`;
     probe.style.fontSize = `${fontPx}px`;
+    const sliceHost = sliceHostRef.current;
+    if (sliceHost) sliceHost.style.width = `${width}px`;
 
-    const measure = (sample: string) => {
+    const measurePlain = (sample: string) => {
       probe.textContent = sample;
       return probe.offsetHeight + 8;
+    };
+    const measureSlice = (node: HTMLElement, sample: string) => {
+      if (!sliceHost) return measurePlain(sample);
+      sliceHost.replaceChildren();
+      const clone = node.cloneNode(true) as HTMLElement;
+      sliceHost.appendChild(clone);
+      const copies = clone.querySelectorAll<HTMLElement>('[data-book-copy]');
+      if (copies.length === 0) {
+        const prose = clone.querySelector('p');
+        if (prose) prose.textContent = sample;
+      } else {
+        copies.forEach((copy, index) => {
+          if (index === 0) {
+            copy.textContent = sample;
+            return;
+          }
+          const para = copy.closest('p');
+          if (para instanceof HTMLElement) para.style.display = 'none';
+        });
+      }
+      return Math.max(clone.offsetHeight, 1);
     };
 
     const flat: { key: string; height: number }[] = [];
@@ -129,9 +201,10 @@ export function BookStage({
         flat.push({ key, height: Math.max(height, 1) });
         return;
       }
+      const measure = (sample: string) => measureSlice(node, sample);
       const parts = sliceToFit(piece.text, limit, measure);
       if (parts.length <= 1) {
-        flat.push({ key, height: Math.max(height, 1) });
+        flat.push({ key, height: Math.max(height, measure(parts[0] ?? piece.text), 1) });
         return;
       }
       parts.forEach((part, index) => {
@@ -143,9 +216,17 @@ export function BookStage({
 
     const pages = packPages(flat, limit);
     const count = Math.max(1, pages.length);
+    const end = readingEnd(pages, storyKey);
+    const heightOf = new Map(flat.map((item) => [item.key, item.height]));
+    const scroll: number[] = [];
+    pages.forEach((keys, index) => {
+      const used = keys.reduce((sum, key) => sum + (heightOf.get(key) ?? 0), 0);
+      if (used > limit + 1) scroll.push(index);
+    });
     countRef.current = count;
-    setLaid({ pages, slices });
-    if (pendingPage.current) {
+    endRef.current = end;
+    setLaid({ pages, slices, scroll });
+    if (pageTurnPending(pendingPage.current)) {
       laidCount.current = count;
       return;
     }
@@ -159,12 +240,16 @@ export function BookStage({
 
     const streamingStarted = streaming && !streamingRef.current;
     if (episodeChanged || before === 0) {
-      follow.current = true;
+      const held = heldOpenPiece(episodeId);
+      const restored = held ? pageHolding(pages, held) : -1;
+      const land = restored >= 0 ? restored : end;
+      follow.current = land === end;
+      if (follow.current) rememberOpenPiece(episodeId, null);
       pendingPage.current = null;
       armCount.current = streaming ? count : null;
       streamingRef.current = streaming;
       setLeaf(null);
-      setPage(count - 1);
+      setPage(land);
       return;
     }
     if (streamingStarted) armCount.current = before > 0 ? before : count;
@@ -178,14 +263,16 @@ export function BookStage({
       });
       armCount.current = null;
       if (dest != null) {
-        const from = Math.max(0, dest - 1);
-        if (leafMotion(reduced) === 'cut') {
-          follow.current = dest >= count - 1;
+        const land = end;
+        follow.current = true;
+        if (leafMotion(reduced) === 'cut' || land === pageRef.current) {
+          pendingPage.current = null;
           setLeaf(null);
-          setPage(dest);
+          setPage(land);
           return;
         }
-        pendingPage.current = dest;
+        const from = Math.max(0, land - 1);
+        pendingPage.current = land;
         setPage(from);
         setLeaf({ dir: 'forward', progress: 0, animate: false });
         const gen = ++animGen.current;
@@ -200,36 +287,75 @@ export function BookStage({
     }
     if (!streaming) armCount.current = null;
 
-    if (follow.current && !pendingPage.current) setPage(count - 1);
+    if (follow.current && !pageTurnPending(pendingPage.current)) setPage(end);
   }, [box.w, box.h, signature, fontPx, episodeId, reveal, reduced, streaming]);
+
+  const commitTurn = () => {
+    const dest = pendingPage.current;
+    pendingPage.current = null;
+    if (dest == null) {
+      setLeaf(null);
+      return;
+    }
+    const next = Math.max(0, Math.min(countRef.current - 1, dest));
+    follow.current = next === endRef.current;
+    if (follow.current && episodeRef.current) rememberOpenPiece(episodeRef.current, null);
+    setLeaf(null);
+    setPage(next);
+  };
+  const commitRef = useRef(commitTurn);
+  commitRef.current = commitTurn;
 
   useEffect(() => {
     const leafEl = leafRef.current;
     if (!leafEl || !leaf?.animate) return;
-    let finished = false;
-    const done = () => {
-      if (finished) return;
-      finished = true;
-      const dest = pendingPage.current;
-      pendingPage.current = null;
-      setLeaf(null);
-      if (dest == null) return;
-      const count = countRef.current;
-      const next = Math.max(0, Math.min(count - 1, dest));
-      follow.current = next >= count - 1;
-      setPage(next);
-    };
     const onEnd = (event: TransitionEvent) => {
       if (event.propertyName !== 'transform') return;
-      done();
+      commitRef.current();
     };
     leafEl.addEventListener('transitionend', onEnd);
-    const timer = window.setTimeout(done, TURN_MS + 80);
-    return () => {
-      leafEl.removeEventListener('transitionend', onEnd);
-      window.clearTimeout(timer);
-    };
+    return () => leafEl.removeEventListener('transitionend', onEnd);
   }, [leaf]);
+
+  const columnPin = useRef(0);
+  useLayoutEffect(() => {
+    if (!scrollFlow || !follow.current) return;
+    const prose = sheetRef.current?.querySelector('.book-prose.is-scroll');
+    if (!(prose instanceof HTMLElement)) return;
+    columnPin.current += 1;
+    prose.scrollTop = prose.scrollHeight;
+    const release = () => {
+      columnPin.current = Math.max(0, columnPin.current - 1);
+      if (columnPin.current > 0) return;
+      const gap = prose.scrollHeight - prose.scrollTop - prose.clientHeight;
+      follow.current = gap < 48;
+    };
+    let settled = false;
+    const frame = requestAnimationFrame(() => {
+      settled = true;
+      release();
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      if (!settled) release();
+    };
+  }, [scrollFlow, laid, signature]);
+
+  useEffect(() => {
+    if (!scrollFlow) return;
+    const prose = sheetRef.current?.querySelector('.book-prose.is-scroll');
+    if (!(prose instanceof HTMLElement)) return;
+    const onScroll = () => {
+      const gap = prose.scrollHeight - prose.scrollTop - prose.clientHeight;
+      if (columnPin.current > 0) {
+        if (gap >= 48) follow.current = false;
+        return;
+      }
+      follow.current = gap < 48;
+    };
+    prose.addEventListener('scroll', onScroll, { passive: true });
+    return () => prose.removeEventListener('scroll', onScroll);
+  }, [scrollFlow, laid, signature]);
 
   const count = Math.max(1, laid.pages.length);
   const safePage = Math.max(0, Math.min(count - 1, page));
@@ -242,6 +368,7 @@ export function BookStage({
     : safePage;
 
   const pieceMap = new Map(pieces.map((piece) => [piece.key, piece]));
+  const endIndex = readingEnd(laid.pages, (key) => !!pieceMap.get(baseKey(key))?.text);
 
   const renderKeys = (keys: string[]) => keys.map((key) => {
     const slice = laid.slices[key];
@@ -251,19 +378,25 @@ export function BookStage({
     return <div key={key}>{body}</div>;
   });
 
+  const pageScrolls = (index: number) => scrollFlow || laid.scroll.includes(index);
   const pageBody = (index: number, showTail: boolean) => (
-    <div className="book-prose">
+    <div className={`book-prose${pageScrolls(index) ? ' is-scroll' : ''}`}>
       {renderKeys(laid.pages[index] ?? [])}
-      {showTail && index === count - 1 ? tail : null}
+      {showTail && (index === count - 1 || index === endIndex) ? tail : null}
     </div>
   );
 
-  const go = (dest: number, dir: 'forward' | 'back') => {
+  const go = (dest: number, dir: 'forward' | 'back', from = 0) => {
+    if (pageTurnPending(pendingPage.current)) return;
     const countNow = countRef.current;
     const next = Math.max(0, Math.min(countNow - 1, dest));
     if (next === pageRef.current && !leaf) return;
-    if (leafMotion(reduced) === 'cut') {
-      follow.current = next >= countNow - 1;
+    const settleFollow = () => {
+      follow.current = next === endRef.current;
+      if (follow.current) rememberOpenPiece(episodeId, null);
+    };
+    if (leafMotion(reduced) === 'cut' || from >= 1) {
+      settleFollow();
       pendingPage.current = null;
       setLeaf(null);
       setPage(next);
@@ -271,12 +404,12 @@ export function BookStage({
     }
     pendingPage.current = next;
     const gen = ++animGen.current;
-    setLeaf((current) => {
-      if (current && current.dir === dir && current.progress > 0) {
-        return { dir, progress: 1, animate: true };
-      }
-      return { dir, progress: 0, animate: false };
-    });
+    const start = from > 0 ? from : 0;
+    setLeaf({ dir, progress: start, animate: false });
+    window.setTimeout(() => {
+      if (animGen.current !== gen) return;
+      commitRef.current();
+    }, TURN_MS + 120);
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         if (animGen.current !== gen) return;
@@ -286,7 +419,7 @@ export function BookStage({
   };
 
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (leaf?.animate) return;
+    if (pageTurnPending(pendingPage.current) || leaf?.animate) return;
     const target = event.target;
     if (target instanceof Element && target.closest('button, a, textarea, input, select')) return;
     const rect = event.currentTarget.getBoundingClientRect();
@@ -294,8 +427,12 @@ export function BookStage({
     if (!edge) return;
     if (edge === 'back' && safePage <= 0) return;
     if (edge === 'forward' && safePage >= count - 1) return;
-    event.currentTarget.setPointerCapture(event.pointerId);
     dragRef.current = { edge, startX: event.clientX, width: rect.width, moved: false };
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // The release still carries the finger's last position.
+    }
   };
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -310,23 +447,18 @@ export function BookStage({
     });
   };
 
-  const onPointerUp = () => {
+  const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     dragRef.current = null;
     if (!drag) return;
-    const current = leaf;
-    const progress = current && current.dir === drag.edge ? current.progress : 0;
+    const dx = event.clientX - drag.startX;
     const dest = drag.edge === 'forward' ? pageRef.current + 1 : pageRef.current - 1;
-    if (!drag.moved || leafSettles(progress) === 'commit') {
-      go(dest, drag.edge);
+    if (flickSettles(drag.edge, dx, drag.width, drag.moved) === 'commit') {
+      go(dest, drag.edge, drag.moved ? dragProgress(drag.edge, dx, drag.width) : 0);
       return;
     }
     pendingPage.current = null;
-    if (leafMotion(reduced) === 'cut') {
-      setLeaf(null);
-      return;
-    }
-    setLeaf({ dir: drag.edge, progress: 0, animate: true });
+    setLeaf(null);
   };
 
   const angle = leaf ? leafAngle(leaf.dir, leaf.progress) : 0;
@@ -336,11 +468,11 @@ export function BookStage({
     <div className="book-stage" data-book-stage>
       <div
         ref={sheetRef}
-        className={`book-sheet${turning ? ' is-turning' : ''}`}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
+        className={`book-sheet${turning ? ' is-turning' : ''}${scrollFlow ? ' is-scroll' : ''}${!scrollFlow && pageScrolls(safePage) ? ' is-page-scroll' : ''}`}
+        onPointerDown={scrollFlow ? undefined : onPointerDown}
+        onPointerMove={scrollFlow ? undefined : onPointerMove}
+        onPointerUp={scrollFlow ? undefined : onPointerUp}
+        onPointerCancel={scrollFlow ? undefined : onPointerUp}
       >
         {underIndex !== frontIndex && (
           <div className="book-under">
@@ -360,7 +492,9 @@ export function BookStage({
           <div className="book-face book-face-front">
             {pageBody(frontIndex, underIndex === frontIndex)}
           </div>
-          <div className="book-face book-face-back" aria-hidden />
+          <div className="book-face book-face-back" aria-hidden>
+            {pageBody(underIndex, false)}
+          </div>
         </div>
         <div className="book-spine" aria-hidden />
       </div>
@@ -390,6 +524,7 @@ export function BookStage({
           <div key={piece.key} data-book-piece={piece.key}>{piece.node}</div>
         ))}
         <div ref={probeRef} className="book-probe serif" />
+        <div ref={sliceHostRef} className="book-slice-host" />
       </div>
     </div>
   );

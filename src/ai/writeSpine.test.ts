@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   matchPlotTargets, mergeStateField, mergeLiveRelationshipPatch, normalizeBeats, capSceneLedger, capSoftWrapExtract,
   dedupeSoftWrapExtract, directorFallbackNarrationBrief, chapterNarrationBrief, softWrapAlreadyFiled, SCENE_LEDGER_CAP,
-  isBlankWorldBrief, isEmptyRosterProposal, pendingBeatsToKeep
+  endStoryWrite, isBlankWorldBrief, isEmptyRosterProposal, pendingBeatsToKeep, tryBeginStoryWrite
 } from './engine';
 import {
   episodeContextPressure,
@@ -682,5 +682,17 @@ describe('pendingBeatsToKeep', () => {
 
   it('clears when nothing remains', () => {
     expect(pendingBeatsToKeep([])).toEqual([]);
+  });
+});
+
+describe('story write lock', () => {
+  it('refuses a second write until the first releases', () => {
+    const first = tryBeginStoryWrite();
+    expect(first).not.toBeNull();
+    expect(tryBeginStoryWrite()).toBeNull();
+    endStoryWrite(first);
+    const second = tryBeginStoryWrite();
+    expect(second).not.toBeNull();
+    endStoryWrite(second);
   });
 });

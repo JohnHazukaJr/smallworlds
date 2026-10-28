@@ -133,6 +133,30 @@ export interface TombstoneInput {
   payload?: unknown;
 }
 
+/**
+ * Delete turns and record their tombstones in one transaction, then delete
+ * again so a copy sync put back before the tombstone existed does not stay.
+ */
+export async function tombstoneAndDeleteTurns(turns: Turn[]): Promise<void> {
+  if (turns.length === 0) return;
+  const now = Date.now();
+  const rows = await Promise.all(turns.map(async (turn) => ({
+    key: `turns:${turn.id}`,
+    table: 'turns' as const,
+    id: turn.id,
+    worldId: turn.worldId,
+    episodeId: turn.episodeId,
+    deletedAt: now,
+    payload: await sealPayload('turns', { ...turn })
+  })));
+  const ids = turns.map((turn) => turn.id);
+  await guardStorage(() => db.transaction('rw', db.turns, db.tombstones, async () => {
+    await db.turns.bulkDelete(ids);
+    await db.tombstones.bulkPut(rows);
+    await db.turns.bulkDelete(ids);
+  }));
+}
+
 export async function recordTombstones(items: TombstoneInput[]): Promise<void> {
   if (items.length === 0) return;
   const now = Date.now();

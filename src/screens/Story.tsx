@@ -1,10 +1,13 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import {
+  clearEpisodeRunningSummary,
   commitSoftEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, draftColdOpenNarration,
+  endStoryWrite,
   rollbackTurnSnapshot,
-  snapshotTurnsAfter, snapshotTurnsFrom, writeTurn,
+  snapshotEpisodeMemory,
+  snapshotTurnsAfter, snapshotTurnsFrom, tryBeginStoryWrite, waitForPostTurn, writeTurn,
   discardPendingPlan,
   WriteAbortedError, type StreamMeta
 } from '../ai/engine';
@@ -27,7 +30,7 @@ import {
   type DirectorBeat
 } from '../ai/prompts';
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
-import { db, recordTombstones } from '../db';
+import { db } from '../db';
 import {
   DEFAULT_DISPLAY, moodFromHue, storyAvatarHeight, useApp,
   type DialogueStyle, type StoryLayout
@@ -233,6 +236,7 @@ function SpeakParagraph({
       }}
     >
       {lead}
+      <span data-book-copy>
       {segments.map((seg, i) => {
         if (seg.kind === 'action') {
           return (
@@ -268,6 +272,7 @@ function SpeakParagraph({
           </span>
         );
       })}
+      </span>
       {last && caret && <span className="prose-caret" aria-hidden />}
     </p>
   );
@@ -347,6 +352,7 @@ function OpeningNarration({
   return (
     <p
       className="serif"
+      data-book-copy
       style={{
         fontSize: fontPx,
         lineHeight: 1.82,
@@ -407,6 +413,7 @@ function ProseBlockView({
           <div className="label" style={{ fontSize: 11, marginBottom: 4 }}>Direction</div>
           <p
             className="serif"
+            data-book-copy
             style={{
               fontSize: Math.max(14, fontPx - 2),
               lineHeight: 1.7,
@@ -443,7 +450,7 @@ function ProseBlockView({
         textWrap: 'pretty'
       }}>
         {lead}
-        <EmphasizedText text={b.text} />
+        <span data-book-copy><EmphasizedText text={b.text} /></span>
         {caretMark}
       </p>
     );
@@ -554,12 +561,16 @@ function WritingLine({ text, fontPx }: { text: string; fontPx: number }) {
 }
 
 function StreamTail({
-  sinkRef, active, scrollRef, onHasText, characters, guests, episodeId, worldId,
+  sinkRef, active, scrollRef, followRef, pinRef, onHasText, characters, guests, episodeId, worldId,
   accent, prose, fontPx, avatarPx, dialogueStyle, opening
 }: {
   sinkRef: RefObject<StreamSink>;
   active: boolean;
   scrollRef: RefObject<HTMLElement | null>;
+  /** When false, a reader who moved up the page stays there. */
+  followRef?: RefObject<boolean>;
+  /** Shared with the page's scroll listener so a programmatic pin is not a user scroll. */
+  pinRef?: RefObject<number>;
   onHasText: (hasText: boolean) => void;
   characters: Character[];
   guests: EpisodeGuest[];
@@ -597,7 +608,19 @@ function StreamTail({
           onHasText(filled);
         }
         const el = scrollRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
+        if (el && followRef?.current !== false) {
+          if (pinRef) pinRef.current += 1;
+          el.scrollTop = el.scrollHeight;
+          if (pinRef) {
+            requestAnimationFrame(() => {
+              pinRef.current = Math.max(0, pinRef.current - 1);
+              if (pinRef.current === 0 && followRef) {
+                const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+                followRef.current = gap < 48;
+              }
+            });
+          }
+        }
       });
     };
     return () => {
@@ -605,7 +628,7 @@ function StreamTail({
       if (frame.current) cancelAnimationFrame(frame.current);
       frame.current = 0;
     };
-  }, [sinkRef, scrollRef, onHasText]);
+  }, [sinkRef, scrollRef, followRef, pinRef, onHasText]);
 
   useEffect(() => {
     if (active) return;
@@ -804,6 +827,9 @@ export function Story() {
   const [hudTucked, setHudTucked] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLElement>(null);
+  const followScroll = useRef(true);
+  const scrollEpisode = useRef<string | undefined>(undefined);
+  const scrollPin = useRef(0);
 
   useEffect(() => {
     try { localStorage.setItem('sw-reply-size', length); } catch { /* ignore */ }
@@ -841,9 +867,43 @@ export function Story() {
     setMood(moodFromHue(activeLocation.hue));
   }, [episode?.id, episode?.locationId, episode?.moodPinned, activeLocation?.id, activeLocation?.hue, setMood]);
 
-  useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [turns.length]);
+  if (scrollEpisode.current !== episode?.id) {
+    scrollEpisode.current = episode?.id;
+    followScroll.current = true;
+  }
+
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el || book) return;
+    const pin = () => {
+      if (!followScroll.current) return;
+      scrollPin.current += 1;
+      el.scrollTop = el.scrollHeight;
+      requestAnimationFrame(() => {
+        scrollPin.current = Math.max(0, scrollPin.current - 1);
+        if (scrollPin.current > 0) return;
+        const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+        followScroll.current = gap < 48;
+      });
+    };
+    pin();
+    const observer = new ResizeObserver(pin);
+    observer.observe(el);
+    if (el.firstElementChild) observer.observe(el.firstElementChild);
+    const onScroll = () => {
+      const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (scrollPin.current > 0) {
+        if (gap >= 48) followScroll.current = false;
+        return;
+      }
+      followScroll.current = gap < 48;
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => {
+      observer.disconnect();
+      el.removeEventListener('scroll', onScroll);
+    };
+  }, [book, turns.length, episode?.id, storyRowsReady, fontPx, height]);
 
   /** Shared streaming runner behind write / rewrite / retry. */
   const runNarration = async (
@@ -852,7 +912,8 @@ export function Story() {
     resumeBeats?: DirectorBeat[],
     lengthOverride?: TurnLength,
     actionWeight?: ActionWeight,
-    handsId?: string | null
+    handsId?: string | null,
+    writeToken?: symbol
   ): Promise<{ status: 'ok' | 'error' | 'aborted'; beatsCompleted: number; remaining: number }> => {
     if (!world || !season || !episode) return { status: 'error', beatsCompleted: 0, remaining: 0 };
     setError('');
@@ -869,6 +930,7 @@ export function Story() {
         weight: actionWeight ?? weight,
         asCharacterId: handsId === undefined ? (asCharacterId ?? undefined) : (handsId ?? undefined),
         signal: controller.signal,
+        writeToken,
         onProgress: (label) => setProgressLabel(label),
         onNotice: setNotice,
         onDelta: (p, meta) => {
@@ -929,6 +991,8 @@ export function Story() {
       return;
     }
     if (!input.trim()) return;
+    const token = tryBeginStoryWrite();
+    if (!token) return;
     const sceneNpcs = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
     const outgoing = composeOutgoingLine({
       direct,
@@ -939,16 +1003,21 @@ export function Story() {
     });
     const text = input;
     setInput('');
-    const result = await runNarration(
-      outgoing.mode,
-      outgoing.text,
-      undefined,
-      undefined,
-      weight,
-      outgoing.asCharacterId
-    );
-    if (result.status !== 'ok' && result.beatsCompleted === 0 && result.remaining === 0) {
-      setInput(text);
+    try {
+      const result = await runNarration(
+        outgoing.mode,
+        outgoing.text,
+        undefined,
+        undefined,
+        weight,
+        outgoing.asCharacterId,
+        token
+      );
+      if (result.status !== 'ok' && result.beatsCompleted === 0) {
+        setInput(text);
+      }
+    } finally {
+      endStoryWrite(token);
     }
   };
 
@@ -1034,33 +1103,38 @@ export function Story() {
    */
   const retryFrom = async (turn: Turn) => {
     if (!episode || streaming) return;
-    const idx = turns.findIndex((t) => t.id === turn.id);
-    if (idx < 0) return;
-    const replaceSelf = turn.role === 'narrator' || turn.role === 'character';
-    const snapshot = replaceSelf
-      ? await snapshotTurnsFrom(turn.id, episode.id)
-      : await snapshotTurnsAfter(turn.id, episode.id);
+    const token = tryBeginStoryWrite();
+    if (!token) return;
     const retryStartedAt = Date.now();
-    if (replaceSelf) await deleteTurnsFrom(turn.id, episode.id);
-    else await deleteTurnsAfter(turn.id, episode.id);
-    const result = await runNarration('continue', '');
-    if (result.status === 'ok') {
-      if (snapshot.length > 0) {
-        await recordTombstones(snapshot.map((t) => ({
-          table: 'turns' as const,
-          id: t.id,
-          worldId: t.worldId,
-          episodeId: t.episodeId,
-          payload: t
-        })));
-      }
-    } else {
-      await rollbackTurnSnapshot(episode.id, snapshot, retryStartedAt);
-      if (result.status === 'error') {
-        setError((prev) => prev || 'Retry failed — previous turns were restored.');
+    try {
+      const idx = turns.findIndex((t) => t.id === turn.id);
+      if (idx < 0) return;
+      const replaceSelf = turn.role === 'narrator' || turn.role === 'character';
+      const memory = await snapshotEpisodeMemory(episode.id);
+      const snapshot = replaceSelf
+        ? await snapshotTurnsFrom(turn.id, episode.id)
+        : await snapshotTurnsAfter(turn.id, episode.id);
+      if (replaceSelf) await deleteTurnsFrom(turn.id, episode.id);
+      else await deleteTurnsAfter(turn.id, episode.id);
+      const result = await runNarration('continue', '', undefined, undefined, undefined, undefined, token);
+      await waitForPostTurn();
+      if (result.status === 'ok') {
+        if (snapshot.length > 0) {
+          await clearEpisodeRunningSummary(episode.id);
+          const ids = snapshot.map((t) => t.id);
+          const revived = (await db.turns.bulkGet(ids)).filter((row): row is Turn => !!row);
+          if (revived.length > 0) await db.turns.bulkDelete(revived.map((row) => row.id));
+        }
       } else {
-        setNotice('Retry cancelled — previous turns were restored.');
+        await rollbackTurnSnapshot(episode.id, snapshot, retryStartedAt, memory);
+        if (result.status === 'error') {
+          setError((prev) => prev || 'Retry failed — previous turns were restored.');
+        } else {
+          setNotice('Retry cancelled — previous turns were restored.');
+        }
       }
+    } finally {
+      endStoryWrite(token);
     }
   };
 
@@ -1228,7 +1302,7 @@ export function Story() {
   const bookPieces: BookPiece[] = [];
   if (book) {
     const visible = manuscript.slice(-turnWindow);
-    const latestPassageId = [...turns].reverse().find((t) => t.role === 'user')?.id ?? null;
+    const latestPassageId = [...turns].reverse().find((t) => t.role === 'narrator' || t.role === 'character')?.id ?? null;
     const chapterTitle = episode.title.trim() || activeLocation?.name || episode.location || 'Untitled chapter';
     if (manuscript.length > turnWindow) {
       bookPieces.push({
@@ -1558,6 +1632,8 @@ export function Story() {
                 sinkRef={streamSink}
                 active={streaming}
                 scrollRef={scrollRef}
+                followRef={followScroll}
+                pinRef={scrollPin}
                 onHasText={onTailText}
                 characters={characters}
                 guests={guests}
@@ -1775,7 +1851,7 @@ export function Story() {
 
             {(() => {
               const visible = manuscript.slice(-turnWindow);
-              const latestPassageId = [...turns].reverse().find((t) => t.role === 'user')?.id ?? null;
+              const latestPassageId = [...turns].reverse().find((t) => t.role === 'narrator' || t.role === 'character')?.id ?? null;
               let prevEpisodeId = '';
               return visible.map(({ episode: chapter, turn, blocks: bs }, ti) => {
                 const showBreak = chapter.id !== prevEpisodeId
@@ -1835,6 +1911,8 @@ export function Story() {
               sinkRef={streamSink}
               active={streaming}
               scrollRef={scrollRef}
+              followRef={followScroll}
+              pinRef={scrollPin}
               onHasText={onTailText}
               characters={characters}
               guests={guests}

@@ -27,7 +27,17 @@ export function composeOutgoingLine(opts: {
  */
 export function summaryClearPatch(
   runningSummary: string | null | undefined
-): { runningSummary: null; runningSummaryAtChars: 0 } | null {
+): {
+  runningSummary: null;
+  runningSummaryAtChars: 0;
+  liveStateAtChars: 0;
+  liveCanonAtChars: 0;
+} | null {
   if (!runningSummary?.trim()) return null;
-  return { runningSummary: null, runningSummaryAtChars: 0 };
+  return {
+    runningSummary: null,
+    runningSummaryAtChars: 0,
+    liveStateAtChars: 0,
+    liveCanonAtChars: 0
+  };
 }

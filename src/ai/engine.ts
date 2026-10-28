@@ -1,4 +1,4 @@
-import { db, guardStorage, recordTombstones, uid } from '../db';
+import { db, guardStorage, recordTombstones, tombstoneAndDeleteTurns, uid } from '../db';
 import { beginAppWrite, endAppWrite } from '../security/writeGate';
 import { emptyCalendarEvent, evaluateCalendarEvents } from '../calendarEvents';
 import { logAppError } from '../errors';
@@ -347,6 +347,8 @@ export interface WriteOptions {
   onProgress?: (label: string) => void;
   /** Soft recoverable notices (e.g. director fallback) — not hard errors. */
   onNotice?: (message: string) => void;
+  /** Set when the screen already holds the story-write lock. */
+  writeToken?: symbol;
 }
 
 const MAX_SPEAK_BEATS = 3;
@@ -803,13 +805,35 @@ function trackPostTurn(task: () => Promise<void>): void {
   postTurnTail = postTurnTail.then(() => run, () => run);
 }
 
-function waitForPostTurn(): Promise<void> {
+export function waitForPostTurn(): Promise<void> {
   return postTurnTail;
 }
 
+/** One reply or rewrite at a time. Taken synchronously, before any await. */
+let storyWrite: symbol | null = null;
+
+export function tryBeginStoryWrite(): symbol | null {
+  if (storyWrite) return null;
+  storyWrite = Symbol('story-write');
+  return storyWrite;
+}
+
+export function endStoryWrite(token: symbol | null): void {
+  if (token && storyWrite === token) storyWrite = null;
+}
+
 export function writeTurn(opts: WriteOptions): Promise<string> {
+  if (storyWrite && storyWrite !== opts.writeToken) {
+    return Promise.reject(new AIError('A reply is already being written.'));
+  }
+  const takenHere = !storyWrite;
+  const token = storyWrite ?? Symbol('story-write');
+  if (takenHere) storyWrite = token;
   beginAppWrite();
-  return writeTurnInner(opts).finally(endAppWrite);
+  return writeTurnInner(opts).finally(() => {
+    if (takenHere && storyWrite === token) storyWrite = null;
+    endAppWrite();
+  });
 }
 
 async function writeTurnInner(opts: WriteOptions): Promise<string> {
@@ -821,6 +845,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
   const inScene = ctx.characters.filter((c) => castIds.includes(c.id) && !c.isPlayer);
   let beatsCompleted = 0;
   let userTurnId: string | null = null;
+  const filedText = new Map<string, string>();
   // Pre-delta scene — restored if we abort/fail with zero beats after director mutated cast.
   const sceneSnapshot = {
     castIds: [...opts.episode.castIds],
@@ -844,6 +869,21 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
     sceneMutated = false;
   };
 
+  /** No reply beat landed, so the player line must not stay in the chapter. */
+  const dropUnansweredPlayer = async () => {
+    if (!userTurnId || beatsCompleted > 0) return;
+    const id = userTurnId;
+    const doomed = ctx.turns.find((t) => t.id === id);
+    userTurnId = null;
+    filedText.delete(id);
+    ctx.turns = ctx.turns.filter((t) => t.id !== id);
+    if (!doomed) {
+      await db.turns.delete(id).catch(() => undefined);
+      return;
+    }
+    await tombstoneAndDeleteTurns([doomed]).catch(() => undefined);
+  };
+
   if (opts.mode !== 'continue' && opts.input.trim()) {
     const { tone, body } = parseDeliveryTone(opts.input.trim());
     const normalized = (opts.mode === 'speak' || opts.mode === 'play') ? normalizeSpeakText(body) : body;
@@ -858,6 +898,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
     };
     await guardStorage(() => db.turns.add(userTurn));
     userTurnId = userTurn.id;
+    filedText.set(userTurn.id, userTurn.text);
     ctx.turns.push(userTurn);
   }
 
@@ -872,31 +913,39 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
   const requireDialogue = requiresSpokenReply(opts.mode);
 
   // File glue before planning so the first long Write is not tail-only.
-  await maybeRefreshRunningSummary(opts.world, ctx, opts.signal, progress, opts.onNotice, {
-    phase: 'pre',
-    proseModel: model
-  });
-
-  // Who answers comes from the player's line. Resume still runs leftover replies after Stop.
-  let beats: DirectorBeat[];
+  // Stop here has saved no reply, so the player line comes back out with it.
+  let beats: DirectorBeat[] = [];
   const enterIds: string[] = [];
-  if (opts.resumeBeats && opts.resumeBeats.length > 0) {
-    progress('Writing…');
-    beats = opts.resumeBeats;
-  } else {
-    progress('Writing…');
-    beats = beatsForTurn({
-      length: opts.length,
-      mode: opts.mode,
-      playerText,
-      location: ctx.episode.location,
-      inScene,
-      guests: activeGuests(ctx.episode),
-      turns: ctx.turns,
-      preferCharacterId: opts.preferCharacterId,
-      preferGuestId: opts.preferGuestId
+  try {
+    await maybeRefreshRunningSummary(opts.world, ctx, opts.signal, progress, opts.onNotice, {
+      phase: 'pre',
+      proseModel: model
     });
+
+    // Who answers comes from the player's line. Resume still runs leftover replies after Stop.
+    if (opts.resumeBeats && opts.resumeBeats.length > 0) {
+      progress('Writing…');
+      beats = opts.resumeBeats;
+    } else {
+      progress('Writing…');
+      beats = beatsForTurn({
+        length: opts.length,
+        mode: opts.mode,
+        playerText,
+        location: ctx.episode.location,
+        inScene,
+        guests: activeGuests(ctx.episode),
+        turns: ctx.turns,
+        preferCharacterId: opts.preferCharacterId,
+        preferGuestId: opts.preferGuestId
+      });
+      await clearPendingPlan(opts.episode.id);
+    }
+  } catch (e) {
+    await rollbackSceneIfNeeded();
+    await dropUnansweredPlayer();
     await clearPendingPlan(opts.episode.id);
+    asWriteAbort(e, 0, []);
   }
 
   const sceneGuests = () => activeGuests(ctx.episode);
@@ -946,6 +995,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
           role: 'narrator', mode: null, text: narrText, createdAt: Date.now()
         };
         await guardStorage(() => db.turns.add(narratorTurn));
+        filedText.set(narratorTurn.id, narratorTurn.text);
         ctx.turns.push(narratorTurn);
         lastId = narratorTurn.id;
         beatsCompleted++;
@@ -998,6 +1048,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
           text: cleaned, createdAt: Date.now()
         };
         await guardStorage(() => db.turns.add(guestTurn));
+        filedText.set(guestTurn.id, guestTurn.text);
         ctx.turns.push(guestTurn);
         lastId = guestTurn.id;
         beatsCompleted++;
@@ -1053,6 +1104,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
         text: cleaned, createdAt: Date.now()
       };
       await guardStorage(() => db.turns.add(characterTurn));
+      filedText.set(characterTurn.id, characterTurn.text);
       ctx.turns.push(characterTurn);
       lastId = characterTurn.id;
       beatsCompleted++;
@@ -1066,21 +1118,17 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
       asWriteAbort(e, beatsCompleted, remaining);
     } catch (abortErr) {
       const keep = pendingBeatsToKeep(remaining);
-      if (keep.length > 0) {
+      if (beatsCompleted === 0) {
+        // The notice says nothing was kept. The player line has to match that.
+        await rollbackSceneIfNeeded();
+        await dropUnansweredPlayer();
+        await clearPendingPlan(opts.episode.id);
+      } else if (keep.length > 0) {
         // Pause: leftover beats resume via Continue plan. Keep the player line
         // and any cast/guest the director already applied.
         await savePendingPlan(opts.episode.id, keep, opts.length);
       } else {
-        // Nothing to resume — roll back scene and remove the player turn so
-        // the scene looks untouched. (beatsCompleted may be 0 or >0 here;
-        // either way there are no beats left to continue.)
         await rollbackSceneIfNeeded();
-        if (userTurnId && beatsCompleted === 0) {
-          // Only delete the user turn when no beat landed — if some beats
-          // completed there may already be AI replies after it.
-          await db.turns.delete(userTurnId).catch(() => undefined);
-          ctx.turns = ctx.turns.filter((t) => t.id !== userTurnId);
-        }
         await clearPendingPlan(opts.episode.id);
       }
       if (abortErr instanceof WriteAbortedError) throw abortErr;
@@ -1095,10 +1143,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
 
   if (beatsCompleted === 0) {
     await rollbackSceneIfNeeded();
-    if (userTurnId) {
-      await db.turns.delete(userTurnId).catch(() => undefined);
-      ctx.turns = ctx.turns.filter((t) => t.id !== userTurnId);
-    }
+    await dropUnansweredPlayer();
     // When this is a resume run (resumeBeats provided), beats were real but all
     // got skipped at runtime — preserve the plan so the user can try again via
     // Continue plan.  On a fresh run there is nothing to preserve.
@@ -1138,17 +1183,25 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
   // and an abort here must not look like a zero-beat stop.
   if (!opts.signal?.aborted) {
     const saved = beatsCompleted;
+    const textStillFiled = async () => {
+      const ids = [...filedText.keys()];
+      if (ids.length === 0) return true;
+      const rows = await db.turns.bulkGet(ids);
+      return ids.every((id, index) => rows[index]?.text === filedText.get(id));
+    };
     trackPostTurn(async () => {
       const quiet = () => {};
       try {
+        if (!(await textStillFiled())) return;
         await Promise.all([
           maybeRefreshRunningSummary(opts.world, ctx, opts.signal, quiet, opts.onNotice, {
             phase: 'post',
-            proseModel: model
+            proseModel: model,
+            textStillFiled
           }),
           opts.weight === 'moment'
             ? Promise.resolve()
-            : maybeRefreshLiveMemory(opts.world, ctx, saved, opts.signal, quiet, opts.onNotice)
+            : maybeRefreshLiveMemory(opts.world, ctx, saved, opts.signal, quiet, opts.onNotice, textStillFiled)
         ]);
       } catch (e) {
         if ((e as Error).name === 'AbortError' || e instanceof WriteAbortedError) return;
@@ -1325,7 +1378,7 @@ async function maybeRefreshRunningSummary(
   signal: AbortSignal | undefined,
   progress: (label: string) => void,
   onNotice?: (message: string) => void,
-  opts?: { phase?: 'pre' | 'post'; proseModel?: string }
+  opts?: { phase?: 'pre' | 'post'; proseModel?: string; textStillFiled?: () => Promise<boolean> }
 ): Promise<void> {
   const chars = episodeHistoryChars(ctx.turns);
   const pressure = episodeContextPressure(chars);
@@ -1353,6 +1406,8 @@ async function maybeRefreshRunningSummary(
   const digest = compressOmittedTurns(sourceTurns, ctx.characters, guests);
   if (!digest.trim()) return;
 
+  if (opts?.textStillFiled && !(await opts.textStillFiled())) return;
+
   try {
     progress('remembering earlier beats…');
     const { provider, model } = utilityModelFor(world);
@@ -1377,6 +1432,7 @@ async function maybeRefreshRunningSummary(
     });
     const summary = text.trim();
     if (!summary) return;
+    if (opts?.textStillFiled && !(await opts.textStillFiled())) return;
     await db.episodes.update(ctx.episode.id, {
       runningSummary: summary,
       runningSummaryAtChars: chars,
@@ -1469,7 +1525,8 @@ async function maybeRefreshLiveMemory(
   turnsSaved: number,
   signal: AbortSignal | undefined,
   progress: (label: string) => void,
-  onNotice?: (message: string) => void
+  onNotice?: (message: string) => void,
+  textStillFiled?: () => Promise<boolean>
 ): Promise<void> {
   if (turnsSaved <= 0) return;
   const inScene = ctx.characters.filter(
@@ -1542,6 +1599,8 @@ async function maybeRefreshLiveMemory(
     ? ctx.locations.find((l) => l.id === ctx.episode.locationId)
     : ctx.locations.find((l) => l.name.toLowerCase() === placeLine.trim().toLowerCase());
 
+  if (textStillFiled && !(await textStillFiled())) return;
+
   try {
     progress('updating the room…');
     const result = await utilityJson<{
@@ -1589,6 +1648,7 @@ async function maybeRefreshLiveMemory(
       LIVE_MEMORY_TOOL
     );
 
+    if (textStillFiled && !(await textStillFiled())) return;
     const applied = inScene.length > 0
       ? await applyLiveCharacterStateUpdates(world.id, inScene, result.updates ?? [])
       : 0;
@@ -2067,6 +2127,25 @@ export async function commitSoftEpisodeWrap(
   return wrap;
 }
 
+export type EpisodeMemorySnapshot = {
+  runningSummary: string | null;
+  runningSummaryAtChars: number;
+  liveStateAtChars: number;
+  liveCanonAtChars: number;
+};
+
+/** Summary and live-memory watermarks, so a cancelled rewrite can put them back. */
+export async function snapshotEpisodeMemory(episodeId: string): Promise<EpisodeMemorySnapshot | null> {
+  const episode = await db.episodes.get(episodeId);
+  if (!episode) return null;
+  return {
+    runningSummary: episode.runningSummary ?? null,
+    runningSummaryAtChars: episode.runningSummaryAtChars ?? 0,
+    liveStateAtChars: episode.liveStateAtChars ?? 0,
+    liveCanonAtChars: episode.liveCanonAtChars ?? 0
+  };
+}
+
 /** Snapshot turns that would be removed by deleteTurnsFrom (inclusive). */
 export async function snapshotTurnsFrom(turnId: string, episodeId: string): Promise<Turn[]> {
   const turns = await db.turns.where('episodeId').equals(episodeId).sortBy('createdAt');
@@ -2104,32 +2183,44 @@ export async function clearEpisodeRunningSummary(episodeId: string): Promise<voi
 export async function deleteTurnsFrom(turnId: string, episodeId: string): Promise<void> {
   const turns = await snapshotTurnsFrom(turnId, episodeId);
   if (turns.length === 0) return;
-  await db.turns.bulkDelete(turns.map((t) => t.id));
-  await clearEpisodeRunningSummary(episodeId);
+  await tombstoneAndDeleteTurns(turns);
 }
 
 /** Delete everything after a turn, keeping the turn itself. */
 export async function deleteTurnsAfter(turnId: string, episodeId: string): Promise<void> {
   const turns = await snapshotTurnsAfter(turnId, episodeId);
   if (turns.length === 0) return;
-  await db.turns.bulkDelete(turns.map((t) => t.id));
-  await clearEpisodeRunningSummary(episodeId);
+  await tombstoneAndDeleteTurns(turns);
 }
 
 /**
  * After a failed retry: remove turns written during the attempt and put the
- * snapshot back. Does not record sync tombstones (caller handles that on success).
+ * snapshot, including the summary, back.
  */
 export async function rollbackTurnSnapshot(
   episodeId: string,
   snapshot: Turn[],
-  retryStartedAt: number
+  retryStartedAt: number,
+  memory?: EpisodeMemorySnapshot | null
 ): Promise<void> {
   const snapIds = new Set(snapshot.map((t) => t.id));
   const current = await db.turns.where('episodeId').equals(episodeId).toArray();
   const extras = current.filter((t) => !snapIds.has(t.id) && t.createdAt >= retryStartedAt);
-  if (extras.length > 0) await db.turns.bulkDelete(extras.map((t) => t.id));
-  await restoreTurns(snapshot);
+  if (extras.length > 0) await tombstoneAndDeleteTurns(extras);
+  await db.transaction('rw', [db.turns, db.tombstones, db.episodes], async () => {
+    if (snapshot.length > 0) {
+      await db.tombstones.bulkDelete(snapshot.map((turn) => `turns:${turn.id}`));
+      await db.turns.bulkPut(snapshot);
+    }
+    if (!memory) return;
+    await db.episodes.update(episodeId, {
+      runningSummary: memory.runningSummary,
+      runningSummaryAtChars: memory.runningSummaryAtChars,
+      liveStateAtChars: memory.liveStateAtChars,
+      liveCanonAtChars: memory.liveCanonAtChars,
+      updatedAt: Date.now()
+    });
+  });
 }
 
 // ---------- Utility calls (JSON tasks on the utility model) ----------

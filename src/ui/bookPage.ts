@@ -54,7 +54,63 @@ export function dragProgress(edge: 'back' | 'forward', dx: number, width: number
   return clamp01(dx / width);
 }
 
+/** Page 0 is a real destination, so only null means no turn is in progress. */
+export function pageTurnPending(pending: number | null): boolean {
+  return pending !== null;
+}
+
+/**
+ * A tap on the edge commits. A drag commits from the finger's last position,
+ * including a flick that never painted an intermediate frame.
+ */
+export function flickSettles(
+  edge: 'back' | 'forward',
+  dx: number,
+  width: number,
+  moved: boolean
+): 'commit' | 'cancel' {
+  if (!moved) return 'commit';
+  return leafSettles(dragProgress(edge, dx, width));
+}
+
+const openPieces = new Map<string, string>();
+
+/** Remember the piece a reader was on when they were not following the end. */
+export function rememberOpenPiece(episodeId: string, pieceKey: string | null): void {
+  if (!episodeId) return;
+  if (!pieceKey) openPieces.delete(episodeId);
+  else openPieces.set(episodeId, pieceKey);
+}
+
+export function heldOpenPiece(episodeId: string): string | null {
+  return openPieces.get(episodeId) ?? null;
+}
+
+/** Page index that still contains this piece, including a sliced key. */
+export function pageHolding(pages: string[][], pieceKey: string): number {
+  if (!pieceKey) return -1;
+  const prefix = `${pieceKey}::`;
+  for (let i = 0; i < pages.length; i++) {
+    if ((pages[i] ?? []).some((key) => key === pieceKey || key.startsWith(prefix))) return i;
+  }
+  return -1;
+}
+
 export type FlowPiece = { key: string; height: number };
+
+/**
+ * Last page that still holds the story. A trailing Edit control, or a chapter
+ * head with no prose, does not count. When nothing is marked as story, stay
+ * on the last page.
+ * `isStory` sees page keys, including `piece::slice` keys.
+ */
+export function readingEnd(pages: string[][], isStory: (key: string) => boolean): number {
+  const last = Math.max(0, pages.length - 1);
+  for (let i = pages.length - 1; i >= 0; i--) {
+    if ((pages[i] ?? []).some((key) => isStory(key))) return i;
+  }
+  return last;
+}
 
 /** Pack measured pieces onto pages. A piece taller than the page sits alone. */
 export function packPages(pieces: FlowPiece[], pageHeight: number): string[][] {
