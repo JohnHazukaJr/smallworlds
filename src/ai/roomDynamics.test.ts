@@ -252,32 +252,32 @@ describe('selectAnswerers', () => {
     expect(ids).toEqual(['c1']);
   });
 
-  it('lets a normal reply include a second person who was also spoken to', () => {
+  it('answers with the person addressed, not everyone named', () => {
     const ids = selectAnswerers({
       length: 'scene',
       playerText: 'Ada, tell Ben what you saw.',
       candidates: trio
     }).map((c) => c.id);
-    expect(ids).toContain('c1');
-    expect(ids).toContain('c2');
-    expect(ids.length).toBeLessThanOrEqual(2);
+    expect(ids).toEqual(['c1']);
   });
 
-  it('caps a long reply at three named people and stays at one when nobody is named', () => {
-    const named = selectAnswerers({
-      length: 'episode',
-      playerText: 'Ada, Ben, Clerk — all of you, answer me.',
-      candidates: trio
-    });
-    expect(named.length).toBeLessThanOrEqual(3);
-    expect(named.length).toBeGreaterThan(1);
+  it('continues with the last voice when nobody is named', () => {
+    const ids = selectAnswerers({
+      length: 'scene',
+      playerText: 'I wait.',
+      candidates: trio,
+      turns: [said('c2', '"The ledger is closed."')]
+    }).map((c) => c.id);
+    expect(ids).toEqual(['c2']);
+  });
 
-    const unnamed = selectAnswerers({
+  it('gives a first line to one person already in the chapter', () => {
+    const ids = selectAnswerers({
       length: 'episode',
       playerText: 'I wait.',
       candidates: trio
-    });
-    expect(unnamed).toHaveLength(1);
+    }).map((c) => c.id);
+    expect(ids).toEqual(['c1']);
   });
 
   it('puts a pinned person first and still respects the short cap', () => {

@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { isHostedProvider, presetFor } from '../ai/providers';
+import { isHostedProvider, presetFor, VENICE_ADULT_EDIT_MODEL } from '../ai/providers';
 import { formatUserError, logAppError } from '../errors';
 import type { AppSettings, ModelRef, ProviderConfig } from '../types';
 
@@ -33,6 +33,7 @@ interface SettingsStore extends AppSettings {
   setProseModel: (m: ModelRef | null) => void;
   setUtilityModel: (m: ModelRef | null) => void;
   setImageModel: (m: ModelRef | null) => void;
+  setMatureImageModel: (m: ModelRef | null) => void;
   setMatureDefault: (v: boolean) => void;
   setDefaultVisibility: (v: AppSettings['defaultVisibility']) => void;
   /** Replace settings from a device restore (does not touch vault ciphertext). */
@@ -46,6 +47,7 @@ export const useSettings = create<SettingsStore>()(
       proseModel: null,
       utilityModel: null,
       imageModel: null,
+      matureImageModel: null,
       matureDefault: true,
       defaultVisibility: 'private',
       vaultPersistError: '',
@@ -65,10 +67,14 @@ export const useSettings = create<SettingsStore>()(
             if (!newIsHosted && current && isHostedProvider(current)) return ref;
             return slot;
           };
+          const adult = presetFor(p)?.id === 'venice'
+            ? { providerId: p.id, model: VENICE_ADULT_EDIT_MODEL }
+            : null;
           return {
             providers: [...s.providers, p],
             proseModel: claim(s.proseModel),
-            utilityModel: claim(s.utilityModel)
+            utilityModel: claim(s.utilityModel),
+            matureImageModel: s.matureImageModel ?? adult
           };
         });
         void syncVaultSafe(set);
@@ -82,13 +88,15 @@ export const useSettings = create<SettingsStore>()(
           providers: s.providers.filter((p) => p.id !== id),
           proseModel: s.proseModel?.providerId === id ? null : s.proseModel,
           utilityModel: s.utilityModel?.providerId === id ? null : s.utilityModel,
-          imageModel: s.imageModel?.providerId === id ? null : s.imageModel
+          imageModel: s.imageModel?.providerId === id ? null : s.imageModel,
+          matureImageModel: s.matureImageModel?.providerId === id ? null : s.matureImageModel
         }));
         void syncVaultSafe(set);
       },
       setProseModel: (proseModel) => set({ proseModel }),
       setUtilityModel: (utilityModel) => set({ utilityModel }),
       setImageModel: (imageModel) => set({ imageModel }),
+      setMatureImageModel: (matureImageModel) => set({ matureImageModel }),
       setMatureDefault: (matureDefault) => set({ matureDefault }),
       setDefaultVisibility: (defaultVisibility) => set({ defaultVisibility }),
       hydrateFromBackup: (s) => set({
@@ -96,6 +104,7 @@ export const useSettings = create<SettingsStore>()(
         proseModel: s.proseModel,
         utilityModel: s.utilityModel,
         imageModel: s.imageModel ?? null,
+        matureImageModel: s.matureImageModel ?? null,
         matureDefault: s.matureDefault,
         defaultVisibility: s.defaultVisibility
       })
@@ -109,6 +118,7 @@ export const useSettings = create<SettingsStore>()(
         proseModel: s.proseModel,
         utilityModel: s.utilityModel,
         imageModel: s.imageModel,
+        matureImageModel: s.matureImageModel ?? null,
         matureDefault: s.matureDefault,
         defaultVisibility: s.defaultVisibility
         // vaultPersistError is session-only — not persisted
@@ -133,6 +143,7 @@ export function settingsSnapshot(): AppSettings {
     proseModel: s.proseModel,
     utilityModel: s.utilityModel,
     imageModel: s.imageModel ?? null,
+    matureImageModel: s.matureImageModel ?? null,
     matureDefault: s.matureDefault,
     defaultVisibility: s.defaultVisibility
   };

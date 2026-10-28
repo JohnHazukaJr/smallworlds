@@ -88,8 +88,10 @@ export function BookStage({
   const dragRef = useRef<{
     edge: 'back' | 'forward';
     startX: number;
+    startY: number;
     width: number;
-    moved: boolean;
+    pointerId: number;
+    horizontal: boolean;
   } | null>(null);
 
   const [box, setBox] = useState({ w: 0, h: 0 });
@@ -263,8 +265,8 @@ export function BookStage({
       });
       armCount.current = null;
       if (dest != null) {
-        const land = end;
-        follow.current = true;
+        const land = dest;
+        follow.current = land === end;
         if (leafMotion(reduced) === 'cut' || land === pageRef.current) {
           pendingPage.current = null;
           setLeaf(null);
@@ -287,7 +289,22 @@ export function BookStage({
     }
     if (!streaming) armCount.current = null;
 
-    if (follow.current && !pageTurnPending(pendingPage.current)) setPage(end);
+    const parked = armCount.current;
+    if (
+      streaming
+      && follow.current
+      && parked != null
+      && count > parked
+      && !pageTurnPending(pendingPage.current)
+    ) {
+      const land = Math.min(count - 1, parked);
+      follow.current = land === end;
+      if (pageRef.current !== land) {
+        pendingPage.current = null;
+        setLeaf(null);
+        setPage(land);
+      }
+    }
   }, [box.w, box.h, signature, fontPx, episodeId, reveal, reduced, streaming]);
 
   const commitTurn = () => {
@@ -427,19 +444,34 @@ export function BookStage({
     if (!edge) return;
     if (edge === 'back' && safePage <= 0) return;
     if (edge === 'forward' && safePage >= count - 1) return;
-    dragRef.current = { edge, startX: event.clientX, width: rect.width, moved: false };
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    } catch {
-      // The release still carries the finger's last position.
-    }
+    dragRef.current = {
+      edge,
+      startX: event.clientX,
+      startY: event.clientY,
+      width: rect.width,
+      pointerId: event.pointerId,
+      horizontal: false
+    };
   };
 
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag) return;
     const dx = event.clientX - drag.startX;
-    if (Math.abs(dx) > 8) drag.moved = true;
+    const dy = event.clientY - drag.startY;
+    if (!drag.horizontal) {
+      if (Math.abs(dy) > 8 && Math.abs(dy) >= Math.abs(dx)) {
+        dragRef.current = null;
+        return;
+      }
+      if (!(Math.abs(dx) > 8 && Math.abs(dx) > Math.abs(dy))) return;
+      drag.horizontal = true;
+      try {
+        event.currentTarget.setPointerCapture(drag.pointerId);
+      } catch {
+        // The release still carries the finger's last position.
+      }
+    }
     setLeaf({
       dir: drag.edge,
       progress: dragProgress(drag.edge, dx, drag.width),
@@ -450,11 +482,11 @@ export function BookStage({
   const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     dragRef.current = null;
-    if (!drag) return;
+    if (!drag?.horizontal) return;
     const dx = event.clientX - drag.startX;
     const dest = drag.edge === 'forward' ? pageRef.current + 1 : pageRef.current - 1;
-    if (flickSettles(drag.edge, dx, drag.width, drag.moved) === 'commit') {
-      go(dest, drag.edge, drag.moved ? dragProgress(drag.edge, dx, drag.width) : 0);
+    if (flickSettles(drag.edge, dx, drag.width, true) === 'commit') {
+      go(dest, drag.edge, dragProgress(drag.edge, dx, drag.width));
       return;
     }
     pendingPage.current = null;

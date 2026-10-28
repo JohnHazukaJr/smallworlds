@@ -2,7 +2,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useId, useRef, useState } from 'react';
 import { testConnection } from '../ai/client';
 import {
-  BYOK_PRESETS, hostedBaseUrl, isHostedProvider, listModels, presetFor, type ProviderPreset
+  BYOK_PRESETS, hostedBaseUrl, isHostedProvider, listModels, presetFor, VENICE_ADULT_EDIT_MODEL, type ProviderPreset
 } from '../ai/providers';
 import { COST_BEAT, COST_IMAGE, COST_UTILITY, HOSTED_IMAGE_MODEL, HOSTED_PROSE_MODEL, HOSTED_UTILITY_MODEL } from '../billing/plans';
 import { PassphraseDialog } from '../components/PassphraseDialog';
@@ -107,6 +107,8 @@ export function Settings() {
         </div>
       </Section>
 
+      <AdultPictures />
+
       {/* world AI settings */}
       {world && <WorldSettings world={world} />}
 
@@ -129,6 +131,77 @@ export function Settings() {
       <SecuritySection />
       <div style={{ marginTop: 28 }}><LegalLinks /></div>
     </div>
+  );
+}
+
+function AdultPictures() {
+  const s = useSettings();
+  const [key, setKey] = useState('');
+  const venicePreset = BYOK_PRESETS.find((p) => p.id === 'venice');
+  const venice = s.providers.find((p) => presetFor(p)?.id === 'venice');
+  const armed = !!venice
+    && s.matureImageModel?.providerId === venice.id
+    && s.matureImageModel.model === VENICE_ADULT_EDIT_MODEL;
+
+  const save = () => {
+    const trimmed = key.trim();
+    if (!trimmed || !venicePreset) return;
+    if (venice) {
+      s.updateProvider(venice.id, { apiKey: trimmed });
+      s.setMatureImageModel({ providerId: venice.id, model: VENICE_ADULT_EDIT_MODEL });
+    } else {
+      s.addProvider({
+        id: uid(),
+        kind: 'openai',
+        label: venicePreset.label,
+        baseUrl: venicePreset.baseUrl,
+        apiKey: trimmed
+      });
+    }
+    setKey('');
+  };
+
+  return (
+    <Section title="Adult pictures" note="optional">
+      <div className="craft-row" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
+          An adult chapter picture keeps the face from a portrait you already generated.
+          Portraits and other pictures keep using the image model above.
+          {venicePreset?.keyUrl && (
+            <> Get a key at <a href={venicePreset.keyUrl} target="_blank" rel="noreferrer">{venicePreset.keyUrl.replace('https://', '')}</a>.</>
+          )}
+        </div>
+        {armed && (
+          <div style={{ fontSize: 13, color: 'var(--paper)' }}>
+            Adult chapter pictures use <span className="mono">{VENICE_ADULT_EDIT_MODEL}</span>.
+          </div>
+        )}
+        <Field label="Venice API key" note={venice ? 'replaces the saved key' : 'required'}>
+          <input
+            type="password"
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            placeholder="venice-…"
+            autoComplete="off"
+            style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}
+          />
+        </Field>
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          <button className="btn-primary" onClick={save} disabled={!key.trim()}>
+            {venice ? 'Save key' : 'Save Venice key'}
+          </button>
+          {venice && !armed && (
+            <button
+              className="btn-ghost"
+              onClick={() => s.setMatureImageModel({ providerId: venice.id, model: VENICE_ADULT_EDIT_MODEL })}
+            >Use for adult pictures</button>
+          )}
+          {armed && (
+            <button className="btn-quiet" onClick={() => s.setMatureImageModel(null)}>Stop adult pictures</button>
+          )}
+        </div>
+      </div>
+    </Section>
   );
 }
 

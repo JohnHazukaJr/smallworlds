@@ -697,7 +697,7 @@ function ChapterFigure({ picture }: { picture: ChapterIllustration }) {
 
 export function Story() {
   const { band, height, keyboardOffset, keyboardOpen } = useViewport();
-  const book = bookStageOpen(band, keyboardOpen);
+  const book = bookStageOpen(band, keyboardOpen, height);
   const phone = phoneChrome(band);
   const compact = band === 'compact';
   const short = shortStoryChrome(band, height);
@@ -830,6 +830,10 @@ export function Story() {
   const followScroll = useRef(true);
   const scrollEpisode = useRef<string | undefined>(undefined);
   const scrollPin = useRef(0);
+  /** First turn of the reply in progress. While set, the column does not jump to the end. */
+  const replyFrom = useRef(0);
+  const replyAnchor = useRef<'idle' | 'await'>('idle');
+  const streamingScroll = useRef(false);
 
   useEffect(() => {
     try { localStorage.setItem('sw-reply-size', length); } catch { /* ignore */ }
@@ -870,12 +874,38 @@ export function Story() {
   if (scrollEpisode.current !== episode?.id) {
     scrollEpisode.current = episode?.id;
     followScroll.current = true;
+    replyAnchor.current = 'idle';
   }
+  if (streaming && !streamingScroll.current && followScroll.current) {
+    replyFrom.current = turns.length;
+    replyAnchor.current = 'await';
+    followScroll.current = false;
+  }
+  if (!streaming && replyAnchor.current === 'await' && turns.length <= replyFrom.current) {
+    replyAnchor.current = 'idle';
+  }
+  streamingScroll.current = streaming;
 
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el || book) return;
     const pin = () => {
+      if (replyAnchor.current === 'await') {
+        const anchor = turns[replyFrom.current];
+        const node = anchor
+          ? el.querySelector(`[data-turn-id="${anchor.id}"]`)
+          : null;
+        if (!(node instanceof HTMLElement)) return;
+        const top = node.getBoundingClientRect().top - el.getBoundingClientRect().top + el.scrollTop;
+        scrollPin.current += 1;
+        el.scrollTop = Math.max(0, top);
+        followScroll.current = false;
+        replyAnchor.current = 'idle';
+        requestAnimationFrame(() => {
+          scrollPin.current = Math.max(0, scrollPin.current - 1);
+        });
+        return;
+      }
       if (!followScroll.current) return;
       scrollPin.current += 1;
       el.scrollTop = el.scrollHeight;
@@ -1859,7 +1889,7 @@ export function Story() {
                 prevEpisodeId = chapter.id;
                 const chapterTitle = chapter.title.trim() || chapter.location || `Chapter ${chapter.number}`;
                 return (
-                  <div key={turn.id}>
+                  <div key={turn.id} data-turn-id={turn.id}>
                     {showBreak && (
                       <div style={{ margin: '2.6em 0 1.4em', textAlign: 'center' }}>
                         <div className="serif" style={{

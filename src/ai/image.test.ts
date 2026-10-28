@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ADULT_PORTRAIT_ERROR,
   chapterPictureFaces,
   chapterPictureSubjects,
+  clearAdultAge,
   collectSceneImageRefs,
   imageModelAcceptsRefs,
+  planAdultFaceEdit,
   prepareChapterPicture,
-  sceneImagePrompt
+  sceneImagePrompt,
+  veniceFaceEditRequest
 } from './image';
 import type { Character, Location, ProviderConfig, World } from '../types';
 import { DEFAULT_AI } from '../worldOps';
@@ -147,6 +151,92 @@ describe('scene image refs', () => {
     });
     expect(plan.ok).toBe(true);
     expect(blocked.ok).toBe(false);
+  });
+
+  it('keeps a non-sexual picture on the current image model', () => {
+    expect(planAdultFaceEdit({
+      mature: true,
+      userPrompt: 'Marisol at the window.',
+      subjects: [{ age: '34' }],
+      faceCount: 1,
+      veniceConfigured: true
+    })).toEqual({ action: 'current' });
+  });
+
+  it('edits an adult picture that already has a portrait', () => {
+    expect(clearAdultAge('34')).toBe(true);
+    expect(clearAdultAge('')).toBe(false);
+    expect(clearAdultAge('thirties')).toBe(false);
+    expect(clearAdultAge('16')).toBe(false);
+    expect(planAdultFaceEdit({
+      mature: true,
+      userPrompt: 'Marisol, nude, in the long room.',
+      subjects: [{ age: '34' }],
+      faceCount: 1,
+      veniceConfigured: true
+    })).toEqual({ action: 'edit' });
+  });
+
+  it('does not edit when the age is blank, someone is under 18, or there is no portrait', () => {
+    const sexual = 'Mina, nude, in the long room.';
+    expect(planAdultFaceEdit({
+      mature: true,
+      userPrompt: sexual,
+      subjects: [{ age: '' }],
+      faceCount: 1,
+      veniceConfigured: true
+    })).toEqual({ action: 'current' });
+    expect(planAdultFaceEdit({
+      mature: true,
+      userPrompt: sexual,
+      subjects: [{ age: '16' }],
+      faceCount: 1,
+      veniceConfigured: true
+    }).action).toBe('refuse');
+    expect(planAdultFaceEdit({
+      mature: true,
+      userPrompt: sexual,
+      subjects: [{ age: '34' }],
+      faceCount: 0,
+      veniceConfigured: true
+    })).toEqual({ action: 'refuse', error: ADULT_PORTRAIT_ERROR });
+    expect(planAdultFaceEdit({
+      mature: true,
+      userPrompt: sexual,
+      subjects: [{ age: '34' }],
+      faceCount: 1,
+      veniceConfigured: false
+    })).toEqual({ action: 'current' });
+  });
+
+  it('sends one face to the edit endpoint and two faces to multi-edit', () => {
+    const one = veniceFaceEditRequest({
+      baseUrl: 'https://api.venice.ai/api/v1/',
+      prompt: 'Keep the face.',
+      images: ['data:image/jpeg;base64,aaa']
+    });
+    expect(one.url).toBe('https://api.venice.ai/api/v1/image/edit');
+    expect(one.body).toEqual({
+      model: 'qwen-edit-uncensored',
+      prompt: 'Keep the face.',
+      image: 'aaa',
+      safe_mode: false
+    });
+    expect(one.body).not.toHaveProperty('enhance_prompt');
+    const two = veniceFaceEditRequest({
+      baseUrl: 'https://api.venice.ai/api/v1',
+      prompt: 'Keep both faces.',
+      images: ['data:image/jpeg;base64,aaa', 'data:image/jpeg;base64,bbb']
+    });
+    expect(two.url).toBe('https://api.venice.ai/api/v1/image/multi-edit');
+    expect(two.body).toEqual({
+      modelId: 'qwen-edit-uncensored',
+      prompt: 'Keep both faces.',
+      images: ['aaa', 'bbb'],
+      safe_mode: false
+    });
+    expect(two.body).not.toHaveProperty('model');
+    expect(two.body).not.toHaveProperty('enhance_prompt');
   });
 
   it('names face refs and drops the no-people line when matching', () => {

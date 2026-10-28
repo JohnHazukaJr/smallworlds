@@ -1,6 +1,6 @@
 import { getSupabase, isCloudConfigured } from '../cloud/supabase';
 import type { ProviderConfig } from '../types';
-import { AI_PROXY_HOSTS, exactProxyHost } from './proxyHosts';
+import { AI_PROXY_HOSTS, exactProxyHost, isZaiHost } from './proxyHosts';
 
 export { AI_PROXY_HOSTS };
 
@@ -27,7 +27,7 @@ export function hostedOp(url: string): 'image' | 'chat' {
 }
 
 export function isZaiProvider(provider: ProviderConfig): boolean {
-  return exactProxyHost(provider.baseUrl);
+  return isZaiHost(provider.baseUrl);
 }
 
 export function hostAllowlisted(url: string): boolean {

@@ -614,6 +614,8 @@ export interface AppSettings {
   utilityModel: ModelRef | null;
   /** global default for scene image generation */
   imageModel: ModelRef | null;
+  /** Adult chapter pictures. Null keeps every picture on imageModel. */
+  matureImageModel: ModelRef | null;
   matureDefault: boolean;
   defaultVisibility: Visibility;
 }

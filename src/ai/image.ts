@@ -1,7 +1,7 @@
 import type { Character, Location, ProviderConfig, World } from '../types';
 import { characterPortraits } from '../worldOps';
 import { AIError, providerTagFor } from './client';
-import { configuredImageModel } from './models';
+import { configuredImageModel, configuredMatureImageModel } from './models';
 import {
   buildCharacterPortraitPrompt,
   characterReadsAsMinor,
@@ -10,6 +10,7 @@ import {
   type PortraitStyle
 } from './portrait';
 import { isZaiProvider, providerFetch } from './providerFetch';
+import { VENICE_ADULT_EDIT_MODEL } from './providers';
 
 export interface SceneImageRef {
   name: string;
@@ -330,6 +331,99 @@ export async function generateCharacterPortrait(opts: {
   return urlToJpegDataUrl(url, 720, 0.72);
 }
 
+export const ADULT_PORTRAIT_ERROR = 'Generate a portrait first. This picture keeps that face.';
+
+/** True when the age line states a number from 18 through 120 and does not read as under 18. */
+export function clearAdultAge(age: string): boolean {
+  if (characterReadsAsMinor(age)) return false;
+  const years = [...age.matchAll(/\b(\d{1,3})\b/g)]
+    .map((m) => Number(m[1]))
+    .filter((n) => n >= 1 && n <= 120);
+  return years.some((n) => n >= 18);
+}
+
+export type AdultFaceEditPlan =
+  | { action: 'current' }
+  | { action: 'refuse'; error: string }
+  | { action: 'edit' };
+
+/**
+ * Adult chapter pictures with a Venice key edit existing portraits.
+ * Anything else stays on the image model already configured.
+ */
+export function planAdultFaceEdit(opts: {
+  mature: boolean;
+  userPrompt: string;
+  subjects: { age: string }[];
+  faceCount: number;
+  veniceConfigured: boolean;
+}): AdultFaceEditPlan {
+  if (!opts.mature || !textLooksSexual(opts.userPrompt) || !opts.veniceConfigured) {
+    return { action: 'current' };
+  }
+  if (opts.subjects.some((subject) => characterReadsAsMinor(subject.age))) {
+    return {
+      action: 'refuse',
+      error: 'A character in this picture reads as under 18. A sexual prompt can’t be sent.'
+    };
+  }
+  if (opts.subjects.length === 0 || opts.subjects.some((subject) => !clearAdultAge(subject.age))) {
+    return { action: 'current' };
+  }
+  if (opts.faceCount < 1) return { action: 'refuse', error: ADULT_PORTRAIT_ERROR };
+  return { action: 'edit' };
+}
+
+export function stripImageDataUrl(src: string): string {
+  const comma = src.indexOf(',');
+  if (src.startsWith('data:') && comma >= 0) return src.slice(comma + 1);
+  return src;
+}
+
+/** Venice edit body. One portrait uses /image/edit. More than one uses /image/multi-edit. */
+export function veniceFaceEditRequest(opts: {
+  baseUrl: string;
+  prompt: string;
+  images: string[];
+}): { url: string; body: Record<string, unknown> } {
+  const base = opts.baseUrl.replace(/\/$/, '');
+  const raw = opts.images.map(stripImageDataUrl);
+  if (raw.length <= 1) {
+    return {
+      url: `${base}/image/edit`,
+      body: {
+        model: VENICE_ADULT_EDIT_MODEL,
+        prompt: opts.prompt,
+        image: raw[0],
+        safe_mode: false
+      }
+    };
+  }
+  return {
+    url: `${base}/image/multi-edit`,
+    body: {
+      modelId: VENICE_ADULT_EDIT_MODEL,
+      prompt: opts.prompt,
+      images: raw,
+      safe_mode: false
+    }
+  };
+}
+
+function veniceAdultProvider(): { provider: ProviderConfig; model: string } | null {
+  const resolved = configuredMatureImageModel();
+  if (!resolved || !isVeniceProvider(resolved.provider)) return null;
+  return resolved;
+}
+
+function isVeniceProvider(provider: ProviderConfig): boolean {
+  try {
+    return new URL(provider.baseUrl).hostname.toLowerCase() === 'api.venice.ai';
+  } catch {
+    return false;
+  }
+}
+
 function chapterPictureSizes(model: string): string[] {
   return model.toLowerCase().includes('glm-image')
     ? ['1024x1024', '864x1152']
@@ -345,6 +439,47 @@ export async function generateChapterPicture(opts: {
   style: PortraitStyle;
   signal?: AbortSignal;
 }): Promise<string> {
+  const subjects = chapterPictureSubjects({
+    characters: opts.characters,
+    castIds: opts.castIds,
+    prompt: opts.userPrompt
+  });
+  const faces = chapterPictureFaces({
+    characters: opts.characters,
+    castIds: opts.castIds,
+    prompt: opts.userPrompt
+  });
+  const venice = veniceAdultProvider();
+  const adult = planAdultFaceEdit({
+    mature: !!opts.world.ai.mature,
+    userPrompt: opts.userPrompt,
+    subjects,
+    faceCount: faces.length,
+    veniceConfigured: !!venice
+  });
+  if (adult.action === 'refuse') throw new AIError(adult.error);
+  if (adult.action === 'edit' && venice) {
+    const plan = prepareChapterPicture({
+      characters: opts.characters,
+      castIds: opts.castIds,
+      userPrompt: opts.userPrompt,
+      style: opts.style,
+      contentNotes: opts.world.ai.contentNotes ?? '',
+      mature: true,
+      provider: venice.provider,
+      model: VENICE_ADULT_EDIT_MODEL
+    });
+    if (!plan.ok) throw new AIError(plan.error);
+    const refs = await prepareSceneImageRefs(plan.refs);
+    const url = await requestVeniceFaceEdit({
+      provider: venice.provider,
+      prompt: plan.prompt,
+      refs,
+      signal: opts.signal
+    });
+    return urlToJpegDataUrl(url, 1280, 0.8);
+  }
+
   const resolved = configuredImageModel(opts.world);
   const plan = prepareChapterPicture({
     characters: opts.characters,
@@ -371,6 +506,41 @@ export async function generateChapterPicture(opts: {
     sizes: chapterPictureSizes(resolved.model)
   });
   return urlToJpegDataUrl(url, 1280, 0.8);
+}
+
+async function requestVeniceFaceEdit(opts: {
+  provider: ProviderConfig;
+  prompt: string;
+  refs: SceneImageRef[];
+  signal?: AbortSignal;
+}): Promise<string> {
+  const request = veniceFaceEditRequest({
+    baseUrl: opts.provider.baseUrl,
+    prompt: opts.prompt,
+    images: opts.refs.map((ref) => ref.dataUrl)
+  });
+  const res = await providerFetch(request.url, {
+    method: 'POST',
+    headers: imageHeaders(opts.provider),
+    signal: opts.signal,
+    body: JSON.stringify(request.body)
+  });
+  if (!res.ok) throw await imageHttpError(res, opts.provider);
+  return responseBytesToDataUrl(res);
+}
+
+async function responseBytesToDataUrl(res: Response): Promise<string> {
+  const blob = await res.blob();
+  const type = blob.type || '';
+  if (!blob.size || type.includes('json') || type.startsWith('text/')) {
+    throw new AIError('The model did not return an image.');
+  }
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(new AIError('Could not read the generated image.'));
+    reader.readAsDataURL(blob);
+  });
 }
 
 async function imageHttpError(res: Response, provider?: ProviderConfig): Promise<AIError> {

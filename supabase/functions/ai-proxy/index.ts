@@ -1,11 +1,11 @@
 /**
- * Allowlisted SSE/HTTP relay for AI hosts that block browser CORS (Z.ai, BigModel).
+ * Allowlisted SSE/HTTP relay for AI hosts that block browser CORS (Z.ai, BigModel, Venice).
  * Forwards the caller's upstream Authorization. Does not store keys or run inference.
  * Requires a signed-in Supabase user — the anon key is not enough.
  */
 import { CORS, handleOptions, json, MAX_CHAT_BODY, readLimitedJson, requireUser } from '../_shared/http.ts';
 
-const ALLOWED_HOSTS = ['api.z.ai', 'open.bigmodel.cn'];
+const ALLOWED_HOSTS = ['api.z.ai', 'open.bigmodel.cn', 'api.venice.ai'];
 
 function hostAllowed(url: string): boolean {
   try {

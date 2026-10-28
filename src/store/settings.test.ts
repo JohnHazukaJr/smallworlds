@@ -9,6 +9,7 @@ const empty: AppSettings = {
   proseModel: null,
   utilityModel: null,
   imageModel: null,
+  matureImageModel: null,
   matureDefault: true,
   defaultVisibility: 'private'
 };
@@ -98,6 +99,29 @@ describe('addProvider', () => {
     const s = useSettings.getState();
     expect(s.proseModel).toEqual({ providerId: 'or1', model: 'z-ai/glm-5.2' });
     expect(s.utilityModel).toEqual({ providerId: 'or1', model: 'z-ai/glm-5.2' });
+  });
+
+  it('points adult pictures at Venice and leaves the writer in place', () => {
+    useSettings.setState({
+      proseModel: { providerId: 'old', model: 'keep-me' },
+      utilityModel: { providerId: 'old', model: 'keep-me' },
+      imageModel: { providerId: 'old', model: 'glm-image' }
+    });
+    useSettings.getState().addProvider({
+      id: 'ven1',
+      kind: 'openai',
+      label: 'Venice',
+      baseUrl: 'https://api.venice.ai/api/v1',
+      apiKey: 'ven-test'
+    });
+    const s = useSettings.getState();
+    expect(s.proseModel).toEqual({ providerId: 'old', model: 'keep-me' });
+    expect(s.utilityModel).toEqual({ providerId: 'old', model: 'keep-me' });
+    expect(s.imageModel).toEqual({ providerId: 'old', model: 'glm-image' });
+    expect(s.matureImageModel).toEqual({ providerId: 'ven1', model: 'qwen-edit-uncensored' });
+    useSettings.getState().removeProvider('ven1');
+    expect(useSettings.getState().matureImageModel).toBeNull();
+    expect(useSettings.getState().proseModel).toEqual({ providerId: 'old', model: 'keep-me' });
   });
 
   it('leaves existing model refs in place', () => {

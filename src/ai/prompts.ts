@@ -1687,6 +1687,7 @@ export function buildNarrationBeatMessages(
     `(Narration only — no spoken dialogue, no CharacterName: "…" lines.)\n` +
     `Do not write the player's actions, speech, or thoughts. Do not repeat their line. Leave them room to answer.\n` +
     `Write this: ${brief}\n` +
+    `Only the people already in this room, and walk-ons already here, may appear. Do not invent a named person. Do not have anyone walk in.\n` +
     `Show this moment on named bodies in the room; do not recap. Carry the consequence through the length below.\n\n` +
     `${narrationSizeHint(length)}`;
   return mergeMessages([...messages, { role: 'user', content: userContent }]);
@@ -1827,6 +1828,7 @@ export function buildCharacterSpeakMessages(
     heardAnswerCue(turns, characters, guests) +
     `Intent for this line: ${brief}\n\n` +
     knowledgeWallCue(speaking.mustNotKnow) +
+    `Answer the player's last line in your own voice, with words in double quotes. Do not restage the room. Do not speak for anyone else.\n` +
     `Use the required *action* "dialogue" format. No other speakers.\n` +
     `${speakSizeHint(length)}\n\n` +
     SPEAK_FORMAT_RULES +
@@ -1862,6 +1864,7 @@ export function buildGuestSpeakMessages(
     voiceLine +
     heardAnswerCue(turns, characters, guests) +
     `Intent for this line: ${brief}\n\n` +
+    `Answer the player's last line in your own voice, with words in double quotes. Do not restage the room. Do not speak for anyone else.\n` +
     `${speakSizeHint(length)}\n\n` +
     SPEAK_FORMAT_RULES +
     (opts?.requireDialogue ? `\n\n${SPEAK_MUST_DIALOGUE}` : '');

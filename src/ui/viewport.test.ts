@@ -54,6 +54,8 @@ describe('chrome helpers', () => {
     expect(bookStageOpen(bandForWidth(1280), false)).toBe(false);
     expect(bookStageOpen(bandForWidth(752), true)).toBe(false);
     expect(bookStageOpen(bandForWidth(884), true)).toBe(false);
+    expect(bookStageOpen(bandForWidth(752), false, 616)).toBe(false);
+    expect(bookStageOpen(bandForWidth(884), false, 715)).toBe(true);
   });
 
   it('docks sheets to the bottom only on compact', () => {

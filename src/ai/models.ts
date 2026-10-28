@@ -40,6 +40,12 @@ export function configuredImageModel(world: World | null) {
   return resolveModel(world?.imageModel ?? s.imageModel ?? null);
 }
 
+/** Adult chapter pictures. Unset means every picture stays on the image model. */
+export function configuredMatureImageModel() {
+  const s = useSettings.getState();
+  return resolveModel(s.matureImageModel ?? null);
+}
+
 /** True when a writing or utility model can actually be resolved (provider + id). */
 export function hasConfiguredModel(world?: World | null): boolean {
   const s = useSettings.getState();

@@ -1,6 +1,9 @@
 import { HOSTED_IMAGE_MODEL, HOSTED_PROSE_MODEL, HOSTED_UTILITY_MODEL } from '../billing/plans';
 import type { ProviderConfig, ProviderKind } from '../types';
 
+/** Venice edit model for an adult chapter picture that already has a portrait. */
+export const VENICE_ADULT_EDIT_MODEL = 'qwen-edit-uncensored';
+
 export interface ProviderPreset {
   id: string;
   label: string;
@@ -112,6 +115,15 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     keyUrl: 'https://console.x.ai',
     suggestedModels: ['grok-4', 'grok-4-fast'],
     note: 'Grok direct.'
+  },
+  {
+    id: 'venice',
+    label: 'Venice',
+    kind: 'openai',
+    baseUrl: 'https://api.venice.ai/api/v1',
+    keyUrl: 'https://venice.ai/settings/api',
+    suggestedModels: [],
+    note: 'Adult chapter pictures that keep a face from a portrait you already made. This key does not write the story.'
   },
   {
     id: 'ollama',

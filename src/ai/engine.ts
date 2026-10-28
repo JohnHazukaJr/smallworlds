@@ -910,7 +910,9 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
   const playerText = hands
     ? `${hands.name} takes this action. Write what follows around it, and do not play the action again as if it had not happened:\n${opts.input.trim()}`
     : opts.input.trim();
-  const requireDialogue = requiresSpokenReply(opts.mode);
+  const requireDialogue = requiresSpokenReply(opts.mode)
+    || inScene.length > 0
+    || activeGuests(ctx.episode).length > 0;
 
   // File glue before planning so the first long Write is not tail-only.
   // Stop here has saved no reply, so the player line comes back out with it.
@@ -1038,7 +1040,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
             onAccumulated: (acc) => opts.onDelta(acc, meta)
           });
         }, opts.onNotice);
-        if (!cleaned) {
+        if (!cleaned || (requireDialogue && !hasSpokenDialogue(cleaned))) {
           opts.onDelta('', meta);
           continue;
         }
@@ -1094,7 +1096,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
           onAccumulated: (acc) => opts.onDelta(acc, meta)
         });
       }, opts.onNotice);
-      if (!cleaned) {
+      if (!cleaned || (requireDialogue && !hasSpokenDialogue(cleaned))) {
         opts.onDelta('', meta);
         continue;
       }
@@ -4741,7 +4743,8 @@ export async function fleshOutWorldEverything(
     }
 
     if (createdCharacterIds.length > 0) {
-      const castIds = [...new Set([...liveEpisode.castIds, ...createdCharacterIds])];
+      const opening = createdCharacterIds.slice(0, 2);
+      const castIds = [...new Set([...liveEpisode.castIds, ...opening])];
       await db.episodes.update(liveEpisode.id, { castIds, updatedAt: Date.now() });
       liveEpisode = { ...liveEpisode, castIds };
     }
@@ -4849,12 +4852,7 @@ async function repairWriteReadyFields(world: World, episode: Episode): Promise<v
 
   const npcsAll = (await db.characters.where('worldId').equals(world.id).toArray())
     .filter((c) => !c.isPlayer);
-  let castIds = [...liveEpisode.castIds];
-  if (castIds.length === 0 && npcsAll.length > 0) {
-    castIds = npcsAll.map((c) => c.id);
-    await db.episodes.update(liveEpisode.id, { castIds, updatedAt: Date.now() });
-  }
-  const inScene = new Set(castIds);
+  const inScene = new Set(liveEpisode.castIds);
   for (const npc of npcsAll.filter((c) => inScene.has(c.id))) {
     if (npc.anchors.some((a) => a.trim())) continue;
     const fromTrait = npc.traits.split(/[.;\n]/)[0]?.trim();

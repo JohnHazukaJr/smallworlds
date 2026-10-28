@@ -234,30 +234,27 @@ export function selectAnswerers(opts: {
   turns?: Turn[];
   preferId?: string;
 }): SpeakerCandidate[] {
-  const cap = answererCap(opts.length);
+  const one = (c: SpeakerCandidate | undefined): SpeakerCandidate[] => (
+    c ? [{ id: c.id, name: c.name, kind: c.kind }] : []
+  );
   const ranked = rankReplySpeakers({
     candidates: opts.candidates,
     playerText: opts.playerText,
     turns: opts.turns
   });
-  const picked: SpeakerCandidate[] = [];
-  const push = (c: SpeakerCandidate | undefined) => {
-    if (!c || picked.some((p) => p.id === c.id) || picked.length >= cap) return;
-    picked.push({ id: c.id, name: c.name, kind: c.kind });
-  };
 
-  if (opts.preferId) push(ranked.find((c) => c.id === opts.preferId));
-
-  const addressed = ranked.filter((c) => c.address === 'vocative' || c.address === 'directed');
-  if (addressed.length > 0) {
-    for (const c of addressed) push(c);
-  } else {
-    const mentions = ranked.filter((c) => c.address === 'mention');
-    const mentionCap = opts.length === 'episode' ? cap : 1;
-    for (const c of mentions.slice(0, mentionCap)) push(c);
+  if (opts.preferId) {
+    const pinned = ranked.find((c) => c.id === opts.preferId);
+    if (pinned) return one(pinned);
   }
-  if (picked.length === 0) push(ranked[0]);
-  return picked;
+
+  const addressed = ranked.find((c) => c.address === 'vocative' || c.address === 'directed');
+  if (addressed) return one(addressed);
+
+  const last = lastSpeaker(opts.turns ?? [], opts.candidates);
+  if (last) return one(last);
+
+  return one(opts.candidates[0]);
 }
 
 /**
