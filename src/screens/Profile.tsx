@@ -17,7 +17,7 @@ import {
 import { pullEncryptedSecrets, pushEncryptedSecrets, syncNow, useSyncMeta } from '../sync/engine';
 import { formatUserError } from '../errors';
 import { IMPORT_TOO_LARGE, importTooLarge } from '../security/importLimit';
-import { ErrorNote, Mono, phoneChrome, useViewport } from '../ui/bits';
+import { ErrorNote, Field, Mono, phoneChrome, useViewport } from '../ui/bits';
 import { avatarStyle, plateStyle, VIS } from '../ui/theme';
 import { LegalLinks } from './Legal';
 import type { Visibility } from '../types';
@@ -368,8 +368,12 @@ function AccountSection({
 
         {tab === 'email' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <input type="email" placeholder="email" value={email} onChange={(e) => setEmail(e.target.value)} />
-            <input type="password" placeholder="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+            <Field label="Email">
+              <input type="email" autoComplete="email" placeholder="email" value={email} onChange={(e) => setEmail(e.target.value)} />
+            </Field>
+            <Field label="Password">
+              <input type="password" autoComplete="current-password" placeholder="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+            </Field>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <button className="btn-primary" disabled={busy || !email || !password} onClick={() => void run(() => auth.signInWithEmail(email, password))}>
                 Sign in
@@ -383,7 +387,9 @@ function AccountSection({
 
         {tab === 'phone' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <input type="tel" placeholder="+1…" value={phone} onChange={(e) => setPhone(e.target.value)} />
+            <Field label="Phone">
+              <input type="tel" autoComplete="tel" placeholder="+1…" value={phone} onChange={(e) => setPhone(e.target.value)} />
+            </Field>
             {!otpSent ? (
               <button className="btn-primary" disabled={busy || !phone} onClick={() => void run(async () => {
                 await auth.signInWithPhone(phone);
@@ -391,7 +397,9 @@ function AccountSection({
               })}>Send code</button>
             ) : (
               <>
-                <input placeholder="SMS code" value={otp} onChange={(e) => setOtp(e.target.value)} />
+                <Field label="Code">
+                  <input autoComplete="one-time-code" placeholder="SMS code" value={otp} onChange={(e) => setOtp(e.target.value)} />
+                </Field>
                 <button className="btn-primary" disabled={busy || !otp} onClick={() => void run(() => auth.verifyPhoneOtp(phone, otp))}>
                   Verify
                 </button>

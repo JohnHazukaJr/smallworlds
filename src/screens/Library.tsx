@@ -224,7 +224,19 @@ export function Library() {
                 </span>
               </div>
               <div style={{ padding: narrow ? '14px 16px 16px' : '16px 20px', display: 'flex', flexDirection: 'column', gap: 8, justifyContent: 'center' }}>
-                <div className="serif" style={{ fontSize: 20, color: 'var(--ink-heading)', lineHeight: 1.2 }}>{w.title}</div>
+                <button
+                  type="button"
+                  className="serif"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (!compactingId) openWorld(w.id);
+                  }}
+                  style={{
+                    border: 0, background: 'transparent', padding: 0, width: 'fit-content', maxWidth: '100%',
+                    fontSize: 20, fontWeight: 400, lineHeight: 1.2, textAlign: 'left',
+                    color: 'var(--ink-heading)', cursor: compactingId ? 'default' : 'pointer'
+                  }}
+                >{w.title}</button>
                 <div style={{ fontSize: 13, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
                   {busy ? (compactProgress || 'Compacting…') : w.line}
                 </div>
@@ -238,17 +250,26 @@ export function Library() {
                   <span>{st ? `${Math.round(st.words / 100) / 10}k words` : ''}</span>
                   <span style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
                     <button
-                      className="btn-quiet" style={{ padding: '2px 4px', fontSize: 10 }}
+                      type="button"
+                      className="btn-quiet"
+                      style={{ padding: '6px 8px', fontSize: 10, minHeight: 32 }}
+                      aria-label={`Compact ${w.title}`}
                       disabled={!!compactingId}
                       onClick={(e) => { e.stopPropagation(); void runCompact(w.id, w.title); }}
                     >compact</button>
                     <button
-                      className="btn-quiet" style={{ padding: '2px 4px', fontSize: 10 }}
+                      type="button"
+                      className="btn-quiet"
+                      style={{ padding: '6px 8px', fontSize: 10, minHeight: 32 }}
+                      aria-label={`Export ${w.title}`}
                       disabled={!!compactingId}
                       onClick={(e) => { e.stopPropagation(); setPendingExport({ worldId: w.id, title: w.title }); }}
                     >export</button>
                     <button
-                      className="btn-quiet" style={{ padding: '2px 4px', fontSize: 10 }}
+                      type="button"
+                      className="btn-quiet"
+                      style={{ padding: '6px 8px', fontSize: 10, minHeight: 32 }}
+                      aria-label={`Delete ${w.title}`}
                       disabled={!!compactingId}
                       onClick={(e) => {
                         e.stopPropagation();

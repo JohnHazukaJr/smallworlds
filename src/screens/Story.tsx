@@ -1329,6 +1329,20 @@ export function Story() {
     ? guests
     : guests.filter((g) => episode.activeGuestIds!.includes(g.id));
   const writing = writingLineText(streaming, tailHasText, progressLabel);
+  const speakingAs = direct
+    ? 'Direct'
+    : asCharacterId
+      ? (characters.find((c) => c.id === asCharacterId)?.name.trim() || 'Them')
+      : 'You';
+  const composePrompt = direct
+    ? 'What should happen next?'
+    : asCharacterId
+      ? 'What do they do?'
+      : 'What do you do, or what do you say?';
+  const composeStatus = `${speakingAs} · ${weight === 'moment' ? 'Just this moment' : 'Changes things'} · ${
+    length === 'beat' ? 'Short' : length === 'episode' ? 'Long' : 'Normal'
+  }`;
+  const sendTitle = `Send (${/Mac|iPhone|iPad|iPod/.test(navigator.platform) ? 'Cmd' : 'Ctrl'}+Enter)`;
   const bookPieces: BookPiece[] = [];
   if (book) {
     const visible = manuscript.slice(-turnWindow);
@@ -1617,7 +1631,7 @@ export function Story() {
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <div style={{ display: 'flex', borderBottom: '1px solid var(--rule)' }}>
               {([['write', 'Write'], ['read', 'Read']] as const).map(([id, label]) => (
-                <button key={id} onClick={() => setLayout(id as StoryLayout)} style={{
+                <button key={id} aria-pressed={layout === id} onClick={() => setLayout(id as StoryLayout)} style={{
                   border: 0, background: 'transparent',
                   color: 'inherit', opacity: layout === id ? 1 : 0.5, padding: '7px 12px',
                   fontSize: 12, fontWeight: layout === id ? 600 : 500, cursor: 'pointer', minHeight: 36,
@@ -2187,6 +2201,13 @@ export function Story() {
               </div>
             </div>
           )}
+          <div className="label" style={{
+            flexShrink: 0,
+            maxWidth: '40rem', margin: '0 auto', width: '100%',
+            fontSize: 12
+          }}>
+            {composeStatus}
+          </div>
           <div style={{
             flexShrink: 0,
             display: 'flex', gap: 13, alignItems: 'flex-end',
@@ -2199,11 +2220,8 @@ export function Story() {
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void write(); }
               }}
-              placeholder={direct
-                ? 'What should happen next?'
-                : asCharacterId
-                ? 'What do they do?'
-                : 'What do you do, or what do you say?'}
+              aria-label={composePrompt}
+              placeholder={composePrompt}
               rows={2}
               disabled={streaming}
               style={{
@@ -2218,6 +2236,7 @@ export function Story() {
               <button
                 className="btn-primary"
                 style={{ alignSelf: 'flex-end', padding: '10px 19px', minHeight: 44 }}
+                title={sendTitle}
                 disabled={!input.trim()}
                 onClick={() => void write()}
               >

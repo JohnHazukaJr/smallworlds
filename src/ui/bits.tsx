@@ -90,6 +90,7 @@ export function Chip({
     <button
       onClick={onClick}
       disabled={disabled}
+      aria-pressed={typeof active === 'boolean' ? active : undefined}
       style={{
         border: `1px solid ${active ? tint(0.55) : 'var(--rule)'}`,
         background: active ? tint(0.1) : 'transparent',

@@ -24,6 +24,12 @@ const TABS: Array<[string, Screen]> = [
   ['Profile', 'profile']
 ];
 
+const OPEN_WORLD_FIRST = 'Open a world first.';
+
+function navBlock(key: Screen, currentWorldId: string | null): boolean {
+  return (key === 'story' || key === 'cast' || key === 'locations') && !currentWorldId;
+}
+
 
 export function Rail() {
   const screen = useApp((s) => s.screen);
@@ -68,20 +74,24 @@ export function Rail() {
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
         {ITEMS.map(([label, key]) => {
-          const needsWorld = key === 'story' || key === 'cast' || key === 'locations';
-          const blocked = needsWorld && !currentWorldId;
+          const blocked = navBlock(key, currentWorldId);
+          const reason = blocked ? OPEN_WORLD_FIRST : undefined;
           return (
-            <button
-              key={key}
-              className={`nav-btn${screen === key ? ' active' : ''}`}
-              disabled={blocked}
-              onClick={() => {
-                if (blocked) return;
-                go(key);
-              }}
-            >
-              <span style={{ whiteSpace: 'nowrap' }}>{label}</span>
-            </button>
+            <span key={key} title={reason} style={{ display: 'block' }}>
+              <button
+                className={`nav-btn${screen === key ? ' active' : ''}`}
+                disabled={blocked}
+                aria-disabled={blocked || undefined}
+                aria-current={screen === key ? 'page' : undefined}
+                title={reason}
+                onClick={() => {
+                  if (blocked) return;
+                  go(key);
+                }}
+              >
+                <span style={{ whiteSpace: 'nowrap' }}>{label}</span>
+              </button>
+            </span>
           );
         })}
       </div>
@@ -122,21 +132,25 @@ export function TabBar() {
   return (
     <div className={`tabbar${showLabels ? '' : ' glyphs-only'}`}>
       {TABS.map(([label, key]) => {
-        const needsWorld = key === 'story' || key === 'cast' || key === 'locations';
-        const blocked = needsWorld && !currentWorldId;
+        const blocked = navBlock(key, currentWorldId);
+        const reason = blocked ? OPEN_WORLD_FIRST : undefined;
         return (
-          <button
-            key={key}
-            className={screen === key ? 'active' : ''}
-            disabled={blocked}
-            aria-label={label}
-            onClick={() => {
-              if (blocked) return;
-              go(key);
-            }}
-          >
-            <span>{label}</span>
-          </button>
+          <span key={key} className="tabbar-slot" title={reason}>
+            <button
+              className={screen === key ? 'active' : ''}
+              disabled={blocked}
+              aria-disabled={blocked || undefined}
+              aria-current={screen === key ? 'page' : undefined}
+              aria-label={blocked ? `${label}. ${OPEN_WORLD_FIRST}` : label}
+              title={reason}
+              onClick={() => {
+                if (blocked) return;
+                go(key);
+              }}
+            >
+              <span>{label}</span>
+            </button>
+          </span>
         );
       })}
     </div>

@@ -69,6 +69,16 @@ input, textarea, select {
   width: 100%;
 }
 input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+button:focus-visible,
+.nav-btn:focus-visible,
+.tabbar button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 2px;
+}
+.tabbar button:focus-visible { outline-offset: -2px; }
 input::placeholder, textarea::placeholder { color: rgba(0, 0, 0, 0.35); }
 textarea { resize: vertical; line-height: 1.6; }
 input[type="range"] { accent-color: var(--accent); }
@@ -568,6 +578,12 @@ input[type="range"] { accent-color: var(--accent); }
   background: var(--ink);
   padding-bottom: env(safe-area-inset-bottom);
 }
+.tabbar-slot {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+.tabbar-slot > button { width: 100%; }
 .tabbar button {
   flex: 1;
   min-width: 0;
