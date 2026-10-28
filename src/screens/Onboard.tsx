@@ -1,9 +1,9 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useMemo, useRef, useState } from 'react';
 import {
-  composeWorldBriefFromInterview, draftColdOpenNarration, fleshOutCharacter, fleshOutLocation,
+  draftColdOpenNarration, fleshOutCharacter, fleshOutLocation,
   fleshOutNarratorRules, fleshOutPremise, fleshOutRelationships, fleshOutWorldEverything,
-  fleshOutWorldLore, interviewWorldIdea, seedOpeningMemory, type WorldInterviewQuestion
+  fleshOutWorldLore, seedOpeningMemory
 } from '../ai/engine';
 import { CharacterPortraitTools } from '../components/CharacterPortraitTools';
 import { db, deleteWorld, recordTombstones, safeWrite } from '../db';
@@ -39,12 +39,12 @@ const SEED_KINDS = [
 
 const LANES = [
   {
-    label: 'From an idea',
-    line: 'Describe the story. You make a character, the world answers, and you start writing.'
+    label: 'Step by step',
+    line: 'Shape, seed, voice, you, people, place, memory — you write each one. AI drafts a section only when you ask.'
   },
   {
-    label: 'Step by step',
-    line: 'Shape, seed, voice, you, people, place, memory — fill each yourself, with AI help when you want it.'
+    label: 'From an idea',
+    line: 'Start from a paragraph you write. The same sections follow, and each one stays yours to edit.'
   }
 ];
 
@@ -80,13 +80,10 @@ export function Onboard() {
   const utilityModel = useSettings((s) => s.utilityModel);
 
   const [step, setStep] = useState(0);
-  const [lane, setLane] = useState(0); // 0 = From an idea, 1 = Step by step
+  const [lane, setLane] = useState(0); // 0 = Step by step, 1 = From an idea
   const [shape, setShape] = useState(0);
   const [seedKind, setSeedKind] = useState(0);
   const [seed, setSeed] = useState('');
-  const [idea, setIdea] = useState('');
-  const [interviewQs, setInterviewQs] = useState<WorldInterviewQuestion[]>([]);
-  const [interviewAnswers, setInterviewAnswers] = useState<Record<string, string>>({});
   const [title, setTitle] = useState('');
   const [premise, setPremise] = useState('');
   const [ai, setAi] = useState<WorldAISettings>(() => ({ ...DEFAULT_AI, mature: matureDefault }));
@@ -106,7 +103,7 @@ export function Onboard() {
   const [seasonId, setSeasonId] = useState<string | null>(null);
 
   const hasAI = !!resolveModel(utilityModel ?? proseModel);
-  const ideaLane = lane === 0;
+  const ideaLane = lane === 1;
   const storyStance = stanceFromShapeIndex(shape);
   const premiseRequired = storyStance === 'longform';
 
@@ -697,178 +694,15 @@ export function Onboard() {
     }
   };
 
-  /** Idea lane: create world from idea text and load clarifying questions. */
-  const startIdeaInterview = async () => {
-    const text = idea.trim();
-    if (!text) {
-      setError('Describe the roleplay you want first.');
-      return false;
-    }
-    if (!hasAI) {
-      setError('Pick a writing model in Settings to use From an idea — or switch to Step by step.');
-      return false;
-    }
-    setError('');
-    setBusy('Building the world…');
-    try {
-      let wid = worldId;
-      if (!wid) {
-        const custom = shapeTag(shape);
-        const world = await createWorld({
-          title: title.trim(),
-          line: text.slice(0, 140),
-          bible: text,
-          premise: '',
-          storyStance: stanceFromShapeIndex(shape),
-          ai: { ...ai, customInstructions: custom }
-        });
-        wid = world.id;
-        setWorldId(world.id);
-        setSeasonId(world.activeSeasonId);
-        setAi(world.ai);
-        setSeed(text);
-        setTitle(world.title);
-      } else {
-        await db.worlds.update(wid, {
-          line: text.slice(0, 140),
-          bible: text,
-          updatedAt: Date.now()
-        });
-        setSeed(text);
-      }
-      setBusy('Asking clarifying questions…');
-      const qs = await interviewWorldIdea(text, shapeTag(shape));
-      if (qs.length === 0) {
-        // Fallback questions if the model returns nothing
-        setInterviewQs([
-          { id: 'who', question: 'Who are you in this story, and what do you want as it opens?', hint: 'e.g. A smuggler under a false name, trying to keep the ledger quiet.' },
-          { id: 'situation', question: 'What is true as it opens?', hint: 'e.g. Someone is asking about your handwriting — or nothing urgent, just the weather and who is in the room.' },
-          { id: 'cast', question: 'Who is in the first chapter with you?', hint: 'e.g. The registrar who saw the false signature.' },
-          { id: 'place', question: 'Where does chapter 1 open, and what rule does that place enforce?', hint: 'e.g. The long room above customs — nothing spoken there is public unless carried downstairs.' },
-          { id: 'walls', question: 'What must the narrator never do, and what content is off-limits?', hint: 'e.g. Never kill a named character off-page. No sexual content involving minors.' }
-        ]);
-      } else {
-        setInterviewQs(qs);
-      }
-      setInterviewAnswers({});
-      return true;
-    } catch (e) {
-      setError(formatUserError(e));
-      return false;
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  /** Idea lane: merge answers into the world, then flesh everything and jump to review. */
-  const generateFromInterview = async () => {
-    if (!hasAI) {
-      setError('Pick a writing model in Settings to generate from an idea.');
-      return false;
-    }
-    const text = idea.trim() || seed.trim();
-    if (!text) {
-      setError('Describe the roleplay you want first.');
-      return false;
-    }
-    setError('');
-    setBusy('Composing world brief…');
-    try {
-      const brief = await composeWorldBriefFromInterview(
-        text,
-        shapeTag(shape),
-        interviewQs.map((q) => ({
-          question: q.question,
-          answer: interviewAnswers[q.id] ?? ''
-        }))
-      );
-
-      let wid = worldId;
-      let sid = seasonId;
-      const nextAi: WorldAISettings = {
-        ...ai,
-        contentNotes: brief.contentNotes || ai.contentNotes,
-        narratorRules: brief.narratorRules.length ? brief.narratorRules : ai.narratorRules,
-        mature: brief.mature,
-        customInstructions: brief.customInstructions || shapeTag(shape)
-      };
-
-      if (!wid) {
-        const world = await createWorld({
-          title: brief.title,
-          line: brief.line,
-          bible: brief.bible,
-          premise: brief.premise,
-          storyStance: stanceFromShapeIndex(shape),
-          ai: nextAi
-        });
-        wid = world.id;
-        sid = world.activeSeasonId;
-        setWorldId(world.id);
-        setSeasonId(world.activeSeasonId);
-      } else {
-        await db.worlds.update(wid, {
-          title: brief.title,
-          line: brief.line,
-          bible: brief.bible,
-          ai: nextAi,
-          storyStance: stanceFromShapeIndex(shape),
-          updatedAt: Date.now()
-        });
-        if (sid) await db.seasons.update(sid, { premise: brief.premise });
-      }
-
-      setTitle(brief.title);
-      setSeed(brief.bible);
-      setPremise(brief.premise);
-      setAi(nextAi);
-
-      // Wait for episode row (just created) if needed
-      let ep = wid ? await db.episodes.where('worldId').equals(wid).first() : undefined;
-      const world = wid ? await db.worlds.get(wid) : undefined;
-      const s = sid ? await db.seasons.get(sid) : undefined;
-      if (!world || !s || !ep) throw new Error('World scaffolding missing — try again.');
-
-      setBusy('Fleshing lore…');
-      await fleshOutWorldEverything(world, s, ep, {
-        shape: shapeTag(shape),
-        targetCharacters: rosterTargets(shape).characters,
-        targetLocations: rosterTargets(shape).locations,
-        seedColdOpen: true,
-        onProgress: setBusy
-      });
-
-      const refreshed = await db.worlds.get(wid);
-      if (refreshed) {
-        setTitle(refreshed.title);
-        setSeed(refreshed.bible);
-        setAi(refreshed.ai);
-      }
-      const refreshedSeason = await db.seasons.get(s.id);
-      if (refreshedSeason) setPremise(refreshedSeason.premise);
-
-      setReviewBanner(
-        'Generated from your idea — walk through You, Cast, Place, and Memory. Perfect anything, then Enter when write-ready.'
-      );
-      setStep(3);
-      return true;
-    } catch (e) {
-      setError(formatUserError(e));
-      return false;
-    } finally {
-      setBusy(null);
-    }
-  };
-
   const fleshEverythingPanel = worldId && hasAI ? (
     <div className="craft-row" style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>Fill in everything</div>
       <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
-        Fills bible, premise, narrator rules, you, cast to roster targets, places, relationships, and opening memory.
-        You review each step after — Story opens only when the write-ready checklist passes.
+        Optional. Fills bible, premise, narrator rules, you, cast, places, relationships, and opening memory.
+        Leave it and write each section yourself — Story opens only when the checklist passes.
       </div>
       <button
-        className="btn-primary"
+        className="btn-ghost"
         style={{ padding: '9px 16px', fontSize: 12.5, alignSelf: 'flex-start' }}
         disabled={!!busy}
         onClick={() => void runFleshEverything()}
@@ -881,18 +715,16 @@ export function Onboard() {
   const steps = [
     {
       title: 'How do you want to begin?',
-      body: ideaLane
-        ? 'Describe a roleplay. AI will ask a few questions, generate the full world, then you review every sheet before Enter.'
-        : 'Small Worlds does not hand you a story. Pick a shape — then build seed, voice, cast, and place step by step.',
-      cta: ideaLane ? 'Next — your idea' : 'Next — the world',
+      body: 'You write each section. Next only saves what you typed. AI drafts a section when you use Fill in with AI — it does not run on its own.',
+      cta: 'Next — the world',
       content: (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <OptionList options={LANES} value={lane} onChange={(i) => { setLane(i); setInterviewQs([]); setInterviewAnswers({}); setReviewBanner(''); }} />
+          <OptionList options={LANES} value={lane} onChange={(i) => { setLane(i); setReviewBanner(''); }} />
           <div style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--paper)' }}>Story shape</div>
           <OptionList options={STORY_STANCES} value={shape} onChange={persistShape} />
-          {ideaLane && !hasAI && (
+          {!hasAI && (
             <div style={{ fontSize: 12.5, color: 'oklch(0.78 0.06 195)' }}>
-              From an idea needs a writing model. Pick one in Settings, or switch to Step by step.
+              No writing model yet. You can still write every section. Fill in with AI turns on after you pick a model in Settings.
             </div>
           )}
         </div>
@@ -901,14 +733,14 @@ export function Onboard() {
     ideaLane
       ? {
           title: 'Describe the roleplay.',
-          body: 'Setting, who you are, what is true as it opens, tone — a paragraph is enough. AI will ask follow-ups next.',
-          cta: 'Next — clarifying questions',
+          body: 'Setting, who you are, what is true as it opens. This text is yours. Fill in with AI only if you want it expanded before you keep going.',
+          cta: 'Next — how it writes',
           content: (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
               <textarea
                 rows={8}
-                value={idea}
-                onChange={(e) => setIdea(e.target.value)}
+                value={seed}
+                onChange={(e) => setSeed(e.target.value)}
                 placeholder="e.g. I want a tense harbour intrigue where I’m living under a false name, the debt ledger is public, and the registrar who noticed my handwriting has asked for a meeting in the long room…"
                 className="serif"
                 style={{ fontSize: 15.5, lineHeight: 1.65 }}
@@ -916,14 +748,21 @@ export function Onboard() {
               <input
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                placeholder="Title (optional — drafted from your idea)"
+                placeholder="Title (optional — leave blank to name it yourself later)"
               />
+              {hasAI && (
+                <div>
+                  <button className="btn-ghost" disabled={!!busy || (!title.trim() && !seed.trim())} onClick={() => void fleshOutSeed()}>
+                    {busy === 'Fleshing out the world…' ? 'Working…' : 'Fill in with AI'}
+                  </button>
+                </div>
+              )}
             </div>
           )
         }
       : {
           title: 'Give the world one true thing.',
-          body: 'A place, a rule, a situation. One sentence is enough to start — flesh with AI when you want a full bible, then keep editing.',
+          body: 'A place, a rule, a situation. One sentence is enough. Fill in with AI when you want a longer bible, then keep editing.',
           cta: 'Next — how it writes',
           content: (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -938,7 +777,7 @@ export function Onboard() {
                 ][seedKind]}
                 className="serif" style={{ fontSize: 15.5, lineHeight: 1.65 }}
               />
-              <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title (optional — one gets drafted if blank)" />
+              <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title (optional)" />
               {hasAI && (
                 <div>
                   <button className="btn-ghost" disabled={!!busy || (!title.trim() && !seed.trim())} onClick={() => void fleshOutSeed()}>
@@ -949,36 +788,7 @@ export function Onboard() {
             </div>
           )
         },
-    ideaLane
-      ? {
-          title: 'A few questions to lock it in.',
-          body: 'Answer what you can — skip the rest. Then AI generates the full world. You still review and edit every sheet.',
-          cta: busy ? busy : '✦ Generate world & review',
-          content: (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              {interviewQs.length === 0 ? (
-                <div style={{ fontSize: 13, color: 'var(--ink-muted)' }}>
-                  Questions appear after you continue from your idea.
-                </div>
-              ) : (
-                interviewQs.map((q) => (
-                  <Field key={q.id} label={q.question} note={q.hint}>
-                    <textarea
-                      rows={2}
-                      value={interviewAnswers[q.id] ?? ''}
-                      onChange={(e) => setInterviewAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
-                      placeholder={q.hint || 'Your answer (optional)'}
-                    />
-                  </Field>
-                ))
-              )}
-              <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
-                Generation fills bible, premise, narrator rules, you, cast, places, relationships, opening memory, and a cold open — then opens review.
-              </div>
-            </div>
-          )
-        }
-      : {
+    {
           title: 'How should this world write?',
           body: 'These ride in every prompt for this world. Set defaults now so the first chapter already feels right — change them later from Write → Edit world.',
           cta: 'Next — who you are',
@@ -1085,7 +895,7 @@ export function Onboard() {
               {fleshEverythingPanel}
             </div>
           )
-        },
+    },
     {
       title: 'Who are you in this world?',
       body: 'Your sheet is the protagonist the cast reacts to. Summary or a live goal is required before Enter — desires, fears, and state help the first chapter land.',
@@ -1093,19 +903,6 @@ export function Onboard() {
       content: (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           {checklistPanel(true)}
-          {ideaLane && (
-            <Field
-              label="Opening"
-              note={premiseRequired ? 'required — the opening' : 'optional — the opening'}
-            >
-              <textarea
-                rows={3}
-                value={premise}
-                onChange={(e) => setPremiseAndSave(e.target.value)}
-                placeholder="The opening"
-              />
-            </Field>
-          )}
           {!player ? (
             <div style={{ fontSize: 13, color: 'var(--ink-muted)' }}>Player sheet not found — go back one step and recreate the world.</div>
           ) : (
@@ -1224,11 +1021,11 @@ export function Onboard() {
             placeholder="Anything you already know — optional. Traits, backstory, a line of dialogue…"
           />
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-            <button className="btn-ghost" disabled={!!busy || (!castName.trim() && !castNotes.trim())} onClick={() => void addCastPlain()}>+ Add</button>
+            <button className="btn-primary" style={{ padding: '8px 16px', fontSize: 12.5 }} disabled={!!busy || (!castName.trim() && !castNotes.trim())} onClick={() => void addCastPlain()}>+ Add</button>
             {hasAI && (
-              <button className="btn-primary" style={{ padding: '8px 16px', fontSize: 12.5 }}
+              <button className="btn-ghost" style={{ padding: '8px 16px', fontSize: 12.5 }}
                 disabled={!!busy || (!castName.trim() && !castNotes.trim())} onClick={() => void addCastGenerate()}>
-                {busy === 'Generating…' ? 'Generating…' : '✦ Generate with AI'}
+                {busy === 'Generating…' ? 'Working…' : 'Fill in with AI'}
               </button>
             )}
             {busy === 'Generating…' && <Spinner label="the utility model is fleshing out the sheet" />}
@@ -1287,11 +1084,11 @@ export function Onboard() {
             placeholder="Anything you already know — optional. Atmosphere, a rule, who runs it…"
           />
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-            <button className="btn-ghost" disabled={!!busy || (!placeName.trim() && !placeNotes.trim())} onClick={() => void addPlacePlain()}>+ Add</button>
+            <button className="btn-primary" style={{ padding: '8px 16px', fontSize: 12.5 }} disabled={!!busy || (!placeName.trim() && !placeNotes.trim())} onClick={() => void addPlacePlain()}>+ Add</button>
             {hasAI && (
-              <button className="btn-primary" style={{ padding: '8px 16px', fontSize: 12.5 }}
+              <button className="btn-ghost" style={{ padding: '8px 16px', fontSize: 12.5 }}
                 disabled={!!busy || (!placeName.trim() && !placeNotes.trim())} onClick={() => void addPlaceGenerate()}>
-                {busy === 'Generating…' ? 'Generating…' : '✦ Generate with AI'}
+                {busy === 'Generating…' ? 'Working…' : 'Fill in with AI'}
               </button>
             )}
             {busy === 'Generating…' && <Spinner label="the utility model is fleshing out the sheet" />}
@@ -1377,31 +1174,23 @@ export function Onboard() {
 
   const goNext = async () => {
     if (step === 0) {
-      if (ideaLane && !hasAI) {
-        setError('From an idea needs a writing model. Pick one in Settings, or switch to Step by step.');
-        return;
-      }
       setError('');
       setStep(1);
       return;
     }
 
     if (step === 1) {
-      if (ideaLane) {
-        const ok = await startIdeaInterview();
-        if (!ok) return;
-        setStep(2);
-        return;
-      }
       const t = title.trim();
       const s = seed.trim();
       if (!t && !s) {
-        setError('Give the world at least one true thing (or a title) first.');
+        setError(ideaLane
+          ? 'Describe the roleplay you want first.'
+          : 'Give the world at least one true thing (or a title) first.');
         return;
       }
       setError('');
       if (!worldId) {
-        setBusy('Building the world…');
+        setBusy('Saving the world…');
         try {
           const custom = (ai.customInstructions ?? '').trim() ? ai.customInstructions : shapeTag(shape);
           const world = await createWorld({
@@ -1429,13 +1218,8 @@ export function Onboard() {
     }
 
     if (step === 2) {
-      if (ideaLane) {
-        const ok = await generateFromInterview();
-        if (!ok) return;
-        return; // generateFromInterview sets step to 3
-      }
       if (premiseRequired && !premise.trim()) {
-        setError('An opening is required for a long story — write what is happening, or fill it in with AI.');
+        setError('An opening is required for a long story — write it yourself, or fill it in with AI.');
         return;
       }
       setStep(3);
