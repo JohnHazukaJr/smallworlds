@@ -207,14 +207,18 @@ input[type="range"] { accent-color: var(--accent); }
   -webkit-backdrop-filter: none;
   box-shadow: none;
 }
-.compose-air textarea {
+.compose-air textarea,
+.compose-air input {
+  touch-action: manipulation;
+}
+.compose-air textarea:not(.line-edit) {
   background: transparent;
   border: 0;
   border-radius: 0;
   padding: 0;
   box-shadow: none;
 }
-.compose-air textarea:focus {
+.compose-air textarea:not(.line-edit):focus {
   border-color: transparent;
 }
 

@@ -1,5 +1,6 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
+import { flushSync } from 'react-dom';
 import {
   commitSoftEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, draftColdOpenNarration,
   rollbackTurnSnapshot,
@@ -951,6 +952,19 @@ export function Story() {
     }
   };
 
+  const beginEdit = (turn: Turn) => {
+    flushSync(() => {
+      setComposerOpen(true);
+      setEditing({ id: turn.id, text: turn.text });
+    });
+    const field = document.querySelector('textarea[aria-label="Edit this line"]');
+    if (field instanceof HTMLTextAreaElement) {
+      field.focus();
+      const end = field.value.length;
+      field.setSelectionRange(end, end);
+    }
+  };
+
   const saveEdit = async () => {
     if (!editing || !episode || editBusy) return;
     const text = editing.text.trim();
@@ -1390,12 +1404,7 @@ export function Story() {
               streaming={streaming}
               canEdit={canEdit}
               editing={editing?.id === turn.id}
-              draft={editing?.id === turn.id ? editing.text : turn.text}
-              busy={editBusy}
-              onEdit={() => setEditing({ id: turn.id, text: turn.text })}
-              onDraft={(text) => setEditing({ id: turn.id, text })}
-              onSave={() => { void saveEdit(); }}
-              onCancel={() => setEditing(null)}
+              onEdit={() => beginEdit(turn)}
               onRewrite={rewrite}
             />
           )
@@ -1809,14 +1818,9 @@ export function Story() {
                         else void retryFrom(turn);
                       } : undefined}
                       onEdit={turn.role === 'narrator' || turn.role === 'character'
-                        ? () => setEditing({ id: turn.id, text: turn.text })
+                        ? () => beginEdit(turn)
                         : undefined}
                       editing={editing?.id === turn.id}
-                      draft={editing?.id === turn.id ? editing.text : turn.text}
-                      editBusy={editBusy}
-                      onDraft={(text) => setEditing((current) => current ? { ...current, text } : current)}
-                      onSaveEdit={() => { void saveEdit(); }}
-                      onCancelEdit={() => setEditing(null)}
                     />
                   </div>
                 );
@@ -1915,7 +1919,7 @@ export function Story() {
         <div className="compose-air" style={{
           position: 'relative', zIndex: 4,
           flexShrink: 0,
-          maxHeight: '45%',
+          maxHeight: editing ? '70%' : '45%',
           minHeight: 0,
           overflow: 'hidden',
           padding: narrow
@@ -2044,6 +2048,37 @@ export function Story() {
           </div>
           )}
           </div>
+          {editing && (
+            <div style={{
+              flexShrink: 0,
+              maxWidth: '40rem', margin: '0 auto', width: '100%',
+              display: 'flex', flexDirection: 'column', gap: 8
+            }}>
+              <textarea
+                className="line-edit"
+                value={editing.text}
+                rows={4}
+                aria-label="Edit this line"
+                onChange={(e) => {
+                  const text = e.target.value;
+                  setEditing((current) => current ? { ...current, text } : current);
+                }}
+                style={{
+                  width: '100%', resize: 'vertical', touchAction: 'manipulation',
+                  fontFamily: 'var(--serif)', fontSize: 16, lineHeight: 1.6,
+                  padding: '10px 12px', border: '1px solid var(--rule)', borderRadius: 8,
+                  background: 'var(--page)', color: 'var(--page-ink)'
+                }}
+              />
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="btn-primary" style={{ minHeight: 40, padding: '8px 14px' }}
+                  disabled={editBusy || !editing.text.trim()}
+                  onClick={() => { void saveEdit(); }}>Save</button>
+                <button className="btn-quiet" style={{ minHeight: 40 }} disabled={editBusy}
+                  onClick={() => setEditing(null)}>Cancel</button>
+              </div>
+            </div>
+          )}
           <div style={{
             flexShrink: 0,
             display: 'flex', gap: 13, alignItems: 'flex-end',
@@ -2216,53 +2251,20 @@ function DisplaySheet({ open, onClose, narrow }: {
 // ---------- turn row ----------
 
 function TurnTools({
-  streaming, canEdit, editing, draft, busy, onEdit, onDraft, onSave, onCancel, onRewrite
+  streaming, canEdit, editing, onEdit, onRewrite
 }: {
   streaming: boolean;
   canEdit: boolean;
   editing: boolean;
-  draft: string;
-  busy: boolean;
   onEdit: () => void;
-  onDraft: (text: string) => void;
-  onSave: () => void;
-  onCancel: () => void;
   onRewrite?: () => void;
 }) {
-  if (editing) {
-    return (
-      <div style={{ margin: '8px 0 12px' }}>
-        <textarea
-          value={draft}
-          rows={5}
-          aria-label="Edit this line"
-          onChange={(e) => onDraft(e.target.value)}
-          style={{
-            width: '100%',
-            resize: 'vertical',
-            fontFamily: 'var(--serif)',
-            fontSize: 16,
-            lineHeight: 1.6,
-            padding: '10px 12px',
-            border: '1px solid var(--rule)',
-            borderRadius: 8,
-            background: 'var(--paper)',
-            color: 'var(--ink)'
-          }}
-        />
-        <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
-          <button className="btn" disabled={busy || !draft.trim()} onClick={onSave}>Save</button>
-          <button className="btn-quiet" disabled={busy} onClick={onCancel}>Cancel</button>
-        </div>
-      </div>
-    );
-  }
   if (!canEdit && !onRewrite) return null;
   return (
     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4, marginBottom: 10 }}>
       {canEdit && (
-        <button className="btn-quiet" style={{ fontSize: 12, padding: '6px 10px', minHeight: 36 }} disabled={streaming} onClick={onEdit}>
-          Edit
+        <button className="btn-quiet" style={{ fontSize: 12, padding: '6px 10px', minHeight: 36 }} disabled={streaming || editing} onClick={onEdit}>
+          {editing ? 'Editing' : 'Edit'}
         </button>
       )}
       {onRewrite && (
@@ -2276,7 +2278,7 @@ function TurnTools({
 
 function TurnRow({
   turn, blocks, accent, prose, fontPx, avatarPx, dialogueStyle, prevSpeaker, streaming, opening,
-  onRewrite, onEdit, editing, draft, editBusy, onDraft, onSaveEdit, onCancelEdit
+  onRewrite, onEdit, editing
 }: {
   turn: Turn;
   blocks: ProseBlock[];
@@ -2291,11 +2293,6 @@ function TurnRow({
   onRewrite?: () => void;
   onEdit?: () => void;
   editing?: boolean;
-  draft?: string;
-  editBusy?: boolean;
-  onDraft?: (text: string) => void;
-  onSaveEdit?: () => void;
-  onCancelEdit?: () => void;
 }) {
   const continued = attributionRun(blocks, prevSpeaker);
   return (
@@ -2318,12 +2315,7 @@ function TurnRow({
         streaming={streaming}
         canEdit={!!onEdit}
         editing={!!editing}
-        draft={draft ?? ''}
-        busy={!!editBusy}
         onEdit={onEdit ?? (() => undefined)}
-        onDraft={onDraft ?? (() => undefined)}
-        onSave={onSaveEdit ?? (() => undefined)}
-        onCancel={onCancelEdit ?? (() => undefined)}
         onRewrite={onRewrite}
       />
     </div>
