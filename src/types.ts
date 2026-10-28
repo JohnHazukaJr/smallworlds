@@ -149,6 +149,14 @@ export interface EpisodeWrap {
   guestEffects: string[];
 }
 
+export interface ChapterIllustration {
+  id: string;
+  prompt: string;
+  /** JPEG data URL */
+  dataUrl: string;
+  createdAt: number;
+}
+
 export interface Episode {
   id: string;
   seasonId: string;
@@ -161,6 +169,8 @@ export interface Episode {
   locationId?: string | null;
   /** optional scene image (data URL) shown behind the story text */
   image?: string | null;
+  /** Pictures made in this chapter. Shown in the prose; not sent back as narration. */
+  illustrations?: ChapterIllustration[];
   /** free-text weather / time of day / sensory note for this scene */
   atmosphereNote?: string;
   /** when true, location changes won't auto-retarget the global mood */

@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { generateCharacterPortrait } from '../ai/image';
-import type { PortraitStyle } from '../ai/portrait';
+import { rememberedPortraitStyle, rememberPortraitStyle, type PortraitStyle } from '../ai/portrait';
 import { formatUserError } from '../errors';
 import type { Character, World } from '../types';
 import { ErrorNote } from '../ui/bits';
@@ -8,20 +8,8 @@ import { fileToPortraitImage } from '../ui/image';
 import { ACCENT } from '../ui/theme';
 import { characterPortraits, MAX_CHARACTER_PORTRAITS, portraitsPatch } from '../worldOps';
 
-const STYLE_KEY = 'sw-portrait-style';
-
 function storedStyle(): PortraitStyle {
-  try {
-    return localStorage.getItem(STYLE_KEY) === 'comic' ? 'comic' : 'realistic';
-  } catch {
-    return 'realistic';
-  }
-}
-
-function rememberStyle(style: PortraitStyle) {
-  try {
-    localStorage.setItem(STYLE_KEY, style);
-  } catch { /* private mode */ }
+  return rememberedPortraitStyle();
 }
 
 function aborted(e: unknown): boolean {
@@ -53,7 +41,7 @@ export function CharacterPortraitTools({
 
   const chooseStyle = (next: PortraitStyle) => {
     setStyle(next);
-    rememberStyle(next);
+    rememberPortraitStyle(next);
   };
 
   const onFile = async (file: File) => {

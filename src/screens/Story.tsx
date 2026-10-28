@@ -31,10 +31,12 @@ import {
   DEFAULT_DISPLAY, moodFromHue, storyAvatarHeight, useApp,
   type DialogueStyle, type StoryLayout
 } from '../store/app';
+import { generateChapterPicture } from '../ai/image';
+import { rememberedPortraitStyle } from '../ai/portrait';
 import { hasWritingModel } from '../ai/models';
 import { useSettings } from '../store/settings';
 import type {
-  Character, ComposeMode, Episode, EpisodeGuest,
+  ChapterIllustration, Character, ComposeMode, Episode, EpisodeGuest,
   Location, Turn, TurnLength, ActionWeight
 } from '../types';
 import { AppError, classifyError } from '../errors';
@@ -650,6 +652,25 @@ function StreamTail({
   );
 }
 
+function ChapterFigure({ picture }: { picture: ChapterIllustration }) {
+  return (
+    <figure style={{ margin: '1.2em 0 1.4em' }} data-chapter-picture={picture.id}>
+      <div style={{ width: '100%', aspectRatio: '4 / 3', overflow: 'hidden', background: 'var(--rule)' }}>
+        <img
+          src={picture.dataUrl}
+          alt={picture.prompt}
+          style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }}
+        />
+      </div>
+      <figcaption className="serif" style={{
+        fontSize: 13, fontStyle: 'italic', color: 'var(--ink-muted)', marginTop: 8
+      }}>
+        {picture.prompt}
+      </figcaption>
+    </figure>
+  );
+}
+
 export function Story() {
   const { band, height, keyboardOffset, keyboardOpen } = useViewport();
   const book = bookStageOpen(band, keyboardOpen);
@@ -744,6 +765,10 @@ export function Story() {
   const [toneGroup, setToneGroup] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
   const [editBusy, setEditBusy] = useState(false);
+  const [pictureOpen, setPictureOpen] = useState(false);
+  const [picturePrompt, setPicturePrompt] = useState('');
+  const [pictureBusy, setPictureBusy] = useState(false);
+  const pictureAbortRef = useRef<AbortController | null>(null);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [tailHasText, setTailHasText] = useState(false);
@@ -892,8 +917,6 @@ export function Story() {
       world, season, episode, characters, locations, continuityCount: continuity.length
     });
   }, [storyRowsReady, turns.length, world, season, episode, characters, locations, continuity.length]);
-  const writeBlocked = !hasAI || !!(writeReady && writeReady.missing.length > 0 && !writeAnyway);
-
   const write = async () => {
     if (!world || !season || !episode || streaming) return;
     if (!hasAI) {
@@ -948,6 +971,44 @@ export function Story() {
       setError(classifyError(e));
     } finally {
       setEditBusy(false);
+    }
+  };
+
+  const makePicture = async () => {
+    if (!world || !episode || pictureBusy) return;
+    const text = picturePrompt.trim();
+    if (!text) return;
+    const controller = new AbortController();
+    pictureAbortRef.current = controller;
+    setPictureBusy(true);
+    setError('');
+    try {
+      const dataUrl = await generateChapterPicture({
+        world,
+        characters,
+        castIds: episode.castIds,
+        userPrompt: text,
+        style: rememberedPortraitStyle(),
+        signal: controller.signal
+      });
+      if (controller.signal.aborted) return;
+      const illustration: ChapterIllustration = {
+        id: crypto.randomUUID(),
+        prompt: text,
+        dataUrl,
+        createdAt: Date.now()
+      };
+      await db.episodes.update(episode.id, {
+        illustrations: [...(episode.illustrations ?? []), illustration],
+        updatedAt: Date.now()
+      });
+      setPicturePrompt('');
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') return;
+      setError(classifyError(e));
+    } finally {
+      if (pictureAbortRef.current === controller) pictureAbortRef.current = null;
+      setPictureBusy(false);
     }
   };
 
@@ -1341,6 +1402,12 @@ export function Story() {
         });
       }
     });
+    (episode.illustrations ?? []).forEach((picture) => {
+      bookPieces.push({
+        key: `picture-${picture.id}`,
+        node: <ChapterFigure picture={picture} />
+      });
+    });
     if (writing) {
       bookPieces.push({
         key: 'writing',
@@ -1349,7 +1416,7 @@ export function Story() {
     }
   }
   const bookSignature = book
-    ? `${episode.id}\n${fontPx}\n${turnWindow}\n${writing ?? ''}\n${editing?.id ?? ''}\n${manuscript.map((entry) => `${entry.turn.id}:${entry.turn.text.length}`).join('|')}`
+    ? `${episode.id}\n${fontPx}\n${turnWindow}\n${writing ?? ''}\n${editing?.id ?? ''}\n${(episode.illustrations ?? []).map((picture) => picture.id).join(',')}\n${manuscript.map((entry) => `${entry.turn.id}:${entry.turn.text.length}`).join('|')}`
     : '';
 
   return (
@@ -1361,6 +1428,7 @@ export function Story() {
       flex: 1,
       minHeight: 0,
       height: shellHeight,
+      overflow: 'hidden',
       display: 'flex',
       flexDirection: 'column',
       color: M.text,
@@ -1377,7 +1445,7 @@ export function Story() {
           className={`scene-hud glass-clear${hudTucked && !composerOpen ? ' tucked' : ''}`}
           onMouseEnter={() => setHudTucked(false)}
           style={{
-          position: 'relative', zIndex: 5, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          position: 'relative', zIndex: 5, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           gap: 12,
           paddingTop: narrow ? 'calc(10px + env(safe-area-inset-top))' : 11,
           paddingBottom: narrow ? 10 : 11,
@@ -1411,7 +1479,7 @@ export function Story() {
         </div>
       ) : (
         <div style={{
-          position: 'relative', zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          position: 'relative', zIndex: 2, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           gap: 14,
           paddingTop: narrow ? 'calc(11px + env(safe-area-inset-top))' : 13,
           paddingBottom: narrow ? 11 : 13,
@@ -1463,7 +1531,7 @@ export function Story() {
       <div
         aria-busy={streaming}
         style={{
-          position: 'relative', zIndex: 2, flex: 1, display: 'grid', minHeight: 0,
+          position: 'relative', zIndex: 2, flex: 1, display: 'grid', minHeight: 0, overflow: 'hidden',
           gridTemplateColumns: 'minmax(0, 1fr)',
           gridTemplateRows: 'minmax(0, 1fr)'
         }}
@@ -1497,7 +1565,7 @@ export function Story() {
           />
         ) : null}
         {!book && (
-        <section ref={scrollRef} style={{ overflow: 'auto', display: 'flex', flexDirection: 'column', position: 'relative' }}>
+        <section ref={scrollRef} style={{ overflow: 'auto', minHeight: 0, display: 'flex', flexDirection: 'column', position: 'relative' }}>
 
           <div
             className="page-plane"
@@ -1755,6 +1823,10 @@ export function Story() {
               });
             })()}
 
+            {(episode.illustrations ?? []).map((picture) => (
+              <ChapterFigure key={picture.id} picture={picture} />
+            ))}
+
             <StreamTail
               sinkRef={streamSink}
               active={streaming}
@@ -1780,7 +1852,7 @@ export function Story() {
 
       {(confirmAsk || error || notice) && (
         <div style={{
-          position: 'relative', zIndex: 3,
+          position: 'relative', zIndex: 3, flexShrink: 0,
           padding: narrow ? '10px 12px 0' : '12px 24px 0',
           display: 'flex', flexDirection: 'column', gap: 10
         }}>
@@ -1823,7 +1895,7 @@ export function Story() {
         <div
           className="compose-air"
           style={{
-            position: 'relative', zIndex: 2, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10,
+            position: 'relative', zIndex: 4, flexShrink: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10,
             padding: '8px 16px 12px'
           }}
         >
@@ -1841,14 +1913,22 @@ export function Story() {
         </div>
       ) : (
         <div className="compose-air" style={{
-          position: 'relative', zIndex: 2,
+          position: 'relative', zIndex: 4,
+          flexShrink: 0,
+          maxHeight: '45%',
+          minHeight: 0,
+          overflow: 'hidden',
           padding: narrow
             ? (readMode ? '10px 16px 12px' : '11px 12px 12px')
             : '12px 24px 16px',
           display: 'flex', flexDirection: 'column', gap: 10
         }}>
+          <div style={{
+            overflow: 'auto', minHeight: 0, flex: '1 1 auto',
+            display: 'flex', flexDirection: 'column', gap: 10
+          }}>
           {!hasAI && turns.length > 0 && (
-            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', maxWidth: '40rem', margin: '0 auto', width: '100%' }}>
               <p style={{ fontSize: 14, margin: 0, color: 'var(--paper)', flex: 1, minWidth: 180 }}>
                 Add a writing model in Settings to write.
               </p>
@@ -1858,12 +1938,44 @@ export function Story() {
               </button>
             </div>
           )}
-          <div style={{ maxWidth: '40rem', margin: '0 auto', width: '100%' }}>
+          <div style={{ maxWidth: '40rem', margin: '0 auto', width: '100%', display: 'flex', gap: 8 }}>
             <button className="btn-quiet" style={{ fontSize: 12, minHeight: 32, padding: '4px 6px' }}
               onClick={() => setOptionsOpen((o) => !o)}>
               {optionsOpen ? 'Hide options' : 'Options'}
             </button>
+            <button className="btn-quiet" style={{ fontSize: 12, minHeight: 32, padding: '4px 6px' }}
+              onClick={() => setPictureOpen((o) => !o)}>
+              {pictureOpen ? 'Hide picture' : 'Picture'}
+            </button>
           </div>
+          {pictureOpen && (
+            <div style={{ maxWidth: '40rem', margin: '0 auto', width: '100%', display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <textarea
+                value={picturePrompt}
+                onChange={(e) => setPicturePrompt(e.target.value)}
+                placeholder="Who is in the picture, and what are they doing?"
+                rows={2}
+                aria-label="Picture prompt"
+                disabled={pictureBusy}
+                style={{
+                  width: '100%', resize: 'vertical',
+                  fontFamily: 'var(--serif)', fontSize: 16, lineHeight: 1.5,
+                  padding: '8px 10px', border: '1px solid var(--rule)', borderRadius: 8,
+                  background: 'var(--page)', color: 'var(--page-ink)'
+                }}
+              />
+              {pictureBusy ? (
+                <button className="btn-quiet" style={{ alignSelf: 'flex-start', minHeight: 36 }}
+                  onClick={() => pictureAbortRef.current?.abort()}>Stop</button>
+              ) : (
+                <button className="btn-ghost" style={{ alignSelf: 'flex-start', fontSize: 12, padding: '7px 12px' }}
+                  disabled={!picturePrompt.trim()}
+                  onClick={() => { void makePicture(); }}>
+                  Generate
+                </button>
+              )}
+            </div>
+          )}
           {optionsOpen && (
           <div style={{ maxWidth: '40rem', margin: '0 auto', width: '100%', display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -1931,7 +2043,9 @@ export function Story() {
           </div>
           </div>
           )}
+          </div>
           <div style={{
+            flexShrink: 0,
             display: 'flex', gap: 13, alignItems: 'flex-end',
             maxWidth: '40rem', margin: '0 auto', width: '100%',
             padding: '4px 0'
@@ -1961,7 +2075,7 @@ export function Story() {
               <button
                 className="btn-primary"
                 style={{ alignSelf: 'flex-end', padding: '10px 19px', minHeight: 44 }}
-                disabled={writeBlocked || !input.trim()}
+                disabled={!input.trim()}
                 onClick={() => void write()}
               >
                 Send

@@ -11,6 +11,11 @@ describe('classifyError', () => {
     expect(err.userMessage).not.toMatch(/cloud sync/i);
   });
 
+  it('keeps a missing picture model instead of a generic model failure', () => {
+    const err = classifyError(new AIError('Set an image model in Settings before making a picture.'));
+    expect(err.userMessage).toBe('Set an image model in Settings before making a picture.');
+  });
+
   it('keeps portrait instructions instead of a generic model failure', () => {
     const err = classifyError(new AIError('Set an image model in Settings before generating a portrait.'));
     expect(err.userMessage).toBe('Set an image model in Settings before generating a portrait.');

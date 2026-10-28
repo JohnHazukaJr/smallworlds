@@ -23,6 +23,32 @@ const UNDER_EIGHTEEN = /\bunder\s*-?\s*18\b/i;
 const SEXUAL_VISUAL =
   /\b(nude|naked|nudity|topless|bottomless|nsfw|explicit|erotic|erotica|lingerie|genitals|genital|breasts|nipples|penis|vagina|orgasm|undressed|sex|sexual)\b/i;
 
+export const PORTRAIT_STYLE_KEY = 'sw-portrait-style';
+
+export function rememberedPortraitStyle(): PortraitStyle {
+  try {
+    return localStorage.getItem(PORTRAIT_STYLE_KEY) === 'comic' ? 'comic' : 'realistic';
+  } catch {
+    return 'realistic';
+  }
+}
+
+export function rememberPortraitStyle(style: PortraitStyle) {
+  try {
+    localStorage.setItem(PORTRAIT_STYLE_KEY, style);
+  } catch { /* private mode */ }
+}
+
+export function textLooksSexual(text: string): boolean {
+  return SEXUAL_VISUAL.test(text);
+}
+
+export function portraitStyleLine(style: PortraitStyle): string {
+  return style === 'comic'
+    ? 'Comic book illustration, ink linework and painted color, graphic novel, not a photograph'
+    : 'Photorealistic, natural light, real camera';
+}
+
 /** True when the age line describes someone under 18. A blank age is not a minor. */
 export function characterReadsAsMinor(age: string): boolean {
   const s = age.trim().toLowerCase();
@@ -53,7 +79,7 @@ export function buildCharacterPortraitPrompt(input: PortraitPromptInput): Portra
     };
   }
   const style = input.style === 'comic'
-    ? 'Comic book illustration, ink linework and painted color, graphic novel, not a photograph'
+    ? portraitStyleLine('comic')
     : 'Photorealistic portrait photograph, natural skin, real camera, shallow depth of field';
   const audience = minor || !input.mature
     ? 'Fully clothed, non-sexual, no nudity, no suggestive pose'

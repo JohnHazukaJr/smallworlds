@@ -2,7 +2,13 @@ import type { Character, Location, ProviderConfig, World } from '../types';
 import { characterPortraits } from '../worldOps';
 import { AIError, providerTagFor } from './client';
 import { configuredImageModel } from './models';
-import { buildCharacterPortraitPrompt, type PortraitStyle } from './portrait';
+import {
+  buildCharacterPortraitPrompt,
+  characterReadsAsMinor,
+  portraitStyleLine,
+  textLooksSexual,
+  type PortraitStyle
+} from './portrait';
 import { isZaiProvider, providerFetch } from './providerFetch';
 
 export interface SceneImageRef {
@@ -81,6 +87,150 @@ export function collectSceneImageRefs(opts: {
 
 export function sceneHasPortraitRefs(characters: Character[], castIds: string[]): boolean {
   return collectSceneImageRefs({ characters, castIds }).some((r) => r.kind === 'face');
+}
+
+function nameInPrompt(name: string, prompt: string): boolean {
+  const n = name.trim().toLowerCase();
+  if (n.length < 2) return false;
+  const hay = prompt.toLowerCase();
+  let from = 0;
+  while (from <= hay.length - n.length) {
+    const at = hay.indexOf(n, from);
+    if (at < 0) return false;
+    const before = at === 0 ? '' : hay[at - 1];
+    const after = hay[at + n.length] ?? '';
+    const edge = (ch: string) => ch === '' || !/[a-z0-9]/i.test(ch);
+    if (edge(before) && edge(after)) return true;
+    from = at + n.length;
+  }
+  return false;
+}
+
+function namesOverlap(a: string, b: string): boolean {
+  const x = a.trim().toLowerCase();
+  const y = b.trim().toLowerCase();
+  if (!x || !y) return false;
+  return x === y || x.includes(y) || y.includes(x);
+}
+
+/** People the picture is about: names in the prompt, otherwise everyone in the chapter. */
+export function chapterPictureSubjects(opts: {
+  characters: Character[];
+  castIds: string[];
+  prompt: string;
+}): Character[] {
+  const named = opts.characters
+    .filter((c) => nameInPrompt(c.name, opts.prompt))
+    .sort((a, b) => b.name.trim().length - a.name.trim().length);
+  const picked: Character[] = [];
+  for (const character of named) {
+    if (picked.some((have) => namesOverlap(have.name, character.name))) continue;
+    picked.push(character);
+  }
+  if (picked.length > 0) return picked;
+  const inScene = opts.characters.filter((c) => opts.castIds.includes(c.id) || c.isPlayer);
+  return [...inScene.filter((c) => c.isPlayer), ...inScene.filter((c) => !c.isPlayer)];
+}
+
+/** Main photos for the picture, at most three, in subject order. */
+export function chapterPictureFaces(opts: {
+  characters: Character[];
+  castIds: string[];
+  prompt: string;
+}): SceneImageRef[] {
+  const faces: SceneImageRef[] = [];
+  for (const character of chapterPictureSubjects(opts)) {
+    const face = characterPortraits(character)[0];
+    if (!face) continue;
+    faces.push({ name: character.name.trim() || 'someone', dataUrl: face, kind: 'face' });
+    if (faces.length >= FACE_REF_CAP) break;
+  }
+  return faces;
+}
+
+export function chapterPicturePrompt(opts: {
+  userPrompt: string;
+  refs: SceneImageRef[];
+  style: PortraitStyle;
+  contentNotes: string;
+  mature: boolean;
+  minor: boolean;
+}): string {
+  const identity = opts.refs
+    .map((ref, i) => `Image ${i + 1} is ${ref.name}. Keep their face, hair, and coloring from that photo.`)
+    .join(' ');
+  const audience = opts.minor || !opts.mature
+    ? 'Fully clothed, non-sexual, no nudity, no suggestive pose'
+    : '';
+  const bits = [
+    opts.userPrompt.trim(),
+    identity,
+    opts.refs.length > 0 ? 'People in frame must match the named reference photos. No extra invented faces.' : '',
+    opts.contentNotes.trim() ? `Boundaries: ${opts.contentNotes.trim()}` : '',
+    portraitStyleLine(opts.style),
+    audience,
+    'No text, no watermark'
+  ].filter((part) => part && String(part).trim());
+  return bits.join('. ').slice(0, 1600);
+}
+
+export type ChapterPicturePlan =
+  | { ok: false; error: string }
+  | { ok: true; prompt: string; refs: SceneImageRef[] };
+
+/**
+ * Decide the prompt and photo refs before any request.
+ * Photos are required when the people already have them; a text-only model must not drop them.
+ */
+export function prepareChapterPicture(opts: {
+  characters: Character[];
+  castIds: string[];
+  userPrompt: string;
+  style: PortraitStyle;
+  contentNotes: string;
+  mature: boolean;
+  provider: ProviderConfig | null;
+  model: string | null;
+}): ChapterPicturePlan {
+  const userPrompt = opts.userPrompt.trim();
+  if (!userPrompt) return { ok: false, error: 'Say what the picture should show.' };
+  if (!opts.provider || !opts.model) {
+    return { ok: false, error: 'Set an image model in Settings before making a picture.' };
+  }
+  const subjects = chapterPictureSubjects({
+    characters: opts.characters,
+    castIds: opts.castIds,
+    prompt: userPrompt
+  });
+  if (textLooksSexual(userPrompt) && subjects.some((c) => characterReadsAsMinor(c.age))) {
+    return {
+      ok: false,
+      error: 'A character in this picture reads as under 18. A sexual prompt can’t be sent.'
+    };
+  }
+  const refs = chapterPictureFaces({
+    characters: opts.characters,
+    castIds: opts.castIds,
+    prompt: userPrompt
+  });
+  if (refs.length > 0 && !imageModelAcceptsRefs(opts.provider, opts.model)) {
+    return {
+      ok: false,
+      error: 'This image model can’t use character photos. Choose an image model that accepts reference images.'
+    };
+  }
+  return {
+    ok: true,
+    refs,
+    prompt: chapterPicturePrompt({
+      userPrompt,
+      refs,
+      style: opts.style,
+      contentNotes: opts.contentNotes,
+      mature: opts.mature,
+      minor: subjects.some((c) => characterReadsAsMinor(c.age))
+    })
+  };
 }
 
 /**
@@ -178,6 +328,49 @@ export async function generateCharacterPortrait(opts: {
     sizes: portraitSizes(resolved.model)
   });
   return urlToJpegDataUrl(url, 720, 0.72);
+}
+
+function chapterPictureSizes(model: string): string[] {
+  return model.toLowerCase().includes('glm-image')
+    ? ['1024x1024', '864x1152']
+    : ['1024x1024', '1024x1536'];
+}
+
+/** A picture for the chapter. Uses main photos when the image model can take them. */
+export async function generateChapterPicture(opts: {
+  world: World;
+  characters: Character[];
+  castIds: string[];
+  userPrompt: string;
+  style: PortraitStyle;
+  signal?: AbortSignal;
+}): Promise<string> {
+  const resolved = configuredImageModel(opts.world);
+  const plan = prepareChapterPicture({
+    characters: opts.characters,
+    castIds: opts.castIds,
+    userPrompt: opts.userPrompt,
+    style: opts.style,
+    contentNotes: opts.world.ai.contentNotes ?? '',
+    mature: !!opts.world.ai.mature,
+    provider: resolved?.provider ?? null,
+    model: resolved?.model ?? null
+  });
+  if (!plan.ok) throw new AIError(plan.error);
+  if (!resolved) throw new AIError('Set an image model in Settings before making a picture.');
+  if (resolved.provider.kind !== 'openai') {
+    throw new AIError('Pictures need an OpenAI-compatible provider (OpenRouter or Z.ai).');
+  }
+  const refs = await prepareSceneImageRefs(plan.refs);
+  const url = await requestImage({
+    provider: resolved.provider,
+    model: resolved.model,
+    prompt: plan.prompt,
+    refs,
+    signal: opts.signal,
+    sizes: chapterPictureSizes(resolved.model)
+  });
+  return urlToJpegDataUrl(url, 1280, 0.8);
 }
 
 async function imageHttpError(res: Response, provider?: ProviderConfig): Promise<AIError> {

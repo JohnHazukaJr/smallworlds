@@ -111,6 +111,16 @@ function looksLikePortrait(msg: string): boolean {
   );
 }
 
+function looksLikeChapterPicture(msg: string): boolean {
+  const m = msg.toLowerCase();
+  return (
+    m.includes('making a picture') ||
+    m.includes('character photos') ||
+    m.includes('in this picture') ||
+    m.includes('pictures need')
+  );
+}
+
 function looksLikeMissingModel(msg: string): boolean {
   return /no (writing|utility|image) model configured/i.test(msg);
 }
@@ -313,7 +323,7 @@ export function classifyError(e: unknown): AppError {
     });
   }
 
-  if (looksLikePortrait(msg)) {
+  if (looksLikePortrait(msg) || looksLikeChapterPicture(msg)) {
     return new AppError({
       code: 'provider',
       userMessage: msg.trim(),
