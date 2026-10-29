@@ -558,6 +558,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 <ModelPicker
                   value={world.imageModel ?? null}
                   onChange={(m) => patchWorld({ imageModel: m })}
+                  kind="image"
                 />
                 {world.imageModel && (
                   <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}

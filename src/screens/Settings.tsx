@@ -2,7 +2,8 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useId, useRef, useState } from 'react';
 import { testConnection } from '../ai/client';
 import {
-  BYOK_PRESETS, hostedBaseUrl, isHostedProvider, listModels, presetFor, VENICE_ADULT_EDIT_MODEL, type ProviderPreset
+  BYOK_PRESETS, hostedBaseUrl, isHostedProvider, listModels, presetFor, suggestedModelsFor, VENICE_ADULT_EDIT_MODEL,
+  type ModelCatalogKind, type ProviderPreset
 } from '../ai/providers';
 import { COST_BEAT, COST_IMAGE, COST_UTILITY, HOSTED_IMAGE_MODEL, HOSTED_PROSE_MODEL, HOSTED_UTILITY_MODEL } from '../billing/plans';
 import { PassphraseDialog } from '../components/PassphraseDialog';
@@ -95,9 +96,9 @@ export function Settings() {
           <div className="craft-row" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>Image model</div>
             <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
-              Character portraits. Recommended: glm-image. A prose model is not used for pictures.
+              Character portraits. Recommended: glm-image on Z.ai, or an OpenRouter image model. A prose model is not used for pictures.
             </div>
-            <ModelPicker value={s.imageModel ?? null} onChange={s.setImageModel} />
+            <ModelPicker value={s.imageModel ?? null} onChange={s.setImageModel} kind="image" />
           </div>
         </div>
         <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)', marginTop: 10 }}>
@@ -587,7 +588,13 @@ function ProviderCard({ config }: { config: ProviderConfig }) {
 
 // ---------- model picker ----------
 
-export function ModelPicker({ value, onChange }: { value: ModelRef | null; onChange: (m: ModelRef | null) => void }) {
+export function ModelPicker({
+  value, onChange, kind = 'text'
+}: {
+  value: ModelRef | null;
+  onChange: (m: ModelRef | null) => void;
+  kind?: ModelCatalogKind;
+}) {
   const providers = useSettings((st) => st.providers);
   const [catalog, setCatalog] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -596,7 +603,7 @@ export function ModelPicker({ value, onChange }: { value: ModelRef | null; onCha
 
   const provider = providers.find((p) => p.id === value?.providerId) ?? providers[0];
   const preset = provider ? presetFor(provider) : undefined;
-  const suggestions = [...new Set([...(preset?.suggestedModels ?? []), ...catalog])];
+  const suggestions = [...new Set([...suggestedModelsFor(preset, kind), ...catalog])];
 
   if (providers.length === 0) {
     return <div style={{ fontSize: 12.5, color: 'var(--ink-muted)' }}>Add a provider above first.</div>;
@@ -610,7 +617,8 @@ export function ModelPicker({ value, onChange }: { value: ModelRef | null; onCha
           const p = providers.find((x) => x.id === e.target.value);
           if (p) {
             const ps = presetFor(p);
-            onChange({ providerId: p.id, model: value?.providerId === p.id ? value.model : (ps?.suggestedModels[0] ?? '') });
+            const next = suggestedModelsFor(ps, kind)[0] ?? '';
+            onChange({ providerId: p.id, model: value?.providerId === p.id ? value.model : next });
             setCatalog([]);
             setListError('');
           }
@@ -634,7 +642,7 @@ export function ModelPicker({ value, onChange }: { value: ModelRef | null; onCha
             setLoading(true);
             setListError('');
             try {
-              const { models, error } = await listModels(provider);
+              const { models, error } = await listModels(provider, kind);
               setCatalog(models);
               if (error) setListError(error);
               else if (models.length === 0) setListError('Provider returned no models.');
@@ -796,6 +804,7 @@ function WorldSettings({ world }: { world: World }) {
             <ModelPicker
               value={world.imageModel ?? null}
               onChange={(m) => patchWorld({ imageModel: m })}
+              kind="image"
             />
             {world.imageModel && (
               <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
