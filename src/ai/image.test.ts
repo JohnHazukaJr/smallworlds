@@ -1,11 +1,18 @@
-import { describe, expect, it } from 'vitest';
+import '../test/storagePolyfill';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useSettings } from '../store/settings';
 import {
   ADULT_PORTRAIT_ERROR,
   chapterPictureFaces,
   chapterPictureSubjects,
   clearAdultAge,
   collectSceneImageRefs,
+  generateCharacterPortrait,
+  imageGenerationsBodies,
+  imageGenerationsUrls,
   imageModelAcceptsRefs,
+  imageModelUsesChatFallback,
+  imageSizeCandidates,
   planAdultFaceEdit,
   prepareChapterPicture,
   sceneImagePrompt,
@@ -245,5 +252,143 @@ describe('scene image refs', () => {
     ]);
     expect(prompt).toMatch(/Image 1 is Ada/);
     expect(prompt).not.toMatch(/no people/);
+  });
+});
+
+describe('image request adapter', () => {
+  it('sends a minimal generations body without DALL-E-only fields', () => {
+    const bodies = imageGenerationsBodies({
+      model: 'black-forest-labs/flux.2-pro',
+      prompt: 'Portrait of Ada'
+    });
+    expect(bodies[0]).toEqual({
+      model: 'black-forest-labs/flux.2-pro',
+      prompt: 'Portrait of Ada'
+    });
+    expect(bodies[0]).not.toHaveProperty('quality');
+    expect(bodies[0]).not.toHaveProperty('response_format');
+    expect(bodies[0]).not.toHaveProperty('n');
+  });
+
+  it('adds conservative sizes after the unsized body, not CogView-only 864x1152', () => {
+    expect(imageSizeCandidates('portrait')).toEqual(['1024x1024', '1024x1536']);
+    expect(imageSizeCandidates('portrait').join(' ')).not.toMatch(/864x1152/);
+    const bodies = imageGenerationsBodies({
+      model: 'any-image-model',
+      prompt: 'Portrait of Ada',
+      sizes: imageSizeCandidates('portrait')
+    });
+    expect(bodies.map((b) => b.size)).toEqual([undefined, '1024x1024', '1024x1536']);
+  });
+
+  it('uses OpenRouter /images then /images/generations', () => {
+    expect(imageGenerationsUrls(or.baseUrl)).toEqual([
+      'https://openrouter.ai/api/v1/images',
+      'https://openrouter.ai/api/v1/images/generations'
+    ]);
+    expect(imageGenerationsUrls(zai.baseUrl)).toEqual([
+      'https://api.z.ai/api/paas/v4/images/generations'
+    ]);
+  });
+
+  it('skips chat fallback for generation-only models, including glm-image as one of them', () => {
+    expect(imageModelUsesChatFallback('black-forest-labs/flux.2-pro')).toBe(false);
+    expect(imageModelUsesChatFallback('glm-image')).toBe(false);
+    expect(imageModelUsesChatFallback('z-ai/glm-image')).toBe(false);
+    expect(imageModelUsesChatFallback('small-worlds/image')).toBe(false);
+    expect(imageModelUsesChatFallback('google/gemini-2.5-flash-image')).toBe(true);
+    expect(imageModelUsesChatFallback('openai/gpt-5-image')).toBe(true);
+  });
+
+  it('attaches refs on every body when the caller passed them', () => {
+    const bodies = imageGenerationsBodies({
+      model: 'openai/gpt-5-image',
+      prompt: 'Keep the face.',
+      refs: [{ name: 'Ada', dataUrl: 'data:image/jpeg;base64,x', kind: 'face' }],
+      sizes: ['1024x1024']
+    });
+    expect(bodies[0]).toMatchObject({
+      image: 'data:image/jpeg;base64,x',
+      images: ['data:image/jpeg;base64,x']
+    });
+    expect(bodies[1].size).toBe('1024x1024');
+    expect(bodies[1].images).toEqual(['data:image/jpeg;base64,x']);
+  });
+});
+
+describe('generateCharacterPortrait request', () => {
+  const calls: { url: string; body: Record<string, unknown> }[] = [];
+
+  beforeEach(() => {
+    calls.length = 0;
+    localStorage.removeItem('small-worlds-settings');
+    useSettings.setState({
+      providers: [or],
+      proseModel: null,
+      utilityModel: null,
+      imageModel: { providerId: or.id, model: 'black-forest-labs/flux.2-pro' },
+      matureImageModel: null,
+      matureDefault: true,
+      defaultVisibility: 'private',
+      vaultPersistError: ''
+    });
+    vi.stubGlobal('Image', class {
+      width = 8;
+      height = 8;
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      set src(_v: string) {
+        queueMicrotask(() => this.onload?.());
+      }
+    });
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => {
+        if (tag !== 'canvas') throw new Error(`unexpected element ${tag}`);
+        return {
+          width: 0,
+          height: 0,
+          getContext: () => ({ drawImage() { /* jpeg encode stub */ } }),
+          toDataURL: () => 'data:image/jpeg;base64,stub'
+        };
+      }
+    });
+    vi.stubGlobal('fetch', async (url: string | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      calls.push({ url: String(url), body });
+      return new Response(JSON.stringify({
+        data: [{ b64_json: 'AAAA', media_type: 'image/png' }]
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    localStorage.removeItem('small-worlds-settings');
+    useSettings.setState({
+      providers: [],
+      proseModel: null,
+      utilityModel: null,
+      imageModel: null,
+      matureImageModel: null,
+      matureDefault: true,
+      defaultVisibility: 'private',
+      vaultPersistError: ''
+    });
+  });
+
+  it('posts a minimal body to OpenRouter /images for whichever image model is selected', async () => {
+    const url = await generateCharacterPortrait({
+      world: world(),
+      character: { ...char('a', 'Ada', false), appearance: 'grey coat, dark hair' },
+      style: 'realistic'
+    });
+    expect(url).toBe('data:image/jpeg;base64,stub');
+    expect(calls[0]?.url).toBe('https://openrouter.ai/api/v1/images');
+    expect(calls[0]?.body).toEqual({
+      model: 'black-forest-labs/flux.2-pro',
+      prompt: expect.stringMatching(/Portrait of Ada/)
+    });
+    expect(calls[0]?.body).not.toHaveProperty('quality');
+    expect(calls[0]?.body).not.toHaveProperty('response_format');
   });
 });

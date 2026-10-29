@@ -10,7 +10,7 @@ import {
   type PortraitStyle
 } from './portrait';
 import { isZaiProvider, providerFetch } from './providerFetch';
-import { VENICE_ADULT_EDIT_MODEL } from './providers';
+import { isOpenRouterHost, VENICE_ADULT_EDIT_MODEL } from './providers';
 
 export interface SceneImageRef {
   name: string;
@@ -245,10 +245,51 @@ export function imageModelAcceptsRefs(provider: ProviderConfig, model: string): 
   return true;
 }
 
-function zaiLandscapeSize(model: string): string {
+export type ImageSizeKind = 'portrait' | 'landscape' | 'square';
+
+/** Conservative sizes most image APIs accept. Unsized `{ model, prompt }` is tried first. */
+export function imageSizeCandidates(kind: ImageSizeKind = 'square'): string[] {
+  if (kind === 'portrait') return ['1024x1024', '1024x1536'];
+  if (kind === 'landscape') return ['1024x1024', '1792x1024'];
+  return ['1024x1024'];
+}
+
+/** OpenRouter’s Image API is `/images`; OpenAI-compatible hosts use `/images/generations`. */
+export function imageGenerationsUrls(baseUrl: string): string[] {
+  const base = baseUrl.replace(/\/$/, '');
+  const generations = `${base}/images/generations`;
+  if (isOpenRouterHost(baseUrl)) return [`${base}/images`, generations];
+  return [generations];
+}
+
+/** Minimal body first. Extra fields (`quality`, `response_format`) are what get 400s. */
+export function imageGenerationsBodies(opts: {
+  model: string;
+  prompt: string;
+  refs?: SceneImageRef[];
+  sizes?: string[];
+}): Record<string, unknown>[] {
+  const base: Record<string, unknown> = { model: opts.model, prompt: opts.prompt };
+  const refs = opts.refs ?? [];
+  if (refs.length > 0) {
+    const urls = refs.map((r) => r.dataUrl);
+    base.image = urls[0];
+    base.images = urls;
+  }
+  const bodies: Record<string, unknown>[] = [{ ...base }];
+  for (const size of opts.sizes ?? []) {
+    if (!size) continue;
+    bodies.push({ ...base, size });
+  }
+  return bodies;
+}
+
+/** Chat + `modalities: image` — Gemini/GPT image models, not Flux-style generators. */
+export function imageModelUsesChatFallback(model: string): boolean {
   const m = model.toLowerCase();
-  if (m.includes('glm-image')) return '1728x960';
-  return '1792x1024';
+  if (m.includes('gemini') && m.includes('image')) return true;
+  if (m.includes('gpt-image') || (m.includes('gpt') && m.includes('image'))) return true;
+  return false;
 }
 
 /**
@@ -289,11 +330,6 @@ export async function generateSceneImage(opts: {
   return { dataUrl, warning };
 }
 
-function portraitSizes(model: string): string[] {
-  return model.toLowerCase().includes('glm-image')
-    ? ['864x1152', '1024x1024']
-    : ['1024x1536', '1024x1024'];
-}
 
 /** Generate a portrait from the character sheet and return a gallery-sized JPEG data URL. */
 export async function generateCharacterPortrait(opts: {
@@ -326,7 +362,7 @@ export async function generateCharacterPortrait(opts: {
     prompt: built.prompt,
     refs: [],
     signal: opts.signal,
-    sizes: portraitSizes(resolved.model)
+    sizes: imageSizeCandidates('portrait')
   });
   return urlToJpegDataUrl(url, 720, 0.72);
 }
@@ -424,12 +460,6 @@ function isVeniceProvider(provider: ProviderConfig): boolean {
   }
 }
 
-function chapterPictureSizes(model: string): string[] {
-  return model.toLowerCase().includes('glm-image')
-    ? ['1024x1024', '864x1152']
-    : ['1024x1024', '1024x1536'];
-}
-
 /** A picture for the chapter. Uses main photos when the image model can take them. */
 export async function generateChapterPicture(opts: {
   world: World;
@@ -503,7 +533,7 @@ export async function generateChapterPicture(opts: {
     prompt: plan.prompt,
     refs,
     signal: opts.signal,
-    sizes: chapterPictureSizes(resolved.model)
+    sizes: imageSizeCandidates('square')
   });
   return urlToJpegDataUrl(url, 1280, 0.8);
 }
@@ -569,52 +599,60 @@ async function requestImage(opts: {
   sizes?: string[];
 }): Promise<string> {
   const headers = imageHeaders(opts.provider);
-  const base = opts.provider.baseUrl.replace(/\/$/, '');
-  const imagesUrl = `${base}/images/generations`;
-  const sizes = opts.sizes?.length ? opts.sizes : [zaiLandscapeSize(opts.model)];
-
-  const generationsBodies: Record<string, unknown>[] = sizes.map((size) => ({
+  const urls = imageGenerationsUrls(opts.provider.baseUrl);
+  const sizes = opts.sizes?.length ? opts.sizes : imageSizeCandidates('square');
+  const bodies = imageGenerationsBodies({
     model: opts.model,
     prompt: opts.prompt,
-    n: 1,
-    size,
-    quality: 'hd',
-    response_format: 'b64_json'
-  }));
-  if (opts.refs.length > 0) {
-    const urls = opts.refs.map((r) => r.dataUrl);
-    generationsBodies.unshift({
-      model: opts.model,
-      prompt: opts.prompt,
-      n: 1,
-      size: sizes[0],
-      image: urls[0],
-      images: urls,
-      response_format: 'b64_json'
-    });
-  }
+    refs: opts.refs,
+    sizes
+  });
 
-  for (const body of generationsBodies) {
-    if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-    try {
-      const res = await providerFetch(imagesUrl, {
-        method: 'POST',
-        headers,
-        signal: opts.signal,
-        body: JSON.stringify(body)
-      });
-      if (res.status === 401 || res.status === 402) throw await imageHttpError(res, opts.provider);
-      if (res.ok) {
-        const parsed = await readImagePayload(res);
-        if (parsed) return parsed;
+  let lastError: AIError | null = null;
+  for (const imagesUrl of urls) {
+    for (const body of bodies) {
+      if (opts.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      try {
+        const res = await providerFetch(imagesUrl, {
+          method: 'POST',
+          headers,
+          signal: opts.signal,
+          body: JSON.stringify(body)
+        });
+        if (res.status === 401 || res.status === 402 || res.status === 429) {
+          throw await imageHttpError(res, opts.provider);
+        }
+        if (res.ok) {
+          const parsed = await readImagePayload(res);
+          if (parsed) return parsed;
+          lastError = new AIError('The model did not return an image. Pick an image-capable model or upload one.');
+          continue;
+        }
+        lastError = await imageHttpError(res, opts.provider);
+      } catch (e) {
+        if (e instanceof AIError && (e.status === 401 || e.status === 402 || e.status === 429)) throw e;
+        if (isAbortError(e)) throw e;
+        lastError = e instanceof AIError
+          ? e
+          : new AIError(e instanceof Error ? e.message : 'Image request failed.');
       }
-    } catch (e) {
-      if (e instanceof AIError && (e.status === 401 || e.status === 402)) throw e;
-      if (isAbortError(e)) throw e;
     }
   }
 
-  return requestImageViaChat(opts);
+  if (imageModelUsesChatFallback(opts.model)) {
+    try {
+      return await requestImageViaChat(opts);
+    } catch (e) {
+      if (isAbortError(e)) throw e;
+      if (e instanceof AIError && (e.status === 401 || e.status === 402 || e.status === 429)) throw e;
+      lastError = e instanceof AIError
+        ? e
+        : new AIError(e instanceof Error ? e.message : 'Image request failed.');
+    }
+  }
+
+  if (lastError) throw lastError;
+  throw new AIError('The model did not return an image. Pick an image-capable model or upload one.');
 }
 
 async function requestImageViaChat(opts: {
@@ -639,23 +677,28 @@ async function requestImageViaChat(opts: {
     body: JSON.stringify({
       model: opts.model,
       messages: [
-        { role: 'system', content: 'You generate a single atmospheric scene image. Return only the image.' },
+        { role: 'system', content: 'You generate a single image. Return only the image.' },
         { role: 'user', content: userContent }
       ],
       modalities: ['image', 'text'],
-      max_tokens: 1024
+      max_tokens: 4096
     })
   });
   if (!res.ok) {
-    if (res.status === 401 || res.status === 402) throw await imageHttpError(res, opts.provider);
+    if (res.status === 401 || res.status === 402 || res.status === 429) {
+      throw await imageHttpError(res, opts.provider);
+    }
     let detail = '';
     try {
       const body = await res.json();
       detail = body?.error?.message ?? body?.message ?? '';
     } catch { /* ignore */ }
     throw new AIError(
-      `Image generation failed (${res.status}). Try glm-image on Z.ai or an image-capable model on OpenRouter, or upload a scene image instead.${detail ? ` ${detail}` : ''}`,
-      res.status
+      detail
+        ? `Image generation failed (${res.status}). ${detail}`
+        : `Image generation failed (${res.status}). Pick an image-capable model in Settings, or upload a photo instead.`,
+      res.status,
+      providerTagFor(opts.provider)
     );
   }
   const data = await res.json();
@@ -682,7 +725,7 @@ async function requestImageViaChat(opts: {
 function imageHeaders(provider: ProviderConfig): Record<string, string> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (provider.apiKey) headers.Authorization = `Bearer ${provider.apiKey}`;
-  if (provider.baseUrl.includes('openrouter.ai')) {
+  if (isOpenRouterHost(provider.baseUrl)) {
     headers['HTTP-Referer'] = 'https://smallworlds.local';
     headers['X-Title'] = 'Small Worlds AI';
   }
@@ -694,9 +737,11 @@ function imageHeaders(provider: ProviderConfig): Record<string, string> {
 
 async function readImagePayload(res: Response): Promise<string | null> {
   const data = await res.json();
-  const b64 = data?.data?.[0]?.b64_json as string | undefined;
-  const url = data?.data?.[0]?.url as string | undefined;
-  if (b64) return `data:image/png;base64,${b64}`;
+  const item = data?.data?.[0] as { b64_json?: string; url?: string; media_type?: string } | undefined;
+  const b64 = item?.b64_json;
+  const url = item?.url;
+  const media = item?.media_type?.startsWith('image/') ? item.media_type : 'image/png';
+  if (b64) return `data:${media};base64,${b64}`;
   if (url) return url;
   return null;
 }

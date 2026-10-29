@@ -100,6 +100,19 @@ describe('classifyError', () => {
     expect(err.userMessage).not.toMatch(/Small Worlds hosted/);
   });
 
+  it('keeps image provider detail on HTTP 400 instead of a generic Settings line', () => {
+    const size = classifyError(new AIError('Invalid size: 864x1152 is not supported', 400));
+    expect(size.userMessage).toMatch(/Invalid size: 864x1152/);
+    expect(size.userMessage).not.toBe('The model provider rejected the request. Check model and Settings.');
+
+    const image = classifyError(new AIError(
+      'Image generation failed (400). Unknown parameter quality.',
+      400
+    ));
+    expect(image.userMessage).toBe('Image generation failed (400). Unknown parameter quality.');
+    expect(image.userMessage).not.toBe('The model provider rejected the request. Check model and Settings.');
+  });
+
   it('keeps write-loop AIError copy instead of generic Settings', () => {
     const spoken = classifyError(new AIError(
       'No character replied aloud. Try again, or add someone to this chapter.'

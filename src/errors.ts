@@ -102,6 +102,16 @@ function looksLikeVault(msg: string): boolean {
   return m.includes('vault') || m.includes('passphrase') || m.includes('decrypt');
 }
 
+function looksLikeImageRequest(msg: string): boolean {
+  const m = msg.toLowerCase();
+  return (
+    m.includes('image request failed') ||
+    m.includes('image generation failed') ||
+    m.includes('did not return an image') ||
+    m.includes('image-capable model')
+  );
+}
+
 function looksLikePortrait(msg: string): boolean {
   const m = msg.toLowerCase();
   return (
@@ -269,9 +279,20 @@ export function classifyError(e: unknown): AppError {
   }
 
   if (status != null && status >= 400) {
+    if (looksLikePortrait(msg) || looksLikeChapterPicture(msg) || looksLikeImageRequest(msg)) {
+      return new AppError({
+        code: 'provider',
+        userMessage: msg.trim(),
+        detail: msg,
+        status,
+        cause: e
+      });
+    }
+    const extra = msg.trim();
+    const generic = 'The model provider rejected the request. Check model and Settings.';
     return new AppError({
       code: 'provider',
-      userMessage: 'The model provider rejected the request. Check model and Settings.',
+      userMessage: extra && extra !== generic ? `${generic} ${extra}` : generic,
       detail: msg,
       status,
       cause: e
