@@ -103,7 +103,8 @@ export async function importDevice(data: DeviceExport, opts?: { mergeWorlds?: bo
     imageModel: data.settings.imageModel ?? null,
     matureImageModel: data.settings.matureImageModel ?? null,
     matureDefault: data.settings.matureDefault,
-    defaultVisibility: data.settings.defaultVisibility
+    defaultVisibility: data.settings.defaultVisibility,
+    contextWindowTokens: data.settings.contextWindowTokens ?? null
   });
 
   if (data.vault) {

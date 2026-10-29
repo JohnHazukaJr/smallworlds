@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   matchPlotTargets, mergeStateField, mergeLiveRelationshipPatch, normalizeBeats, capSceneLedger, capSoftWrapExtract,
   dedupeSoftWrapExtract, directorFallbackNarrationBrief, chapterNarrationBrief, softWrapAlreadyFiled, SCENE_LEDGER_CAP,
-  endStoryWrite, isBlankWorldBrief, isEmptyRosterProposal, pendingBeatsToKeep, tryBeginStoryWrite
+  endStoryWrite, isBlankWorldBrief, isEmptyRosterProposal,   pendingBeatsToKeep, tryBeginStoryWrite, nextSceneCast, rememberedExtract
 } from './engine';
 import {
   episodeContextPressure,
@@ -332,18 +332,14 @@ describe('packTurnsDetailed / pressure', () => {
       charBudget: HISTORY_TAIL_CHAR_BUDGET,
       maxTurns: HISTORY_TAIL_MAX_TURNS
     });
-    expect(chooseHistoryTail('some-local-chat', 'speak')).toEqual({
-      charBudget: SPEAK_HISTORY_TAIL_CHAR_BUDGET,
-      maxTurns: SPEAK_HISTORY_TAIL_MAX_TURNS
-    });
+    expect(chooseHistoryTail('some-local-chat', 'speak')).toEqual(
+      chooseHistoryTail('some-local-chat', 'narrator')
+    );
     expect(chooseHistoryTail('claude-haiku-4-5', 'narrator')).toEqual({
       charBudget: 32_000,
       maxTurns: 32
     });
-    expect(chooseHistoryTail('gpt-4o', 'speak').maxTurns).toBe(12);
-    expect(chooseHistoryTail('gpt-4o', 'speak').charBudget).toBeLessThan(
-      chooseHistoryTail('gpt-4o', 'narrator').charBudget
-    );
+    expect(chooseHistoryTail('gpt-4o', 'speak')).toEqual(chooseHistoryTail('gpt-4o', 'narrator'));
     expect(chooseHistoryTail('my-model-64k', 'narrator')).toEqual({
       charBudget: 24_000,
       maxTurns: 24
@@ -360,6 +356,7 @@ describe('packTurnsDetailed / pressure', () => {
     expect(large.length).toBe(turns.length - 32);
     expect(large.length).toBeLessThan(small.length);
     expect(small.at(-1)?.id).not.toBe(turns.at(-1)?.id);
+    expect(omittedTurnsForNarratorTail(turns, 'some-local-chat', 200_000).length).toBe(large.length);
   });
 
   it('caps speak history tighter than narrator', () => {
@@ -682,6 +679,57 @@ describe('pendingBeatsToKeep', () => {
 
   it('clears when nothing remains', () => {
     expect(pendingBeatsToKeep([])).toEqual([]);
+  });
+});
+
+describe('nextSceneCast', () => {
+  const cast = [npc('c1', 'Ada'), npc('c2', 'Ben')];
+
+  it('brings an off-stage character in and introduces one walk-on', () => {
+    let n = 0;
+    const scene = nextSceneCast({
+      castIds: ['c1'],
+      guests: [],
+      characters: cast,
+      delta: {
+        enter: ['Ben'],
+        introduce: [{ name: 'Clerk', brief: 'tired', voice: 'dry' }]
+      },
+      newId: () => `g${++n}`
+    });
+    expect(scene.castIds).toEqual(['c1', 'c2']);
+    expect(scene.enterIds).toEqual(['c2']);
+    expect(scene.guests.map((g) => g.name)).toEqual(['Clerk']);
+    expect(scene.introduceNameToId.get('clerk')).toBe('g1');
+    expect(scene.activeGuestIds).toEqual(['g1']);
+    expect(scene.changed).toBe(true);
+  });
+
+  it('takes a guest off the floor without deleting them', () => {
+    const scene = nextSceneCast({
+      castIds: ['c1'],
+      guests: [{ id: 'g1', name: 'Clerk', brief: 'tired' }],
+      characters: cast,
+      delta: { leave: ['Clerk'] },
+      newId: () => 'unused'
+    });
+    expect(scene.guests).toHaveLength(1);
+    expect(scene.activeGuestIds).toEqual([]);
+  });
+});
+
+describe('rememberedExtract', () => {
+  it('keeps the room air of a moment and drops durable canon', () => {
+    const extract = rememberedExtract({
+      facts: ['Ada took the key'],
+      threads: ['Who paid Ivo?'],
+      knowledge: [{ name: 'Ada', nowKnows: 'the debt' }],
+      place: { name: 'Harbour office', currentState: 'The lamp is broken', atmosphere: 'wet wool' }
+    }, false);
+    expect(extract.facts).toEqual([]);
+    expect(extract.threads).toEqual([]);
+    expect(extract.knowledge).toEqual([]);
+    expect(extract.place).toEqual({ name: 'Harbour office', atmosphere: 'wet wool' });
   });
 });
 

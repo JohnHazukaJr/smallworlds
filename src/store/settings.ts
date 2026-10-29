@@ -36,6 +36,7 @@ interface SettingsStore extends AppSettings {
   setMatureImageModel: (m: ModelRef | null) => void;
   setMatureDefault: (v: boolean) => void;
   setDefaultVisibility: (v: AppSettings['defaultVisibility']) => void;
+  setContextWindowTokens: (n: number | null) => void;
   /** Replace settings from a device restore (does not touch vault ciphertext). */
   hydrateFromBackup: (s: AppSettings) => void;
 }
@@ -50,6 +51,7 @@ export const useSettings = create<SettingsStore>()(
       matureImageModel: null,
       matureDefault: true,
       defaultVisibility: 'private',
+      contextWindowTokens: null,
       vaultPersistError: '',
       clearVaultPersistError: () => set({ vaultPersistError: '' }),
       addProvider: (p) => {
@@ -99,6 +101,9 @@ export const useSettings = create<SettingsStore>()(
       setMatureImageModel: (matureImageModel) => set({ matureImageModel }),
       setMatureDefault: (matureDefault) => set({ matureDefault }),
       setDefaultVisibility: (defaultVisibility) => set({ defaultVisibility }),
+      setContextWindowTokens: (n) => set({
+        contextWindowTokens: n != null && n >= 2048 && n <= 2_000_000 ? Math.round(n) : null
+      }),
       hydrateFromBackup: (s) => set({
         providers: s.providers,
         proseModel: s.proseModel,
@@ -106,7 +111,8 @@ export const useSettings = create<SettingsStore>()(
         imageModel: s.imageModel ?? null,
         matureImageModel: s.matureImageModel ?? null,
         matureDefault: s.matureDefault,
-        defaultVisibility: s.defaultVisibility
+        defaultVisibility: s.defaultVisibility,
+        contextWindowTokens: s.contextWindowTokens ?? null
       })
     }),
     {
@@ -120,7 +126,8 @@ export const useSettings = create<SettingsStore>()(
         imageModel: s.imageModel,
         matureImageModel: s.matureImageModel ?? null,
         matureDefault: s.matureDefault,
-        defaultVisibility: s.defaultVisibility
+        defaultVisibility: s.defaultVisibility,
+        contextWindowTokens: s.contextWindowTokens ?? null
         // vaultPersistError is session-only — not persisted
       })
     }
@@ -145,6 +152,7 @@ export function settingsSnapshot(): AppSettings {
     imageModel: s.imageModel ?? null,
     matureImageModel: s.matureImageModel ?? null,
     matureDefault: s.matureDefault,
-    defaultVisibility: s.defaultVisibility
+    defaultVisibility: s.defaultVisibility,
+    contextWindowTokens: s.contextWindowTokens ?? null
   };
 }

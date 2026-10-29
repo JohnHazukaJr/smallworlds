@@ -5,6 +5,8 @@ import {
   buildNarrationBeatMessages,
   buildNarratorSystemPrompt,
   compressOmittedTurns,
+  turnsSinceCharMark,
+  selectFactsPinnedFirst,
   directorSystemPrompt,
   DIRECTOR_FACT_CAP,
   DIRECTOR_THREAD_CAP,
@@ -120,8 +122,56 @@ describe('textMatchScore', () => {
   });
 });
 
+describe('lorebook recall', () => {
+  it('pulls a related fact that does not share words with this beat', () => {
+    const facts: ContinuityFact[] = [
+      {
+        id: 'a', worldId: 'w', seasonId: 's', text: 'The brass key opens the harbour office',
+        source: 'manual', createdAt: 1
+      },
+      {
+        id: 'b', worldId: 'w', seasonId: 's', text: 'The harbour office ledger names Ivo',
+        source: 'manual', createdAt: 2
+      },
+      {
+        id: 'c', worldId: 'w', seasonId: 's', text: 'Rain on the chapel glass',
+        source: 'manual', createdAt: 3
+      }
+    ];
+    const picked = selectFactsPinnedFirst(facts, [], 2, 'Where is the brass key?');
+    expect(picked.map((f) => f.id)).toEqual(['a', 'b']);
+  });
+
+  it('matches a filed key when the beat uses another word for the same thing', () => {
+    const facts: ContinuityFact[] = [
+      {
+        id: 'a', worldId: 'w', seasonId: 's', text: 'A debt sits under a false hand',
+        keys: ['harbor'], source: 'manual', createdAt: 1
+      },
+      {
+        id: 'b', worldId: 'w', seasonId: 's', text: 'Rain on the chapel glass',
+        source: 'manual', createdAt: 2
+      }
+    ];
+    const picked = selectFactsPinnedFirst(facts, [], 1, 'We walk the harbour road');
+    expect(picked.map((f) => f.id)).toEqual(['a']);
+  });
+});
+
+describe('turnsSinceCharMark', () => {
+  it('returns only the turns after the watermark', () => {
+    const turns = [
+      { text: 'aaaa' },
+      { text: 'bbbb' },
+      { text: 'cccc' }
+    ];
+    expect(turnsSinceCharMark(turns, 4).map((t) => t.text)).toEqual(['bbbb', 'cccc']);
+    expect(turnsSinceCharMark(turns, 0)).toHaveLength(3);
+  });
+});
+
 describe('compressOmittedTurns', () => {
-  it('keeps head, mid, and tail when digest is long', () => {
+  it('keeps the whole omitted chapter when it fits', () => {
     const turns: Turn[] = Array.from({ length: 30 }, (_, i) => ({
       id: `t${i}`,
       episodeId: 'e',
@@ -133,10 +183,26 @@ describe('compressOmittedTurns', () => {
     }));
     const digest = compressOmittedTurns(turns, []);
     expect(digest).toContain('MARKER_0_');
+    expect(digest).toContain('MARKER_15_');
     expect(digest).toContain('MARKER_29_');
-    expect(digest.split('…').length).toBeGreaterThanOrEqual(3);
-    // Mid slice should survive (not only head/tail).
-    expect(/MARKER_1[0-9]_/.test(digest)).toBe(true);
+    expect(digest).not.toContain('…');
+  });
+
+  it('samples the middle when the omitted chapter is long', () => {
+    const turns: Turn[] = Array.from({ length: 24 }, (_, i) => ({
+      id: `t${i}`,
+      episodeId: 'e',
+      worldId: 'w',
+      role: 'narrator' as const,
+      mode: null,
+      text: `MARKER_${i}_` + 'x'.repeat(800),
+      createdAt: i
+    }));
+    const digest = compressOmittedTurns(turns, []);
+    expect(digest).toContain('MARKER_0_');
+    expect(digest).toContain('MARKER_23_');
+    expect(digest).toMatch(/MARKER_1[0-5]_/);
+    expect(digest.split('…').length).toBeGreaterThanOrEqual(4);
   });
 });
 
@@ -179,6 +245,19 @@ describe('speak agent context frame', () => {
       .join('\n');
     expect(joined).toMatch(/\[Ada\]/);
     expect(joined).not.toMatch(/(?:^|\n)Ada: /);
+    const messages = buildCharacterSpeakMessages([
+      {
+        id: 'n1', episodeId: 'e', worldId: 'w', role: 'narrator', mode: null,
+        text: 'Rain hits the glass.', createdAt: 0
+      },
+      ...turns
+    ], [ada], ada, 'press them', []);
+    const scene = messages.find((m) => m.content.includes('Rain hits the glass'));
+    const own = messages.find((m) => m.role === 'assistant' && m.content.includes('[Ada]'));
+    expect(scene?.role).toBe('user');
+    expect(scene?.content).toContain('[Narrator]');
+    expect(own?.role).toBe('assistant');
+    expect(scene?.content).not.toContain('[Ada]');
     expect(joined).toMatch(/At most one question/i);
     expect(joined).toMatch(/Output format \(required\)/);
   });
@@ -545,6 +624,20 @@ describe('context window heuristics', () => {
     expect(inferContextWindowTokens('my-model-8k')).toBe(8 * 1024);
   });
 
+  it('gives known large families a long window and small local ids a short one', () => {
+    expect(inferContextWindowTokens('qwen2.5-72b')).toBe(128_000);
+    expect(inferContextWindowTokens('ollama/llama3')).toBe(8_192);
+    expect(inferContextWindowTokens('custom-ctx-8192')).toBe(8192);
+  });
+
+  it('lets an author window override the model-name guess', () => {
+    const overridden = promptCharBudget('unknown', 1100, { windowTokens: 8192 });
+    expect(overridden).toBe(Math.floor((8192 - 1100 - 1024) * 3.2));
+    expect(overridden).toBeLessThan(promptCharBudget('unknown', 1100));
+    expect(promptCharBudget('my-model-4k', 400, { windowTokens: 131_072 }))
+      .toBeGreaterThan(promptCharBudget('my-model-4k', 400));
+  });
+
   it('keeps a 32k unknown model above a short chapter', () => {
     expect(promptCharBudget('unknown', 1100)).toBeGreaterThanOrEqual(12_000);
   });
@@ -649,7 +742,7 @@ describe('token-efficient packing', () => {
     createdAt: i
   }));
 
-  it('never ships a running summary and an omitted digest together', () => {
+  it('keeps concrete earlier lines even when a running summary exists', () => {
     const history = manyTurns();
     const withSummary = buildNarrationBeatMessages(
       history, [npc('c1', 'Ada')], 'Look around.', 'scene', [],
@@ -657,7 +750,8 @@ describe('token-efficient packing', () => {
       0, { totalCap: 12_000 }
     );
     const blob = withSummary.map((m) => m.content).join('\n');
-    expect(blob).not.toMatch(/Compressed earlier beats/);
+    expect(blob).toMatch(/Compressed earlier beats/);
+    expect(blob).toMatch(/unique-token-0/);
     expect(blob).not.toMatch(/A mushy recap of the same early beats/);
 
     const withoutSummary = buildNarrationBeatMessages(
@@ -684,16 +778,15 @@ describe('token-efficient packing', () => {
     expect(a).toBe(b);
   });
 
-  it('keeps the narrator prefix stable and leaves the bible off spoken lines', () => {
+  it('keeps the narrator prefix stable and shares the world with spoken lines', () => {
     const frame = ctx({ turns: manyTurns().slice(0, 4) });
     const narrPrefix = storyCachePrefix(frame, { agent: 'narrator' });
     const narr = buildNarratorSystemPrompt(frame);
     const speak = buildCharacterSystemPrompt(frame, npc('c1', 'Ada'));
     expect(narr.startsWith(narrPrefix)).toBe(true);
     expect(narr).toMatch(/## The world/);
-    expect(speak).not.toMatch(/## The world/);
-    expect(speak).not.toContain('A coastal city of ledgers.');
-    expect(speak.length).toBeLessThan(narr.length);
+    expect(speak).toMatch(/## The world/);
+    expect(speak).toContain('A coastal city of ledgers.');
     expect(speak).toMatch(/## People here/);
   });
 
@@ -735,7 +828,7 @@ describe('engine context pack', () => {
     expect(prompt).toContain('Ben');
   });
 
-  it('keeps speak leaner than narrator on the same fixture', () => {
+  it('shares the world and the newest facts with the speaker', () => {
     const extraLoc = { ...loc(), id: 'loc2', name: 'The quay', summary: 'Wet stone.', history: 'QUAY_HISTORY' };
     const facts: ContinuityFact[] = Array.from({ length: 20 }, (_, i) => ({
       id: `f${i}`, worldId: 'w', seasonId: 's', episodeId: 'e',
@@ -749,14 +842,13 @@ describe('engine context pack', () => {
     });
     const narr = buildNarratorSystemPrompt(frame);
     const speak = buildCharacterSystemPrompt(frame, npc('c1', 'Ada'));
-    expect(speak.length).toBeLessThan(narr.length);
     expect(narr).not.toMatch(/Other established locations/);
     expect(speak).not.toMatch(/Other established locations/);
     expect(narr).toContain('END_BIBLE');
-    expect(speak).not.toContain('END_BIBLE');
-    expect(speak).not.toMatch(/## The world/);
-    expect(speak.length).toBeLessThan(narr.length * 0.75);
+    expect(speak).toContain('END_BIBLE');
+    expect(speak).toMatch(/## The world/);
     expect(narr).toContain('Durable fact 19');
+    expect(speak).toContain('Durable fact 19');
     expect(speak).not.toContain('Durable fact 0');
     expect(narr).not.toMatch(/Week cycle:/);
     expect(narr).not.toMatch(/^Months:/m);

@@ -63,6 +63,84 @@ export function hasSpokenDialogue(raw: string): boolean {
   return parseSpeakSegments(raw).some((s) => s.kind === 'speech' && s.text.trim().length > 0);
 }
 
+/**
+ * Narration stopped before the sentence finished, whatever the provider called that stop.
+ * Open quotes, or a long line that does not end on a closer.
+ */
+export function narrationLineCutOff(raw: string): boolean {
+  const text = normalizeQuotes(raw).trim();
+  if (!text) return false;
+  if (((text.match(/"/g) ?? []).length) % 2 === 1) return true;
+  if (/[.!?…"'”»—-]$/.test(text)) return false;
+  return text.length > 80 || /[,:;]$/.test(text);
+}
+
+export function speakLineCutOff(raw: string): boolean {
+  const text = normalizeQuotes(raw).trim();
+  if (!text) return false;
+  const quotes = (text.match(/"/g) ?? []).length;
+  const stars = (text.match(/\*/g) ?? []).length;
+  if (quotes % 2 === 1 || stars % 2 === 1) return true;
+  if (/[.!?…"*'”»—-]$/.test(text)) return false;
+  return text.length > 80 || /[,:;]$/.test(text);
+}
+
+/**
+ * Turn whatever a model actually wrote into a line we can keep.
+ * Closes a cut-off quote, quotes bare words beside an *action*, and
+ * leaves a finished "*action* \"speech\"" line or an action-only line as-is.
+ */
+export function settleSpeakText(raw: string): string {
+  let text = normalizeQuotes(raw.trim());
+  if (!text) return '';
+  if ((text.match(/"/g) ?? []).length % 2 === 1) text = `${text}"`;
+  if ((text.match(/\*/g) ?? []).length % 2 === 1) {
+    const i = text.lastIndexOf('*');
+    text = `${text.slice(0, i)}${text.slice(i + 1)}`;
+  }
+  text = normalizeSpeakText(text);
+  if (!text || !text.includes('*') || hasSpokenDialogue(text)) return text;
+  return quotePlainBesideActions(text);
+}
+
+function wrapPlain(gap: string): string {
+  if (!gap.trim()) return gap;
+  return gap.replace(/[^\n]+/g, (line) => {
+    const trimmed = line.trim();
+    if (!trimmed || !/[\p{L}\p{N}]/u.test(trimmed)) return line;
+    const lead = line.match(/^\s*/)?.[0] ?? '';
+    const tail = line.match(/\s*$/)?.[0] ?? '';
+    let speech = trimmed;
+    if (speech.length >= 2 && speech.startsWith("'") && speech.endsWith("'")) {
+      const inner = speech.slice(1, -1).trim();
+      if (inner) speech = inner;
+    }
+    return `${lead}"${speech}"${tail}`;
+  });
+}
+
+/** Quote words that sit outside *action* and existing "speech". */
+function quotePlainBesideActions(text: string): string {
+  const re = /"([^"]*)"|\*([^*]*)\*/g;
+  let last = 0;
+  let out = '';
+  let quoted = false;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const gap = text.slice(last, m.index);
+    const wrapped = wrapPlain(gap);
+    if (wrapped !== gap) quoted = true;
+    out += wrapped + m[0];
+    last = m.index + m[0].length;
+  }
+  const tail = text.slice(last);
+  const wrappedTail = wrapPlain(tail);
+  if (wrappedTail !== tail) quoted = true;
+  out += wrappedTail;
+  if (!quoted) return text.trim();
+  return normalizeSpeakText(out) || text.trim();
+}
+
 /** True when spoken dialogue asks something — later speak beats should wait for the player. */
 export function speakHoldsForPlayer(raw: string): boolean {
   return parseSpeakSegments(raw).some((s) => s.kind === 'speech' && /\?/.test(s.text));

@@ -2,13 +2,10 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import {
-  clearEpisodeRunningSummary,
-  commitSoftEpisodeWrap, deleteTurnsAfter, deleteTurnsFrom, draftColdOpenNarration,
+  commitSoftEpisodeWrap, draftColdOpenNarration,
   endStoryWrite,
-  rollbackTurnSnapshot,
-  snapshotEpisodeMemory,
-  snapshotTurnsAfter, snapshotTurnsFrom, tryBeginStoryWrite, waitForPostTurn, writeTurn,
-  discardPendingPlan,
+  regenerateBeat,
+  tryBeginStoryWrite, writeTurn,
   WriteAbortedError, type StreamMeta
 } from '../ai/engine';
 import {
@@ -45,7 +42,7 @@ import type {
 } from '../types';
 import { AppError, classifyError } from '../errors';
 import {
-  Chip, ConfirmBar, ErrorNote, Mono, Sheet, Spinner,
+  Chip, ErrorNote, Mono, Sheet, Spinner,
   bookStageOpen, phoneChrome, sheetsFromBottom, shortStoryChrome, useViewport
 } from '../ui/bits';
 import { BookStage, type BookPiece } from '../ui/BookStage';
@@ -818,10 +815,6 @@ export function Story() {
   const [worldEditOpen, setWorldEditOpen] = useState(false);
   const [displayOpen, setDisplayOpen] = useState(false);
   const [moreSheet, setMoreSheet] = useState(false);
-  const [confirmAsk, setConfirmAsk] = useState<null | {
-    kind: 'retryFrom';
-    turn: Turn;
-  }>(null);
   const [composerOpen, setComposerOpen] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [hudTucked, setHudTucked] = useState(false);
@@ -975,7 +968,6 @@ export function Story() {
       if (e instanceof WriteAbortedError || (e as Error).name === 'AbortError') {
         const n = e instanceof WriteAbortedError ? e.beatsCompleted : 0;
         const left = e instanceof WriteAbortedError ? e.remainingBeats.length : 0;
-        if (left > 0) void discardPendingPlan(episode.id);
         setNotice(abortWriteNotice(n, left));
         return { status: 'aborted', beatsCompleted: n, remaining: left };
       }
@@ -986,7 +978,6 @@ export function Story() {
         ? Math.max(0, ((e as { remainingBeats?: unknown[] }).remainingBeats ?? []).length)
         : 0;
       if (left > 0) {
-        void discardPendingPlan(episode.id);
         setNotice(unfinishedWriteNotice(n, left));
       } else {
         setError(classifyError(e));
@@ -1043,7 +1034,7 @@ export function Story() {
         outgoing.asCharacterId,
         token
       );
-      if (result.status !== 'ok' && result.beatsCompleted === 0) {
+      if (result.status !== 'ok' && result.beatsCompleted === 0 && result.remaining === 0) {
         setInput(text);
       }
     } finally {
@@ -1125,54 +1116,60 @@ export function Story() {
     }
   };
 
-  /**
-   * Retry from a turn. For narrator/character turns: that response and everything
-   * after are rewritten. For a player turn: the turn is kept and everything after
-   * is rewritten from it. Deletion commits only after a successful regenerate;
-   * on failure the prior turns are restored.
-   */
-  const retryFrom = async (turn: Turn) => {
-    if (!episode || streaming) return;
+  /** Replace one narrator or character line. Later lines stay. */
+  const rewritePassage = async (turn: Turn) => {
+    if (!world || !season || !episode || streaming) return;
+    if (turn.role !== 'narrator' && turn.role !== 'character') return;
     const token = tryBeginStoryWrite();
     if (!token) return;
-    const retryStartedAt = Date.now();
+    setError('');
+    setNotice('');
+    setStreaming(true);
+    setTailHasText(false);
+    setProgressLabel('Rewriting…');
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
-      const idx = turns.findIndex((t) => t.id === turn.id);
-      if (idx < 0) return;
-      const replaceSelf = turn.role === 'narrator' || turn.role === 'character';
-      const memory = await snapshotEpisodeMemory(episode.id);
-      const snapshot = replaceSelf
-        ? await snapshotTurnsFrom(turn.id, episode.id)
-        : await snapshotTurnsAfter(turn.id, episode.id);
-      if (replaceSelf) await deleteTurnsFrom(turn.id, episode.id);
-      else await deleteTurnsAfter(turn.id, episode.id);
-      const result = await runNarration('continue', '', undefined, undefined, undefined, undefined, token);
-      await waitForPostTurn();
-      if (result.status === 'ok') {
-        if (snapshot.length > 0) {
-          await clearEpisodeRunningSummary(episode.id);
-          const ids = snapshot.map((t) => t.id);
-          const revived = (await db.turns.bulkGet(ids)).filter((row): row is Turn => !!row);
-          if (revived.length > 0) await db.turns.bulkDelete(revived.map((row) => row.id));
-        }
+      await regenerateBeat({
+        world, season, episode, turn, length,
+        signal: controller.signal,
+        onProgress: (label) => setProgressLabel(label),
+        onDelta: (partial, meta) => { streamSink.current(partial, meta); }
+      });
+      setTailHasText(false);
+      setPageReveal((n) => n + 1);
+    } catch (e) {
+      setTailHasText(false);
+      if (e instanceof WriteAbortedError || (e as Error).name === 'AbortError') {
+        setNotice('Rewrite stopped. The previous line is still there.');
       } else {
-        await rollbackTurnSnapshot(episode.id, snapshot, retryStartedAt, memory);
-        if (result.status === 'error') {
-          setError((prev) => prev || 'Retry failed — previous turns were restored.');
-        } else {
-          setNotice('Retry cancelled — previous turns were restored.');
-        }
+        setError(classifyError(e));
       }
     } finally {
+      setStreaming(false);
+      setProgressLabel('');
+      abortRef.current = null;
       endStoryWrite(token);
     }
   };
 
-  const runConfirmAsk = () => {
-    if (!confirmAsk) return;
-    const ask = confirmAsk;
-    setConfirmAsk(null);
-    void retryFrom(ask.turn);
+  const continueSavedPlan = async () => {
+    if (!episode?.pendingPlan?.beats.length || streaming) return;
+    const token = tryBeginStoryWrite();
+    if (!token) return;
+    try {
+      await runNarration(
+        'continue',
+        '',
+        episode.pendingPlan.beats,
+        episode.pendingPlan.length,
+        undefined,
+        undefined,
+        token
+      );
+    } finally {
+      endStoryWrite(token);
+    }
   };
 
   /** End with a minimal recap so the next chapter still has memory. An empty chapter just opens the next one. */
@@ -1507,12 +1504,7 @@ export function Story() {
       });
       const canEdit = turn.role === 'narrator' || turn.role === 'character';
       const rewrite = turn.id === latestPassageId
-        ? () => {
-          const idx = turns.findIndex((t) => t.id === turn.id);
-          const below = idx < 0 ? 0 : turns.length - idx - 1;
-          if (below > 0) setConfirmAsk({ kind: 'retryFrom', turn });
-          else void retryFrom(turn);
-        }
+        ? () => { void rewritePassage(turn); }
         : undefined;
       if (canEdit || rewrite) {
         bookPieces.push({
@@ -1931,12 +1923,7 @@ export function Story() {
                       prevSpeaker={ti > 0 ? lastSpokenBy(visible[ti - 1].blocks) : null}
                       streaming={streaming}
                       opening={manuscript.length <= turnWindow && ti === 0}
-                      onRewrite={turn.id === latestPassageId ? () => {
-                        const idx = turns.findIndex((t) => t.id === turn.id);
-                        const below = idx < 0 ? 0 : turns.length - idx - 1;
-                        if (below > 0) setConfirmAsk({ kind: 'retryFrom', turn });
-                        else void retryFrom(turn);
-                      } : undefined}
+                      onRewrite={turn.id === latestPassageId ? () => { void rewritePassage(turn); } : undefined}
                       onEdit={turn.role === 'narrator' || turn.role === 'character'
                         ? () => beginEdit(turn)
                         : undefined}
@@ -1976,22 +1963,24 @@ export function Story() {
         )}
       </div>
 
-      {(confirmAsk || error || notice) && (
+      {(error || notice || (episode?.pendingPlan?.beats.length ?? 0) > 0) && (
         <div style={{
           position: 'relative', zIndex: 3, flexShrink: 0,
           padding: narrow ? '10px 12px 0' : '12px 24px 0',
           display: 'flex', flexDirection: 'column', gap: 10
         }}>
-          {confirmAsk && (
-            <ConfirmBar
-              title={confirmAsk.turn.role === 'narrator' || confirmAsk.turn.role === 'character'
-                ? 'Rewrite this response?'
-                : 'Retry from here?'}
-              body="Turns after this one will be replaced. This cannot be undone."
-              confirmLabel="Rewrite"
-              onConfirm={runConfirmAsk}
-              onCancel={() => setConfirmAsk(null)}
-            />
+          {(episode?.pendingPlan?.beats.length ?? 0) > 0 && !streaming && (
+            <div className="glass-nudge" style={{
+              border: `1px solid ${ACCENT_RGBA.a35}`,
+              background: ACCENT_RGBA.a08, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap'
+            }}>
+              <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--paper)', flex: 1, minWidth: 0 }}>
+                The rest of that reply is still waiting.
+              </div>
+              <button className="btn-quiet" style={{ fontSize: 12, minHeight: 32 }} onClick={() => void continueSavedPlan()}>
+                Continue reply
+              </button>
+            </div>
           )}
           {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
           {notice && (

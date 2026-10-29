@@ -101,6 +101,27 @@ export function Settings() {
             <ModelPicker value={s.imageModel ?? null} onChange={s.setImageModel} kind="image" />
           </div>
         </div>
+        <div style={{ marginTop: 14, maxWidth: 440, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>Context window</div>
+          <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
+            Auto reads the model name. Set this when a local or oddly named model is smaller or larger than that guess, so the chapter the writer can see matches the model.
+          </div>
+          <select
+            aria-label="Context window"
+            value={s.contextWindowTokens ?? ''}
+            onChange={(e) => s.setContextWindowTokens(e.target.value ? Number(e.target.value) : null)}
+            style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 }}
+          >
+            <option value="">Auto</option>
+            <option value="8192">8k</option>
+            <option value="16384">16k</option>
+            <option value="32768">32k</option>
+            <option value="65536">64k</option>
+            <option value="131072">128k</option>
+            <option value="200000">200k</option>
+            <option value="1048576">1M</option>
+          </select>
+        </div>
         <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)', marginTop: 10 }}>
           Z.ai in the browser may fail CORS — use OpenRouter’s <span className="mono">z-ai/glm-5.2</span> or sign in
           so the cloud relay can reach Z.ai. Custom still covers BigModel China

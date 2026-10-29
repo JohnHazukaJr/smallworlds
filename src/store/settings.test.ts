@@ -11,7 +11,8 @@ const empty: AppSettings = {
   imageModel: null,
   matureImageModel: null,
   matureDefault: true,
-  defaultVisibility: 'private'
+  defaultVisibility: 'private',
+  contextWindowTokens: null
 };
 
 describe('addProvider', () => {

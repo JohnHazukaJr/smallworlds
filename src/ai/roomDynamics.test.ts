@@ -252,23 +252,33 @@ describe('selectAnswerers', () => {
     expect(ids).toEqual(['c1']);
   });
 
-  it('answers with the person addressed, not everyone named', () => {
+  it('answers the person addressed and the other person named', () => {
     const ids = selectAnswerers({
       length: 'scene',
       playerText: 'Ada, tell Ben what you saw.',
       candidates: trio
     }).map((c) => c.id);
-    expect(ids).toEqual(['c1']);
+    expect(ids).toEqual(['c1', 'c2']);
   });
 
-  it('continues with the last voice when nobody is named', () => {
+  it('lets one quiet person enter beside the last voice', () => {
     const ids = selectAnswerers({
       length: 'scene',
       playerText: 'I wait.',
       candidates: trio,
       turns: [said('c2', '"The ledger is closed."')]
     }).map((c) => c.id);
-    expect(ids).toEqual(['c2']);
+    expect(ids[0]).toBe('c2');
+    expect(ids).toHaveLength(2);
+  });
+
+  it('on a long reply, includes everyone who was named', () => {
+    const ids = selectAnswerers({
+      length: 'episode',
+      playerText: 'Ada, Ben, and Clerk, listen.',
+      candidates: trio
+    }).map((c) => c.id);
+    expect(ids).toEqual(['c1', 'c2', 'g1']);
   });
 
   it('gives a first line to one person already in the chapter', () => {

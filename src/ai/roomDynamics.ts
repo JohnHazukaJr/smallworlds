@@ -223,8 +223,8 @@ export function answererCap(length: TurnLength): number {
 /**
  * Who speaks after the player.
  * Short: the person addressed, or one present person if nobody was named.
- * Normal: that person plus at most one other who was also spoken to.
- * Long: up to three who were spoken to. If nobody was named, still only one.
+ * Normal: up to two — everyone spoken to, then one quiet person if the room has already been talking.
+ * Long: up to three, the same way. A cold open with nobody named is still one voice.
  * A pinned id goes first and counts toward the cap.
  */
 export function selectAnswerers(opts: {
@@ -234,27 +234,48 @@ export function selectAnswerers(opts: {
   turns?: Turn[];
   preferId?: string;
 }): SpeakerCandidate[] {
-  const one = (c: SpeakerCandidate | undefined): SpeakerCandidate[] => (
-    c ? [{ id: c.id, name: c.name, kind: c.kind }] : []
-  );
+  const cap = answererCap(opts.length);
   const ranked = rankReplySpeakers({
     candidates: opts.candidates,
     playerText: opts.playerText,
     turns: opts.turns
   });
+  const picked: RankedSpeaker[] = [];
+  const take = (c: RankedSpeaker | undefined) => {
+    if (!c || picked.length >= cap) return;
+    if (picked.some((p) => p.id === c.id)) return;
+    picked.push(c);
+  };
 
-  if (opts.preferId) {
-    const pinned = ranked.find((c) => c.id === opts.preferId);
-    if (pinned) return one(pinned);
+  if (opts.preferId) take(ranked.find((c) => c.id === opts.preferId));
+
+  const addressed = ranked.filter((c) => c.address === 'vocative' || c.address === 'directed');
+  const mentioned = ranked.filter((c) => c.address === 'mention');
+  if (addressed.length > 0) {
+    for (const c of addressed) take(c);
+    if (opts.length !== 'beat') {
+      for (const c of mentioned) take(c);
+    }
+  } else if (opts.length !== 'beat' && mentioned.length > 0) {
+    for (const c of mentioned) take(c);
+  } else if (picked.length === 0) {
+    const last = lastSpeaker(opts.turns ?? [], opts.candidates);
+    const lastRanked = last ? ranked.find((c) => c.id === last.id) : undefined;
+    take(lastRanked ?? ranked[0]);
   }
 
-  const addressed = ranked.find((c) => c.address === 'vocative' || c.address === 'directed');
-  if (addressed) return one(addressed);
+  const anyoneSpoke = (opts.turns ?? []).some((t) => t.role === 'character');
+  if (opts.length !== 'beat' && anyoneSpoke && picked.length < cap) {
+    const quiet = ranked.find(
+      (c) =>
+        !picked.some((p) => p.id === c.id) &&
+        (!Number.isFinite(c.turnsSince) || c.turnsSince >= 4)
+    );
+    take(quiet);
+  }
 
-  const last = lastSpeaker(opts.turns ?? [], opts.candidates);
-  if (last) return one(last);
-
-  return one(opts.candidates[0]);
+  if (picked.length === 0 && ranked[0]) picked.push(ranked[0]);
+  return picked.slice(0, cap).map((c) => ({ id: c.id, name: c.name, kind: c.kind }));
 }
 
 /**

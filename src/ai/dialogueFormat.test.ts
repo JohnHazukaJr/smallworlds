@@ -2,11 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   groupSpeakParagraphs,
   hasSpokenDialogue,
+  narrationLineCutOff,
   parseInlineEmphasis,
   parseSpeakSegments,
   previewSpeakText,
+  settleSpeakText,
   SPEAK_FORMAT_RULES,
   speakHoldsForPlayer,
+  speakLineCutOff,
   stitchSpeakRetry,
   stripNarratorEmbeddedDialogue
 } from './dialogueFormat';
@@ -90,6 +93,51 @@ describe('groupSpeakParagraphs', () => {
   });
 });
 
+describe('settleSpeakText', () => {
+  it('quotes bare speech after an action', () => {
+    const out = settleSpeakText("*sets the cup down* You shouldn't have come.");
+    expect(out).toBe('*sets the cup down* "You shouldn\'t have come."');
+    expect(hasSpokenDialogue(out)).toBe(true);
+  });
+
+  it('closes a quote the stream cut off', () => {
+    const out = settleSpeakText('*nods* "I was going');
+    expect(out).toContain('I was going');
+    expect(hasSpokenDialogue(out)).toBe(true);
+    expect(speakLineCutOff('*nods* "I was going')).toBe(true);
+  });
+
+  it('leaves a finished quoted line unchanged', () => {
+    const line = '*leans in* "The ledger is closed."';
+    expect(settleSpeakText(line)).toBe(line);
+    expect(speakLineCutOff(line)).toBe(false);
+  });
+
+  it('keeps an action-only line', () => {
+    expect(settleSpeakText('*sets the stamp down*')).toBe('*sets the stamp down*');
+    expect(hasSpokenDialogue(settleSpeakText('*sets the stamp down*'))).toBe(false);
+  });
+
+  it('quotes a line that used no markers at all', () => {
+    const out = settleSpeakText('Leave it.');
+    expect(hasSpokenDialogue(out)).toBe(true);
+    expect(out).toContain('Leave it.');
+  });
+
+  it('treats a long unfinished line as cut off, and a short finished word as done', () => {
+    expect(speakLineCutOff(`${'The door stays open and nobody moves '.repeat(3)}and`)).toBe(true);
+    expect(speakLineCutOff('No')).toBe(false);
+    expect(speakLineCutOff('*nods*')).toBe(false);
+  });
+
+  it('quotes a single-quoted utterance beside an action', () => {
+    const out = settleSpeakText("*shrugs* 'Don't go.'");
+    expect(hasSpokenDialogue(out)).toBe(true);
+    expect(out).toContain("Don't go.");
+    expect(out).not.toMatch(/'Don't/);
+  });
+});
+
 describe('previewSpeakText', () => {
   it('hides dangling open quote while streaming', () => {
     const preview = previewSpeakText('*she smiles* "Hel');
@@ -121,5 +169,19 @@ describe('stripNarratorEmbeddedDialogue', () => {
     expect(out).toContain('The lamp ticks.');
     expect(out).not.toMatch(/Ada:/);
     expect(out).not.toMatch(/ledger is closed/);
+  });
+});
+
+describe('narrationLineCutOff', () => {
+  it('treats a finished sentence as complete', () => {
+    expect(narrationLineCutOff('Rain hits the glass.')).toBe(false);
+    expect(narrationLineCutOff('The lamp ticks!')).toBe(false);
+  });
+
+  it('treats a long unfinished sentence as cut off', () => {
+    const line = 'Rain hits the glass and runs down the registrar\'s sleeve while Ada reaches for the';
+    expect(narrationLineCutOff(line)).toBe(true);
+    expect(narrationLineCutOff('She says "the ledger')).toBe(true);
+    expect(narrationLineCutOff('She says “the ledger')).toBe(true);
   });
 });

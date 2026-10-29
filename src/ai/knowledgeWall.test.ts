@@ -13,6 +13,13 @@ describe('speakLeaksMustNotKnow', () => {
     expect(speakLeaksMustNotKnow('*looks up* "The lamp ticks."', WALL)).toBe(false);
   });
 
+  it('does not throw away a line that only shares ordinary words with a secret', () => {
+    const wall = 'She must not learn that her brother is the capital\'s spy.';
+    expect(speakLeaksMustNotKnow('"The capital is quiet tonight."', wall)).toBe(false);
+    expect(speakLeaksMustNotKnow('"I asked her brother to wait."', wall)).toBe(false);
+    expect(speakLeaksMustNotKnow('"Her brother reached the capital."', wall)).toBe(true);
+  });
+
   it('never leaks on an empty wall', () => {
     expect(speakLeaksMustNotKnow('"Ivo took the guild money."', '')).toBe(false);
     expect(speakLeaksMustNotKnow('"Ivo took the guild money."', '   ')).toBe(false);

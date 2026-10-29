@@ -27,9 +27,12 @@ export function isReasoningModel(model: string): boolean {
 export function promptCharBudget(
   model: string,
   maxTokens: number,
-  opts?: { thinking?: boolean }
+  opts?: { thinking?: boolean; windowTokens?: number | null }
 ): number {
-  const window = inferContextWindowTokens(model);
+  const override = opts?.windowTokens;
+  const window = override != null && override >= 2048
+    ? override
+    : inferContextWindowTokens(model);
   const thinking = opts?.thinking ?? false;
   const reserve = TOKENIZER_RESERVE + (shouldReserveReasoningTokens(model, thinking) ? REASONING_OUTPUT_RESERVE : 0);
   const tokens = Math.max(0, window - Math.max(0, maxTokens) - reserve);

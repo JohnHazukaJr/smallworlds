@@ -89,6 +89,32 @@ function inferWindow(model: string): number {
   if (m.includes('gpt-4o')) return 128_000;
   if (m.includes('llama-3.1') || m.includes('llama-3-1') || m.includes('llama3.1')) return 128_000;
   if (m.includes('llama-4') || m.includes('llama4')) return 128_000;
+  if (
+    m.includes('qwen') ||
+    m.includes('command-r') ||
+    m.includes('grok') ||
+    m.includes('mixtral') ||
+    m.includes('mistral-large')
+  ) {
+    return 128_000;
+  }
+  if (
+    m.includes('gemma-2') || m.includes('gemma2') ||
+    m.includes('phi-3') || m.includes('phi-4') || m.includes('phi3') || m.includes('phi4')
+  ) {
+    return 128_000;
+  }
+  if (m.includes('llama-3.2') || m.includes('llama-3.3') || m.includes('llama3.2') || m.includes('llama3.3')) {
+    return 128_000;
+  }
+  if (m.includes('mistral-7') || m.includes('gemma-2b') || m.includes('phi-2')) return 8_192;
+  if (/(?:^|[^a-z0-9])llama[-_]?3(?:[^.\d]|$)/.test(m)) return 8_192;
+  if (/ollama|lmstudio|lm-studio|\.gguf/.test(m)) return 8_192;
+  const ctx = m.match(/(?:context|ctx|window)[-_:]?(\d{4,7})/);
+  if (ctx) {
+    const n = Number(ctx[1]);
+    if (n >= 2048 && n <= 2_000_000) return n;
+  }
   return DEFAULT_WINDOW;
 }
 

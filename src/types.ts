@@ -408,6 +408,8 @@ export interface ContinuityFact {
   source: 'auto' | 'manual';
   /** When true, always included in the director fact cap before soft picks. */
   pinned?: boolean;
+  /** Lorebook keys. When set, a beat that mentions one of these pulls the fact even if the wording differs. */
+  keys?: string[];
   createdAt: number;
   updatedAt?: number;
 }
@@ -618,4 +620,9 @@ export interface AppSettings {
   matureImageModel: ModelRef | null;
   matureDefault: boolean;
   defaultVisibility: Visibility;
+  /**
+   * Author override for the prose context window, in tokens.
+   * Null means infer it from the model id.
+   */
+  contextWindowTokens: number | null;
 }

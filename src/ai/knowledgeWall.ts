@@ -1,7 +1,18 @@
 /**
  * Detect when a spoken line states a fact the speaker must not know yet.
- * Same content-word overlap as wrap matching: two shared tokens of length > 2.
+ * Ordinary words in a secret ("the capital", "her brother") are not a leak.
+ * A leak needs two distinctive words, or one explicit proper-name hit plus another.
  */
+
+const WALL_STOP = new Set([
+  'the', 'and', 'for', 'with', 'that', 'this', 'from', 'your', 'you', 'are', 'was', 'were',
+  'have', 'has', 'had', 'not', 'but', 'her', 'his', 'she', 'him', 'they', 'them', 'their',
+  'into', 'about', 'what', 'when', 'where', 'who', 'how', 'its', 'our', 'did', 'does',
+  'must', 'know', 'until', 'story', 'reveals', 'learn', 'cover', 'took', 'take', 'than',
+  'then', 'them', 'been', 'being', 'will', 'would', 'could', 'should', 'just', 'only',
+  'over', 'under', 'after', 'before', 'while', 'because', 'which', 'there', 'here',
+  'said', 'says', 'told', 'tell', 'asks', 'asked'
+]);
 
 function contentWords(s: string): Set<string> {
   return new Set(
@@ -9,7 +20,8 @@ function contentWords(s: string): Set<string> {
       .toLowerCase()
       .replace(/[^a-z0-9\s']/g, ' ')
       .split(/\s+/)
-      .filter((w) => w.length > 2)
+      .map((w) => w.replace(/'s$/g, '').replace(/^'+|'+$/g, ''))
+      .filter((w) => w.length >= 3 && !WALL_STOP.has(w))
   );
 }
 

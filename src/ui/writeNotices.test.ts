@@ -11,8 +11,7 @@ describe('abortWriteNotice', () => {
     const copy = abortWriteNotice(0, 3);
     expect(copy).toMatch(/stopped/i);
     expect(copy).toMatch(/Nothing new was kept/);
-    expect(copy).not.toMatch(/Continue plan/);
-    expect(copy).not.toMatch(/plan/);
+    expect(copy).toMatch(/Continue finishes/);
     expect(copy).not.toMatch(/was not applied/);
   });
 
@@ -26,7 +25,7 @@ describe('abortWriteNotice', () => {
   it('says how many lines were kept when some landed', () => {
     expect(abortWriteNotice(2, 1)).toMatch(/stopped after 2 lines/i);
     expect(abortWriteNotice(2, 1)).toMatch(/Those lines were kept/);
-    expect(abortWriteNotice(2, 1)).not.toMatch(/plan/);
+    expect(abortWriteNotice(2, 1)).toMatch(/Continue finishes/);
   });
 });
 
@@ -35,8 +34,7 @@ describe('unfinishedWriteNotice', () => {
     const copy = unfinishedWriteNotice(0, 3);
     expect(copy).toMatch(/stopped/i);
     expect(copy).toMatch(/Nothing new was kept/);
-    expect(copy).not.toMatch(/Continue plan/);
-    expect(copy).not.toMatch(/plan/);
+    expect(copy).toMatch(/Continue finishes/);
   });
 
   it('is empty when nothing remains', () => {

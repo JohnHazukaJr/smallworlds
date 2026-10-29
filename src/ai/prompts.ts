@@ -374,12 +374,12 @@ const PRIOR_CAPS: Record<PromptAgent, PriorCapPreset> = {
     recapDigestChars: 280, recapImmediateChars: 1800, runningCap: 1400
   },
   character: {
-    beatCapImmediate: 4, beatCapDigest: 2,
-    recapDigestChars: 220, recapImmediateChars: 1200, runningCap: 1200
+    beatCapImmediate: 6, beatCapDigest: 2,
+    recapDigestChars: 280, recapImmediateChars: 1800, runningCap: 1400
   },
   guest: {
-    beatCapImmediate: 3, beatCapDigest: 1,
-    recapDigestChars: 200, recapImmediateChars: 900, runningCap: 900
+    beatCapImmediate: 6, beatCapDigest: 2,
+    recapDigestChars: 280, recapImmediateChars: 1800, runningCap: 1400
   },
   director: {
     beatCapImmediate: 6, beatCapDigest: 2,
@@ -389,14 +389,10 @@ const PRIOR_CAPS: Record<PromptAgent, PriorCapPreset> = {
 
 const FACT_CAPS: Record<PromptAgent, { facts: number; threads: number }> = {
   narrator: { facts: CONTINUITY_FACT_CAP, threads: THREAD_CAP },
-  character: { facts: 8, threads: 4 },
-  guest: { facts: 8, threads: 4 },
+  character: { facts: CONTINUITY_FACT_CAP, threads: THREAD_CAP },
+  guest: { facts: CONTINUITY_FACT_CAP, threads: THREAD_CAP },
   director: { facts: DIRECTOR_FACT_CAP, threads: DIRECTOR_THREAD_CAP }
 };
-
-function isSpeakAgent(opts: PromptBuildOpts): boolean {
-  return opts.agent === 'character' || opts.agent === 'guest';
-}
 
 /**
  * Pick up to `cap` items while keeping coverage across episode buckets
@@ -498,45 +494,98 @@ export function memoryFocusQuery(parts: Array<string | null | undefined>): strin
   return parts.map((p) => (p ?? '').trim()).filter(Boolean).join('\n');
 }
 
-function textOverlap(text: string, query: Set<string>): number {
-  if (query.size === 0) return 0;
+/** Light aliases so a fact filed as "harbour" still matches "harbor". */
+const LORE_ALIASES: Record<string, string[]> = {
+  harbour: ['harbor'],
+  harbor: ['harbour'],
+  colour: ['color'],
+  color: ['colour'],
+  grey: ['gray'],
+  gray: ['grey']
+};
+
+function expandLoreTokens(tokens: Iterable<string>): Set<string> {
+  const out = new Set<string>();
+  for (const raw of tokens) {
+    const t = raw.toLowerCase();
+    if (t.length < 3) continue;
+    out.add(t);
+    if (t.length > 4 && t.endsWith('s')) out.add(t.slice(0, -1));
+    else if (t.length >= 4) out.add(`${t}s`);
+    for (const alt of LORE_ALIASES[t] ?? []) out.add(alt);
+  }
+  return out;
+}
+
+function loreKeys(item: { text: string; keys?: string[] }): string[] {
+  const explicit = (item.keys ?? [])
+    .map((k) => k.toLowerCase().trim())
+    .filter((k) => k.length >= 2);
+  const derived = memoryTokens(item.text).filter((w) => w.length >= 5);
+  return [...new Set([...explicit, ...derived])];
+}
+
+function loreScore(item: { text: string; keys?: string[] }, queryTokens: Set<string>): number {
+  if (queryTokens.size === 0) return 0;
   let n = 0;
   const seen = new Set<string>();
-  for (const word of memoryTokens(text)) {
-    if (!query.has(word) || seen.has(word)) continue;
-    seen.add(word);
-    n++;
+  for (const key of loreKeys(item)) {
+    const forms = expandLoreTokens([key]);
+    for (const form of forms) {
+      if (!queryTokens.has(form) || seen.has(key)) continue;
+      seen.add(key);
+      n += key.length >= 5 || (item.keys ?? []).some((k) => k.toLowerCase().trim() === key) ? 2 : 1;
+      break;
+    }
   }
   return n;
 }
 
-function rankUnpinned<T extends { id: string; createdAt: number; text: string }>(
+function keysRelated(a: string, b: string): boolean {
+  if (a.length < 5 || b.length < 5) return false;
+  if (a === b) return true;
+  return expandLoreTokens([a]).has(b);
+}
+
+function rankUnpinned<T extends { id: string; createdAt: number; text: string; keys?: string[] }>(
   items: T[],
   bucketOf: (t: T) => string,
   cap: number,
   preferBuckets: string[],
   query: string
 ): T[] {
-  const tokens = new Set(memoryTokens(query));
+  const tokens = expandLoreTokens(memoryTokens(query));
   if (tokens.size === 0) return pickAcrossBuckets(items, bucketOf, cap, preferBuckets);
-  const hot: T[] = [];
-  const cold: T[] = [];
-  const scored = items.map((item) => ({ item, score: textOverlap(item.text, tokens) }));
+  const scored = items.map((item) => ({ item, score: loreScore(item, tokens) }));
   scored.sort((a, b) => b.score - a.score || b.item.createdAt - a.item.createdAt);
+  const hot: T[] = [];
+  const rest: T[] = [];
   for (const row of scored) {
     if (row.score > 0) hot.push(row.item);
-    else cold.push(row.item);
+    else rest.push(row.item);
   }
   const picked = hot.slice(0, cap);
   if (picked.length >= cap) return picked;
   const seen = new Set(picked.map((item) => item.id));
+  const pickedKeys = picked.flatMap((item) => loreKeys(item));
+  const related: T[] = [];
+  for (const item of rest) {
+    if (picked.length + related.length >= cap) break;
+    if (seen.has(item.id)) continue;
+    const hit = loreKeys(item).some((key) => pickedKeys.some((pk) => keysRelated(key, pk)));
+    if (!hit) continue;
+    related.push(item);
+    seen.add(item.id);
+  }
+  const soFar = [...picked, ...related];
+  if (soFar.length >= cap) return soFar;
   const fill = pickAcrossBuckets(
-    cold.filter((item) => !seen.has(item.id)),
+    rest.filter((item) => !seen.has(item.id)),
     bucketOf,
-    cap - picked.length,
+    cap - soFar.length,
     preferBuckets
   );
-  return [...picked, ...fill];
+  return [...soFar, ...fill];
 }
 
 /** Pinned facts fill the cap first, then relevance, then bucket-balanced rest. */
@@ -707,6 +756,11 @@ function cappedContinuityLines(
 ): string[] {
   return selectFactsPinnedFirst(continuity, preferBuckets, cap, query)
     .map((f) => `- ${f.text}`);
+}
+
+function worldBibleCap(episode: Episode, tight: boolean): number {
+  if (tight) return 1800;
+  return episode.runningSummary?.trim() ? WORLD_BIBLE_AFTER_SUMMARY_CAP : WORLD_BIBLE_CAP;
 }
 
 function worldBibleSection(world: World, cap = WORLD_BIBLE_CAP): string {
@@ -1036,29 +1090,19 @@ export function storyCachePrefix(ctx: PromptContext, opts: PromptBuildOpts = {})
 function storyCacheSections(ctx: PromptContext, opts: PromptBuildOpts = {}): string[] {
   const { world, season, episode, characters } = ctx;
   const tight = opts.pack === 'tight';
-  const speak = isSpeakAgent(opts);
   const inScene = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
   const player = characters.find((c) => c.isPlayer);
   const sections: string[] = [];
 
-  sections.push(worldBibleSection(
-    world,
-    speak
-      ? WORLD_BIBLE_SPEAK_CAP
-      : tight
-        ? 1800
-        : episode.runningSummary?.trim()
-          ? WORLD_BIBLE_AFTER_SUMMARY_CAP
-          : WORLD_BIBLE_CAP
-  ));
-  const bible = seasonBibleSection(season, speak ? 400 : (tight ? 600 : SEASON_BIBLE_RECAP_CAP));
+  sections.push(worldBibleSection(world, worldBibleCap(episode, tight)));
+  const bible = seasonBibleSection(season, tight ? 600 : SEASON_BIBLE_RECAP_CAP);
   if (bible) sections.push(bible);
   sections.push(situationPremise(ctx, { includeSeasonMeta: true }));
   sections.push(episodeHeader(episode));
 
   sections.push(...currentLocationBlock(ctx, {
     includeOthers: false,
-    atmosphereOnly: tight || speak
+    atmosphereOnly: tight
   }));
 
   const sensoryBits = [
@@ -1097,15 +1141,18 @@ function storyCacheSections(ctx: PromptContext, opts: PromptBuildOpts = {}): str
 }
 
 /**
- * Room packet for a spoken line: who is here, the air of the place, the live premise.
- * The world bible and season recap stay on the narrator.
+ * Room packet for a spoken line. Same world, season, and place the narrator just used.
  */
-function speakScenePrefix(ctx: PromptContext): string {
-  const { episode, characters } = ctx;
+function speakScenePrefix(ctx: PromptContext, opts: PromptBuildOpts = {}): string {
+  const { episode, characters, season } = ctx;
+  const tight = opts.pack === 'tight';
   const sections: string[] = [];
+  sections.push(worldBibleSection(ctx.world, worldBibleCap(episode, tight)));
+  const seasonBible = seasonBibleSection(season, tight ? 600 : SEASON_BIBLE_RECAP_CAP);
+  if (seasonBible) sections.push(seasonBible);
   sections.push(situationPremise(ctx, { includeSeasonMeta: true }));
   sections.push(episodeHeader(episode));
-  sections.push(...currentLocationBlock(ctx, { includeOthers: false, atmosphereOnly: true }));
+  sections.push(...currentLocationBlock(ctx, { includeOthers: false, atmosphereOnly: tight }));
 
   const player = characters.find((c) => c.isPlayer);
   const inScene = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
@@ -1138,15 +1185,13 @@ function worldSpineSections(
     if (targets) sections.push(targets);
   }
 
-  if (agent === 'narrator') {
-    const priorEps = tight
-      ? formatPriorEpisodesSection(ctx, {
-        beatCapImmediate: 3, beatCapDigest: 1,
-        recapDigestChars: 160, recapImmediateChars: 700
-      })
-      : priorMemoryFor(ctx, agent);
-    if (priorEps) sections.push(priorEps);
-  }
+  const priorEps = tight
+    ? formatPriorEpisodesSection(ctx, {
+      beatCapImmediate: 3, beatCapDigest: 1,
+      recapDigestChars: 160, recapImmediateChars: 700
+    })
+    : priorMemoryFor(ctx, agent);
+  if (priorEps) sections.push(priorEps);
 
   const factCap = tight ? 8 : FACT_CAPS[agent].facts;
   const threadCap = tight ? 4 : FACT_CAPS[agent].threads;
@@ -1311,13 +1356,14 @@ export function buildCharacterSystemPrompt(
   const frameOpts: PromptBuildOpts = { ...opts, agent: 'character' };
   const sections: string[] = [];
 
-  sections.push(speakScenePrefix(ctx));
+  sections.push(speakScenePrefix(ctx, frameOpts));
   sections.push(stancePlaybook(storyStanceOf(world)));
 
   sections.push(
     `You ARE ${character.name} in the story "${world.title}". You speak and act only as yourself. ` +
     `You are not the narrator. You do not write other characters' dialogue or the player's lines. ` +
-    `Reply in your own voice — looks/mannerisms plus what you say aloud.`
+    `Reply in your own voice — looks/mannerisms plus what you say aloud. ` +
+    `Blocks marked [Narrator] or another person's name are the scene, not lines you already said.`
   );
 
   sections.push(...leanAgentFrame(ctx, 'character', frameOpts));
@@ -1355,12 +1401,13 @@ export function buildGuestSystemPrompt(
   const frameOpts: PromptBuildOpts = { ...opts, agent: 'guest' };
   const sections: string[] = [];
 
-  sections.push(speakScenePrefix(ctx));
+  sections.push(speakScenePrefix(ctx, frameOpts));
   sections.push(stancePlaybook(storyStanceOf(world)));
 
   sections.push(
     `You ARE ${guest.name}, a temporary walk-on in "${world.title}" (not a permanent cast member). ` +
-    `You speak and act only as yourself in this chapter.`
+    `You speak and act only as yourself in this chapter. ` +
+    `Blocks marked [Narrator] or another person's name are the scene, not lines you already said.`
   );
 
   sections.push(...leanAgentFrame(ctx, 'guest', frameOpts));
@@ -1412,12 +1459,12 @@ export const MODE_PREFIX: Record<ComposeMode, (input: string) => string> = {
  */
 export const HISTORY_CHAR_BUDGET = 56000;
 
-/** Verbatim tail shipped on each Write. Spine + glue cover the rest. */
+/** Verbatim tail shipped on each Write. Narrator and speaker share it. */
 export const HISTORY_TAIL_CHAR_BUDGET = 16_000;
 export const HISTORY_TAIL_MAX_TURNS = 16;
-/** Speak/guest: a 40-word line does not need the narrator tail. */
-export const SPEAK_HISTORY_TAIL_CHAR_BUDGET = 8_000;
-export const SPEAK_HISTORY_TAIL_MAX_TURNS = 8;
+/** Same recent prose as the narrator, so a spoken line cannot miss the beat just written. */
+export const SPEAK_HISTORY_TAIL_CHAR_BUDGET = HISTORY_TAIL_CHAR_BUDGET;
+export const SPEAK_HISTORY_TAIL_MAX_TURNS = HISTORY_TAIL_MAX_TURNS;
 
 export type HistoryTailAgent = 'narrator' | 'speak' | 'director';
 
@@ -1427,19 +1474,20 @@ export interface HistoryTail {
 }
 
 /**
- * Verbatim tail by model window. Large windows get more recent prose for
- * immersion; speak stays leaner than narrator so a short line does not
- * resend the chapter. Unknown / 32k models keep the conservative floor.
+ * Verbatim tail by model window. Narrator and speaker share it, so the person
+ * who talks has seen the prose that was just written. Unknown / 32k models
+ * keep the conservative floor. An author window override replaces the guess.
  */
-export function chooseHistoryTail(model: string, agent: HistoryTailAgent): HistoryTail {
-  const window = inferContextWindowTokens(model);
+export function chooseHistoryTail(
+  model: string,
+  agent: HistoryTailAgent,
+  windowTokens?: number | null
+): HistoryTail {
+  const window = windowTokens != null && windowTokens >= 2048
+    ? windowTokens
+    : inferContextWindowTokens(model);
   const large = window >= 128_000;
   const mid = window >= 64_000;
-  if (agent === 'speak') {
-    if (large) return { charBudget: 12_000, maxTurns: 12 };
-    if (mid) return { charBudget: 10_000, maxTurns: 10 };
-    return { charBudget: SPEAK_HISTORY_TAIL_CHAR_BUDGET, maxTurns: SPEAK_HISTORY_TAIL_MAX_TURNS };
-  }
   if (agent === 'director') {
     if (large) return { charBudget: 16_000, maxTurns: 12 };
     if (mid) return { charBudget: 12_000, maxTurns: 10 };
@@ -1453,8 +1501,13 @@ export function chooseHistoryTail(model: string, agent: HistoryTailAgent): Histo
 /** Overflow retry keeps the latest exchange and drops the older chapter. */
 export const OVERFLOW_HISTORY_TAIL: HistoryTail = { charBudget: 4_000, maxTurns: 4 };
 
-export function historyTailFor(model: string, agent: HistoryTailAgent, pack?: PromptPack): HistoryTail {
-  const tail = chooseHistoryTail(model, agent);
+export function historyTailFor(
+  model: string,
+  agent: HistoryTailAgent,
+  pack?: PromptPack,
+  windowTokens?: number | null
+): HistoryTail {
+  const tail = chooseHistoryTail(model, agent, windowTokens);
   if (pack !== 'tight') return tail;
   return {
     charBudget: Math.min(tail.charBudget, OVERFLOW_HISTORY_TAIL.charBudget),
@@ -1463,8 +1516,12 @@ export function historyTailFor(model: string, agent: HistoryTailAgent, pack?: Pr
 }
 
 /** Turns the narrator tail will drop — used to decide when to file a running summary. */
-export function omittedTurnsForNarratorTail(turns: Turn[], model: string): Turn[] {
-  const tail = chooseHistoryTail(model, 'narrator');
+export function omittedTurnsForNarratorTail(
+  turns: Turn[],
+  model: string,
+  windowTokens?: number | null
+): Turn[] {
+  const tail = chooseHistoryTail(model, 'narrator', windowTokens);
   return packTurnsDetailed(turns, 0, TOTAL_PROMPT_CHAR_SOFT_CAP, {
     charBudget: tail.charBudget,
     maxTurns: tail.maxTurns
@@ -1481,10 +1538,13 @@ const PACK_MIN_TURNS = 4;
 const WORLD_BIBLE_CAP = 6000;
 /** After a running summary exists the cold-open bible can shrink. */
 const WORLD_BIBLE_AFTER_SUMMARY_CAP = 3000;
-const WORLD_BIBLE_SPEAK_CAP = 800;
 const SEASON_BIBLE_RECAP_CAP = 1600;
-/** Target size for deterministic omitted-turn digests (head / mid / tail). */
-const OMITTED_DIGEST_CHARS = 1800;
+/**
+ * Omitted chapter text sent whole when it fits. Longer chapters are sampled
+ * in even slices so the middle is not one 600-character window.
+ */
+const OMITTED_DIGEST_CHARS = 14_000;
+const OMITTED_SLICE_COUNT = 7;
 
 /** Sum of turn text lengths for an episode — used for context-pressure UI. */
 export function episodeHistoryChars(turns: Array<{ text: string }>): number {
@@ -1524,7 +1584,8 @@ function turnToChatContent(
   t: Turn,
   characters: Character[],
   guests: EpisodeGuest[] = [],
-  fullPlayerPrefix = false
+  fullPlayerPrefix = false,
+  voice: HistoryVoice = { kind: 'narrator' }
 ): { role: 'user' | 'assistant'; content: string } {
   if (t.role === 'user') {
     return {
@@ -1536,10 +1597,13 @@ function turnToChatContent(
   }
   if (t.role === 'character') {
     const name = resolveSpeakerName(t, characters, guests);
-    // Keep canonical *action* "speech" markers in history so models continue the format.
-    return { role: 'assistant', content: `[${name}]\n${t.text}` };
+    const id = t.guestId ?? t.characterId ?? '';
+    const mine = voice.kind === 'speaker' && id === voice.speakerId;
+    // Only this speaker's own lines are assistant. Everyone else is context.
+    return { role: mine ? 'assistant' : 'user', content: `[${name}]\n${t.text}` };
   }
-  return { role: 'assistant', content: t.text };
+  if (voice.kind === 'narrator') return { role: 'assistant', content: t.text };
+  return { role: 'user', content: `[Narrator]\n${t.text}` };
 }
 
 function labelTurnCompact(
@@ -1593,8 +1657,9 @@ export function packTurnsDetailed(
 }
 
 /**
- * Deterministic compressed digest of turns dropped by packing.
- * Takes head + tail slices so early setup and the cutover survive.
+ * Deterministic digest of turns dropped by packing.
+ * A chapter that fits is sent whole. A longer one is sampled in even slices
+ * from the open through the middle to the cutover.
  */
 export function compressOmittedTurns(
   omitted: Turn[],
@@ -1604,21 +1669,30 @@ export function compressOmittedTurns(
   if (omitted.length === 0) return '';
   const labeled = omitted.map((t) => labelTurnCompact(t, characters, guests)).join('\n\n');
   if (labeled.length <= OMITTED_DIGEST_CHARS) return labeled;
-  // Head + mid + tail so early setup, mid-episode turns, and the cutover all survive.
-  const third = Math.max(120, Math.floor(OMITTED_DIGEST_CHARS / 3) - 12);
-  const midStart = Math.max(0, Math.floor((labeled.length - third) / 2));
-  return (
-    labeled.slice(0, third).trimEnd() +
-    '\n\n…\n\n' +
-    labeled.slice(midStart, midStart + third).trim() +
-    '\n\n…\n\n' +
-    labeled.slice(-third).trimStart()
-  );
+  const slice = Math.max(240, Math.floor(OMITTED_DIGEST_CHARS / OMITTED_SLICE_COUNT) - 16);
+  const parts: string[] = [];
+  for (let i = 0; i < OMITTED_SLICE_COUNT; i++) {
+    const start = Math.floor((labeled.length - slice) * (i / (OMITTED_SLICE_COUNT - 1)));
+    const bit = labeled.slice(Math.max(0, start), Math.max(0, start) + slice).trim();
+    if (bit) parts.push(bit);
+  }
+  return parts.join('\n\n…\n\n');
+}
+
+/** Turns whose text begins after `markChars` of transcript. Empty when the mark is current. */
+export function turnsSinceCharMark<T extends { text: string }>(turns: T[], markChars: number): T[] {
+  if (markChars <= 0) return turns;
+  let used = 0;
+  for (let i = 0; i < turns.length; i++) {
+    if (used >= markChars) return turns.slice(i);
+    used += turns[i].text.length;
+  }
+  return [];
 }
 
 /**
- * History prefix when older turns were packed out.
- * If a running summary already covers those beats, skip the digest (never send both).
+ * Concrete lines that fell off the verbatim tail.
+ * A running summary does not replace them — the summary can flatten a beat the next line still needs.
  */
 function earlierEpisodePrefix(
   episode: Episode | undefined,
@@ -1626,14 +1700,20 @@ function earlierEpisodePrefix(
   characters: Character[],
   guests: EpisodeGuest[]
 ): ChatMessage | null {
-  if (episode?.runningSummary?.trim()) return null;
   const digest = compressOmittedTurns(omitted, characters, guests);
   if (!digest) return null;
+  const note = episode?.runningSummary?.trim()
+    ? '(Concrete lines from earlier in this chapter. The running summary may have flattened these. Recent turns follow.)'
+    : '(Earlier in this chapter — compressed; recent turns follow.)';
   return {
     role: 'user',
-    content: `(Earlier in this chapter — compressed; recent turns follow.)\n\nCompressed earlier beats:\n${digest}`
+    content: `${note}\n\nCompressed earlier beats:\n${digest}`
   };
 }
+
+type HistoryVoice =
+  | { kind: 'narrator' }
+  | { kind: 'speaker'; speakerId: string };
 
 function historyMessages(
   turns: Turn[],
@@ -1641,7 +1721,8 @@ function historyMessages(
   guests: EpisodeGuest[] = [],
   episode?: Episode,
   systemChars = 0,
-  pack?: Pick<PromptBuildOpts, 'totalCap' | 'skipOmittedDigest' | 'historyTailChars' | 'historyTailMaxTurns'>
+  pack?: Pick<PromptBuildOpts, 'totalCap' | 'skipOmittedDigest' | 'historyTailChars' | 'historyTailMaxTurns'>,
+  voice: HistoryVoice = { kind: 'narrator' }
 ): ChatMessage[] {
   const { kept, omitted } = packTurnsDetailed(
     turns, systemChars, pack?.totalCap ?? TOTAL_PROMPT_CHAR_SOFT_CAP,
@@ -1649,7 +1730,7 @@ function historyMessages(
   );
   const latestUser = latestUserTurnId(turns);
   const messages: ChatMessage[] = kept.map((t) =>
-    turnToChatContent(t, characters, guests, t.role === 'user' && t.id === latestUser)
+    turnToChatContent(t, characters, guests, t.role === 'user' && t.id === latestUser, voice)
   );
   if (!pack?.skipOmittedDigest) {
     const prefix = earlierEpisodePrefix(episode, omitted, characters, guests);
@@ -1688,6 +1769,7 @@ export function buildNarrationBeatMessages(
     `Do not write the player's actions, speech, or thoughts. Do not repeat their line. Leave them room to answer.\n` +
     `Write this: ${brief}\n` +
     `Only the people already in this room, and walk-ons already here, may appear. Do not invent a named person. Do not have anyone walk in.\n` +
+    `Lines marked [Name] were spoken by that person. Do not continue them as narration.\n` +
     `Show this moment on named bodies in the room; do not recap. Carry the consequence through the length below.\n\n` +
     `${narrationSizeHint(length)}`;
   return mergeMessages([...messages, { role: 'user', content: userContent }]);
@@ -1819,11 +1901,13 @@ export function buildCharacterSpeakMessages(
       skipOmittedDigest: opts?.skipOmittedDigest,
       historyTailChars: opts?.historyTailChars ?? SPEAK_HISTORY_TAIL_CHAR_BUDGET,
       historyTailMaxTurns: opts?.historyTailMaxTurns ?? SPEAK_HISTORY_TAIL_MAX_TURNS
-    }
+    },
+    { kind: 'speaker', speakerId: speaking.id }
   );
   const length = opts?.length ?? 'scene';
   const userContent =
     `(You are ${speaking.name}. Respond now in character.)\n` +
+    `Only [${speaking.name}] lines are yours. [Narrator] and other names are the scene — do not repeat them or treat them as something you already said.\n` +
     speakVoiceReminder(speaking) +
     heardAnswerCue(turns, characters, guests) +
     `Intent for this line: ${brief}\n\n` +
@@ -1852,7 +1936,8 @@ export function buildGuestSpeakMessages(
       skipOmittedDigest: opts?.skipOmittedDigest,
       historyTailChars: opts?.historyTailChars ?? SPEAK_HISTORY_TAIL_CHAR_BUDGET,
       historyTailMaxTurns: opts?.historyTailMaxTurns ?? SPEAK_HISTORY_TAIL_MAX_TURNS
-    }
+    },
+    { kind: 'speaker', speakerId: guest.id }
   );
   const length = opts?.length ?? 'scene';
   const guestVoice = (guest.voice ?? '').trim();
@@ -1861,6 +1946,7 @@ export function buildGuestSpeakMessages(
     : '';
   const userContent =
     `(You are ${guest.name}, a walk-on. Respond now.)\n` +
+    `Only [${guest.name}] lines are yours. [Narrator] and other names are the scene — do not repeat them or treat them as something you already said.\n` +
     voiceLine +
     heardAnswerCue(turns, characters, guests) +
     `Intent for this line: ${brief}\n\n` +

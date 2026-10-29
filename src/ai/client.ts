@@ -152,8 +152,33 @@ function cachedSystemBlock(text: string) {
 
 function isLengthStop(reason: string | undefined | null): boolean {
   if (!reason) return false;
-  const r = reason.toUpperCase();
-  return r === 'LENGTH' || r === 'MAX_TOKENS' || r === 'MAX_TOKEN' || r === 'MAXTOKENS';
+  const r = reason.toUpperCase().replace(/[\s-]+/g, '_');
+  return r === 'LENGTH'
+    || r === 'MAX_TOKENS'
+    || r === 'MAX_TOKEN'
+    || r === 'MAXTOKENS'
+    || r === 'MAX_OUTPUT_TOKENS'
+    || r === 'MAX_LENGTH'
+    || r === 'MODEL_LENGTH';
+}
+
+/**
+ * Pull complete SSE `data:` payloads out of a read buffer.
+ * When `flush` is set, the last line is included even if the provider
+ * closed the socket without a trailing newline — that chunk is the end of the reply.
+ */
+export function drainSSEBuffer(buffer: string, flush: boolean): { events: string[]; rest: string } {
+  const lines = buffer.replace(/\r/g, '').split('\n');
+  const complete = flush ? lines : lines.slice(0, -1);
+  const rest = flush ? '' : (lines[lines.length - 1] ?? '');
+  const events: string[] = [];
+  for (const line of complete) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('data:')) continue;
+    const data = trimmed.slice(5).trim();
+    if (data && data !== '[DONE]') events.push(data);
+  }
+  return { events, rest };
 }
 
 function isRetryableStatus(status: number | undefined): boolean {
@@ -334,18 +359,16 @@ async function readSSE(
   let buffer = '';
   for (;;) {
     const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() ?? '';
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith('data:')) {
-        const data = trimmed.slice(5).trim();
-        if (data && data !== '[DONE]') onEvent(data);
-      }
+    if (done) {
+      buffer += decoder.decode(value);
+      break;
     }
+    buffer += decoder.decode(value, { stream: true });
+    const drained = drainSSEBuffer(buffer, false);
+    buffer = drained.rest;
+    for (const data of drained.events) onEvent(data);
   }
+  for (const data of drainSSEBuffer(buffer, true).events) onEvent(data);
 }
 
 async function throwHttpError(res: Response, provider?: ProviderConfig): Promise<never> {
@@ -369,8 +392,20 @@ async function throwHttpError(res: Response, provider?: ProviderConfig): Promise
 
 function contentPiece(raw: unknown): string {
   if (typeof raw === 'string') return raw;
-  if (Array.isArray(raw)) {
-    return raw.map((p: { text?: string }) => p?.text ?? '').join('');
+  if (Array.isArray(raw)) return raw.map((part) => contentPiece(part)).join('');
+  if (raw && typeof raw === 'object') {
+    const part = raw as { text?: unknown; content?: unknown };
+    if (typeof part.text === 'string') return part.text;
+    if (typeof part.content === 'string') return part.content;
+  }
+  return '';
+}
+
+/** First present text field. An empty string is present and does not fall through. */
+function firstPresentText(...parts: unknown[]): string {
+  for (const part of parts) {
+    if (part == null) continue;
+    return contentPiece(part);
   }
   return '';
 }
@@ -394,7 +429,7 @@ async function streamOpenAI(req: StreamRequest): Promise<StreamResult> {
       const json = JSON.parse(data);
       const choice = json.choices?.[0];
       const delta = choice?.delta;
-      const piece = contentPiece(delta?.content ?? choice?.message?.content ?? delta?.text);
+      const piece = firstPresentText(delta?.content, delta?.text, choice?.text, choice?.message?.content);
       if (delta?.reasoning || delta?.reasoning_content || choice?.message?.reasoning_content) {
         sawReasoning = true;
       }

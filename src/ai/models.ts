@@ -10,6 +10,15 @@ function requireModel(ref: ModelRef | null, label: string) {
   return resolved;
 }
 
+/** Author-set context window, or null when the model id should be inferred. */
+export function contextWindowFor(): number | null {
+  const n = useSettings.getState().contextWindowTokens;
+  if (typeof n !== 'number' || !Number.isFinite(n)) return null;
+  const rounded = Math.round(n);
+  if (rounded < 2048 || rounded > 2_000_000) return null;
+  return rounded;
+}
+
 export function proseModelFor(world: World | null) {
   const s = useSettings.getState();
   return requireModel(world?.proseModel ?? s.proseModel, 'writing');
