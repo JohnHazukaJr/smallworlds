@@ -706,7 +706,8 @@ function calendarBlock(
       `Today is ${formatStoryDate(cal, scene)}.\n` +
       `This chapter's date: ${dateLine}.` +
       worldClock +
-      (note ? `\nDate note: ${note}` : '')
+      (note ? `\nDate note: ${note}` : '') +
+      `\nGround the scene in this date when natural — weekday, season, or time of day — without dumping a calendar header into the prose.`
     );
   }
   if (mode === 'directorLine') {
@@ -1330,6 +1331,7 @@ export function buildNarratorSystemPrompt(ctx: PromptContext, opts: PromptBuildO
     `- ${pacingLine(ai)}\n` +
     `- Never write the player's dialogue, decisions, or inner monologue. Leave space for them to act.\n` +
     `- NEVER write spoken dialogue, quoted speech, or lines in the form CharacterName: "…". Named characters speak in their own turns. Write the consequence through to the length asked on this turn. Do not stop after the first physical beat, and do not write the player's next move.\n` +
+    `- Use the Calendar above to ground the moment (weekday, season, or time of day) when it serves the scene — weave it in; do not print a date stamp.\n` +
     `- ${narratorCloseGuidance(storyStanceOf(world))}` +
     (rules.length > 0 ? `\n${rules.map((r) => `- ${r}`).join('\n')}` : '')
   );
@@ -1766,14 +1768,21 @@ export function buildNarrationBeatMessages(
   const messages = historyMessages(turns, characters, guests, episode, systemChars, pack);
   const userContent =
     `(Narration only — no spoken dialogue, no CharacterName: "…" lines.)\n` +
+    `First job: show the consequence of the player's last move on named bodies in this room. ` +
+    `Atmosphere only serves that consequence — no weather catalogue. Do not recap earlier beats.\n` +
     `Do not write the player's actions, speech, or thoughts. Do not repeat their line. Leave them room to answer.\n` +
     `Write this: ${brief}\n` +
     `Only the people already in this room, and walk-ons already here, may appear. Do not invent a named person. Do not have anyone walk in.\n` +
-    `Lines marked [Name] were spoken by that person. Do not continue them as narration.\n` +
-    `Show this moment on named bodies in the room; do not recap. Carry the consequence through the length below.\n\n` +
+    `Lines marked [Name] were spoken by that person. Do not continue them as narration.\n\n` +
     `${narrationSizeHint(length)}`;
   return mergeMessages([...messages, { role: 'user', content: userContent }]);
 }
+
+/** Hard rule on every character/guest speak turn. */
+export const SPEAK_QUESTION_RULE =
+  'Questions are rare. Prefer act, refuse, bargain, deflect, or reveal. ' +
+  'If the player just answered you, register that answer and advance the stake — do not rephrase the same question. ' +
+  'At most one new question, and only when they introduced a new unknown.';
 
 /** Extra rule when the player just spoke (Speak/Play) — Act may stay silent. */
 export const SPEAK_MUST_DIALOGUE =
@@ -1913,6 +1922,7 @@ export function buildCharacterSpeakMessages(
     `Intent for this line: ${brief}\n\n` +
     knowledgeWallCue(speaking.mustNotKnow) +
     `Answer the player's last line in your own voice, with words in double quotes. Do not restage the room. Do not speak for anyone else.\n` +
+    `${SPEAK_QUESTION_RULE}\n` +
     `Use the required *action* "dialogue" format. No other speakers.\n` +
     `${speakSizeHint(length)}\n\n` +
     SPEAK_FORMAT_RULES +
@@ -1951,6 +1961,7 @@ export function buildGuestSpeakMessages(
     heardAnswerCue(turns, characters, guests) +
     `Intent for this line: ${brief}\n\n` +
     `Answer the player's last line in your own voice, with words in double quotes. Do not restage the room. Do not speak for anyone else.\n` +
+    `${SPEAK_QUESTION_RULE}\n` +
     `${speakSizeHint(length)}\n\n` +
     SPEAK_FORMAT_RULES +
     (opts?.requireDialogue ? `\n\n${SPEAK_MUST_DIALOGUE}` : '');

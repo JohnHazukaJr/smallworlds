@@ -856,6 +856,9 @@ describe('engine context pack', () => {
     expect((speak.match(/^## Calendar\b/gm) ?? []).length).toBe(1);
     expect(narr).not.toMatch(/## Calendar events/);
     expect(speak).not.toMatch(/## Calendar texture/);
+    expect(narr).toMatch(/Ground the scene in this date/i);
+    expect(narr).toMatch(/Use the Calendar above to ground the moment/i);
+    expect(speak).not.toMatch(/Ground the scene in this date/i);
   });
 
   it('uses short labels on older player turns and full MODE_PREFIX on the latest', () => {

@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   addressStrength,
   detectAddressee,
+  detectHardAddressee,
   lastOpenQuestion,
   lastSpeaker,
+  priorOpenQuestionText,
   rankReplySpeakers,
   roomDynamicsLines,
   selectAnswerers,
@@ -298,5 +300,36 @@ describe('selectAnswerers', () => {
       preferId: 'c2'
     }).map((c) => c.id);
     expect(ids).toEqual(['c2']);
+  });
+
+  it('gives the unanswered asker the floor when the player did not name anyone', () => {
+    const ids = selectAnswerers({
+      length: 'scene',
+      playerText: 'I was at the quay.',
+      candidates: trio,
+      turns: [said('c2', '"Where were you?"'), player('I was at the quay.')]
+    }).map((c) => c.id);
+    expect(ids[0]).toBe('c2');
+  });
+});
+
+describe('detectHardAddressee', () => {
+  it('ignores a bare mention when someone else is directed', () => {
+    expect(detectHardAddressee('Ada, tell Ben what you saw.', trio)?.id).toBe('c1');
+    expect(detectAddressee('Ada, tell Ben what you saw.', trio)?.id).toBe('c1');
+  });
+
+  it('does not hard-pin a topic-only mention', () => {
+    expect(detectHardAddressee('I heard Ben lied about the ledger.', trio)).toBeNull();
+    expect(detectAddressee('I heard Ben lied about the ledger.', trio)?.id).toBe('c2');
+  });
+});
+
+describe('priorOpenQuestionText', () => {
+  it('returns the asker and their question line', () => {
+    const turns = [said('c1', '"Where is the key?"'), player('Under the blotter.')];
+    const open = priorOpenQuestionText(turns, trio);
+    expect(open?.asker.id).toBe('c1');
+    expect(open?.text).toMatch(/Where is the key/);
   });
 });

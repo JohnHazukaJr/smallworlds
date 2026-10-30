@@ -156,7 +156,7 @@ export function lastOpenQuestion(
   };
 }
 
-/** Who the player's latest move points at, if anyone. */
+/** Who the player's latest move points at, if anyone (includes bare mention). */
 export function detectAddressee(
   playerText: string,
   candidates: SpeakerCandidate[]
@@ -173,6 +173,54 @@ export function detectAddressee(
 }
 
 /**
+ * Who the player is speaking straight to — vocative or directed only.
+ * Bare mentions ("tell Ada that Ben lied") do not count; Ben stays a topic.
+ */
+export function detectHardAddressee(
+  playerText: string,
+  candidates: SpeakerCandidate[]
+): SpeakerCandidate | null {
+  let best: { c: SpeakerCandidate; rank: number } | null = null;
+  for (const c of candidates) {
+    const strength = addressStrength(playerText, c.name);
+    if (strength !== 'vocative' && strength !== 'directed') continue;
+    const r = strength === 'vocative' ? 3 : 2;
+    if (!best || r > best.rank) best = { c, rank: r };
+  }
+  return best?.c ?? null;
+}
+
+/**
+ * The open-question asker's prior line text, when the player just answered them.
+ * Used for re-ask detection on speak briefs and spoken lines.
+ */
+export function priorOpenQuestionText(
+  turns: Turn[],
+  candidates: SpeakerCandidate[]
+): { asker: SpeakerCandidate; text: string } | null {
+  let userIdx = -1;
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].role === 'user') {
+      userIdx = i;
+      break;
+    }
+  }
+  if (userIdx < 0) return null;
+  let i = userIdx - 1;
+  while (i >= 0 && turns[i].role === 'narrator') i--;
+  if (i < 0 || turns[i].role !== 'character') return null;
+  if (!/\?/.test(turns[i].text)) return null;
+  const id = turns[i].guestId ?? turns[i].characterId;
+  if (!id) return null;
+  const asker = candidates.find((c) => c.id === id) ?? {
+    id,
+    name: 'Someone',
+    kind: (turns[i].guestId ? 'guest' : 'cast') as SpeakerKind
+  };
+  return { asker, text: turns[i].text };
+}
+
+/**
  * Rank who should answer when the plan has no speak beat.
  * Being addressed dominates; after that, whoever has been quiet longest gets the floor,
  * so one NPC cannot monopolise a scene just by being first in the cast list.
@@ -184,6 +232,8 @@ export function rankReplySpeakers(opts: {
 }): RankedSpeaker[] {
   const turns = opts.turns ?? [];
   const since = turnsSinceSpoke(turns, opts.candidates);
+  const openAsker = lastOpenQuestion(turns, opts.candidates);
+  const hard = detectHardAddressee(opts.playerText, opts.candidates);
   let lastNarration = '';
   for (let i = turns.length - 1; i >= 0; i--) {
     if (turns[i].role === 'narrator') {
@@ -200,6 +250,9 @@ export function rankReplySpeakers(opts: {
       if (address === 'vocative') score += 100;
       else if (address === 'directed') score += 70;
       else if (address === 'mention') score += 30;
+
+      // Player answered this person's question and did not hard-address someone else.
+      if (openAsker && openAsker.id === c.id && !hard) score += 55;
 
       if (!Number.isFinite(turnsSince)) score += NEVER_SPOKE_PULL;
       else score += Math.min(turnsSince, SILENCE_GAP_CAP) * 3;
@@ -259,9 +312,13 @@ export function selectAnswerers(opts: {
   } else if (opts.length !== 'beat' && mentioned.length > 0) {
     for (const c of mentioned) take(c);
   } else if (picked.length === 0) {
-    const last = lastSpeaker(opts.turns ?? [], opts.candidates);
-    const lastRanked = last ? ranked.find((c) => c.id === last.id) : undefined;
-    take(lastRanked ?? ranked[0]);
+    const asker = lastOpenQuestion(opts.turns ?? [], opts.candidates);
+    if (asker) take(ranked.find((c) => c.id === asker.id));
+    if (picked.length === 0) {
+      const last = lastSpeaker(opts.turns ?? [], opts.candidates);
+      const lastRanked = last ? ranked.find((c) => c.id === last.id) : undefined;
+      take(lastRanked ?? ranked[0]);
+    }
   }
 
   const anyoneSpoke = (opts.turns ?? []).some((t) => t.role === 'character');

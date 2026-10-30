@@ -3,7 +3,9 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { flushSync } from 'react-dom';
 import {
   commitSoftEpisodeWrap, draftColdOpenNarration,
+  deleteTurn, deleteTurnsFrom,
   endStoryWrite,
+  finalizeChapterMemory,
   regenerateBeat,
   tryBeginStoryWrite, writeTurn,
   WriteAbortedError, type StreamMeta
@@ -13,7 +15,7 @@ import {
   DELIVERY_TONE_GROUPS,
   type DeliveryTone
 } from '../ai/deliveryTone';
-import { composeOutgoingLine, summaryClearPatch } from '../ai/composeLine';
+import { composeOutgoingLine } from '../ai/composeLine';
 import {
   groupSpeakParagraphs,
   parseInlineEmphasis,
@@ -1068,13 +1070,31 @@ export function Story() {
     setError('');
     try {
       await db.turns.update(editing.id, { text, updatedAt: Date.now() });
-      const patch = summaryClearPatch(episode.runningSummary);
-      if (patch) await db.episodes.update(episode.id, { ...patch, updatedAt: Date.now() });
+      await finalizeChapterMemory(episode.id);
       setEditing(null);
     } catch (e) {
       setError(classifyError(e));
     } finally {
       setEditBusy(false);
+    }
+  };
+
+  const deletePassage = async (turn: Turn, fromHere: boolean) => {
+    if (!episode || streaming) return;
+    if (turn.role !== 'narrator' && turn.role !== 'character') return;
+    const ok = fromHere
+      ? window.confirm('Delete this line and everything after it in this chapter?')
+      : window.confirm('Delete this line?');
+    if (!ok) return;
+    setError('');
+    setNotice('');
+    try {
+      if (fromHere) await deleteTurnsFrom(turn.id, episode.id);
+      else await deleteTurn(turn.id, episode.id);
+      await finalizeChapterMemory(episode.id);
+      if (editing?.id === turn.id) setEditing(null);
+    } catch (e) {
+      setError(classifyError(e));
     }
   };
 
@@ -1343,7 +1363,6 @@ export function Story() {
   const bookPieces: BookPiece[] = [];
   if (book) {
     const visible = manuscript.slice(-turnWindow);
-    const latestPassageId = [...turns].reverse().find((t) => t.role === 'narrator' || t.role === 'character')?.id ?? null;
     const chapterTitle = episode.title.trim() || activeLocation?.name || episode.location || 'Untitled chapter';
     if (manuscript.length > turnWindow) {
       bookPieces.push({
@@ -1503,10 +1522,7 @@ export function Story() {
         });
       });
       const canEdit = turn.role === 'narrator' || turn.role === 'character';
-      const rewrite = turn.id === latestPassageId
-        ? () => { void rewritePassage(turn); }
-        : undefined;
-      if (canEdit || rewrite) {
+      if (canEdit) {
         bookPieces.push({
           key: `tools-${turn.id}`,
           node: (
@@ -1515,7 +1531,9 @@ export function Story() {
               canEdit={canEdit}
               editing={editing?.id === turn.id}
               onEdit={() => beginEdit(turn)}
-              onRewrite={rewrite}
+              onRewrite={() => { void rewritePassage(turn); }}
+              onDeleteLine={() => { void deletePassage(turn, false); }}
+              onDeleteFromHere={() => { void deletePassage(turn, true); }}
             />
           )
         });
@@ -1887,13 +1905,13 @@ export function Story() {
 
             {(() => {
               const visible = manuscript.slice(-turnWindow);
-              const latestPassageId = [...turns].reverse().find((t) => t.role === 'narrator' || t.role === 'character')?.id ?? null;
               let prevEpisodeId = '';
               return visible.map(({ episode: chapter, turn, blocks: bs }, ti) => {
                 const showBreak = chapter.id !== prevEpisodeId
                   && !(prevEpisodeId === '' && chapter.id === episode.id);
                 prevEpisodeId = chapter.id;
                 const chapterTitle = chapter.title.trim() || chapter.location || `Chapter ${chapter.number}`;
+                const canEdit = turn.role === 'narrator' || turn.role === 'character';
                 return (
                   <div key={turn.id} data-turn-id={turn.id}>
                     {showBreak && (
@@ -1923,10 +1941,10 @@ export function Story() {
                       prevSpeaker={ti > 0 ? lastSpokenBy(visible[ti - 1].blocks) : null}
                       streaming={streaming}
                       opening={manuscript.length <= turnWindow && ti === 0}
-                      onRewrite={turn.id === latestPassageId ? () => { void rewritePassage(turn); } : undefined}
-                      onEdit={turn.role === 'narrator' || turn.role === 'character'
-                        ? () => beginEdit(turn)
-                        : undefined}
+                      onRewrite={canEdit ? () => { void rewritePassage(turn); } : undefined}
+                      onEdit={canEdit ? () => beginEdit(turn) : undefined}
+                      onDeleteLine={canEdit ? () => { void deletePassage(turn, false); } : undefined}
+                      onDeleteFromHere={canEdit ? () => { void deletePassage(turn, true); } : undefined}
                       editing={editing?.id === turn.id}
                     />
                   </div>
@@ -2367,17 +2385,19 @@ function DisplaySheet({ open, onClose, narrow }: {
 // ---------- turn row ----------
 
 function TurnTools({
-  streaming, canEdit, editing, onEdit, onRewrite
+  streaming, canEdit, editing, onEdit, onRewrite, onDeleteLine, onDeleteFromHere
 }: {
   streaming: boolean;
   canEdit: boolean;
   editing: boolean;
   onEdit: () => void;
   onRewrite?: () => void;
+  onDeleteLine?: () => void;
+  onDeleteFromHere?: () => void;
 }) {
-  if (!canEdit && !onRewrite) return null;
+  if (!canEdit && !onRewrite && !onDeleteLine && !onDeleteFromHere) return null;
   return (
-    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4, marginBottom: 10 }}>
+    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4, marginBottom: 10, flexWrap: 'wrap' }}>
       {canEdit && (
         <button className="btn-quiet" style={{ fontSize: 12, padding: '6px 10px', minHeight: 36 }} disabled={streaming || editing} onClick={onEdit}>
           {editing ? 'Editing' : 'Edit'}
@@ -2388,13 +2408,23 @@ function TurnTools({
           Rewrite this passage
         </button>
       )}
+      {onDeleteLine && (
+        <button className="btn-quiet" style={{ fontSize: 12, padding: '6px 10px', minHeight: 36 }} disabled={streaming} onClick={onDeleteLine}>
+          Delete line
+        </button>
+      )}
+      {onDeleteFromHere && (
+        <button className="btn-quiet" style={{ fontSize: 12, padding: '6px 10px', minHeight: 36 }} disabled={streaming} onClick={onDeleteFromHere}>
+          Delete from here
+        </button>
+      )}
     </div>
   );
 }
 
 function TurnRow({
   turn, blocks, accent, prose, fontPx, avatarPx, dialogueStyle, prevSpeaker, streaming, opening,
-  onRewrite, onEdit, editing
+  onRewrite, onEdit, onDeleteLine, onDeleteFromHere, editing
 }: {
   turn: Turn;
   blocks: ProseBlock[];
@@ -2408,6 +2438,8 @@ function TurnRow({
   opening?: boolean;
   onRewrite?: () => void;
   onEdit?: () => void;
+  onDeleteLine?: () => void;
+  onDeleteFromHere?: () => void;
   editing?: boolean;
 }) {
   const continued = attributionRun(blocks, prevSpeaker);
@@ -2433,6 +2465,8 @@ function TurnRow({
         editing={!!editing}
         onEdit={onEdit ?? (() => undefined)}
         onRewrite={onRewrite}
+        onDeleteLine={onDeleteLine}
+        onDeleteFromHere={onDeleteFromHere}
       />
     </div>
   );

@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   matchPlotTargets, mergeStateField, mergeLiveRelationshipPatch, normalizeBeats, capSceneLedger, capSoftWrapExtract,
   dedupeSoftWrapExtract, directorFallbackNarrationBrief, chapterNarrationBrief, softWrapAlreadyFiled, SCENE_LEDGER_CAP,
-  endStoryWrite, isBlankWorldBrief, isEmptyRosterProposal,   pendingBeatsToKeep, tryBeginStoryWrite, nextSceneCast, rememberedExtract
+  endStoryWrite, isBlankWorldBrief, isEmptyRosterProposal, pendingBeatsToKeep, tryBeginStoryWrite, nextSceneCast,
+  rememberedExtract, isThinNarrationBrief, strengthenNarrationBrief, chapterMemoryClearPatch
 } from './engine';
 import {
   episodeContextPressure,
@@ -244,6 +245,121 @@ describe('normalizeBeats', () => {
     );
     expect(beats.some((b) => b.type === 'speak')).toBe(true);
     expect(beats[0].type).toBe('speak');
+  });
+
+  it('puts the hard addressee first even when the director briefed someone else first', () => {
+    const beats = normalizeBeats(
+      {
+        beats: [
+          { type: 'speak', characterId: 'Ben', brief: 'wrong voice' },
+          { type: 'narration', brief: 'Rain hits the glass while Ada reaches for the stamp.' }
+        ]
+      },
+      cast,
+      guests,
+      new Map(),
+      'speak',
+      'Ada, look at me.'
+    );
+    expect(beats[0]).toMatchObject({ type: 'speak', characterId: 'c1' });
+    if (beats[0].type === 'speak') {
+      expect(beats[0].brief).toMatch(/speaking straight at you/i);
+    }
+  });
+
+  it('does not let a bare mention steal the floor from the directed person', () => {
+    const beats = normalizeBeats(
+      {
+        beats: [
+          { type: 'speak', characterId: 'Ben', brief: 'topic only' },
+          { type: 'speak', characterId: 'Ada', brief: 'addressed' },
+          { type: 'narration', brief: 'Ada turns toward Ben with the ledger open between them.' }
+        ]
+      },
+      cast,
+      guests,
+      new Map(),
+      'speak',
+      'Ada, tell Ben what you saw.'
+    );
+    expect(beats[0]).toMatchObject({ type: 'speak', characterId: 'c1' });
+  });
+
+  it('gives the unanswered asker the first speak when the player did not name anyone', () => {
+    const asked: Turn = {
+      id: 't1', episodeId: 'e', worldId: 'w', role: 'character', mode: null,
+      characterId: 'c2', text: '"Where were you?"', createdAt: 1
+    };
+    const answered: Turn = {
+      id: 't2', episodeId: 'e', worldId: 'w', role: 'user', mode: 'speak',
+      text: '"At the quay."', createdAt: 2
+    };
+    const beats = normalizeBeats(
+      {
+        beats: [
+          { type: 'speak', characterId: 'Ada', brief: 'ask where again' },
+          { type: 'narration', brief: 'Ben watches the player over the blotter.' }
+        ]
+      },
+      cast,
+      guests,
+      new Map(),
+      'speak',
+      'At the quay.',
+      'scene',
+      undefined,
+      [asked, answered]
+    );
+    expect(beats[0]).toMatchObject({ type: 'speak', characterId: 'c2' });
+    if (beats[0].type === 'speak') {
+      expect(beats[0].brief).toMatch(/register|answered|do not ask/i);
+    }
+  });
+
+  it('replaces a thin narration brief with place, move, and named bodies', () => {
+    const beats = normalizeBeats(
+      { beats: [{ type: 'narration', brief: 'Rain.' }] },
+      cast,
+      guests,
+      new Map(),
+      'continue',
+      'I wait by the desk.',
+      'scene',
+      undefined,
+      undefined,
+      'Harbour office'
+    );
+    const narr = beats.find((b) => b.type === 'narration');
+    expect(narr?.type).toBe('narration');
+    if (narr?.type === 'narration') {
+      expect(narr.brief).toMatch(/Harbour office|Ada|wait by the desk/i);
+      expect(isThinNarrationBrief(narr.brief, 'I wait by the desk.', cast)).toBe(false);
+    }
+  });
+});
+
+describe('strengthenNarrationBrief', () => {
+  it('keeps a brief that already names a body', () => {
+    const brief = 'Ada stamps the page while rain hits the glass.';
+    expect(strengthenNarrationBrief({
+      brief,
+      mode: 'speak',
+      playerText: 'Hello',
+      location: 'Office',
+      inScene: [npc('c1', 'Ada')]
+    })).toBe(brief);
+  });
+
+  it('replaces weather-only mush', () => {
+    expect(isThinNarrationBrief('Rain on glass.', '', [npc('c1', 'Ada')])).toBe(true);
+    const next = strengthenNarrationBrief({
+      brief: 'Rain on glass.',
+      mode: 'speak',
+      playerText: 'I set the ledger down.',
+      location: 'Harbour office',
+      inScene: [npc('c1', 'Ada')]
+    });
+    expect(next).toMatch(/Harbour office|Ada|ledger/i);
   });
 });
 
@@ -679,6 +795,19 @@ describe('pendingBeatsToKeep', () => {
 
   it('clears when nothing remains', () => {
     expect(pendingBeatsToKeep([])).toEqual([]);
+  });
+});
+
+describe('chapterMemoryClearPatch', () => {
+  it('always clears summary watermarks, pending plan, and scene ledger', () => {
+    expect(chapterMemoryClearPatch()).toEqual({
+      runningSummary: null,
+      runningSummaryAtChars: 0,
+      liveStateAtChars: 0,
+      liveCanonAtChars: 0,
+      pendingPlan: null,
+      sceneLedger: []
+    });
   });
 });
 

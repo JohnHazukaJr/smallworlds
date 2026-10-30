@@ -28,6 +28,12 @@ import { stancePlaybook } from './storyStance';
 import { hasSpokenDialogue, narrationLineCutOff, normalizeSpeakText, settleSpeakText, speakHoldsForPlayer, speakLineCutOff, stitchSpeakRetry, stripNarratorEmbeddedDialogue } from './dialogueFormat';
 import { SPEAK_WALL_NUDGE, acceptWallRetry, clearMustNotKnowClause, speakLeaksMustNotKnow } from './knowledgeWall';
 import {
+  SPEAK_REASK_NUDGE,
+  rewriteReaskSpeakBrief,
+  speakBriefLooksLikeReask,
+  speakReasksPriorQuestion
+} from './speakReask';
+import {
   activeGuests,
   buildCharacterSpeakMessages,
   buildCharacterSystemPrompt,
@@ -55,7 +61,14 @@ import {
   narrationBeatTokens,
   planCapsForLength
 } from './prompts';
-import { detectAddressee, rankReplySpeakers, selectAnswerers, speakerCandidates, type RankedSpeaker } from './roomDynamics';
+import {
+  detectHardAddressee,
+  priorOpenQuestionText,
+  rankReplySpeakers,
+  selectAnswerers,
+  speakerCandidates,
+  type RankedSpeaker
+} from './roomDynamics';
 import {
   isNearDuplicate,
   knowledgeFactLine,
@@ -128,6 +141,8 @@ async function streamSpeakComplete(opts: {
   signal?: AbortSignal;
   requireDialogue?: boolean;
   mustNotKnow?: string;
+  /** Prior open-question text when this speaker is the asker the player just answered. */
+  priorQuestion?: string | null;
   onProgress: (label: string) => void;
   onAccumulated: (text: string) => void;
 }): Promise<string> {
@@ -220,6 +235,32 @@ async function streamSpeakComplete(opts: {
       throw new AIError('That line still says something they must not know. Try the beat again.');
     }
     cleaned = kept;
+  }
+
+  // One retry when the asker rephrases a question the player already answered.
+  // Fail open: keep the settled line if the retry still loops.
+  const priorQ = (opts.priorQuestion ?? '').trim();
+  if (priorQ && cleaned && speakReasksPriorQuestion(cleaned, priorQ)) {
+    opts.onProgress('taking the answer as heard…');
+    const base = cleaned;
+    let extra = '';
+    try {
+      await call([
+        ...opts.messages,
+        { role: 'assistant', content: base },
+        { role: 'user', content: SPEAK_REASK_NUDGE }
+      ], (d) => {
+        extra += d;
+        opts.onAccumulated(stitchSpeakRetry(base, extra));
+      });
+      const retried = settleSpeakText(extra);
+      if (retried && !speakReasksPriorQuestion(retried, priorQ)) {
+        cleaned = retried;
+      }
+    } catch (e) {
+      if (isAbortError(e) || isPromptPackRetryError(e)) throw e;
+      // Keep the settled line — never drop a landed speak for a re-ask.
+    }
   }
   return cleaned;
 }
@@ -502,13 +543,50 @@ export function chapterNarrationBrief(opts: {
   mode: ComposeMode;
   playerText: string;
   location: string;
+  inScene?: Character[];
 }): string {
   const move = opts.playerText.trim().replace(/\s+/g, ' ').slice(0, 280);
   const loc = opts.location.trim() || 'the current place';
+  const names = (opts.inScene ?? [])
+    .filter((c) => !c.isPlayer)
+    .slice(0, 3)
+    .map((c) => c.name.trim())
+    .filter(Boolean);
+  const bodies = names.length > 0 ? ` Named bodies present: ${names.join(', ')}.` : '';
   const moveBit = move
     ? `The player just did this (${opts.mode}) — show the consequence here, do not repeat their words, do not write their next action, and do not write anyone's spoken dialogue: "${move}".`
     : 'Continue from where the place left off. No spoken dialogue.';
-  return `Place: ${loc}. ${moveBit} Write the consequence through to the length asked on this turn, and leave them room to answer.`;
+  return `Place: ${loc}.${bodies} ${moveBit} Write the consequence through to the length asked on this turn, and leave them room to answer.`;
+}
+
+const THIN_NARRATION_WEATHER =
+  /\b(rain|mist|fog|wind|weather|atmosphere|gloom|dusk|dawn|night|morning|lamp|shadows?)\b/i;
+
+/** Director briefs that are too thin to stage a consequence. */
+export function isThinNarrationBrief(brief: string, playerText = '', inScene: Character[] = []): boolean {
+  const text = brief.trim();
+  if (!text) return true;
+  if (text.length < 40) return true;
+  const lower = text.toLowerCase();
+  const named = inScene.some((c) => !c.isPlayer && c.name.trim() && lower.includes(c.name.trim().toLowerCase()));
+  const move = playerText.trim();
+  const hasMove = move.length >= 8 && lower.includes(move.slice(0, 24).toLowerCase());
+  if (named || hasMove) return false;
+  if (THIN_NARRATION_WEATHER.test(text) && text.length < 90) return true;
+  if (!/\b(player|consequence|show|from|after|when|as )\b/i.test(text) && text.length < 72) return true;
+  return false;
+}
+
+/** Concrete narration brief when the director gave weather/mood mush. */
+export function strengthenNarrationBrief(opts: {
+  brief: string;
+  mode: ComposeMode;
+  playerText: string;
+  location: string;
+  inScene: Character[];
+}): string {
+  if (!isThinNarrationBrief(opts.brief, opts.playerText, opts.inScene)) return opts.brief.trim();
+  return directorFallbackNarrationBrief(opts);
 }
 
 export interface SceneCastDelta {
@@ -651,7 +729,12 @@ function beatsForTurn(opts: {
   });
   const narration: DirectorBeat = {
     type: 'narration',
-    brief: chapterNarrationBrief(opts)
+    brief: directorFallbackNarrationBrief({
+      mode: opts.mode,
+      playerText: opts.playerText,
+      location: opts.location,
+      inScene: opts.inScene
+    })
   };
   const speaks: DirectorBeat[] = answerers.map((a) => {
     if (a.kind === 'guest') {
@@ -756,7 +839,40 @@ function speakKey(beat: DirectorBeat): string | null {
   return null;
 }
 
-/** When the player named someone, that speaker should answer first. */
+function rewriteFirstSpeakBrief(
+  beats: DirectorBeat[],
+  inScene: Character[],
+  guests: EpisodeGuest[],
+  targetId: string,
+  situation: string
+): DirectorBeat[] {
+  const firstSpeak = beats.findIndex((b) => b.type === 'speak');
+  if (firstSpeak < 0) return beats;
+  const beat = beats[firstSpeak];
+  if (beat.type !== 'speak') return beats;
+  const isTarget = 'guestId' in beat
+    ? beat.guestId === targetId
+    : beat.characterId === targetId;
+  if (!isTarget) return beats;
+  const next = [...beats];
+  if ('guestId' in beat && beat.guestId) {
+    const g = guests.find((x) => x.id === beat.guestId);
+    next[firstSpeak] = g
+      ? { type: 'speak', guestId: g.id, brief: injectedSpeakBriefForGuest(g, situation) }
+      : beat;
+  } else if ('characterId' in beat) {
+    const c = inScene.find((x) => x.id === beat.characterId);
+    next[firstSpeak] = c
+      ? { type: 'speak', characterId: c.id, brief: injectedSpeakBriefForCharacter(c, situation) }
+      : beat;
+  }
+  return next;
+}
+
+/**
+ * Put the hard addressee (or unanswered asker) first.
+ * Bare mentions do not steal the floor from the person spoken to.
+ */
 function preferAddresseeSpeak(
   beats: DirectorBeat[],
   playerText: string,
@@ -765,39 +881,78 @@ function preferAddresseeSpeak(
   caps: { maxSpeak: number; maxTotal: number },
   turns?: Turn[]
 ): DirectorBeat[] {
-  const addressee = detectAddressee(playerText, speakerCandidates(inScene, guests));
-  if (!addressee) return beats;
+  const candidates = speakerCandidates(inScene, guests);
+  const hard = detectHardAddressee(playerText, candidates);
+  const open = !hard ? priorOpenQuestionText(turns ?? [], candidates) : null;
+  const target = hard ?? open?.asker ?? null;
+  if (!target) return beats;
+
   const matches = (b: DirectorBeat) => {
     if (b.type !== 'speak') return false;
-    if (addressee.kind === 'guest') return 'guestId' in b && b.guestId === addressee.id;
-    return 'characterId' in b && b.characterId === addressee.id;
+    if (target.kind === 'guest') return 'guestId' in b && b.guestId === target.id;
+    return 'characterId' in b && b.characterId === target.id;
   };
-  const idx = beats.findIndex(matches);
-  const firstSpeak = beats.findIndex((b) => b.type === 'speak');
-  if (idx >= 0 && firstSpeak >= 0 && idx !== firstSpeak) {
-    const next = [...beats];
-    const tmp = next[firstSpeak];
-    next[firstSpeak] = next[idx];
-    next[idx] = tmp;
-    return next;
-  }
-  if (idx >= 0) return beats;
-  const injected = pickReplySpeaker(
-    inScene,
-    guests,
-    playerText,
-    addressee.kind === 'guest' ? { guestId: addressee.id } : { characterId: addressee.id },
-    turns
-  );
-  if (!injected) return beats;
-  const rest = beats.filter((b) => speakKey(b) !== speakKey(injected));
-  const speakN = rest.filter((b) => b.type === 'speak').length;
-  let trimmed = rest;
-  if (speakN >= caps.maxSpeak) {
-    const lastSpeak = rest.reduce((acc, b, i) => (b.type === 'speak' ? i : acc), -1);
-    if (lastSpeak >= 0) trimmed = rest.filter((_, i) => i !== lastSpeak);
-  }
-  return [injected, ...trimmed].slice(0, caps.maxTotal);
+  const situation = hard
+    ? 'the player is speaking straight at you — do not hand it off'
+    : 'the player just answered your question — register it and advance; do not ask it again';
+
+  const putFirst = (list: DirectorBeat[]): DirectorBeat[] => {
+    const idx = list.findIndex(matches);
+    const firstSpeak = list.findIndex((b) => b.type === 'speak');
+    if (idx >= 0 && firstSpeak >= 0 && idx !== firstSpeak) {
+      const next = [...list];
+      const tmp = next[firstSpeak];
+      next[firstSpeak] = next[idx];
+      next[idx] = tmp;
+      return rewriteFirstSpeakBrief(next, inScene, guests, target.id, situation);
+    }
+    if (idx >= 0) {
+      return rewriteFirstSpeakBrief(list, inScene, guests, target.id, situation);
+    }
+    const injected = pickReplySpeaker(
+      inScene,
+      guests,
+      playerText,
+      target.kind === 'guest' ? { guestId: target.id } : { characterId: target.id },
+      turns
+    );
+    if (!injected) return list;
+    const rest = list.filter((b) => speakKey(b) !== speakKey(injected));
+    const speakN = rest.filter((b) => b.type === 'speak').length;
+    let trimmed = rest;
+    if (speakN >= caps.maxSpeak) {
+      const lastSpeak = rest.reduce((acc, b, i) => (b.type === 'speak' ? i : acc), -1);
+      if (lastSpeak >= 0) trimmed = rest.filter((_, i) => i !== lastSpeak);
+    }
+    return rewriteFirstSpeakBrief(
+      [injected, ...trimmed].slice(0, caps.maxTotal),
+      inScene,
+      guests,
+      target.id,
+      situation
+    );
+  };
+
+  return putFirst(beats);
+}
+
+/** After ordering, rewrite asker briefs that still look like a re-ask. */
+function repairReaskSpeakBriefs(
+  beats: DirectorBeat[],
+  playerText: string,
+  inScene: Character[],
+  guests: EpisodeGuest[],
+  turns?: Turn[]
+): DirectorBeat[] {
+  const open = priorOpenQuestionText(turns ?? [], speakerCandidates(inScene, guests));
+  if (!open) return beats;
+  return beats.map((b) => {
+    if (b.type !== 'speak') return b;
+    const id = 'guestId' in b ? b.guestId : b.characterId;
+    if (id !== open.asker.id) return b;
+    if (!speakBriefLooksLikeReask(b.brief, open.text)) return b;
+    return { ...b, brief: rewriteReaskSpeakBrief(open.asker.name, playerText) };
+  });
 }
 
 /** Normalize raw director JSON into executable beats (exported for tests). */
@@ -812,10 +967,12 @@ export function normalizeBeats(
   length: TurnLength = 'scene',
   prefer?: { characterId?: string; guestId?: string },
   /** transcript so far — drives addressee detection and turn-taking fairness */
-  turns?: Turn[]
+  turns?: Turn[],
+  location = ''
 ): DirectorBeat[] {
   const caps = planCapsForLength(length);
   const allowedGuests = new Set(guests.map((g) => g.id));
+  const place = location.trim();
   const beats: DirectorBeat[] = [];
   const seenSpeak = new Set<string>();
   let speakCount = 0;
@@ -851,10 +1008,25 @@ export function normalizeBeats(
   if (beats.length === 0) {
     beats.push({
       type: 'narration',
-      brief: 'Continue the scene with atmosphere and physical action; leave space for the player.'
+      brief: directorFallbackNarrationBrief({ mode, playerText, location: place, inScene })
     });
   }
-  return ensurePlayerReplySpeak(beats, mode, playerText, inScene, guests, caps, prefer, turns);
+  for (let i = 0; i < beats.length; i++) {
+    const b = beats[i];
+    if (b.type !== 'narration') continue;
+    beats[i] = {
+      type: 'narration',
+      brief: strengthenNarrationBrief({
+        brief: b.brief,
+        mode,
+        playerText,
+        location: place,
+        inScene
+      })
+    };
+  }
+  const ordered = ensurePlayerReplySpeak(beats, mode, playerText, inScene, guests, caps, prefer, turns);
+  return repairReaskSpeakBriefs(ordered, playerText, inScene, guests, turns);
 }
 
 /** Race a utility call against a timeout; merges with an optional outer AbortSignal. */
@@ -1130,7 +1302,8 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
         playerText,
         opts.length,
         { characterId: opts.preferCharacterId, guestId: opts.preferGuestId },
-        ctx.turns
+        ctx.turns,
+        ctx.episode.location
       ),
       enterIds: scene.enterIds
     };
@@ -1193,6 +1366,12 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
   const sceneGuests = () => activeGuests(ctx.episode);
   const speakOpts = { requireDialogue, episode: ctx.episode };
   const remainingFrom = (completed: number) => beats.slice(completed);
+  const openQ = priorOpenQuestionText(
+    ctx.turns,
+    speakerCandidates(inScene, sceneGuests())
+  );
+  const priorQuestionFor = (speakerId: string) =>
+    openQ && openQ.asker.id === speakerId ? openQ.text : null;
 
   let lastId = '';
   let speakTurnsSaved = 0;
@@ -1276,6 +1455,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
             length: opts.length,
             signal: opts.signal,
             requireDialogue,
+            priorQuestion: priorQuestionFor(guest.id),
             onProgress: progress,
             onAccumulated: (acc) => opts.onDelta(acc, meta)
           });
@@ -1332,6 +1512,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
           signal: opts.signal,
           requireDialogue,
           mustNotKnow: speaking.mustNotKnow,
+          priorQuestion: priorQuestionFor(speaking.id),
           onProgress: progress,
           onAccumulated: (acc) => opts.onDelta(acc, meta)
         });
@@ -1525,7 +1706,7 @@ async function regenerateBeatInner(opts: {
     });
     if (!narrText) throw new AIError('Re-roll produced no narration. Try again.');
     await guardStorage(() => db.turns.update(opts.turn.id, { text: narrText, updatedAt: Date.now() }));
-    await clearEpisodeRunningSummary(opts.episode.id);
+    await finalizeChapterMemory(opts.episode.id);
     opts.onDelta('', meta);
     return;
   }
@@ -1608,7 +1789,7 @@ async function regenerateBeatInner(opts: {
 
   if (!cleaned) throw new AIError('Re-roll produced no dialogue. Try again.');
   await guardStorage(() => db.turns.update(opts.turn.id, { text: cleaned, updatedAt: Date.now() }));
-  await clearEpisodeRunningSummary(opts.episode.id);
+  await finalizeChapterMemory(opts.episode.id);
   opts.onDelta('', meta);
 }
 
@@ -2409,6 +2590,50 @@ export async function clearEpisodeRunningSummary(episodeId: string): Promise<voi
     liveCanonAtChars: 0,
     updatedAt: Date.now()
   });
+}
+
+/**
+ * After edit / rewrite / delete: drop digests that still describe the old prose
+ * so the next Write reads only the finalized transcript.
+ */
+export async function finalizeChapterMemory(episodeId: string): Promise<void> {
+  await waitForPostTurn();
+  await db.episodes.update(episodeId, {
+    runningSummary: null,
+    runningSummaryAtChars: 0,
+    liveStateAtChars: 0,
+    liveCanonAtChars: 0,
+    pendingPlan: null,
+    sceneLedger: [],
+    updatedAt: Date.now()
+  });
+}
+
+/** Episode patch shape used by tests and callers that update locally. */
+export function chapterMemoryClearPatch(): {
+  runningSummary: null;
+  runningSummaryAtChars: 0;
+  liveStateAtChars: 0;
+  liveCanonAtChars: 0;
+  pendingPlan: null;
+  sceneLedger: [];
+} {
+  return {
+    runningSummary: null,
+    runningSummaryAtChars: 0,
+    liveStateAtChars: 0,
+    liveCanonAtChars: 0,
+    pendingPlan: null,
+    sceneLedger: []
+  };
+}
+
+/** Delete one turn only. */
+export async function deleteTurn(turnId: string, episodeId: string): Promise<void> {
+  const turns = await db.turns.where('episodeId').equals(episodeId).toArray();
+  const hit = turns.find((t) => t.id === turnId);
+  if (!hit) return;
+  await tombstoneAndDeleteTurns([hit]);
 }
 
 /** Delete a turn and everything after it (used by regenerate / retry). */
