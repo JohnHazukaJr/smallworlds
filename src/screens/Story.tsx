@@ -3,10 +3,14 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { flushSync } from 'react-dom';
 import {
   commitSoftEpisodeWrap, draftColdOpenNarration,
-  deleteTurn, deleteTurnsFrom,
+  deleteTurn, deleteTurnsAfter, deleteTurnsFrom,
   endStoryWrite,
+  canRewriteFromHere,
   finalizeChapterMemory,
   regenerateBeat,
+  rollbackTurnSnapshot,
+  snapshotEpisodeMemory,
+  snapshotTurnsAfter,
   tryBeginStoryWrite, writeTurn,
   WriteAbortedError, type StreamMeta
 } from '../ai/engine';
@@ -48,6 +52,7 @@ import {
   bookStageOpen, phoneChrome, sheetsFromBottom, shortStoryChrome, useViewport
 } from '../ui/bits';
 import { BookStage, type BookPiece } from '../ui/BookStage';
+import { placeChapterPictures } from '../ui/chapterPictures';
 import { writingLineText } from '../ui/bookPage';
 import { Face } from '../ui/Face';
 import { attributionRun, isDialogueBlock, lastSpokenBy } from '../ui/attribution';
@@ -940,7 +945,8 @@ export function Story() {
     lengthOverride?: TurnLength,
     actionWeight?: ActionWeight,
     handsId?: string | null,
-    writeToken?: symbol
+    writeToken?: symbol,
+    keepExistingUserTurn?: boolean
   ): Promise<{ status: 'ok' | 'error' | 'aborted'; beatsCompleted: number; remaining: number }> => {
     if (!world || !season || !episode) return { status: 'error', beatsCompleted: 0, remaining: 0 };
     setError('');
@@ -958,6 +964,7 @@ export function Story() {
         asCharacterId: handsId === undefined ? (asCharacterId ?? undefined) : (handsId ?? undefined),
         signal: controller.signal,
         writeToken,
+        keepExistingUserTurn,
         onProgress: (label) => setProgressLabel(label),
         onNotice: setNotice,
         onDelta: (p, meta) => {
@@ -1175,6 +1182,65 @@ export function Story() {
     }
   };
 
+  /** Keep a You or Write-as line and write the reply after it again. */
+  const rewriteFromInjection = async (turn: Turn) => {
+    if (!world || !season || !episode || streaming) return;
+    if (!canRewriteFromHere(turn)) return;
+    if (!hasAI) {
+      setNotice(NOTICE_ADD_MODEL);
+      return;
+    }
+    const ok = window.confirm('Rewrite everything after this line? This line stays.');
+    if (!ok) return;
+    const token = tryBeginStoryWrite();
+    if (!token) return;
+    const started = Date.now();
+    let following: Awaited<ReturnType<typeof snapshotTurnsAfter>> = [];
+    let memory: Awaited<ReturnType<typeof snapshotEpisodeMemory>> = null;
+    let removed = false;
+    try {
+      [following, memory] = await Promise.all([
+        snapshotTurnsAfter(turn.id, episode.id),
+        snapshotEpisodeMemory(episode.id)
+      ]);
+      await deleteTurnsAfter(turn.id, episode.id);
+      removed = true;
+      await finalizeChapterMemory(episode.id);
+      const result = await runNarration(
+        turn.mode && turn.mode !== 'continue' ? turn.mode : 'play',
+        turn.text,
+        undefined,
+        undefined,
+        turn.weight ?? 'matters',
+        turn.asCharacterId ?? null,
+        token,
+        true
+      );
+      if (result.status !== 'ok' && result.beatsCompleted === 0) {
+        await rollbackTurnSnapshot(episode.id, following, started, memory);
+        await db.episodes.update(episode.id, {
+          pendingPlan: null,
+          sceneLedger: [],
+          updatedAt: Date.now()
+        });
+        setError('');
+        setNotice('The rewrite did not land. The earlier lines are back.');
+      }
+    } catch (e) {
+      if (removed) {
+        await rollbackTurnSnapshot(episode.id, following, started, memory).catch(() => undefined);
+        await db.episodes.update(episode.id, {
+          pendingPlan: null,
+          sceneLedger: [],
+          updatedAt: Date.now()
+        }).catch(() => undefined);
+      }
+      setError(classifyError(e));
+    } finally {
+      endStoryWrite(token);
+    }
+  };
+
   const continueSavedPlan = async () => {
     if (!episode?.pendingPlan?.beats.length || streaming) return;
     const token = tryBeginStoryWrite();
@@ -1362,6 +1428,19 @@ export function Story() {
     length === 'beat' ? 'Short' : length === 'episode' ? 'Long' : 'Normal'
   }`;
   const sendTitle = `Send (${/Mac|iPhone|iPad|iPod/.test(navigator.platform) ? 'Cmd' : 'Ctrl'}+Enter)`;
+  const chapters = seasonEpisodes ?? [];
+  const picturePlacement = placeChapterPictures({
+    turns: manuscript.map((entry) => ({
+      id: entry.turn.id,
+      episodeId: entry.episode.id,
+      createdAt: entry.turn.createdAt
+    })),
+    episodeOrder: chapters.map((chapter) => chapter.id),
+    pictures: chapters.flatMap((chapter) =>
+      (chapter.illustrations ?? []).map((picture) => ({ episodeId: chapter.id, picture }))
+    ),
+    windowSize: turnWindow
+  });
   const bookPieces: BookPiece[] = [];
   if (book) {
     const visible = manuscript.slice(-turnWindow);
@@ -1478,6 +1557,12 @@ export function Story() {
         )
       });
     }
+    for (const picture of picturePlacement.leading) {
+      bookPieces.push({
+        key: `picture-${picture.id}`,
+        node: <ChapterFigure picture={picture} />
+      });
+    }
     let prevEpisodeId = '';
     visible.forEach(({ episode: chapter, turn, blocks }, ti) => {
       const showBreak = chapter.id !== prevEpisodeId && !(prevEpisodeId === '' && chapter.id === episode.id);
@@ -1494,6 +1579,12 @@ export function Story() {
               <div className="serif" style={{ fontSize: 26, fontWeight: 400, marginTop: 10, color: 'var(--ink-heading)' }}>{breakTitle}</div>
             </div>
           )
+        });
+      }
+      for (const picture of picturePlacement.before.get(turn.id) ?? []) {
+        bookPieces.push({
+          key: `picture-${picture.id}`,
+          node: <ChapterFigure picture={picture} />
         });
       }
       const continued = attributionRun(blocks, ti > 0 ? lastSpokenBy(visible[ti - 1].blocks) : null);
@@ -1524,7 +1615,8 @@ export function Story() {
         });
       });
       const canEdit = turn.role === 'narrator' || turn.role === 'character';
-      if (canEdit) {
+      const fromUser = canRewriteFromHere(turn);
+      if (canEdit || fromUser) {
         bookPieces.push({
           key: `tools-${turn.id}`,
           node: (
@@ -1533,19 +1625,20 @@ export function Story() {
               canEdit={canEdit}
               editing={editing?.id === turn.id}
               onEdit={() => beginEdit(turn)}
-              onRewrite={() => { void rewritePassage(turn); }}
-              onDeleteLine={() => { void deletePassage(turn, false); }}
-              onDeleteFromHere={() => { void deletePassage(turn, true); }}
+              onRewrite={canEdit ? () => { void rewritePassage(turn); } : undefined}
+              onRewriteFromHere={fromUser ? () => { void rewriteFromInjection(turn); } : undefined}
+              onDeleteLine={canEdit ? () => { void deletePassage(turn, false); } : undefined}
+              onDeleteFromHere={canEdit ? () => { void deletePassage(turn, true); } : undefined}
             />
           )
         });
       }
-    });
-    (episode.illustrations ?? []).forEach((picture) => {
-      bookPieces.push({
-        key: `picture-${picture.id}`,
-        node: <ChapterFigure picture={picture} />
-      });
+      for (const picture of picturePlacement.after.get(turn.id) ?? []) {
+        bookPieces.push({
+          key: `picture-${picture.id}`,
+          node: <ChapterFigure picture={picture} />
+        });
+      }
     });
     if (writing) {
       bookPieces.push({
@@ -1555,7 +1648,7 @@ export function Story() {
     }
   }
   const bookSignature = book
-    ? `${episode.id}\n${fontPx}\n${turnWindow}\n${writing ?? ''}\n${editing?.id ?? ''}\n${(episode.illustrations ?? []).map((picture) => picture.id).join(',')}\n${manuscript.map((entry) => `${entry.turn.id}:${entry.turn.text.length}`).join('|')}`
+    ? `${episode.id}\n${fontPx}\n${turnWindow}\n${writing ?? ''}\n${editing?.id ?? ''}\n${chapters.flatMap((chapter) => (chapter.illustrations ?? []).map((picture) => picture.id)).join(',')}\n${manuscript.map((entry) => `${entry.turn.id}:${entry.turn.text.length}`).join('|')}`
     : '';
 
   return (
@@ -1905,6 +1998,10 @@ export function Story() {
               </div>
             )}
 
+            {picturePlacement.leading.map((picture) => (
+              <ChapterFigure key={picture.id} picture={picture} />
+            ))}
+
             {(() => {
               const visible = manuscript.slice(-turnWindow);
               let prevEpisodeId = '';
@@ -1914,6 +2011,7 @@ export function Story() {
                 prevEpisodeId = chapter.id;
                 const chapterTitle = chapter.title.trim() || chapter.location || `Chapter ${chapter.number}`;
                 const canEdit = turn.role === 'narrator' || turn.role === 'character';
+                const fromUser = canRewriteFromHere(turn);
                 return (
                   <div key={turn.id} data-turn-id={turn.id}>
                     {showBreak && (
@@ -1932,6 +2030,9 @@ export function Story() {
                         </div>
                       </div>
                     )}
+                    {(picturePlacement.before.get(turn.id) ?? []).map((picture) => (
+                      <ChapterFigure key={picture.id} picture={picture} />
+                    ))}
                     <TurnRow
                       turn={turn}
                       blocks={bs}
@@ -1944,19 +2045,19 @@ export function Story() {
                       streaming={streaming}
                       opening={manuscript.length <= turnWindow && ti === 0}
                       onRewrite={canEdit ? () => { void rewritePassage(turn); } : undefined}
+                      onRewriteFromHere={fromUser ? () => { void rewriteFromInjection(turn); } : undefined}
                       onEdit={canEdit ? () => beginEdit(turn) : undefined}
                       onDeleteLine={canEdit ? () => { void deletePassage(turn, false); } : undefined}
                       onDeleteFromHere={canEdit ? () => { void deletePassage(turn, true); } : undefined}
                       editing={editing?.id === turn.id}
                     />
+                    {(picturePlacement.after.get(turn.id) ?? []).map((picture) => (
+                      <ChapterFigure key={picture.id} picture={picture} />
+                    ))}
                   </div>
                 );
               });
             })()}
-
-            {(episode.illustrations ?? []).map((picture) => (
-              <ChapterFigure key={picture.id} picture={picture} />
-            ))}
 
             <StreamTail
               sinkRef={streamSink}
@@ -2387,17 +2488,18 @@ function DisplaySheet({ open, onClose, narrow }: {
 // ---------- turn row ----------
 
 function TurnTools({
-  streaming, canEdit, editing, onEdit, onRewrite, onDeleteLine, onDeleteFromHere
+  streaming, canEdit, editing, onEdit, onRewrite, onRewriteFromHere, onDeleteLine, onDeleteFromHere
 }: {
   streaming: boolean;
   canEdit: boolean;
   editing: boolean;
   onEdit: () => void;
   onRewrite?: () => void;
+  onRewriteFromHere?: () => void;
   onDeleteLine?: () => void;
   onDeleteFromHere?: () => void;
 }) {
-  if (!canEdit && !onRewrite && !onDeleteLine && !onDeleteFromHere) return null;
+  if (!canEdit && !onRewrite && !onRewriteFromHere && !onDeleteLine && !onDeleteFromHere) return null;
   return (
     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4, marginBottom: 10, flexWrap: 'wrap' }}>
       {canEdit && (
@@ -2408,6 +2510,11 @@ function TurnTools({
       {onRewrite && (
         <button className="btn-quiet" style={{ fontSize: 12, padding: '6px 10px', minHeight: 36 }} disabled={streaming} onClick={onRewrite}>
           Rewrite this passage
+        </button>
+      )}
+      {onRewriteFromHere && (
+        <button className="btn-quiet" style={{ fontSize: 12, padding: '6px 10px', minHeight: 36 }} disabled={streaming} onClick={onRewriteFromHere}>
+          Rewrite from here
         </button>
       )}
       {onDeleteLine && (
@@ -2426,7 +2533,7 @@ function TurnTools({
 
 function TurnRow({
   turn, blocks, accent, prose, fontPx, avatarPx, dialogueStyle, prevSpeaker, streaming, opening,
-  onRewrite, onEdit, onDeleteLine, onDeleteFromHere, editing
+  onRewrite, onRewriteFromHere, onEdit, onDeleteLine, onDeleteFromHere, editing
 }: {
   turn: Turn;
   blocks: ProseBlock[];
@@ -2439,6 +2546,7 @@ function TurnRow({
   streaming: boolean;
   opening?: boolean;
   onRewrite?: () => void;
+  onRewriteFromHere?: () => void;
   onEdit?: () => void;
   onDeleteLine?: () => void;
   onDeleteFromHere?: () => void;
@@ -2467,6 +2575,7 @@ function TurnRow({
         editing={!!editing}
         onEdit={onEdit ?? (() => undefined)}
         onRewrite={onRewrite}
+        onRewriteFromHere={onRewriteFromHere}
         onDeleteLine={onDeleteLine}
         onDeleteFromHere={onDeleteFromHere}
       />

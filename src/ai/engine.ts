@@ -431,6 +431,30 @@ export interface WriteOptions {
   onNotice?: (message: string) => void;
   /** Set when the screen already holds the story-write lock. */
   writeToken?: symbol;
+  /**
+   * The user line is already in the chapter (Rewrite from here).
+   * Do not file a second copy. The input is still the move.
+   */
+  keepExistingUserTurn?: boolean;
+}
+
+/** A Write-as line: the player typed it, and it belongs to that character. */
+export function isUserInjection(turn: { role: string; asCharacterId?: string | null }): boolean {
+  return turn.role === 'user' && !!turn.asCharacterId;
+}
+
+/** You and Write-as lines can redo the reply that follows them. Narrator and NPC lines use Rewrite this passage. */
+export function canRewriteFromHere(turn: { role: string }): boolean {
+  return turn.role === 'user';
+}
+
+/** Whether this write should append a new user turn. Continue and a rewrite from an existing line do not. */
+export function shouldFileUserTurn(opts: {
+  mode: ComposeMode;
+  input: string;
+  keepExistingUserTurn?: boolean;
+}): boolean {
+  return !opts.keepExistingUserTurn && opts.mode !== 'continue' && opts.input.trim().length > 0;
 }
 
 const MAX_SPEAK_BEATS = 3;
@@ -1236,7 +1260,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
     await tombstoneAndDeleteTurns([doomed]).catch(() => undefined);
   };
 
-  if (opts.mode !== 'continue' && opts.input.trim()) {
+  if (shouldFileUserTurn(opts)) {
     const { tone, body } = parseDeliveryTone(opts.input.trim());
     const normalized = (opts.mode === 'speak' || opts.mode === 'play') ? normalizeSpeakText(body) : body;
     const userText = isPlayerAgencyMode(opts.mode)
