@@ -41,6 +41,8 @@ import {
   buildGuestSystemPrompt,
   buildNarrationBeatMessages,
   buildNarratorSystemPrompt,
+  episodeSceneDay,
+  sceneDateContextLine,
   characterSpeakTokens,
   historyTailFor,
   compressOmittedTurns,
@@ -578,6 +580,8 @@ export function chapterNarrationBrief(opts: {
   playerText: string;
   location: string;
   inScene?: Character[];
+  /** Formatted scene date. Context for the writer, not a line to print on this turn. */
+  sceneDate?: string;
 }): string {
   const parsed = splitInjectedMove(opts.playerText, 280);
   const move = parsed?.line ?? opts.playerText.trim().replace(/\s+/g, ' ').slice(0, 280);
@@ -593,7 +597,14 @@ export function chapterNarrationBrief(opts: {
     : move
       ? `The player just did this (${opts.mode}) — show the consequence here, do not repeat their words, do not write their next action, and do not write anyone's spoken dialogue: "${move}".`
       : 'Continue from where the place left off. No spoken dialogue.';
-  return `Place: ${loc}.${bodies} ${moveBit} Write the consequence through to the length asked on this turn, and leave them room to answer.`;
+  const dateLine = sceneDateContextLine(opts.sceneDate ?? '');
+  const when = dateLine ? `${dateLine} ` : '';
+  return `${when}Place: ${loc}.${bodies} ${moveBit} Write the consequence through to the length asked on this turn, and leave them room to answer.`;
+}
+
+function narrationSceneDate(world: World, episode: Episode): string {
+  const cal = worldCalendar(world);
+  return formatStoryDate(cal, episodeSceneDay(episode, cal));
 }
 
 const THIN_NARRATION_WEATHER =
@@ -1447,7 +1458,8 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
             messages: buildNarrationBeatMessages(
               ctx.turns, ctx.characters, beat.brief, opts.length, sceneGuests(), ctx.episode,
               narrSystem.length,
-              historyPackFor(model, 'narrator', pack, narrCap)
+              historyPackFor(model, 'narrator', pack, narrCap),
+              narrationSceneDate(opts.world, ctx.episode)
             ),
             length: opts.length,
             signal: opts.signal,
@@ -1744,7 +1756,8 @@ async function regenerateBeatInner(opts: {
         messages: buildNarrationBeatMessages(
           historyTurns, ctx.characters, brief, opts.length, sceneGuests(), ctx.episode,
           narrSystem.length,
-          historyPackFor(model, 'narrator', pack, narrCap)
+          historyPackFor(model, 'narrator', pack, narrCap),
+          narrationSceneDate(opts.world, ctx.episode)
         ),
         length: opts.length,
         signal: opts.signal,
@@ -5132,6 +5145,7 @@ export async function draftColdOpenNarration(
         `World: ${world.title} — ${world.line}\nBible:\n${world.bible.slice(0, 1200)}\n\n` +
         `Premise:\n${season.premise}\n\n` +
         `Opening location: ${episode.location || '(unnamed)'}\n` +
+        `${sceneDateContextLine(narrationSceneDate(world, episode))}\n` +
         `Write the cold open.`
     }],
     maxTokens: 400, temperature: 0.75

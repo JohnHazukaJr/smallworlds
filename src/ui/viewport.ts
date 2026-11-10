@@ -43,6 +43,11 @@ export function shortStoryChrome(band: ViewportBand, height: number): boolean {
   return band === 'compact' || height < TALL_CHROME_MIN;
 }
 
+/** A programmatic pin-to-bottom is not a hand scroll, so it must not hide the story bar. */
+export function tuckSceneHudOnScroll(scrollPinned: boolean): boolean {
+  return !scrollPinned;
+}
+
 export function tabBarInset(visible: boolean): string {
   return visible ? `calc(${TAB_BAR_HEIGHT}px + env(safe-area-inset-bottom))` : '0px';
 }

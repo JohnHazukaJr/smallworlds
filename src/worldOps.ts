@@ -303,6 +303,41 @@ export function formatEpisodeDateRange(
   return `${formatStoryDateShort(cal, start)} → ${formatStoryDateShort(cal, end)}`;
 }
 
+/**
+ * Move the world clock to `day` and, on an active chapter, the scene day with it.
+ * The page, the header, and the model then share one day.
+ */
+export async function commitStoryDay(opts: {
+  world: World;
+  seasonId: string;
+  episode: Episode;
+  day: number;
+}): Promise<void> {
+  const cal = worldCalendar(opts.world);
+  const next = Math.max(1, Math.floor(opts.day));
+  const fromDay = cal.currentDay;
+  const now = Date.now();
+  await db.worlds.update(opts.world.id, {
+    calendar: calendarPatch(opts.world, { currentDay: next }),
+    updatedAt: now
+  });
+  if (opts.episode.status === 'active') {
+    const patch: Partial<Episode> = { storyDay: next, updatedAt: now };
+    if (opts.episode.storyDayEnd && opts.episode.storyDayEnd > 0) patch.storyDayEnd = next;
+    await db.episodes.update(opts.episode.id, patch);
+  }
+  if (next > fromDay) {
+    await evaluateCalendarEvents({
+      worldId: opts.world.id,
+      seasonId: opts.seasonId,
+      fromDay,
+      toDay: next,
+      mode: 'advance',
+      world: opts.world
+    });
+  }
+}
+
 /** Persistable calendar patch merged onto resolved defaults. */
 export function calendarPatch(
   world: World,

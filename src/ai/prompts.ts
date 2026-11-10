@@ -707,7 +707,7 @@ function calendarBlock(
       `This chapter's date: ${dateLine}.` +
       worldClock +
       (note ? `\nDate note: ${note}` : '') +
-      `\nGround the scene in this date when natural — weekday, season, or time of day — without dumping a calendar header into the prose.`
+      `\nOver the course of a scene, let the weekday, season, or time of day hang in the prose so a reader can tell what day it is. Do not repeat it every paragraph, and do not paste a day-number stamp or a calendar header.`
     );
   }
   if (mode === 'directorLine') {
@@ -1331,7 +1331,7 @@ export function buildNarratorSystemPrompt(ctx: PromptContext, opts: PromptBuildO
     `- ${pacingLine(ai)}\n` +
     `- Never write the player's dialogue, decisions, or inner monologue. Leave space for them to act.\n` +
     `- NEVER write spoken dialogue, quoted speech, or lines in the form CharacterName: "…". Named characters speak in their own turns. Write the consequence through to the length asked on this turn. Do not stop after the first physical beat, and do not write the player's next move.\n` +
-    `- Use the Calendar above to ground the moment (weekday, season, or time of day) when it serves the scene — weave it in; do not print a date stamp.\n` +
+    `- Let the weekday, season, or time of day hang in the prose over the course of a scene so a reader can tell what day it is. Do not repeat it every paragraph, and do not paste a day-number stamp or a calendar header.\n` +
     `- ${narratorCloseGuidance(storyStanceOf(world))}` +
     (rules.length > 0 ? `\n${rules.map((r) => `- ${r}`).join('\n')}` : '')
   );
@@ -1378,6 +1378,7 @@ export function buildCharacterSystemPrompt(
     `## How you respond\n` +
     `- Honour behaviour anchors and MUST NOT KNOW. Never soften yourself to please the player.\n` +
     `- If the player just answered you (or the room), take the answer as heard this beat. You may doubt it or act on it — you must not ask the same question again as if they said nothing.\n` +
+    `- You know what day it is. You may mention the weekday or the date when a person would. Do not announce it on every line.\n` +
     `- Never prefix your reply with your name or "Name:". History may show "[Name]" then the line — your output must be only *action* and "speech".`
   );
 
@@ -1420,6 +1421,7 @@ export function buildGuestSystemPrompt(
     `## How you respond\n` +
     (guest.voice ? `- Voice guide — match this exactly; it is your whole identity here: ${guest.voice}\n` : '') +
     `- If the player just answered a question, take the answer as heard — do not ask it again.\n` +
+    `- You know what day it is. You may mention the weekday or the date when a person would. Do not announce it on every line.\n` +
     `- Never prefix your reply with your name or "Name:" — only *action* and "speech".\n` +
     `- Do not steal the scene from the main cast; add texture.`
   );
@@ -1777,6 +1779,13 @@ function mergeMessages(messages: ChatMessage[]): ChatMessage[] {
   return merged;
 }
 
+/** Context for the writer. Not an order to print the date on this turn. */
+export function sceneDateContextLine(sceneDate: string): string {
+  const date = sceneDate.trim();
+  if (!date) return '';
+  return `The scene is on ${date}. This is context for the writer, not an order to print the date on this turn.`;
+}
+
 /** History + a narration-beat instruction. */
 export function buildNarrationBeatMessages(
   turns: Turn[],
@@ -1786,14 +1795,17 @@ export function buildNarrationBeatMessages(
   guests: EpisodeGuest[] = [],
   episode?: Episode,
   systemChars = 0,
-  pack?: Pick<PromptBuildOpts, 'totalCap' | 'skipOmittedDigest' | 'historyTailChars' | 'historyTailMaxTurns'>
+  pack?: Pick<PromptBuildOpts, 'totalCap' | 'skipOmittedDigest' | 'historyTailChars' | 'historyTailMaxTurns'>,
+  sceneDate = ''
 ): ChatMessage[] {
   const messages = historyMessages(turns, characters, guests, episode, systemChars, pack);
+  const dateLine = sceneDateContextLine(sceneDate);
   const userContent =
     `(Narration only — no spoken dialogue, no CharacterName: "…" lines.)\n` +
     `First job: show the consequence of the player's last move on named bodies in this room. ` +
     `Atmosphere only serves that consequence — no weather catalogue. Do not recap earlier beats.\n` +
     `Do not write the player's actions, speech, or thoughts. Do not repeat their line. Leave them room to answer.\n` +
+    (dateLine ? `${dateLine}\n` : '') +
     `Write this: ${brief}\n` +
     `Only the people already in this room, and walk-ons already here, may appear. Do not invent a named person. Do not have anyone walk in.\n` +
     `Lines marked [Name] were spoken by that person. Do not continue them as narration.\n\n` +

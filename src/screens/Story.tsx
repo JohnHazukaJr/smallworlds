@@ -29,9 +29,11 @@ import {
   type SpeakSegment
 } from '../ai/dialogueFormat';
 import {
+  episodeSceneDay,
   resolveSpeakerName,
   type DirectorBeat
 } from '../ai/prompts';
+import { StoryDateFields } from '../components/StoryDateFields';
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
 import { db } from '../db';
 import {
@@ -49,7 +51,7 @@ import type {
 import { AppError, classifyError } from '../errors';
 import {
   Chip, ErrorNote, Mono, Sheet, Spinner,
-  bookStageOpen, phoneChrome, sheetsFromBottom, shortStoryChrome, useViewport
+  bookStageOpen, phoneChrome, sheetsFromBottom, shortStoryChrome, tuckSceneHudOnScroll, useViewport
 } from '../ui/bits';
 import { BookStage, type BookPiece } from '../ui/BookStage';
 import { placeChapterPictures } from '../ui/chapterPictures';
@@ -682,6 +684,36 @@ function StreamTail({
   );
 }
 
+function StoryDateButton({
+  date, onEdit, opening
+}: {
+  date: string;
+  onEdit: () => void;
+  opening?: boolean;
+}) {
+  if (!date) return null;
+  return (
+    <button
+      type="button"
+      className="serif"
+      onClick={onEdit}
+      title="Edit the story date"
+      style={opening
+        ? {
+          marginTop: 10, fontSize: 15, lineHeight: 1.55, fontStyle: 'italic',
+          color: 'var(--ink-muted)', border: 0, background: 'transparent',
+          padding: 0, cursor: 'pointer', textAlign: 'left'
+        }
+        : {
+          border: 0, background: 'transparent', padding: 0, cursor: 'pointer',
+          color: 'inherit', font: 'inherit', letterSpacing: 'inherit', textTransform: 'inherit'
+        }}
+    >
+      {date}
+    </button>
+  );
+}
+
 function ChapterFigure({ picture }: { picture: ChapterIllustration }) {
   return (
     <figure style={{ margin: '1.2em 0 1.4em' }} data-chapter-picture={picture.id}>
@@ -822,6 +854,7 @@ export function Story() {
   }, [currentWorldId, world, closeWorld]);
   const [wrapBusy, setWrapBusy] = useState(false);
   const [worldEditOpen, setWorldEditOpen] = useState(false);
+  const [dateOpen, setDateOpen] = useState(false);
   const [displayOpen, setDisplayOpen] = useState(false);
   const [moreSheet, setMoreSheet] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
@@ -857,13 +890,12 @@ export function Story() {
     if (!readMode) return;
     if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
     const el = scrollRef.current;
-    const tuck = () => { if (!composerOpen) setHudTucked(true); };
-    const onScroll = () => tuck();
+    const onScroll = () => {
+      if (!composerOpen && tuckSceneHudOnScroll(scrollPin.current > 0)) setHudTucked(true);
+    };
     el?.addEventListener('scroll', onScroll, { passive: true });
-    const idle = window.setTimeout(tuck, 2400);
     return () => {
       el?.removeEventListener('scroll', onScroll);
-      window.clearTimeout(idle);
     };
   }, [readMode, composerOpen, episode?.id]);
 
@@ -1405,10 +1437,8 @@ export function Story() {
     ? season.bible?.recap
     : seasonEpisodes?.find((e) => e.number === episode.number - 1)?.wrap?.recap
   )?.trim() || '';
-  const sceneDate = formatStoryDate(
-    worldCalendar(world),
-    episode.storyDay && episode.storyDay > 0 ? episode.storyDay : worldCalendar(world).currentDay
-  );
+  const sceneCalendar = worldCalendar(world);
+  const sceneDate = formatStoryDate(sceneCalendar, episodeSceneDay(episode, sceneCalendar));
   const stageCast = inScene;
   const stageGuests = episode.activeGuestIds == null
     ? guests
@@ -1482,15 +1512,12 @@ export function Story() {
                   <div className="serif" style={{ fontSize: 32, fontWeight: 400, lineHeight: 1.2, margin: '12px 0 0', color: 'var(--ink-heading)' }}>
                     {chapterTitle}
                   </div>
-                  {sceneDate && (
-                    <div className="serif" style={{ marginTop: 10, fontSize: 15, lineHeight: 1.55, fontStyle: 'italic', color: 'var(--ink-muted)' }}>
-                      {sceneDate}
-                    </div>
-                  )}
+                  <StoryDateButton date={sceneDate} opening onEdit={() => setDateOpen(true)} />
                 </>
               ) : (
                 <div className="serif" style={{ fontSize: 13, letterSpacing: '0.14em', textTransform: 'uppercase', lineHeight: 1.45, color: 'var(--ink-muted)' }}>
-                  {chapterTitle}{sceneDate ? ` · ${sceneDate}` : ''}
+                  {chapterTitle}{sceneDate ? ' · ' : ''}
+                  <StoryDateButton date={sceneDate} onEdit={() => setDateOpen(true)} />
                 </div>
               )}
             </div>
@@ -1696,6 +1723,10 @@ export function Story() {
               onClick={() => { setComposerOpen((o) => !o); setHudTucked(false); }}>
               {composerOpen ? 'Hide' : 'Write'}
             </button>
+            <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
+              onClick={() => { setWorldEditOpen(true); setHudTucked(false); }}>
+              Edit world
+            </button>
             {short ? (
               <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
                 onClick={() => setMoreSheet(true)}>More</button>
@@ -1729,7 +1760,8 @@ export function Story() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
               <div className="serif" style={{ fontSize: 16, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{world.title}</div>
               <div className="label" style={{ fontSize: 11 }}>
-                Chapter {episode.number}{locLabel ? ` · ${locLabel}` : ''} · {formatStoryDate(worldCalendar(world), worldCalendar(world).currentDay)}
+                Chapter {episode.number}{locLabel ? ` · ${locLabel}` : ''} ·{' '}
+                <StoryDateButton date={sceneDate} onEdit={() => setDateOpen(true)} />
               </div>
             </div>
           </div>
@@ -1747,13 +1779,11 @@ export function Story() {
             {!short && (
               <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} disabled={wrapBusy} onClick={() => void skipWrapAndEnd()}>End chapter</button>
             )}
+            <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setWorldEditOpen(true)}>Edit world</button>
             {short ? (
               <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setMoreSheet(true)}>More</button>
             ) : (
-              <>
-                <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setDisplayOpen(true)}>Display</button>
-                <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setWorldEditOpen(true)}>Edit world</button>
-              </>
+              <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setDisplayOpen(true)}>Display</button>
             )}
           </div>
         </div>
@@ -1843,14 +1873,7 @@ export function Story() {
                   }}>
                     {episode.title.trim() || activeLocation?.name || episode.location || 'Untitled chapter'}
                   </div>
-                  {sceneDate && (
-                    <div className="serif" style={{
-                      marginTop: 10, fontSize: 15, lineHeight: 1.55, fontStyle: 'italic',
-                      color: 'var(--ink-muted)'
-                    }}>
-                      {sceneDate}
-                    </div>
-                  )}
+                  <StoryDateButton date={sceneDate} opening onEdit={() => setDateOpen(true)} />
                 </>
               ) : (
                 <div className="serif" style={{
@@ -1858,7 +1881,8 @@ export function Story() {
                   color: 'var(--ink-muted)'
                 }}>
                   {episode.title.trim() || activeLocation?.name || episode.location}
-                  {sceneDate ? ` · ${sceneDate}` : ''}
+                  {sceneDate ? ' · ' : ''}
+                  <StoryDateButton date={sceneDate} onEdit={() => setDateOpen(true)} />
                 </div>
               )}
                 </div>
@@ -2393,6 +2417,15 @@ export function Story() {
             Profile
           </button>
         </div>
+      </Sheet>
+
+      <Sheet open={dateOpen} onClose={() => setDateOpen(false)} narrow={sheetBottom} width={420}
+        footer={
+          <button className="btn-primary" style={{ width: '100%', minHeight: 44 }} onClick={() => setDateOpen(false)}>Done</button>
+        }
+      >
+        <div className="serif" style={{ fontWeight: 300, fontSize: 24, color: 'var(--ink-heading)' }}>Story date</div>
+        <StoryDateFields world={world} season={season} episode={episode} narrow={sheetBottom} />
       </Sheet>
 
       {/* live world editor */}

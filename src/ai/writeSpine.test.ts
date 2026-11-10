@@ -609,6 +609,18 @@ describe('directorFallbackNarrationBrief', () => {
     expect(brief).not.toMatch(/Stop while/);
     expect(brief).not.toMatch(/\bbeat\b/i);
   });
+
+  it('gives the narrator the scene date as context, not a line to print', () => {
+    const brief = chapterNarrationBrief({
+      mode: 'play',
+      playerText: 'I set the cup down.',
+      location: 'the long room',
+      sceneDate: 'Thursday, 12 March, Year 3'
+    });
+    expect(brief).toMatch(/The scene is on Thursday, 12 March, Year 3/);
+    expect(brief).toMatch(/not an order to print the date/i);
+    expect(brief).toContain('the long room');
+  });
 });
 
 describe('capSoftWrapExtract', () => {

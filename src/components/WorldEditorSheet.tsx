@@ -5,20 +5,20 @@ import {
   episodeSceneDay, preferBucketsForEpisodes, selectDirectorFacts, selectDirectorThreads
 } from '../ai/prompts';
 import { db, safeWrite } from '../db';
-import { evaluateCalendarEvents } from '../calendarEvents';
 import { formatUserError } from '../errors';
 import { ModelPicker } from '../screens/Settings';
 import { useApp } from '../store/app';
 import type {
   Character, ContinuityFact, Episode, Location, OpenThread, Season, StoryStance, World, WorldAISettings
 } from '../types';
+import { StoryDateFields } from './StoryDateFields';
 import { Bar, Chip, ErrorNote, Field, Mono, Sheet, Spinner, Toggle } from '../ui/bits';
 import { characterAvatarStyle } from '../ui/avatar';
 import { avatarStyle } from '../ui/theme';
 import {
-  applyStanceToAi, advanceMonths, calendarPatch, dayFromParts, emptyCharacter, emptyLocation,
+  applyStanceToAi, calendarPatch, emptyCharacter, emptyLocation,
   syncSceneLocationName,
-  formatEpisodeDateRange, formatStoryDate, formatStoryDateShort, partsForDay, PLOT_TARGET_CAP,
+  formatEpisodeDateRange, formatStoryDate, formatStoryDateShort, PLOT_TARGET_CAP,
   STORY_STANCES, storyStanceOf, worldCalendar
 } from '../worldOps';
 
@@ -223,91 +223,11 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
             <Field label="Calendar" note="lives here, and advances when a chapter ends">
               {(() => {
                 const cal = worldCalendar(world);
-                const today = partsForDay(cal, cal.currentDay);
-                const monthLen = cal.monthLengths[today.monthIndex] ?? 30;
                 const patchCal = (p: Parameters<typeof calendarPatch>[1]) =>
                   patchWorld({ calendar: calendarPatch(world, p) });
-                /** Match Direct calendar: advancing today also stamps active episode scene day. */
-                const setDay = (day: number) => {
-                  const next = Math.max(1, Math.floor(day));
-                  const fromDay = cal.currentDay;
-                  void safeWrite(async () => {
-                    await db.worlds.update(world.id, {
-                      calendar: calendarPatch(world, { currentDay: next }),
-                      updatedAt: Date.now()
-                    });
-                    if (episode.status === 'active') {
-                      await db.episodes.update(episode.id, { storyDay: next, updatedAt: Date.now() });
-                    }
-                    if (next > fromDay) {
-                      await evaluateCalendarEvents({
-                        worldId: world.id,
-                        seasonId: season.id,
-                        fromDay,
-                        toDay: next,
-                        mode: 'advance',
-                        world
-                      });
-                    }
-                  }, onSaveFail);
-                };
-                const setParts = (year: number, monthIndex: number, dayOfMonth: number) =>
-                  setDay(dayFromParts(cal, year, monthIndex, dayOfMonth));
                 return (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                    <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 13, color: 'var(--ink-heading)' }}>
-                      {formatStoryDateShort(cal, cal.currentDay)}
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                      <Chip onClick={() => setDay(cal.currentDay - 1)}>−1</Chip>
-                      <Chip onClick={() => setDay(cal.currentDay + 1)}>+1 day</Chip>
-                      <Chip onClick={() => setDay(cal.currentDay + 7)}>+7 days</Chip>
-                      <Chip onClick={() => setDay(advanceMonths(cal, cal.currentDay, 1))}>+1 month</Chip>
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: narrow ? '1fr' : '1fr 1.4fr 0.9fr', gap: 8 }}>
-                      <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, opacity: 0.75 }}>
-                        Day
-                        <input
-                          type="number"
-                          min={1}
-                          max={monthLen}
-                          value={today.dayOfMonth}
-                          onChange={(e) => setParts(today.year, today.monthIndex, Number(e.target.value) || 1)}
-                          style={{ ...MONO_INPUT, width: '100%' }}
-                        />
-                      </label>
-                      <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, opacity: 0.75 }}>
-                        Month
-                        <select
-                          value={today.monthIndex}
-                          onChange={(e) => setParts(today.year, Number(e.target.value), today.dayOfMonth)}
-                          style={{ fontSize: 13, padding: '8px 10px' }}
-                        >
-                          {cal.months.map((name, i) => (
-                            <option key={name + i} value={i}>{name}</option>
-                          ))}
-                        </select>
-                      </label>
-                      <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, opacity: 0.75 }}>
-                        Year
-                        <input
-                          type="number"
-                          value={today.year}
-                          onChange={(e) => setParts(Number(e.target.value) || cal.yearOne, today.monthIndex, today.dayOfMonth)}
-                          style={{ ...MONO_INPUT, width: '100%' }}
-                        />
-                      </label>
-                    </div>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, opacity: 0.75 }}>
-                      Absolute day
-                      <input
-                        type="number"
-                        min={1}
-                        value={cal.currentDay}
-                        onChange={(e) => setDay(Math.max(1, Number(e.target.value) || 1))}
-                        style={{ width: 72, ...MONO_INPUT }}
-                      />
-                    </label>
+                    <StoryDateFields world={world} season={season} episode={episode} narrow={narrow} />
                     <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, opacity: 0.75 }}>
                       Days to advance when a chapter ends
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>

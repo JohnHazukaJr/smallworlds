@@ -7,7 +7,8 @@ import {
   phoneChrome,
   sheetsFromBottom,
   shortStoryChrome,
-  tabBarInset
+  tabBarInset,
+  tuckSceneHudOnScroll
 } from './viewport';
 
 describe('bandForWidth', () => {
@@ -68,6 +69,11 @@ describe('chrome helpers', () => {
     expect(shortStoryChrome('regular', 616)).toBe(true);
     expect(shortStoryChrome('regular', 715)).toBe(false);
     expect(shortStoryChrome('wide', 800)).toBe(false);
+  });
+
+  it('does not tuck the story bar while a scroll is pinned', () => {
+    expect(tuckSceneHudOnScroll(true)).toBe(false);
+    expect(tuckSceneHudOnScroll(false)).toBe(true);
   });
 
   it('reserves tab-bar + safe area when the bar is showing', () => {
