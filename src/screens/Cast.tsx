@@ -524,6 +524,17 @@ export function Cast() {
                       className="serif" style={{ fontSize: 15.5, lineHeight: 1.7 }} />
                   </Field>
                   <Field label="Age / read"><input value={d.age} onChange={(e) => patch({ age: e.target.value })} placeholder="Late thirties. Tired in a competent way." /></Field>
+                  <Field label="Also answers to" note="nicknames and roles they answer to — one per line. Mom, Red, Registrar.">
+                    <textarea
+                      rows={2}
+                      value={(d.aliases ?? []).join('\n')}
+                      onChange={(e) => patch({ aliases: e.target.value.split('\n') })}
+                      onBlur={() => patch({
+                        aliases: (d.aliases ?? []).map((l) => l.trim()).filter(Boolean)
+                      })}
+                      placeholder={'Registrar\nRed'}
+                    />
+                  </Field>
                   <Field label="Appearance" note="identity the narrator keeps consistent">
                     <textarea rows={2} value={d.appearance} onChange={(e) => patch({ appearance: e.target.value })} />
                   </Field>

@@ -314,12 +314,22 @@ export const SPEAK_FORMAT_RULES =
   '- Physical looks, gestures, mannerisms, and body language go inside *asterisks* outside the spoken quotes.\n' +
   '- Words said aloud go inside "double quotes" only.\n' +
   '- Vocal stress on a word: wrap it in *asterisks* or **double asterisks** inside the quotes (shown bold). Example: "I *said* leave."\n' +
-  '- Write a real reply: action and speech across more than one sentence. Do not stop after a single spoken line.\n' +
+  '- One spoken sentence is enough. Do not expand a short reply into a speech.\n' +
   '- At most one question. If you ask the player something, stop there — do not keep talking, pile on follow-ups, or answer yourself.\n' +
   '- Do not write the player\'s actions, speech, or thoughts, and do not repeat their line.\n' +
   '- Use a blank line only when tone truly shifts mid-reply; most replies need none.\n' +
   '- Examples (match the speaker\'s own voice — these are format only):\n' +
-  '  *sets the stamp on the ledger and doesn\'t look up* "Say it again. Slower." *The nib scratches once, then waits.*\n' +
-  '  *wipes salt off his mouth with the back of his hand* "You\'re early. That\'s either brave or stupid." *He nods at the empty chair and leaves the rest unsaid.*\n' +
+  '  "The ledger\'s closed."\n' +
+  '  *taps the ledger once* "Say it again. Slower."\n' +
   '- You may use dialogue-only. Action-only (*gestures* with no quotes) is allowed only when the beat brief says so; otherwise prefer at least one spoken line. ' +
   'Do NOT prefix with your name. Do NOT wrap the whole reply in one outer quote.';
+
+/** Speak-only: how the line should sound. Not for the narrator. */
+export const SPOKEN_VOICE_RULES =
+  'How a person talks:\n' +
+  '- The first quoted sentence answers what the player just said or did. Do not restate their line, set the scene, or explain the subtext.\n' +
+  '- Match this person\'s cadence from Voice and example lines: contractions, fragments, interruptions, slang, or stiff formality. Do not upgrade them into eloquent prose.\n' +
+  '- One through-line. A single short line is a complete reply. Do not pad to a word count.\n' +
+  '- A gesture is optional. Most lines need none. If you use one, one concrete tic — not a paragraph of body language.\n' +
+  '- A longer turn is allowed when refusing, confessing, bargaining, or telling something — still words they would say out loud, still one idea.\n' +
+  '- Do not use "it\'s not X, it\'s Y", "the truth is", "if I\'m being honest", or a three-part list. Do not answer a question with a speech about the question.';

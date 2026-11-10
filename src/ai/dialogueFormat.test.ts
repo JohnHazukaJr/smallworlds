@@ -8,6 +8,7 @@ import {
   previewSpeakText,
   settleSpeakText,
   SPEAK_FORMAT_RULES,
+  SPOKEN_VOICE_RULES,
   speakHoldsForPlayer,
   speakLineCutOff,
   stitchSpeakRetry,
@@ -15,19 +16,28 @@ import {
 } from './dialogueFormat';
 
 describe('SPEAK_FORMAT_RULES', () => {
-  it('uses contrasting concrete examples instead of soft RP stock', () => {
+  it('uses a short concrete example instead of soft RP stock', () => {
     expect(SPEAK_FORMAT_RULES).not.toMatch(/dimples|shyly/i);
-    expect(SPEAK_FORMAT_RULES).toMatch(/ledger|salt/i);
-    expect(SPEAK_FORMAT_RULES).toMatch(/leaves the rest unsaid/i);
+    expect(SPEAK_FORMAT_RULES).toMatch(/ledger/i);
+    expect(SPEAK_FORMAT_RULES).not.toMatch(/leaves the rest unsaid/i);
+    expect(SPEAK_FORMAT_RULES).not.toMatch(/more than one sentence/i);
   });
 
   it('tells the speaker to stop after one question', () => {
     expect(SPEAK_FORMAT_RULES).toMatch(/at most one question/i);
     expect(SPEAK_FORMAT_RULES).toMatch(/stop there/i);
-    expect(SPEAK_FORMAT_RULES).toMatch(/more than one sentence/i);
-    expect(SPEAK_FORMAT_RULES).toMatch(/do not stop after a single spoken line/i);
+    expect(SPEAK_FORMAT_RULES).toMatch(/one spoken sentence is enough/i);
+    expect(SPEAK_FORMAT_RULES).not.toMatch(/do not stop after a single spoken line/i);
     expect(SPEAK_FORMAT_RULES).toMatch(/do not write the player/i);
     expect(SPEAK_FORMAT_RULES).not.toMatch(/prefer one tight reply/i);
+  });
+});
+
+describe('SPOKEN_VOICE_RULES', () => {
+  it('answers first and does not pad', () => {
+    expect(SPOKEN_VOICE_RULES).toMatch(/first quoted sentence answers/i);
+    expect(SPOKEN_VOICE_RULES).toMatch(/do not pad/i);
+    expect(SPOKEN_VOICE_RULES).toMatch(/single short line is a complete reply/i);
   });
 });
 

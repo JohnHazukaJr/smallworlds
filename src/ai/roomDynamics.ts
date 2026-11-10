@@ -14,6 +14,10 @@ export interface SpeakerCandidate {
   id: string;
   name: string;
   kind: SpeakerKind;
+  /** Other ways this person is addressed. */
+  aliases?: string[];
+  /** Role line. A distinctive word is used only when one person owns it. */
+  role?: string;
 }
 
 /** How directly a line points at a person. */
@@ -26,12 +30,24 @@ export interface RankedSpeaker extends SpeakerCandidate {
   turnsSince: number;
 }
 
-/** Never-spoken beats any finite silence gap, so newcomers get a voice. */
-const NEVER_SPOKE_PULL = 26;
-/** Cap on how much accumulated silence can pull a speaker forward. */
-const SILENCE_GAP_CAP = 8;
+/** Last voice, when nobody was named, outranks cast order. */
+const LAST_VOICE_PULL = 24;
 
 const RE_SPECIALS = /[.*+?^${}()|[\]\\]/g;
+
+/**
+ * Whole labels that are also ordinary words. A mention of "will" is not the
+ * person Will. "Will," and "tell Will" still count.
+ */
+const COMMON_LABELS = new Set([
+  'will', 'may', 'can', 'art', 'hope', 'mark', 'bill', 'pat', 'don', 'guy', 'rose', 'joy',
+  'faith', 'grace', 'frank', 'amber', 'chase', 'summer', 'april', 'june', 'august', 'just',
+  'like', 'well', 'come', 'look', 'tell', 'said', 'want', 'need', 'have', 'that', 'this',
+  'with', 'from', 'your', 'what', 'when', 'then', 'than', 'them', 'they', 'were', 'been',
+  'into', 'over', 'back', 'down', 'here', 'there', 'about', 'after', 'before', 'would',
+  'could', 'should', 'shall', 'must', 'adult', 'person', 'people', 'their', 'which',
+  'where', 'while', 'still', 'never', 'every'
+]);
 
 function escapeRe(text: string): string {
   return text.replace(RE_SPECIALS, '\\$&');
@@ -61,16 +77,70 @@ export function addressStrength(text: string, rawName: string): AddressStrength 
     return null;
   }
   // "Ada, listen." / "Ada?" / "Ada!" — name followed by punctuation that turns it into address.
-  if (new RegExp(`(^|["'*\\s])${n}\\s*[,!?:]`, 'iu').test(line)) return 'vocative';
+  let strength: AddressStrength = 'mention';
+  if (new RegExp(`(^|["'*\\s])${n}\\s*[,!?:]`, 'iu').test(line)) strength = 'vocative';
   // "..., Ada?" — trailing vocative.
-  if (new RegExp(`,\\s*${n}\\s*["'*.!?]*$`, 'iu').test(line)) return 'vocative';
+  else if (new RegExp(`,\\s*${n}\\s*["'*.!?]*$`, 'iu').test(line)) strength = 'vocative';
+  // "Hey Ada" / "Hi registrar".
+  else if (new RegExp(`\\b(?:hey|hi|hello)\\s+${n}\\b`, 'iu').test(line)) strength = 'vocative';
   // "ask Ada", "turn to Ada", "looks up at Ada" — only connectors may sit between verb and name,
   // so "tell Ada that Ben lied" leaves Ben a topic rather than an addressee.
-  if (new RegExp(`\\b(?:${ADDRESS_VERBS})\\b(?:\\s+(?:${ADDRESS_CONNECTORS}))*\\s+${n}\\b`, 'iu').test(line)) {
-    return 'directed';
+  else if (new RegExp(`\\b(?:${ADDRESS_VERBS})\\b(?:\\s+(?:${ADDRESS_CONNECTORS}))*\\s+${n}\\b`, 'iu').test(line)) {
+    strength = 'directed';
+  } else if (new RegExp(`\\bto\\s+${n}\\b`, 'iu').test(line)) strength = 'directed';
+  if (strength === 'mention' && COMMON_LABELS.has(name.toLowerCase())) return null;
+  return strength;
+}
+
+/** Words long enough to tell people apart. Short and ordinary words are skipped. */
+export function distinctiveTokens(text: string): string[] {
+  const out: string[] = [];
+  for (const raw of text.toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
+    if (raw.length < 5 || COMMON_LABELS.has(raw) || out.includes(raw)) continue;
+    out.push(raw);
   }
-  if (new RegExp(`\\bto\\s+${n}\\b`, 'iu').test(line)) return 'directed';
-  return 'mention';
+  return out;
+}
+
+/** "student" matches "students". "keeper" matches "innkeeper". */
+export function tokensLooselyMatch(a: string, b: string): boolean {
+  if (a === b) return true;
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  if (short.length < 5) return false;
+  if (long.startsWith(short)) {
+    const extra = long.slice(short.length);
+    return extra === 's' || extra === 'es';
+  }
+  return long.endsWith(short);
+}
+
+function uniqueRoleLabels(candidate: SpeakerCandidate, all: SpeakerCandidate[]): string[] {
+  const mine = distinctiveTokens(candidate.role ?? '');
+  return mine.filter((tok) => {
+    const owners = all.filter((c) =>
+      distinctiveTokens(c.role ?? '').some((t) => tokensLooselyMatch(t, tok))
+    );
+    return owners.length === 1;
+  });
+}
+
+/**
+ * Strongest hit across the name, aliases, and a role word only that person owns.
+ */
+export function candidateAddressStrength(
+  text: string,
+  candidate: SpeakerCandidate,
+  all: SpeakerCandidate[]
+): AddressStrength | null {
+  const labels = [candidate.name, ...(candidate.aliases ?? []), ...uniqueRoleLabels(candidate, all)];
+  const rank: Record<AddressStrength, number> = { vocative: 3, directed: 2, mention: 1 };
+  let best: AddressStrength | null = null;
+  for (const label of labels) {
+    const strength = addressStrength(text, label);
+    if (!strength) continue;
+    if (!best || rank[strength] > rank[best]) best = strength;
+  }
+  return best;
 }
 
 /** Cast + active walk-ons as one addressable list (player excluded). */
@@ -80,7 +150,11 @@ export function speakerCandidates(
 ): SpeakerCandidate[] {
   return [
     ...inScene.filter((c) => !c.isPlayer).map((c) => ({
-      id: c.id, name: c.name.trim(), kind: 'cast' as const
+      id: c.id,
+      name: c.name.trim(),
+      kind: 'cast' as const,
+      aliases: (c.aliases ?? []).map((a) => a.trim()).filter(Boolean),
+      role: c.role
     })),
     ...guests.map((g) => ({ id: g.id, name: g.name.trim(), kind: 'guest' as const }))
   ].filter((c) => c.name.length > 0);
@@ -164,7 +238,7 @@ export function detectAddressee(
   let best: { c: SpeakerCandidate; rank: number } | null = null;
   const rank: Record<AddressStrength, number> = { vocative: 3, directed: 2, mention: 1 };
   for (const c of candidates) {
-    const strength = addressStrength(playerText, c.name);
+    const strength = candidateAddressStrength(playerText, c, candidates);
     if (!strength) continue;
     const r = rank[strength];
     if (!best || r > best.rank) best = { c, rank: r };
@@ -173,21 +247,34 @@ export function detectAddressee(
 }
 
 /**
- * Who the player is speaking straight to — vocative or directed only.
+ * Everyone the player is speaking straight to — vocative or directed only.
+ * Bare mentions ("tell Ada that Ben lied") do not count; Ben stays a topic.
+ */
+export function detectHardAddressees(
+  playerText: string,
+  candidates: SpeakerCandidate[]
+): SpeakerCandidate[] {
+  const hits = candidates.flatMap((c) => {
+    const strength = candidateAddressStrength(playerText, c, candidates);
+    if (strength !== 'vocative' && strength !== 'directed') return [];
+    return [{ c, rank: strength === 'vocative' ? 3 : 2 }];
+  });
+  hits.sort((a, b) => b.rank - a.rank);
+  const vocatives = hits.filter((h) => h.rank === 3);
+  // "Ada, tell Ben" names Ada. Ben is what she is told, not a second voice.
+  if (vocatives.length > 0) return vocatives.map((h) => h.c);
+  return hits.map((h) => h.c);
+}
+
+/**
+ * Who the player is speaking straight to — the strongest vocative or directed hit.
  * Bare mentions ("tell Ada that Ben lied") do not count; Ben stays a topic.
  */
 export function detectHardAddressee(
   playerText: string,
   candidates: SpeakerCandidate[]
 ): SpeakerCandidate | null {
-  let best: { c: SpeakerCandidate; rank: number } | null = null;
-  for (const c of candidates) {
-    const strength = addressStrength(playerText, c.name);
-    if (strength !== 'vocative' && strength !== 'directed') continue;
-    const r = strength === 'vocative' ? 3 : 2;
-    if (!best || r > best.rank) best = { c, rank: r };
-  }
-  return best?.c ?? null;
+  return detectHardAddressees(playerText, candidates)[0] ?? null;
 }
 
 /**
@@ -222,8 +309,8 @@ export function priorOpenQuestionText(
 
 /**
  * Rank who should answer when the plan has no speak beat.
- * Being addressed dominates; after that, whoever has been quiet longest gets the floor,
- * so one NPC cannot monopolise a scene just by being first in the cast list.
+ * Being addressed dominates. A bare mention does not. After that, the person
+ * who just spoke, then the person whose question is still open.
  */
 export function rankReplySpeakers(opts: {
   candidates: SpeakerCandidate[];
@@ -234,31 +321,20 @@ export function rankReplySpeakers(opts: {
   const since = turnsSinceSpoke(turns, opts.candidates);
   const openAsker = lastOpenQuestion(turns, opts.candidates);
   const hard = detectHardAddressee(opts.playerText, opts.candidates);
-  let lastNarration = '';
-  for (let i = turns.length - 1; i >= 0; i--) {
-    if (turns[i].role === 'narrator') {
-      lastNarration = turns[i].text;
-      break;
-    }
-  }
 
   return opts.candidates
     .map((c, i) => {
-      const address = addressStrength(opts.playerText, c.name);
+      const address = candidateAddressStrength(opts.playerText, c, opts.candidates);
       const turnsSince = since.get(c.id) ?? Number.POSITIVE_INFINITY;
       let score = 0;
       if (address === 'vocative') score += 100;
       else if (address === 'directed') score += 70;
-      else if (address === 'mention') score += 30;
 
       // Player answered this person's question and did not hard-address someone else.
       if (openAsker && openAsker.id === c.id && !hard) score += 55;
 
-      if (!Number.isFinite(turnsSince)) score += NEVER_SPOKE_PULL;
-      else score += Math.min(turnsSince, SILENCE_GAP_CAP) * 3;
-      if (turnsSince === 0) score -= 12;
+      if (turnsSince === 0) score += LAST_VOICE_PULL;
 
-      if (lastNarration && addressStrength(lastNarration, c.name)) score += 8;
       if (c.kind === 'cast') score += 2;
       score -= i * 0.01;
       return { ...c, score, address, turnsSince };
@@ -275,9 +351,9 @@ export function answererCap(length: TurnLength): number {
 
 /**
  * Who speaks after the player.
- * Short: the person addressed, or one present person if nobody was named.
- * Normal: up to two — everyone spoken to, then one quiet person if the room has already been talking.
- * Long: up to three, the same way. A cold open with nobody named is still one voice.
+ * The people actually addressed, up to the length cap.
+ * If nobody was addressed: the person whose question was just answered,
+ * otherwise the last voice, otherwise the first person already here.
  * A pinned id goes first and counts toward the cap.
  */
 export function selectAnswerers(opts: {
@@ -303,14 +379,10 @@ export function selectAnswerers(opts: {
   if (opts.preferId) take(ranked.find((c) => c.id === opts.preferId));
 
   const addressed = ranked.filter((c) => c.address === 'vocative' || c.address === 'directed');
-  const mentioned = ranked.filter((c) => c.address === 'mention');
-  if (addressed.length > 0) {
-    for (const c of addressed) take(c);
-    if (opts.length !== 'beat') {
-      for (const c of mentioned) take(c);
-    }
-  } else if (opts.length !== 'beat' && mentioned.length > 0) {
-    for (const c of mentioned) take(c);
+  const vocatives = addressed.filter((c) => c.address === 'vocative');
+  const chosen = vocatives.length > 0 ? vocatives : addressed;
+  if (chosen.length > 0) {
+    for (const c of chosen) take(c);
   } else if (picked.length === 0) {
     const asker = lastOpenQuestion(opts.turns ?? [], opts.candidates);
     if (asker) take(ranked.find((c) => c.id === asker.id));
@@ -321,23 +393,13 @@ export function selectAnswerers(opts: {
     }
   }
 
-  const anyoneSpoke = (opts.turns ?? []).some((t) => t.role === 'character');
-  if (opts.length !== 'beat' && anyoneSpoke && picked.length < cap) {
-    const quiet = ranked.find(
-      (c) =>
-        !picked.some((p) => p.id === c.id) &&
-        (!Number.isFinite(c.turnsSince) || c.turnsSince >= 4)
-    );
-    take(quiet);
-  }
-
   if (picked.length === 0 && ranked[0]) picked.push(ranked[0]);
   return picked.slice(0, cap).map((c) => ({ id: c.id, name: c.name, kind: c.kind }));
 }
 
 /**
  * Compact turn-taking signals for the director prompt.
- * Advisory only — the director may still choose anyone.
+ * The hard addressee and an open question only — silence is not a claim on the line.
  */
 export function roomDynamicsLines(opts: {
   candidates: SpeakerCandidate[];
@@ -347,34 +409,14 @@ export function roomDynamicsLines(opts: {
   const { candidates } = opts;
   if (candidates.length === 0) return [];
   const turns = opts.turns ?? [];
-  const since = turnsSinceSpoke(turns, candidates);
   const lines: string[] = [];
 
   const last = lastSpeaker(turns, candidates);
   if (last) lines.push(`Last voice in the room: ${last.name}.`);
 
-  const silent = candidates
-    .filter((c) => !Number.isFinite(since.get(c.id) ?? Number.POSITIVE_INFINITY))
-    .map((c) => c.name)
-    .slice(0, 4);
-  if (silent.length > 0) {
-    lines.push(`Has not spoken this episode: ${silent.join(', ')}.`);
-  }
-
-  const quiet = candidates
-    .filter((c) => {
-      const gap = since.get(c.id) ?? Number.POSITIVE_INFINITY;
-      return Number.isFinite(gap) && gap >= 4;
-    })
-    .map((c) => `${c.name} (${since.get(c.id)} lines ago)`)
-    .slice(0, 3);
-  if (quiet.length > 0) {
-    lines.push(`Quiet for a while: ${quiet.join(', ')}.`);
-  }
-
-  const addressee = detectAddressee(opts.playerText, candidates);
-  if (addressee) {
-    lines.push(`The player's move appears aimed at: ${addressee.name}.`);
+  const addressed = detectHardAddressees(opts.playerText, candidates);
+  if (addressed.length > 0) {
+    lines.push(`The player's move is addressed to: ${addressed.map((c) => c.name).join(', ')}.`);
   }
 
   const asked = lastOpenQuestion(turns, candidates);

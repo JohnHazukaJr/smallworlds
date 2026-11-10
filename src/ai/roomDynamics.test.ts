@@ -76,9 +76,18 @@ describe('addressStrength', () => {
     expect(addressStrength('Tell Ada that Ben lied.', 'Ben')).toBe('mention');
   });
 
-  it('does not match names inside other words', () => {
-    expect(addressStrength('I always knew.', 'Al')).toBeNull();
-    expect(addressStrength('The cabinet is locked.', 'Abi')).toBeNull();
+  it('does not treat a common word as a person', () => {
+    expect(addressStrength('I will go.', 'Will')).toBeNull();
+    expect(addressStrength('Will, come here.', 'Will')).toBe('vocative');
+  });
+
+  it('hears hey plus a role only one person holds', () => {
+    const room: SpeakerCandidate[] = [
+      { id: 'c1', name: 'Ada', kind: 'cast', role: 'harbour registrar', aliases: ['Red'] },
+      { id: 'c2', name: 'Ben', kind: 'cast', role: 'night clerk' }
+    ];
+    expect(detectHardAddressee('Hey registrar', room)?.id).toBe('c1');
+    expect(detectHardAddressee('Red, the ledger.', room)?.id).toBe('c1');
   });
 });
 
@@ -118,11 +127,10 @@ describe('rankReplySpeakers', () => {
     expect(ranked[0].id).toBe('c1');
   });
 
-  it('gives the floor to whoever has been silent instead of the last speaker', () => {
+  it('keeps the last voice ahead of someone who has not spoken', () => {
     const turns = [said('c1', 'a'), said('c1', 'b'), said('c1', 'c')];
     const ranked = rankReplySpeakers({ candidates: trio, playerText: 'Hello?', turns });
-    expect(ranked[0].id).toBe('c2');
-    expect(ranked[ranked.length - 1].id).toBe('c1');
+    expect(ranked[0].id).toBe('c1');
   });
 
   it('lets a direct address outrank silence', () => {
@@ -132,16 +140,16 @@ describe('rankReplySpeakers', () => {
     expect(ranked[0].address).toBe('vocative');
   });
 
-  it('rotates among NPCs who have all spoken, oldest voice first', () => {
+  it('keeps the last voice when everyone has spoken and nobody was named', () => {
     const turns = [said('c2', 'x'), said('g1', 'y'), said('c1', 'z')];
     const ranked = rankReplySpeakers({ candidates: trio, playerText: 'Go on.', turns });
-    expect(ranked[0].id).toBe('c2');
+    expect(ranked[0].id).toBe('c1');
   });
 
-  it('nudges toward whoever the narrator just put in frame', () => {
+  it('does not hand the line to a name that only appears in narration', () => {
     const turns = [said('c1', 'a'), said('c2', 'b'), narrator('The Clerk looks up from the ledger.')];
     const ranked = rankReplySpeakers({ candidates: trio, playerText: 'Well?', turns });
-    expect(ranked[0].id).toBe('g1');
+    expect(ranked[0].id).toBe('c2');
   });
 });
 
@@ -153,7 +161,7 @@ describe('roomDynamicsLines', () => {
     expect(speakerCandidates(cast, guests).map((c) => c.id)).toEqual(['c1', 'c2', 'g1']);
   });
 
-  it('names the last voice, the silent, and the addressee', () => {
+  it('names the last voice and the person addressed', () => {
     const turns = [said('c1', 'a'), said('c1', 'b'), said('c1', 'c'), said('c1', 'd'), said('c1', 'e')];
     const lines = roomDynamicsLines({
       candidates: speakerCandidates(cast, guests),
@@ -161,18 +169,20 @@ describe('roomDynamicsLines', () => {
       turns
     }).join('\n');
     expect(lines).toMatch(/Last voice in the room: Ada\./);
-    expect(lines).toMatch(/Has not spoken this episode: Ben, Clerk\./);
-    expect(lines).toMatch(/aimed at: Ben\./);
+    expect(lines).toMatch(/addressed to: Ben\./);
+    expect(lines).not.toMatch(/Has not spoken/);
+    expect(lines).not.toMatch(/Quiet for a while/);
   });
 
-  it('flags a cast member who has gone quiet for several lines', () => {
+  it('does not recruit someone who has gone quiet', () => {
     const turns = [said('c2', 'x'), said('c1', 'a'), said('c1', 'b'), said('c1', 'c'), said('c1', 'd')];
     const lines = roomDynamicsLines({
       candidates: speakerCandidates(cast, guests),
       playerText: 'Go on.',
       turns
     }).join('\n');
-    expect(lines).toMatch(/Quiet for a while: Ben \(4 lines ago\)/);
+    expect(lines).not.toMatch(/Quiet for a while/);
+    expect(lines).toMatch(/Last voice in the room: Ada\./);
   });
 
   it('returns nothing for an empty room', () => {
@@ -254,24 +264,23 @@ describe('selectAnswerers', () => {
     expect(ids).toEqual(['c1']);
   });
 
-  it('answers the person addressed and the other person named', () => {
+  it('answers only the person addressed, not the person discussed', () => {
     const ids = selectAnswerers({
       length: 'scene',
       playerText: 'Ada, tell Ben what you saw.',
       candidates: trio
     }).map((c) => c.id);
-    expect(ids).toEqual(['c1', 'c2']);
+    expect(ids).toEqual(['c1']);
   });
 
-  it('lets one quiet person enter beside the last voice', () => {
+  it('gives an unnamed line to the last voice alone', () => {
     const ids = selectAnswerers({
       length: 'scene',
       playerText: 'I wait.',
       candidates: trio,
       turns: [said('c2', '"The ledger is closed."')]
     }).map((c) => c.id);
-    expect(ids[0]).toBe('c2');
-    expect(ids).toHaveLength(2);
+    expect(ids).toEqual(['c2']);
   });
 
   it('on a long reply, includes everyone who was named', () => {

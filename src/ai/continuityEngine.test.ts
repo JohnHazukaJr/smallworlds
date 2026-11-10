@@ -344,8 +344,8 @@ describe('director prompt budgets', () => {
     );
     expect(user).toMatch(/Room dynamics/);
     expect(user).toMatch(/Last voice in the room: Ada\./);
-    expect(user).toMatch(/Has not spoken this episode: Ben\./);
-    expect(user).toMatch(/aimed at: Ben\./);
+    expect(user).toMatch(/addressed to: Ben\./);
+    expect(user).not.toMatch(/Has not spoken/);
     expect(user).toMatch(/Ben → Ada: rival — after the same ledger/);
   });
 

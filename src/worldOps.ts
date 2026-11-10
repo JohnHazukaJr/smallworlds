@@ -612,7 +612,7 @@ export function emptyCharacter(worldId: string, patch: Partial<Character> = {}):
   const now = Date.now();
   const base: Character = {
     id: uid(), worldId,
-    name: '', role: '', hue: Math.floor(Math.random() * 360), isPlayer: false, selfTag: false,
+    name: '', role: '', aliases: [], hue: Math.floor(Math.random() * 360), isPlayer: false, selfTag: false,
     portrait: null, portraits: [],
     age: '', appearance: '', mannerisms: '', backstory: '', summary: '',
     speechStyle: '', exampleLines: [],

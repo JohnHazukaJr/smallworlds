@@ -7,8 +7,9 @@ import { formatEpisodeDateRange, formatStoryDate, PLOT_TARGET_CAP, storyStanceOf
 import type { ChatMessage } from './client';
 import { inferContextWindowTokens } from './contextBudget';
 import { deliveryPhrase, parseDeliveryTone } from './deliveryTone';
-import { SPEAK_FORMAT_RULES } from './dialogueFormat';
+import { SPEAK_FORMAT_RULES, SPOKEN_VOICE_RULES } from './dialogueFormat';
 import { lastOpenQuestion, roomDynamicsLines, speakerCandidates } from './roomDynamics';
+import { characterFitsPlace, lineBringsCharacter } from './sceneFit';
 import { directorCloseGuidance, narratorCloseGuidance, stancePlaybook } from './storyStance';
 
 /** Narrator passage ceilings. The model should stop earlier when the moment is smaller. */
@@ -48,22 +49,18 @@ export function narrationSizeHint(length: TurnLength): string {
   return 'Two or three paragraphs (about 200–400 words). Do not stop after one sentence. No spoken dialogue.';
 }
 
-/** Soft word budgets for one person's reply. A ceiling, not a command to be brief. */
+/** Soft word budgets for one person's reply. A ceiling, not a quota. */
 export function speakSizeHint(length: TurnLength): string {
   const close =
     'Do not write the player\'s actions, speech, or thoughts. Do not repeat their line. ' +
-    'Stop on an opening they can answer. At most one question; if you ask, stop there.';
+    'At most one question; if you ask, stop there.';
   if (length === 'beat') {
-    return (
-      'A few sentences: what you do and what you say (about 40–80 words). ' +
-      'Not a single line, and not a speech. ' +
-      close
-    );
+    return `Usually one or two sentences, often under 40 words. A single line is fine. ${close}`;
   }
   if (length === 'scene') {
-    return `About a paragraph (80–160 words), action and speech together. ${close}`;
+    return `A turn someone would take in a conversation, usually 1–4 sentences, about 20–80 words. ${close}`;
   }
-  return `Two or three paragraphs (about 160–320 words). Still one focused reply, not a speech. ${close}`;
+  return `Room to tell something, about 60–160 words, still one person's spoken turn. ${close}`;
 }
 
 /** Shared anti-generic-prose rules for narrator and speak agents. */
@@ -1376,7 +1373,9 @@ export function buildCharacterSystemPrompt(
   // Speak format and the knowledge wall live on the user message, next to the brief.
   sections.push(
     `## How you respond\n` +
-    `- Honour behaviour anchors and MUST NOT KNOW. Never soften yourself to please the player.\n` +
+    `- Honour behaviour anchors and MUST NOT KNOW.\n` +
+    `- Talk, do not write. A short line is enough. Do not decorate every reply with a gesture.\n` +
+    `- Take a turn from what you want right now. Say only what you would say out loud. Do not comfort, clarify, agree, or explain yourself in order to be helpful.\n` +
     `- If the player just answered you (or the room), take the answer as heard this beat. You may doubt it or act on it — you must not ask the same question again as if they said nothing.\n` +
     `- You know what day it is. You may mention the weekday or the date when a person would. Do not announce it on every line.\n` +
     `- Never prefix your reply with your name or "Name:". History may show "[Name]" then the line — your output must be only *action* and "speech".`
@@ -1420,6 +1419,8 @@ export function buildGuestSystemPrompt(
   sections.push(
     `## How you respond\n` +
     (guest.voice ? `- Voice guide — match this exactly; it is your whole identity here: ${guest.voice}\n` : '') +
+    `- Talk, do not write. A short line is enough. Do not decorate every reply with a gesture.\n` +
+    `- Take a turn from what you want right now. Say only what you would say out loud. Do not comfort, clarify, agree, or explain yourself in order to be helpful.\n` +
     `- If the player just answered a question, take the answer as heard — do not ask it again.\n` +
     `- You know what day it is. You may mention the weekday or the date when a person would. Do not announce it on every line.\n` +
     `- Never prefix your reply with your name or "Name:" — only *action* and "speech".\n` +
@@ -1821,8 +1822,7 @@ export const SPEAK_QUESTION_RULE =
 
 /** Extra rule when the player just spoke (Speak/Play) — Act may stay silent. */
 export const SPEAK_MUST_DIALOGUE =
-  'This reply MUST include at least one spoken line in "double quotes". ' +
-  'Action-only (*gestures*) is not enough — answer the player aloud.';
+  'If you speak, one sentence in "double quotes" is enough. Do not expand it into a speech.';
 
 export type SpeakMessageOpts = {
   requireDialogue?: boolean;
@@ -1858,7 +1858,7 @@ export function injectedSpeakBrief(opts: {
   /** where they stand in the room's turn-taking right now */
   situation?: string;
 }): string {
-  const bits: string[] = [`Answer the player's last move as ${opts.name.trim() || 'Someone'}`];
+  const bits: string[] = [`A turn in the room as ${opts.name.trim() || 'Someone'}`];
   const role = (opts.role ?? '').trim();
   if (role) bits.push(`who you are here: ${cueClip(role, 64)}`);
   const voice = (opts.speechStyle ?? '').trim();
@@ -1873,7 +1873,7 @@ export function injectedSpeakBrief(opts: {
   if (hold) bits.push(`hold: ${cueClip(hold, 44)}`);
   const situation = (opts.situation ?? '').trim();
   if (situation) bits.push(cueClip(situation, 88));
-  bits.push('do not soften; register their last line; do not re-ask what they just answered');
+  bits.push('from what you want now; say only what you would say out loud');
   return `${bits.join('; ')}.`;
 }
 
@@ -1903,9 +1903,10 @@ function speakVoiceReminder(speaking: Character): string {
   if (speaking.speechStyle.trim()) {
     parts.push(`Voice: ${cueClip(speaking.speechStyle, 100)}`);
   }
-  const sample = speaking.exampleLines.map((l) => l.trim()).find(Boolean);
-  if (sample) {
-    parts.push(`Rhythm sample (do not copy): "${cueClip(sample, 80)}"`);
+  const samples = speaking.exampleLines.map((l) => l.trim()).filter(Boolean).slice(0, 2);
+  if (samples.length > 0) {
+    const lines = samples.map((sample) => `"${cueClip(sample, 80)}"`).join('\n');
+    parts.push(`Rhythm samples (match the rhythm, do not copy):\n${lines}`);
   }
   return parts.length > 0 ? `${parts.join('\n')}\n\n` : '';
 }
@@ -1956,11 +1957,13 @@ export function buildCharacterSpeakMessages(
     heardAnswerCue(turns, characters, guests) +
     `Intent for this line: ${brief}\n\n` +
     knowledgeWallCue(speaking.mustNotKnow) +
-    `Answer the player's last line in your own voice, with words in double quotes. Do not restage the room. Do not speak for anyone else.\n` +
+    `Take a turn as ${speaking.name} from what you want right now: a fragment, a deflection, a task, or a gesture. You do not owe a complete reply.\n` +
+    `Say only what you would say out loud. Do not comfort, clarify, agree, or explain yourself in order to be helpful. Do not restage the room. Do not speak for anyone else.\n` +
     `${SPEAK_QUESTION_RULE}\n` +
     `Use the required *action* "dialogue" format. No other speakers.\n` +
     `${speakSizeHint(length)}\n\n` +
     SPEAK_FORMAT_RULES +
+    `\n\n${SPOKEN_VOICE_RULES}` +
     (opts?.requireDialogue ? `\n\n${SPEAK_MUST_DIALOGUE}` : '');
   return mergeMessages([...messages, { role: 'user', content: userContent }]);
 }
@@ -1995,10 +1998,12 @@ export function buildGuestSpeakMessages(
     voiceLine +
     heardAnswerCue(turns, characters, guests) +
     `Intent for this line: ${brief}\n\n` +
-    `Answer the player's last line in your own voice, with words in double quotes. Do not restage the room. Do not speak for anyone else.\n` +
+    `Take a turn as ${guest.name} from what you want right now: a fragment, a deflection, a task, or a gesture. You do not owe a complete reply.\n` +
+    `Say only what you would say out loud. Do not comfort, clarify, agree, or explain yourself in order to be helpful. Do not restage the room. Do not speak for anyone else.\n` +
     `${SPEAK_QUESTION_RULE}\n` +
     `${speakSizeHint(length)}\n\n` +
     SPEAK_FORMAT_RULES +
+    `\n\n${SPOKEN_VOICE_RULES}` +
     (opts?.requireDialogue ? `\n\n${SPEAK_MUST_DIALOGUE}` : '');
   return mergeMessages([...messages, { role: 'user', content: userContent }]);
 }
@@ -2078,7 +2083,7 @@ export function directorSystemPrompt(
     '{"type":"speak","guestId":"<id-or-NEW-or-name>","brief":"..."}' +
     ']}' +
     '\n' +
-    'castDelta.enter: saved Cast NPCs who arrive — use character id OR exact name. ' +
+    'castDelta.enter: only someone listed under Also fits, or whom this line brought in — character id OR exact name. ' +
     'castDelta.leave: Cast ids/names or guest ids who exit the scene. ' +
     'Never contradict Continuity facts or Knowledge walls below. ' +
     'castDelta.introduce: optional walk-ons who are NOT Cast cards — temporary for this episode only. At most 2 per plan. ' +
@@ -2087,9 +2092,10 @@ export function directorSystemPrompt(
     'Speak characterId may be the cast id OR the exact character name (never the player). ' +
     'Narration briefs name who moves in the room and one sensory job (sight, sound, smell, temperature, or touch) — never a weather catalogue, never finished dialogue. ' +
     'Speak briefs name want or friction (answer, refuse, deflect, bargain, stall) plus tone — a single intent, never the finished line, never "give a speech" or a multi-point monologue. ' +
+    'The intent is something a person would say in a sentence or two, not a rhetorical flourish. ' +
     'If a speak beat asks the player a question, it must be the last speak in the plan — do not pile another voice on after an unanswered question. ' +
-    'The room is not a queue: the right voice is whoever has the most at stake, not whoever spoke last or stands first in the cast list. ' +
-    'A brief may have someone answer for another, cut them off, or talk past the player — see Room dynamics below. ' +
+    'The room is not a queue. One speak beat: the person addressed. If several people were each addressed, one beat each. If nobody was addressed, the person who just asked, otherwise the last voice. Bystanders stay in the narration. ' +
+    'Do not give the floor to someone because they have been quiet. ' +
     engageReply +
     sizeGuidance +
     `Hard cap for ${sizeLabel}: at most ${maxSpeak} speak beat${maxSpeak === 1 ? '' : 's'} and at most ${maxTotal} beats total. ` +
@@ -2139,6 +2145,8 @@ export function directorUserPrompt(
     systemChars?: number;
     historyTailChars?: number;
     historyTailMaxTurns?: number;
+    /** People who fit this place and are not in the room. Omit to compute. */
+    alsoFitIds?: string[];
   }
 ): string {
   const tight = opts?.pack === 'tight';
@@ -2146,6 +2154,20 @@ export function directorUserPrompt(
   const inScene = ctx.characters.filter((c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer);
   const offScene = ctx.characters.filter((c) => !ctx.episode.castIds.includes(c.id) && !c.isPlayer);
   const guests = activeGuests(ctx.episode);
+  const placeLoc = resolveCurrentLocations(ctx.episode, ctx.locations)[0];
+  const place = {
+    name: (placeLoc?.name || ctx.episode.location || '').trim(),
+    inhabitants: placeLoc?.inhabitants ?? ''
+  };
+  const fittingOff = opts?.alsoFitIds
+    ? offScene.filter((c) => opts.alsoFitIds!.includes(c.id))
+    : offScene.filter((c) => characterFitsPlace(c, place));
+  const fits = fittingOff.slice(0, 4);
+  const brought = offScene.find((c) => lineBringsCharacter(input, c) && !fits.some((f) => f.id === c.id));
+  const alsoShown = brought ? [...fits, brought] : fits;
+  const alsoList = alsoShown.length > 0
+    ? alsoShown.map((c) => `- ${c.id} · ${c.name}${c.role ? ` (${c.role})` : ''}`).join('\n')
+    : '(none)';
   const castList = inScene.length > 0
     ? inScene.map((c) => {
       const emotion = c.state?.emotion?.trim();
@@ -2160,13 +2182,6 @@ export function directorUserPrompt(
       return `- ${c.id} · ${c.name}${c.role ? ` (${c.role})` : ''}${detail}`;
     }).join('\n')
     : '(no NPCs in scene yet)';
-  const offCap = tight ? 6 : 12;
-  const offShown = offScene.slice(0, offCap);
-  const offRest = offScene.length - offShown.length;
-  const offList = offScene.length > 0
-    ? offShown.map((c) => `- ${c.id} · ${c.name}${c.role ? ` (${c.role})` : ''}`).join('\n') +
-      (offRest > 0 ? `\n- …and ${offRest} others` : '')
-    : '(none)';
   const guestList = guests.length > 0
     ? guests.map((g) => `- ${g.id} · ${g.name}: ${g.brief}`).join('\n')
     : '(none yet — you may introduce walk-ons via castDelta.introduce)';
@@ -2182,8 +2197,7 @@ export function directorUserPrompt(
     turns: ctx.turns
   });
   const dynamicsBlock = dynamics.length > 0
-    ? `Room dynamics (advisory — vary who carries a scene; a silent NPC who has a stake ` +
-      `is often the sharper answer than whoever spoke last):\n${dynamics.map((l) => `- ${l}`).join('\n')}\n\n`
+    ? `Room dynamics:\n${dynamics.map((l) => `- ${l}`).join('\n')}\n\n`
     : '';
 
   const preferCast = opts?.preferCharacterId
@@ -2290,7 +2304,8 @@ export function directorUserPrompt(
     (locLine ? `\n${locLine}` : '') +
     `\n` +
     `In-scene cast:\n${castList}\n\n` +
-    `Off-scene cast (may enter via castDelta.enter):\n${offList}\n\n` +
+    `Also fits this place (not in the room yet):\n${alsoList}\n` +
+    `Vary who is present only inside the room and this list. Leave anyone else out.\n\n` +
     `Active walk-ons (guest ids):\n${guestList}\n\n` +
     dyadBlock +
     dynamicsBlock +

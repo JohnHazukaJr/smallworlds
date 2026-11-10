@@ -64,13 +64,15 @@ import {
   planCapsForLength
 } from './prompts';
 import {
-  detectHardAddressee,
+  detectHardAddressees,
+  lastSpeaker,
   priorOpenQuestionText,
   rankReplySpeakers,
   selectAnswerers,
   speakerCandidates,
   type RankedSpeaker
 } from './roomDynamics';
+import { characterFitsPlace, filterCastDelta, inferPlaceChanged, ROOM_NAMED_CAP, stageSceneCast } from './sceneFit';
 import {
   isNearDuplicate,
   knowledgeFactLine,
@@ -111,8 +113,8 @@ const NARRATION_CONTINUE_NUDGE =
   'do not restart or repeat completed words. Stay in narrator voice; no character dialogue.';
 
 const SPEAK_DIALOGUE_NUDGE =
-  'Your reply had no spoken dialogue. Answer the player aloud with one short line in "double quotes". ' +
-  'You may keep a brief *action*, but speech is required — do not expand into a monologue.';
+  'Your reply had no spoken dialogue. Add one short line in "double quotes". ' +
+  'You may keep a brief *action*. One sentence is enough — do not expand into a speech.';
 
 function isAbortError(e: unknown): boolean {
   return e instanceof WriteAbortedError || (e as Error)?.name === 'AbortError';
@@ -923,8 +925,9 @@ function rewriteFirstSpeakBrief(
 }
 
 /**
- * Put the hard addressee (or unanswered asker) first.
- * Bare mentions do not steal the floor from the person spoken to.
+ * Keep only the people the line was actually for.
+ * Several vocatives can all speak. A topic does not. With nobody named,
+ * the asker speaks, otherwise the last voice, otherwise one existing beat.
  */
 function preferAddresseeSpeak(
   beats: DirectorBeat[],
@@ -935,58 +938,46 @@ function preferAddresseeSpeak(
   turns?: Turn[]
 ): DirectorBeat[] {
   const candidates = speakerCandidates(inScene, guests);
-  const hard = detectHardAddressee(playerText, candidates);
-  const open = !hard ? priorOpenQuestionText(turns ?? [], candidates) : null;
-  const target = hard ?? open?.asker ?? null;
-  if (!target) return beats;
-
-  const matches = (b: DirectorBeat) => {
-    if (b.type !== 'speak') return false;
-    if (target.kind === 'guest') return 'guestId' in b && b.guestId === target.id;
-    return 'characterId' in b && b.characterId === target.id;
-  };
-  const situation = hard
+  const hard = detectHardAddressees(playerText, candidates).slice(0, caps.maxSpeak);
+  const open = hard.length === 0 ? priorOpenQuestionText(turns ?? [], candidates) : null;
+  const last = hard.length === 0 && !open ? lastSpeaker(turns ?? [], candidates) : null;
+  const targets = hard.length > 0 ? hard : open ? [open.asker] : last ? [last] : null;
+  const situation = hard.length > 0
     ? 'the player is speaking straight at you — do not hand it off'
-    : 'the player just answered your question — register it and advance; do not ask it again';
+    : open
+      ? 'the player just answered your question — register it and advance; do not ask it again'
+      : '';
 
-  const putFirst = (list: DirectorBeat[]): DirectorBeat[] => {
-    const idx = list.findIndex(matches);
-    const firstSpeak = list.findIndex((b) => b.type === 'speak');
-    if (idx >= 0 && firstSpeak >= 0 && idx !== firstSpeak) {
-      const next = [...list];
-      const tmp = next[firstSpeak];
-      next[firstSpeak] = next[idx];
-      next[idx] = tmp;
-      return rewriteFirstSpeakBrief(next, inScene, guests, target.id, situation);
-    }
-    if (idx >= 0) {
-      return rewriteFirstSpeakBrief(list, inScene, guests, target.id, situation);
+  if (!targets) {
+    const speakIdx = beats.map((b, i) => (b.type === 'speak' ? i : -1)).filter((i) => i >= 0);
+    if (speakIdx.length <= 1) return beats;
+    const drop = new Set(speakIdx.slice(1));
+    return beats.filter((_, i) => !drop.has(i));
+  }
+
+  const narration = beats.filter((b) => b.type === 'narration');
+  const speaks: DirectorBeat[] = [];
+  for (const t of targets) {
+    const key = t.kind === 'guest' ? `g:${t.id}` : `c:${t.id}`;
+    const existing = beats.find((b) => speakKey(b) === key);
+    if (existing) {
+      speaks.push(existing);
+      continue;
     }
     const injected = pickReplySpeaker(
       inScene,
       guests,
       playerText,
-      target.kind === 'guest' ? { guestId: target.id } : { characterId: target.id },
+      t.kind === 'guest' ? { guestId: t.id } : { characterId: t.id },
       turns
     );
-    if (!injected) return list;
-    const rest = list.filter((b) => speakKey(b) !== speakKey(injected));
-    const speakN = rest.filter((b) => b.type === 'speak').length;
-    let trimmed = rest;
-    if (speakN >= caps.maxSpeak) {
-      const lastSpeak = rest.reduce((acc, b, i) => (b.type === 'speak' ? i : acc), -1);
-      if (lastSpeak >= 0) trimmed = rest.filter((_, i) => i !== lastSpeak);
-    }
-    return rewriteFirstSpeakBrief(
-      [injected, ...trimmed].slice(0, caps.maxTotal),
-      inScene,
-      guests,
-      target.id,
-      situation
-    );
-  };
-
-  return putFirst(beats);
+    if (injected) speaks.push(injected);
+  }
+  let merged = [...speaks, ...narration].slice(0, caps.maxTotal);
+  if (situation && targets[0]) {
+    merged = rewriteFirstSpeakBrief(merged, inScene, guests, targets[0].id, situation);
+  }
+  return merged.length > 0 ? merged : beats;
 }
 
 /** After ordering, rewrite asker briefs that still look like a re-ask. */
@@ -1303,6 +1294,32 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
     || activeGuests(ctx.episode).length > 0;
 
   const directThisTurn = async (): Promise<{ beats: DirectorBeat[]; enterIds: string[] }> => {
+    const placeLoc = ctx.locations.find((l) => ctx.episode.locationId && l.id === ctx.episode.locationId)
+      ?? ctx.locations.find((l) => {
+        const name = l.name.trim().toLowerCase();
+        const ep = ctx.episode.location.trim().toLowerCase();
+        return !!name && !!ep && (ep.includes(name) || name.includes(ep));
+      });
+    const placeName = (placeLoc?.name || ctx.episode.location || '').trim();
+    const inhabitants = placeLoc?.inhabitants ?? '';
+    const staged = stageSceneCast({
+      castIds: ctx.episode.castIds,
+      characters: ctx.characters,
+      placeName,
+      inhabitants,
+      playerText: moveText,
+      turns: ctx.turns,
+      placeChanged: inferPlaceChanged(moveText, placeName)
+    });
+    if (staged.castIds.join('\0') !== ctx.episode.castIds.join('\0')) {
+      await guardStorage(() => db.episodes.update(ctx.episode.id, {
+        castIds: staged.castIds,
+        updatedAt: Date.now()
+      }));
+      ctx.episode = { ...ctx.episode, castIds: staged.castIds };
+      sceneMutated = true;
+      inScene = ctx.characters.filter((c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer);
+    }
     const hasSpeakers = inScene.length > 0 || activeGuests(ctx.episode).length > 0;
     const system = directorSystemPrompt(opts.mode, hasSpeakers, opts.length, storyStanceOf(opts.world));
     const tail = historyTailFor(model, 'director', 'normal', contextWindowFor());
@@ -1310,7 +1327,8 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
       preferCharacterId: opts.preferCharacterId,
       preferGuestId: opts.preferGuestId,
       historyTailChars: tail.charBudget,
-      historyTailMaxTurns: tail.maxTurns
+      historyTailMaxTurns: tail.maxTurns,
+      alsoFitIds: staged.alsoFits.map((c) => c.id)
     });
     const raw = await utilityJson<{
       beats?: Array<{ type?: string; brief?: string; characterId?: string; guestId?: string }>;
@@ -1330,7 +1348,14 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
       guests: ctx.episode.guests ?? [],
       activeGuestIds: ctx.episode.activeGuestIds,
       characters: ctx.characters,
-      delta: raw.castDelta,
+      delta: filterCastDelta({
+        delta: raw.castDelta,
+        playerText: moveText,
+        characters: ctx.characters,
+        castIds: ctx.episode.castIds,
+        placeName,
+        inhabitants
+      }),
       newId: uid
     });
     if (scene.changed) {
@@ -4149,10 +4174,6 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
 
   const allCharacters = await db.characters.where('worldId').equals(world.id).toArray();
   const playerId = allCharacters.find((c) => c.isPlayer)?.id;
-  const returningIds = wrap.characters.filter((c) => c.returning).map((c) => c.characterId);
-  const castIds = playerId
-    ? [playerId, ...returningIds.filter((id) => id !== playerId)]
-    : returningIds;
 
   // Carry place into season-open E1 when the last episode still had a valid location.
   const priorEps = await db.episodes.where('seasonId').equals(season.id).toArray();
@@ -4163,6 +4184,19 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
     lastEp,
     (id) => placeById.get(id)
   );
+  const openPlace = openLocationId
+    ? worldPlaces.find((l) => l.id === openLocationId)
+    : worldPlaces.find((l) => l.name.trim() && l.name.trim().toLowerCase() === openLocation.trim().toLowerCase());
+  const fittingIds = allCharacters
+    .filter((c) => !c.isPlayer && characterFitsPlace(c, {
+      name: openPlace?.name || openLocation,
+      inhabitants: openPlace?.inhabitants ?? ''
+    }))
+    .slice(0, ROOM_NAMED_CAP)
+    .map((c) => c.id);
+  const castIds = playerId
+    ? [playerId, ...fittingIds.filter((id) => id !== playerId)]
+    : fittingIds;
 
   const firstEpisode: Episode = {
     id: uid(), seasonId: next.id, worldId: world.id, number: 1,
@@ -4476,12 +4510,14 @@ export async function draftCharacter(world: World | null, description: string): 
     '{"name": string, "role": "<role · relationship to protagonist>", "age": string, "appearance": string, ' +
     '"mannerisms": "<2-3 recurring physical habits or tics, concrete and observable>", ' +
     '"backstory": "<the history that shaped them, 2-3 sentences>", "summary": "<who they are, 2-4 sentences of prose>", ' +
-    '"speechStyle": "<how they talk, 1-2 sentences>", "exampleLines": [<2-3 sample spoken lines>], ' +
+    '"speechStyle": "<how they sound when heard: sentence length, contractions, what they dodge, 1-2 sentences>", ' +
+    '"exampleLines": [<2-3 lines they would actually say aloud, not narration>], ' +
     '"traits": string, "desires": string, "fears": string, "flaws": string, "secrets": "<something they hide>", ' +
     '"mustNotKnow": "<facts they must not know yet, or empty>", ' +
     '"anchors": [<3-4 hard behavioural rules they never break, e.g. "Never lies in writing">], ' +
     '"state":{"goal":"<what they want right now>","emotion":"<mood>","location":"<where they are>","condition":"<physical/social condition>"}}\n' +
-    'Make them specific, contradictory in believable ways, never generic.',
+    'Make them specific, contradictory in believable ways, never generic. ' +
+    'speechStyle is how they sound when heard. exampleLines are lines they would actually say, not narration.',
     `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}Character to create: ${description}`
   );
   const state: CharacterState | undefined = result.state

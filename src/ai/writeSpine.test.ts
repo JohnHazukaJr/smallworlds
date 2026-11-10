@@ -17,6 +17,7 @@ import {
   omittedTurnsForNarratorTail,
   injectedSpeakBrief,
   injectedSpeakBriefForCharacter,
+  buildCharacterSpeakMessages,
   packTurnsDetailed,
   pendingBeatLabel,
   selectDirectorFacts,
@@ -24,7 +25,8 @@ import {
   selectFactsPinnedFirst,
   selectThreadsPinnedFirst
 } from './prompts';
-import { SPEAK_FORMAT_RULES } from './dialogueFormat';
+import { SPEAK_FORMAT_RULES, SPOKEN_VOICE_RULES } from './dialogueFormat';
+import { filterCastDelta, stageSceneCast } from './sceneFit';
 import { LIVE_MEMORY_TOOL } from './utilityCall';
 import type { Character, ContinuityFact, EpisodeGuest, OpenThread, PlotTarget, Turn } from '../types';
 
@@ -76,8 +78,8 @@ describe('normalizeBeats', () => {
     expect(beats.some((b) => b.type === 'speak')).toBe(true);
     expect(beats[0].type).toBe('speak');
     if (beats[0].type === 'speak' && 'characterId' in beats[0]) {
-      expect(beats[0].brief).toMatch(/Answer the player's last move as Ada/i);
-      expect(beats[0].brief).not.toBe("Answer the player's last move; stay in character.");
+      expect(beats[0].brief).toMatch(/A turn in the room as Ada/i);
+      expect(beats[0].brief).not.toMatch(/Answer the player's last/i);
     }
   });
 
@@ -152,7 +154,7 @@ describe('normalizeBeats', () => {
     expect(beats.some((b) => b.type === 'narration')).toBe(true);
   });
 
-  it('injects the NPC who has been quiet rather than the first cast card', () => {
+  it('keeps the last voice when nobody was named', () => {
     const spoke = (i: number): Turn => ({
       id: `t${i}`, episodeId: 'e', worldId: 'w', role: 'character' as const, mode: null,
       characterId: 'c1', text: 'Ada again.', createdAt: i
@@ -168,10 +170,8 @@ describe('normalizeBeats', () => {
       undefined,
       [spoke(1), spoke(2), spoke(3)]
     );
-    expect(beats[0]).toMatchObject({ type: 'speak', characterId: 'c2' });
-    if (beats[0].type === 'speak') {
-      expect(beats[0].brief).toMatch(/have not spoken yet/i);
-    }
+    expect(beats[0]).toMatchObject({ type: 'speak', characterId: 'c1' });
+    expect(beats.filter((b) => b.type === 'speak')).toHaveLength(1);
   });
 
   it('still routes to the NPC the player addressed by name', () => {
@@ -232,6 +232,7 @@ describe('normalizeBeats', () => {
       'Ben, look at me.'
     );
     expect(beats[0]).toMatchObject({ type: 'speak', characterId: 'c2' });
+    expect(beats.filter((b) => b.type === 'speak')).toHaveLength(1);
   });
 
   it('still injects a speak reply when the player used Act', () => {
@@ -283,6 +284,7 @@ describe('normalizeBeats', () => {
       'Ada, tell Ben what you saw.'
     );
     expect(beats[0]).toMatchObject({ type: 'speak', characterId: 'c1' });
+    expect(beats.filter((b) => b.type === 'speak')).toHaveLength(1);
   });
 
   it('gives the unanswered asker the first speak when the player did not name anyone', () => {
@@ -690,8 +692,8 @@ describe('injectedSpeakBrief', () => {
     expect(brief).toMatch(/pushing:.*Hide the forged/i);
     expect(brief).toMatch(/one tic:.*Taps the ledger/i);
     expect(brief).toMatch(/hold:.*Never lies/i);
-    expect(brief).toMatch(/do not soften/i);
-    expect(brief).toMatch(/do not re-ask/i);
+    expect(brief).toMatch(/from what you want now/i);
+    expect(brief).not.toMatch(/Answer the player's last/i);
   });
 
   it('includes character live state via helper', () => {
@@ -702,6 +704,22 @@ describe('injectedSpeakBrief', () => {
     expect(injectedSpeakBriefForCharacter(ada)).toMatch(/Keep the books/);
     expect(injectedSpeakBriefForCharacter(ada)).toMatch(/Never smiles/);
   });
+
+  it('asks for a turn from what they want, not a helpful answer', () => {
+    const ada = npc('c1', 'Ada');
+    const brief = injectedSpeakBriefForCharacter(ada);
+    expect(brief).toMatch(/A turn in the room as Ada/i);
+    expect(brief).toMatch(/from what you want now/i);
+    expect(brief).not.toMatch(/Answer the player's last line/i);
+    const messages = buildCharacterSpeakMessages([], [ada], ada, 'refuse the ledger');
+    const last = messages.at(-1)?.content ?? '';
+    expect(last).toMatch(/from what you want right now/i);
+    expect(last).not.toMatch(/Answer the player's last line/i);
+    expect(SPEAK_FORMAT_RULES).toMatch(/one spoken sentence is enough/i);
+    expect(last).toContain(SPOKEN_VOICE_RULES);
+    expect(last).toMatch(/do not pad/i);
+    expect(last).toMatch(/first quoted sentence answers/i);
+  });
 });
 
 describe('SPEAK_FORMAT_RULES immersion', () => {
@@ -709,7 +727,9 @@ describe('SPEAK_FORMAT_RULES immersion', () => {
     expect(SPEAK_FORMAT_RULES).not.toMatch(/dimples/i);
     expect(SPEAK_FORMAT_RULES).not.toMatch(/smiled shyly/i);
     expect(SPEAK_FORMAT_RULES).toMatch(/ledger/i);
-    expect(SPEAK_FORMAT_RULES).toMatch(/leaves the rest unsaid/i);
+    expect(SPEAK_FORMAT_RULES).toMatch(/one spoken sentence is enough/i);
+    expect(SPEAK_FORMAT_RULES).not.toMatch(/more than one sentence/i);
+    expect(SPEAK_FORMAT_RULES).not.toMatch(/leaves the rest unsaid/i);
   });
 });
 
@@ -883,5 +903,105 @@ describe('story write lock', () => {
     const second = tryBeginStoryWrite();
     expect(second).not.toBeNull();
     endStoryWrite(second);
+  });
+});
+
+describe('stageSceneCast', () => {
+  const person = (
+    id: string,
+    name: string,
+    patch: Partial<{ role: string; age: string; location: string; aliases: string[] }>
+  ) => {
+    const c = npc(id, name);
+    c.role = patch.role ?? '';
+    c.age = patch.age ?? '';
+    c.aliases = patch.aliases;
+    c.state = { ...c.state, location: patch.location ?? '' };
+    return c;
+  };
+
+  const teacher = person('t', 'Mara', { role: 'history teacher', age: 'forties', location: 'the high school' });
+  const student = person('s', 'Pip', { role: 'student', age: 'sixteen', location: 'the high school' });
+  const merchant = person('m', 'Otto', { role: 'cloth merchant', age: 'late thirties', location: 'the market' });
+  const ada = person('a', 'Ada', { role: 'harbour registrar', location: 'the harbour' });
+  const ben = person('b', 'Ben', { role: 'manor clerk', location: 'the manor' });
+  const keeper = person('k', 'Ned', { role: 'innkeeper', location: 'the inn' });
+  const player = npc('p', 'you');
+  player.isPlayer = true;
+
+  it('stages the teacher in a class and leaves the adult merchant out', () => {
+    const scene = stageSceneCast({
+      castIds: ['p'],
+      characters: [player, teacher, student, merchant],
+      placeName: 'Room 12',
+      inhabitants: 'the teacher and the students',
+      playerText: 'I sit down.',
+      placeChanged: true
+    });
+    expect(scene.castIds).toContain('t');
+    expect(scene.castIds).toContain('s');
+    expect(scene.castIds).not.toContain('m');
+  });
+
+  it('lets the merchant in only when the line brings them', () => {
+    const scene = stageSceneCast({
+      castIds: ['p'],
+      characters: [player, teacher, merchant],
+      placeName: 'Room 12',
+      inhabitants: 'the teacher and the students',
+      playerText: 'I take Otto to class.',
+      placeChanged: true
+    });
+    expect(scene.castIds).toContain('m');
+    expect(scene.castIds).toContain('t');
+  });
+
+  it('stages Ada at the harbour office without her name in the line', () => {
+    const scene = stageSceneCast({
+      castIds: ['p'],
+      characters: [player, ada, ben],
+      placeName: 'Harbour office',
+      inhabitants: 'the registrar',
+      playerText: 'I look around.',
+      placeChanged: true
+    });
+    expect(scene.castIds).toContain('a');
+    expect(scene.castIds).not.toContain('b');
+  });
+
+  it('keeps company in an open inn and does not take them into class', () => {
+    const inn = stageSceneCast({
+      castIds: ['p', 'm'],
+      characters: [player, merchant, keeper],
+      placeName: 'The inn',
+      inhabitants: 'the keeper and whoever walks in',
+      playerText: 'We go to the inn.',
+      placeChanged: true
+    });
+    expect(inn.castIds).toContain('m');
+    expect(inn.castIds).toContain('k');
+
+    const room = stageSceneCast({
+      castIds: ['p', 'm'],
+      characters: [player, merchant, teacher],
+      placeName: 'Room 12',
+      inhabitants: 'the teacher and the students',
+      playerText: 'I go to class.',
+      placeChanged: true
+    });
+    expect(room.castIds).not.toContain('m');
+    expect(room.castIds).toContain('t');
+  });
+
+  it('rejects an enter for someone who does not fit', () => {
+    const delta = filterCastDelta({
+      delta: { enter: ['m', 't'] },
+      playerText: 'I sit down.',
+      characters: [player, teacher, merchant],
+      castIds: ['p'],
+      placeName: 'Room 12',
+      inhabitants: 'the teacher and the students'
+    });
+    expect(delta?.enter).toEqual(['t']);
   });
 });

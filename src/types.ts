@@ -321,6 +321,8 @@ export interface Character {
   name: string;
   /** short role line, e.g. "harbour registrar · reluctant ally" */
   role: string;
+  /** Nicknames and forms of address. Missing on older cards means none. */
+  aliases?: string[];
   hue: number;
   isPlayer: boolean;
   /** marks this card as representing the author, for reference only — never changes who the narrator writes as "you" */
