@@ -34,6 +34,11 @@ export interface StreamRequest {
   jsonMode?: boolean;
   tools?: ToolSpec[];
   toolChoice?: 'auto' | { name: string };
+  /**
+   * Prose only. Silence before a read stalls, in milliseconds.
+   * Omit for the default. 0 turns the idle limit off.
+   */
+  idleMs?: number;
 }
 
 /** Full streamed text plus whether the provider stopped for length. */
@@ -43,6 +48,8 @@ export interface StreamResult {
   finishReason?: string;
   toolCalls?: Array<{ name: string; arguments: string }>;
   sawReasoning?: boolean;
+  /** The read went silent. Text already on the page is kept; this was not a length stop. */
+  stalled?: boolean;
 }
 
 export interface AIErrorProviderTag {
@@ -182,7 +189,38 @@ export function drainSSEBuffer(buffer: string, flush: boolean): { events: string
 }
 
 function isRetryableStatus(status: number | undefined): boolean {
-  return status === 429 || status === 502 || status === 503 || status === 504;
+  return status === 429 || status === 502 || status === 503;
+}
+
+/** Prose reads give up after this much silence. Utility and wrap keep their own deadlines. */
+export const PROSE_IDLE_MS = 20_000;
+
+/** A prose stream sent nothing for the idle window. Not a user Stop. */
+export class StreamStallError extends Error {
+  readonly name = 'StreamStallError';
+  constructor() {
+    super('The model went quiet.');
+  }
+}
+
+export function isStreamStall(e: unknown): boolean {
+  return e instanceof StreamStallError || (e as Error)?.name === 'StreamStallError';
+}
+
+/** Timeout, stall, or HTTP 504. These already waited; do not send them again. */
+export function isTimeoutFailure(e: unknown): boolean {
+  if (isStreamStall(e)) return true;
+  const status = e instanceof AIError ? e.status : undefined;
+  if (status === 504) return true;
+  const msg = (e instanceof Error ? e.message : String(e)).toLowerCase();
+  return msg.includes('timed out') || msg.includes('timeout');
+}
+
+/** Idle limit for a prose read, or none for utility, wrap, and tests. */
+export function proseIdleMs(req: Pick<StreamRequest, 'job' | 'idleMs'>): number | undefined {
+  if ((req.job ?? 'prose') !== 'prose') return undefined;
+  if (req.idleMs === 0) return undefined;
+  return req.idleMs ?? PROSE_IDLE_MS;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -191,12 +229,12 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
       reject(new DOMException('Aborted', 'AbortError'));
       return;
     }
-    const t = window.setTimeout(() => {
+    const t = setTimeout(() => {
       signal?.removeEventListener('abort', onAbort);
       resolve();
     }, ms);
     const onAbort = () => {
-      window.clearTimeout(t);
+      clearTimeout(t);
       reject(new DOMException('Aborted', 'AbortError'));
     };
     signal?.addEventListener('abort', onAbort, { once: true });
@@ -296,13 +334,16 @@ function emptyStopHint(r: StreamResult): string {
 
 /**
  * Stream a chat completion from any configured provider.
- * One automatic retry on 429 / transient 5xx / network failure.
+ * One automatic retry on 429 / 502 / 503 / network failure.
+ * Timeouts, stalls, and HTTP 504 are not sent again.
+ * A prose stall with no visible text retries once with thinking off.
  * Empty replies retry once with a larger completion budget (all jobs).
  * Empty thinking streams also retry with thinking off for prose/test.
  */
 export async function streamChat(req: StreamRequest): Promise<StreamResult> {
   const run = (next: StreamRequest) => streamChatOnce(next);
   const job = req.job ?? 'prose';
+  const started = Date.now();
 
   const retryEmpty = async (first: StreamResult): Promise<StreamResult> => {
     if (!resultEmpty(first)) return first;
@@ -333,10 +374,25 @@ export async function streamChat(req: StreamRequest): Promise<StreamResult> {
 
   try {
     const first = await run(req);
-    return await retryEmpty(first);
+    const result = await retryEmpty(first);
+    // #region agent log
+    fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H1',location:'client.ts:streamChat',message:'stream finished',data:{job,ms:Date.now()-started,chars:result.text.length,truncated:!!result.truncated,stalled:!!result.stalled,finish:result.finishReason??''},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+    return result;
   } catch (e) {
+    // #region agent log
+    fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H1-H2-H5',location:'client.ts:streamChat:catch',message:'stream failed',data:{job,ms:Date.now()-started,name:(e as Error)?.name??'',status:e instanceof AIError?e.status??null:null,stall:isStreamStall(e),timeout:isTimeoutFailure(e),aborted:!!req.signal?.aborted,msg:((e as Error)?.message??'').slice(0,180)},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
     if (req.signal?.aborted) throw e;
     if ((e as Error)?.name === 'AbortError') throw e;
+
+    if (isStreamStall(e)) {
+      const second = await run({ ...req, thinking: false });
+      if (resultEmpty(second)) throw e;
+      return second;
+    }
+
+    if (isTimeoutFailure(e)) throw e;
 
     const status = e instanceof AIError ? e.status : undefined;
     const network =
@@ -350,15 +406,67 @@ export async function streamChat(req: StreamRequest): Promise<StreamResult> {
   }
 }
 
+/**
+ * One body read. With an idle limit, silence rejects as a stall.
+ * Any chunk — including a reasoning-only keepalive — completes the read and
+ * the next read starts a fresh window. User Stop stays an abort.
+ */
+function readNextChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal: AbortSignal | undefined,
+  idleMs: number | undefined
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (signal?.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
+  if (!idleMs) return reader.read();
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const stop = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      fn();
+    };
+    timer = setTimeout(() => {
+      stop(() => {
+        reader.cancel().catch(() => undefined);
+        const userStop = !!signal?.aborted;
+        // #region agent log
+        fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H1-H2',location:'client.ts:readNextChunk',message:'prose read went silent',data:{idleMs,userStop},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+        if (userStop) reject(new DOMException('Aborted', 'AbortError'));
+        else reject(new StreamStallError());
+      });
+    }, idleMs);
+    const onAbort = () => {
+      stop(() => {
+        reader.cancel().catch(() => undefined);
+        reject(new DOMException('Aborted', 'AbortError'));
+      });
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    reader.read().then(
+      (result) => stop(() => resolve(result)),
+      (err) => stop(() => {
+        if (signal?.aborted) reject(new DOMException('Aborted', 'AbortError'));
+        else reject(err);
+      })
+    );
+  });
+}
+
 async function readSSE(
   res: Response,
-  onEvent: (data: string) => void
+  onEvent: (data: string) => void,
+  opts?: { signal?: AbortSignal; idleMs?: number }
 ): Promise<void> {
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   for (;;) {
-    const { done, value } = await reader.read();
+    const { done, value } = await readNextChunk(reader, opts?.signal, opts?.idleMs);
     if (done) {
       buffer += decoder.decode(value);
       break;
@@ -424,6 +532,7 @@ async function streamOpenAI(req: StreamRequest): Promise<StreamResult> {
   let finishReason = '';
   let sawReasoning = false;
   const toolBuf: Record<number, { name: string; arguments: string }> = {};
+  try {
   await readSSE(res, (data) => {
     try {
       const json = JSON.parse(data);
@@ -453,7 +562,21 @@ async function streamOpenAI(req: StreamRequest): Promise<StreamResult> {
       if (reason) finishReason = reason;
       if (isLengthStop(reason)) truncated = true;
     } catch { /* keep-alive or malformed chunk */ }
-  });
+  }, { signal: req.signal, idleMs: proseIdleMs(req) });
+  } catch (e) {
+    if (isStreamStall(e) && full.trim()) {
+      const toolCalls = Object.values(toolBuf).filter((t) => t.name || t.arguments);
+      return {
+        text: full,
+        truncated: true,
+        stalled: true,
+        finishReason,
+        sawReasoning,
+        ...(toolCalls.length ? { toolCalls } : {})
+      };
+    }
+    throw e;
+  }
   const toolCalls = Object.values(toolBuf).filter((t) => t.name || t.arguments);
   if (!full.trim() && toolCalls.length === 0) {
     return { text: '', truncated, finishReason, sawReasoning };
@@ -492,6 +615,7 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
   let full = '';
   let truncated = false;
   let finishReason = '';
+  try {
   await readSSE(res, (data) => {
     try {
       const json = JSON.parse(data);
@@ -508,7 +632,13 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
     } catch (e) {
       if (e instanceof AIError) throw e;
     }
-  });
+  }, { signal: req.signal, idleMs: proseIdleMs(req) });
+  } catch (e) {
+    if (isStreamStall(e) && full.trim()) {
+      return { text: full, truncated: true, stalled: true, finishReason };
+    }
+    throw e;
+  }
   if (!full.trim()) return { text: '', truncated, finishReason };
   return { text: full, truncated, finishReason };
 }
@@ -535,6 +665,7 @@ async function streamGemini(req: StreamRequest): Promise<StreamResult> {
   let truncated = false;
   let finishReason = '';
   let sawThought = false;
+  try {
   await readSSE(res, (data) => {
     try {
       const json = JSON.parse(data);
@@ -558,7 +689,13 @@ async function streamGemini(req: StreamRequest): Promise<StreamResult> {
       if (reason) finishReason = reason;
       if (isLengthStop(reason)) truncated = true;
     } catch { /* ignore malformed chunk */ }
-  });
+  }, { signal: req.signal, idleMs: proseIdleMs(req) });
+  } catch (e) {
+    if (isStreamStall(e) && full.trim()) {
+      return { text: full, truncated: true, stalled: true, finishReason, sawReasoning: sawThought };
+    }
+    throw e;
+  }
   if (!full.trim()) return { text: '', truncated, finishReason, sawReasoning: sawThought };
   return { text: full, truncated, finishReason, sawReasoning: sawThought };
 }

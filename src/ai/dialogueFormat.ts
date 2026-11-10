@@ -64,25 +64,35 @@ export function hasSpokenDialogue(raw: string): boolean {
 }
 
 /**
- * Narration stopped before the sentence finished, whatever the provider called that stop.
- * Open quotes, or a long line that does not end on a closer.
+ * Narration still has an open quote. A long sentence with no final period is
+ * not unfinished — that second request is what makes a reply look stuck.
  */
 export function narrationLineCutOff(raw: string): boolean {
   const text = normalizeQuotes(raw).trim();
   if (!text) return false;
-  if (((text.match(/"/g) ?? []).length) % 2 === 1) return true;
-  if (/[.!?…"'”»—-]$/.test(text)) return false;
-  return text.length > 80 || /[,:;]$/.test(text);
+  return ((text.match(/"/g) ?? []).length) % 2 === 1;
 }
 
+/** Speak still has an open quote or a dangling asterisk. */
 export function speakLineCutOff(raw: string): boolean {
   const text = normalizeQuotes(raw).trim();
   if (!text) return false;
   const quotes = (text.match(/"/g) ?? []).length;
   const stars = (text.match(/\*/g) ?? []).length;
-  if (quotes % 2 === 1 || stars % 2 === 1) return true;
-  if (/[.!?…"*'”»—-]$/.test(text)) return false;
-  return text.length > 80 || /[,:;]$/.test(text);
+  return quotes % 2 === 1 || stars % 2 === 1;
+}
+
+/**
+ * One continuation after the first narration stream.
+ * Length-stop, or an open quote. A stall that already produced a sentence does not.
+ */
+export function narrationNeedsContinue(
+  text: string,
+  stream: { truncated?: boolean; stalled?: boolean }
+): boolean {
+  if (!text.trim()) return false;
+  if (stream.truncated && !stream.stalled) return true;
+  return narrationLineCutOff(text);
 }
 
 /**

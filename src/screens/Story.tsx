@@ -1023,7 +1023,11 @@ export function Story() {
       if (left > 0) {
         setNotice(unfinishedWriteNotice(n, left));
       } else {
-        setError(classifyError(e));
+        const classified = classifyError(e);
+        // #region agent log
+        fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H5',location:'Story.tsx:runNarration',message:'reply error shown',data:{code:classified.code,userMessage:classified.userMessage,name:(e as Error)?.name??'',detail:(classified.detail??'').slice(0,180)},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+        setError(classified);
         if (n > 0) {
           setNotice(
             `${n} line${n === 1 ? '' : 's'} saved — retry from the last reply.`
@@ -1202,9 +1206,16 @@ export function Story() {
     } catch (e) {
       setTailHasText(false);
       if (e instanceof WriteAbortedError || (e as Error).name === 'AbortError') {
+        // #region agent log
+        fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H2',location:'Story.tsx:rewritePassage',message:'rewrite treated as stop',data:{name:(e as Error)?.name??''},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
         setNotice('Rewrite stopped. The previous line is still there.');
       } else {
-        setError(classifyError(e));
+        const classified = classifyError(e);
+        // #region agent log
+        fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H5',location:'Story.tsx:rewritePassage',message:'rewrite error shown',data:{code:classified.code,userMessage:classified.userMessage,name:(e as Error)?.name??'',detail:(classified.detail??'').slice(0,180)},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+        setError(classified);
       }
     } finally {
       setStreaming(false);

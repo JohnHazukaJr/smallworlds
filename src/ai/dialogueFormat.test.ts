@@ -3,6 +3,7 @@ import {
   groupSpeakParagraphs,
   hasSpokenDialogue,
   narrationLineCutOff,
+  narrationNeedsContinue,
   parseInlineEmphasis,
   parseSpeakSegments,
   previewSpeakText,
@@ -134,8 +135,8 @@ describe('settleSpeakText', () => {
     expect(out).toContain('Leave it.');
   });
 
-  it('treats a long unfinished line as cut off, and a short finished word as done', () => {
-    expect(speakLineCutOff(`${'The door stays open and nobody moves '.repeat(3)}and`)).toBe(true);
+  it('does not treat a long line without a period as cut off', () => {
+    expect(speakLineCutOff(`${'The door stays open and nobody moves '.repeat(3)}and`)).toBe(false);
     expect(speakLineCutOff('No')).toBe(false);
     expect(speakLineCutOff('*nods*')).toBe(false);
   });
@@ -188,10 +189,14 @@ describe('narrationLineCutOff', () => {
     expect(narrationLineCutOff('The lamp ticks!')).toBe(false);
   });
 
-  it('treats a long unfinished sentence as cut off', () => {
+  it('treats an open quote as cut off, not a long sentence', () => {
     const line = 'Rain hits the glass and runs down the registrar\'s sleeve while Ada reaches for the';
-    expect(narrationLineCutOff(line)).toBe(true);
+    expect(narrationLineCutOff(line)).toBe(false);
+    expect(narrationNeedsContinue(line, { truncated: false })).toBe(false);
+    expect(narrationNeedsContinue(line, { truncated: true, stalled: true })).toBe(false);
+    expect(narrationNeedsContinue(line, { truncated: true })).toBe(true);
     expect(narrationLineCutOff('She says "the ledger')).toBe(true);
     expect(narrationLineCutOff('She says “the ledger')).toBe(true);
+    expect(narrationNeedsContinue('She says "the ledger', {})).toBe(true);
   });
 });

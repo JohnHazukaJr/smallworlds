@@ -25,7 +25,7 @@ import { promptCharBudget } from './contextBudget';
 import { proseCompletionTokens } from './modelProfile';
 import { applyDeliveryTone, parseDeliveryTone } from './deliveryTone';
 import { stancePlaybook } from './storyStance';
-import { hasSpokenDialogue, narrationLineCutOff, normalizeSpeakText, settleSpeakText, speakHoldsForPlayer, speakLineCutOff, stitchSpeakRetry, stripNarratorEmbeddedDialogue } from './dialogueFormat';
+import { hasSpokenDialogue, narrationNeedsContinue, normalizeSpeakText, settleSpeakText, speakHoldsForPlayer, speakLineCutOff, stitchSpeakRetry, stripNarratorEmbeddedDialogue } from './dialogueFormat';
 import { SPEAK_WALL_NUDGE, acceptWallRetry, clearMustNotKnowClause, speakLeaksMustNotKnow } from './knowledgeWall';
 import {
   SPEAK_REASK_NUDGE,
@@ -130,11 +130,33 @@ function keepStreamedSpeak(e: unknown, text: string): string | null {
   return settled.trim() ? settled : null;
 }
 
+export type SpeakFollowUp = 'continue' | 'dialogue' | 'wall' | 'reask' | 'none';
+
+/**
+ * At most one extra generation after the first speak stream.
+ * Continue only for a length stop or an open quote/asterisk.
+ * Otherwise one dialogue nudge, one wall repair, or one re-ask — never a chain.
+ */
+export function speakFollowUpKind(opts: {
+  text: string;
+  truncated: boolean;
+  stalled?: boolean;
+  requireDialogue?: boolean;
+  hasDialogue: boolean;
+  leaksWall: boolean;
+  reasks: boolean;
+}): SpeakFollowUp {
+  const lengthStopped = opts.truncated && !opts.stalled;
+  if (opts.text.trim() && (lengthStopped || speakLineCutOff(opts.text))) return 'continue';
+  if (opts.requireDialogue && opts.text.trim() && !opts.hasDialogue) return 'dialogue';
+  if (opts.leaksWall) return 'wall';
+  if (opts.reasks) return 'reask';
+  return 'none';
+}
+
 /**
  * Stream one character or guest line from whatever model is configured.
- * One continuation when the provider stops for length or the text itself is
- * unfinished. A dialogue nudge runs only when the settled line is still
- * action-only. Any non-empty line is returned so the beat can be saved.
+ * At most one follow-up. A thrown follow-up keeps any line already on the page.
  */
 async function streamSpeakComplete(opts: {
   provider: StreamRequest['provider'];
@@ -176,7 +198,23 @@ async function streamSpeakComplete(opts: {
     throw e;
   }
 
-  if ((first.truncated || speakLineCutOff(acc)) && acc.trim()) {
+  const wall = (opts.mustNotKnow ?? '').trim();
+  const priorQ = (opts.priorQuestion ?? '').trim();
+  let cleaned = settleSpeakText(acc);
+  const follow = speakFollowUpKind({
+    text: acc,
+    truncated: !!first.truncated,
+    stalled: first.stalled,
+    requireDialogue: opts.requireDialogue,
+    hasDialogue: hasSpokenDialogue(cleaned),
+    leaksWall: !!(wall && cleaned && speakLeaksMustNotKnow(cleaned, wall)),
+    reasks: !!(priorQ && cleaned && speakReasksPriorQuestion(cleaned, priorQ))
+  });
+  // #region agent log
+  fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H4',location:'engine.ts:streamSpeakComplete',message:'speak follow-up choice',data:{follow,truncated:!!first.truncated,stalled:!!first.stalled,chars:acc.length,open:speakLineCutOff(acc)},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
+
+  if (follow === 'continue') {
     opts.onProgress('finishing line…');
     try {
       await call([
@@ -189,10 +227,10 @@ async function streamSpeakComplete(opts: {
       if (kept) return kept;
       throw e;
     }
+    return settleSpeakText(acc);
   }
 
-  let cleaned = settleSpeakText(acc);
-  if (opts.requireDialogue && cleaned && !hasSpokenDialogue(cleaned)) {
+  if (follow === 'dialogue') {
     opts.onProgress('adding dialogue…');
     const base = cleaned;
     let extra = '';
@@ -214,10 +252,10 @@ async function streamSpeakComplete(opts: {
       if (kept) return kept;
       throw e;
     }
+    return cleaned;
   }
 
-  const wall = (opts.mustNotKnow ?? '').trim();
-  if (wall && cleaned && speakLeaksMustNotKnow(cleaned, wall)) {
+  if (follow === 'wall') {
     opts.onProgress('honouring what they must not know…');
     const base = cleaned;
     let extra = '';
@@ -231,20 +269,19 @@ async function streamSpeakComplete(opts: {
         opts.onAccumulated(stitchSpeakRetry(base, extra));
       });
     } catch (e) {
-      if (isAbortError(e) || isPromptPackRetryError(e)) throw e;
-      throw new AIError('That line still says something they must not know. Try the beat again.');
+      const kept = keepStreamedSpeak(e, base);
+      if (kept) return kept;
+      throw e;
     }
     const kept = acceptWallRetry(settleSpeakText(extra), wall);
     if (!kept) {
       throw new AIError('That line still says something they must not know. Try the beat again.');
     }
-    cleaned = kept;
+    return kept;
   }
 
-  // One retry when the asker rephrases a question the player already answered.
-  // Fail open: keep the settled line if the retry still loops.
-  const priorQ = (opts.priorQuestion ?? '').trim();
-  if (priorQ && cleaned && speakReasksPriorQuestion(cleaned, priorQ)) {
+  if (follow === 'reask') {
+    // Fail open: keep the settled line if the retry still loops.
     opts.onProgress('taking the answer as heard…');
     const base = cleaned;
     let extra = '';
@@ -262,8 +299,9 @@ async function streamSpeakComplete(opts: {
         cleaned = retried;
       }
     } catch (e) {
-      if (isAbortError(e) || isPromptPackRetryError(e)) throw e;
-      // Keep the settled line — never drop a landed speak for a re-ask.
+      const kept = keepStreamedSpeak(e, base);
+      if (kept) return kept;
+      throw e;
     }
   }
   return cleaned;
@@ -281,8 +319,8 @@ function keepStreamedNarration(e: unknown, text: string): string | null {
 
 /**
  * Stream a narration beat from whatever model is configured.
- * One continuation when the provider stops for length or the sentence itself
- * is unfinished. A thrown stream keeps any narration already on the page.
+ * One continuation when the provider stops for length or a quote is still open.
+ * A thrown stream keeps any narration already on the page.
  */
 async function streamNarrationComplete(opts: {
   provider: StreamRequest['provider'];
@@ -320,7 +358,11 @@ async function streamNarrationComplete(opts: {
     throw e;
   }
 
-  if ((first.truncated || narrationLineCutOff(acc)) && acc.trim()) {
+  const narrContinue = narrationNeedsContinue(acc, first);
+  // #region agent log
+  fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H4',location:'engine.ts:streamNarrationComplete',message:'narration follow-up choice',data:{continue:narrContinue,truncated:!!first.truncated,stalled:!!first.stalled,chars:acc.length},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
+  if (narrContinue) {
     opts.onProgress('finishing narration…');
     try {
       await call([
@@ -1173,7 +1215,8 @@ function beatMemoryQuery(
  */
 let postTurnTail: Promise<void> = Promise.resolve();
 
-function trackPostTurn(task: () => Promise<void>): void {
+/** Memory work after a reply. A failure resolves; it never fails the next reply. */
+export function enqueuePostTurn(task: () => Promise<void>): void {
   beginAppWrite();
   const run = task()
     .catch((e: unknown) => {
@@ -1182,6 +1225,10 @@ function trackPostTurn(task: () => Promise<void>): void {
     })
     .finally(endAppWrite);
   postTurnTail = postTurnTail.then(() => run, () => run);
+}
+
+function trackPostTurn(task: () => Promise<void>): void {
+  enqueuePostTurn(task);
 }
 
 export function waitForPostTurn(): Promise<void> {
@@ -1216,7 +1263,11 @@ export function writeTurn(opts: WriteOptions): Promise<string> {
 }
 
 async function writeTurnInner(opts: WriteOptions): Promise<string> {
+  const waitStarted = Date.now();
   await waitForPostTurn();
+  // #region agent log
+  fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H3',location:'engine.ts:writeTurnInner',message:'post-turn wait finished',data:{waitMs:Date.now()-waitStarted,mode:opts.mode},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
   throwIfAborted(opts.signal, 0);
   const { provider, model } = proseModelFor(opts.world);
   const ctx = await loadContext(opts.world, opts.season, opts.episode);
@@ -1392,16 +1443,11 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
     };
   };
 
-  // File glue before planning so the first long Write is not tail-only.
   // Stop here has saved no reply, so the player line comes back out with it.
+  // The running summary stays on the post-turn pass so this reply does not wait on it.
   let beats: DirectorBeat[] = [];
   const enterIds: string[] = [];
   try {
-    await maybeRefreshRunningSummary(opts.world, ctx, opts.signal, progress, opts.onNotice, {
-      phase: 'pre',
-      proseModel: model
-    });
-
     // Who answers comes from the player's line. Resume still runs leftover replies after Stop.
     if (opts.resumeBeats && opts.resumeBeats.length > 0) {
       progress('Writing…');
@@ -1751,7 +1797,11 @@ async function regenerateBeatInner(opts: {
   if (opts.turn.role !== 'narrator' && opts.turn.role !== 'character') {
     throw new AIError('Only narrator or character turns can be re-rolled.');
   }
+  const rewriteWaitStarted = Date.now();
   await waitForPostTurn();
+  // #region agent log
+  fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H3',location:'engine.ts:regenerateBeatInner',message:'rewrite post-turn wait finished',data:{waitMs:Date.now()-rewriteWaitStarted,role:opts.turn.role},timestamp:Date.now()})}).catch(()=>{});
+  // #endregion
   throwIfAborted(opts.signal, 0);
   const { provider, model } = proseModelFor(opts.world);
   const ctx = await loadContext(opts.world, opts.season, opts.episode);
@@ -1917,6 +1967,7 @@ async function maybeRefreshRunningSummary(
 
   if (opts?.textStillFiled && !(await opts.textStillFiled())) return;
 
+  const { signal: timed, cancel } = withTimeoutSignal(signal, UTILITY_TIMEOUT_MS);
   try {
     progress('remembering earlier beats…');
     const { provider, model } = utilityModelFor(world);
@@ -1937,7 +1988,8 @@ async function maybeRefreshRunningSummary(
           `New material to fold in:\n${digest.slice(0, 14000)}`
       }],
       maxTokens: 600,
-      signal
+      signal: timed,
+      job: 'utility'
     });
     const summary = text.trim();
     if (!summary) return;
@@ -1953,10 +2005,13 @@ async function maybeRefreshRunningSummary(
       runningSummaryAtChars: chars
     };
   } catch (e) {
-    if ((e as Error).name === 'AbortError') throw e;
+    // The deadline aborts an inner signal. That is not the player hitting Stop.
+    if ((e as Error).name === 'AbortError' && signal?.aborted) throw e;
     // Non-fatal — prompts still have omitted digests and prior wrap.
     logAppError(e, 'running summary');
     onNotice?.('Couldn’t refresh mid-episode memory — older beats may thin out until the next successful turn.');
+  } finally {
+    cancel();
   }
 }
 
