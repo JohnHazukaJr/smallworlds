@@ -46,6 +46,27 @@ describe('composeOutgoingLine', () => {
       text: 'She stamps the page.'
     })).toMatchObject({ mode: 'act', text: 'She stamps the page.', asCharacterId: 'marisol' });
   });
+
+  it('keeps a quoted or gestured Write-as line as that NPC speaking', () => {
+    expect(composeOutgoingLine({
+      direct: false,
+      asCharacterId: 'ada',
+      sceneHasOthers: true,
+      tone: null,
+      text: '"The ledger is forged."'
+    })).toEqual({
+      mode: 'play',
+      text: '"The ledger is forged."',
+      asCharacterId: 'ada'
+    });
+    expect(composeOutgoingLine({
+      direct: false,
+      asCharacterId: 'ada',
+      sceneHasOthers: false,
+      tone: null,
+      text: '*stamps the page* "Done."'
+    })).toMatchObject({ mode: 'play', asCharacterId: 'ada' });
+  });
 });
 
 describe('summaryClearPatch', () => {

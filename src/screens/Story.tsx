@@ -139,12 +139,14 @@ function parseTurn(turn: Turn, characters: Character[], guests: EpisodeGuest[] =
   if (turn.role === 'user' && turn.asCharacterId) {
     const who = characters.find((c) => c.id === turn.asCharacterId);
     const { tone, body } = parseDeliveryTone(turn.text);
+    const spoken = /["“”*]/.test(body);
     return [{
       text: body,
       speaker: who?.name ?? 'they',
       hue: who?.hue ?? 200,
       portrait: who ? characterPortraits(who)[0] : null,
-      kind: 'action',
+      kind: spoken ? 'speak' : 'action',
+      ...(spoken ? { segments: parseSpeakSegments(body) } : {}),
       deliveryTone: tone
     }];
   }

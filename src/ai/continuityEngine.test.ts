@@ -371,6 +371,44 @@ describe('director prompt budgets', () => {
     expect(user).not.toMatch(/\[player speak\]:[^\n]*do not add words to their mouth/);
   });
 
+  it('labels a Write-as turn as that NPC, not the player', () => {
+    const ada = npc('c1', 'Ada');
+    const ben = npc('c2', 'Ben');
+    const turns: Turn[] = [{
+      id: 'u1', episodeId: 'e', worldId: 'w', role: 'user', mode: 'play',
+      asCharacterId: 'c1', text: '"The ledger is forged."', createdAt: 1
+    }];
+    const narr = buildNarrationBeatMessages(turns, [ada], 'the room reacts', 'scene');
+    const narrHit = narr.find((m) => m.content.includes('The ledger is forged.'));
+    expect(narrHit?.role).toBe('user');
+    expect(narrHit?.content).toMatch(/\[Ada\]\n"The ledger is forged\."/);
+    const narrJoined = narr.map((m) => m.content).join('\n');
+    expect(narrJoined).not.toMatch(/\[player/);
+    expect(narrJoined).not.toMatch(/The player says/);
+
+    const asAda = buildCharacterSpeakMessages(turns, [ada], ada, 'press them', []);
+    const own = asAda.find((m) => m.content.includes('The ledger is forged.'));
+    expect(own?.role).toBe('assistant');
+    expect(own?.content).toMatch(/\[Ada\]/);
+    const asBen = buildCharacterSpeakMessages(turns, [ada, ben], ben, 'press them', []);
+    const heard = asBen.find((m) => m.content.includes('The ledger is forged.'));
+    expect(heard?.role).toBe('user');
+    expect(heard?.content).toMatch(/\[Ada\]/);
+    const speakJoined = [...asAda, ...asBen].map((m) => m.content).join('\n');
+    expect(speakJoined).not.toMatch(/\[player/);
+    expect(speakJoined).not.toMatch(/The player says/);
+
+    const director = directorUserPrompt(ctx({ turns, characters: [ada] }), 'play', '"The ledger is forged."');
+    expect(director).toMatch(/\[Ada\]\n"The ledger is forged\."/);
+    expect(director).not.toMatch(/\[player/);
+    expect(director).not.toMatch(/The player says/);
+
+    const digest = compressOmittedTurns(turns, [ada]);
+    expect(digest).toMatch(/\[Ada\]/);
+    expect(digest).toContain('The ledger is forged.');
+    expect(digest).not.toMatch(/\[player/);
+  });
+
   it('tells the director to register an answer to the last NPC question', () => {
     const turns: Turn[] = [
       {

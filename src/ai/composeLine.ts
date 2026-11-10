@@ -13,7 +13,11 @@ export function composeOutgoingLine(opts: {
   if (opts.direct) {
     return { mode: 'steer', text: body, asCharacterId: null };
   }
-  const mode: ComposeMode = opts.asCharacterId || !opts.sceneHasOthers ? 'act' : 'play';
+  // Writing as an NPC: quoted or gestured lines are their speech; a bare line is their action.
+  const npcSpoke = !!opts.asCharacterId && /["“”*]/.test(body);
+  const mode: ComposeMode = opts.asCharacterId
+    ? (npcSpoke ? 'play' : 'act')
+    : (!opts.sceneHasOthers ? 'act' : 'play');
   return {
     mode,
     text: applyDeliveryTone(body, opts.tone),

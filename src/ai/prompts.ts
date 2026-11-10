@@ -1564,7 +1564,17 @@ export function episodeContextPressure(chars: number): 'ok' | 'warm' | 'warn' | 
   return 'ok';
 }
 
-function shortPlayerHistory(t: Turn): string {
+/** A "Write as" turn is that NPC's line, already said — not the player. */
+function injectedNpcHistory(t: Turn, characters: Character[]): string | null {
+  if (t.role !== 'user' || !t.asCharacterId) return null;
+  const name = characters.find((c) => c.id === t.asCharacterId)?.name?.trim() || 'Someone';
+  const { body } = parseDeliveryTone(t.text);
+  return `[${name}]\n${body}`;
+}
+
+function shortPlayerHistory(t: Turn, characters: Character[] = []): string {
+  const injected = injectedNpcHistory(t, characters);
+  if (injected) return injected;
   const mode = t.mode ?? 'steer';
   const { body } = parseDeliveryTone(t.text);
   if (mode === 'speak') {
@@ -1590,10 +1600,15 @@ function turnToChatContent(
   voice: HistoryVoice = { kind: 'narrator' }
 ): { role: 'user' | 'assistant'; content: string } {
   if (t.role === 'user') {
+    const injected = injectedNpcHistory(t, characters);
+    if (injected) {
+      const mine = voice.kind === 'speaker' && t.asCharacterId === voice.speakerId;
+      return { role: mine ? 'assistant' : 'user', content: injected };
+    }
     return {
       role: 'user',
       content: t.mode
-        ? (fullPlayerPrefix ? MODE_PREFIX[t.mode](t.text) : shortPlayerHistory(t))
+        ? (fullPlayerPrefix ? MODE_PREFIX[t.mode](t.text) : shortPlayerHistory(t, characters))
         : t.text
     };
   }
@@ -1613,7 +1628,15 @@ function labelTurnCompact(
   characters: Character[],
   guests: EpisodeGuest[] = []
 ): string {
-  if (t.role === 'user') return `[player ${t.mode ?? 'turn'}]: ${t.text}`;
+  if (t.role === 'user') {
+    const injected = injectedNpcHistory(t, characters);
+    if (injected) {
+      const name = characters.find((c) => c.id === t.asCharacterId)?.name?.trim() || 'Someone';
+      const { body } = parseDeliveryTone(t.text);
+      return `[${name}]: ${body}`;
+    }
+    return `[player ${t.mode ?? 'turn'}]: ${t.text}`;
+  }
   if (t.role === 'character') {
     return `[${resolveSpeakerName(t, characters, guests)}]: ${t.text}`;
   }
@@ -2177,8 +2200,10 @@ export function directorUserPrompt(
   const latestUser = latestUserTurnId(ctx.turns);
   const transcript = recentPacked.map((t) => {
     if (t.role === 'user') {
+      const injected = injectedNpcHistory(t, ctx.characters);
+      if (injected) return injected;
       const mode = t.mode ?? 'steer';
-      return t.id === latestUser ? MODE_PREFIX[mode](t.text) : shortPlayerHistory(t);
+      return t.id === latestUser ? MODE_PREFIX[mode](t.text) : shortPlayerHistory(t, ctx.characters);
     }
     if (t.role === 'character') {
       const name = resolveSpeakerName(t, ctx.characters, allGuests);

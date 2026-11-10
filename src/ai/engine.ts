@@ -538,6 +538,16 @@ function pickReplySpeaker(
   return null;
 }
 
+/** Pull the raw line back out of a Write-as wrapper so address detection stays on what was typed. */
+function splitInjectedMove(playerText: string, clip = 280): { name: string; line: string } | null {
+  const match = playerText.match(
+    /^(.+?) already said or did this\. It is not the player\. Do not repeat it or give it to anyone else:\n([\s\S]*)$/
+  );
+  if (!match) return null;
+  const line = match[2].trim().replace(/\s+/g, ' ').slice(0, clip);
+  return line ? { name: match[1].trim(), line } : null;
+}
+
 /** Connective prose for this turn: consequence and place, never anyone's spoken lines. */
 export function chapterNarrationBrief(opts: {
   mode: ComposeMode;
@@ -545,7 +555,8 @@ export function chapterNarrationBrief(opts: {
   location: string;
   inScene?: Character[];
 }): string {
-  const move = opts.playerText.trim().replace(/\s+/g, ' ').slice(0, 280);
+  const parsed = splitInjectedMove(opts.playerText, 280);
+  const move = parsed?.line ?? opts.playerText.trim().replace(/\s+/g, ' ').slice(0, 280);
   const loc = opts.location.trim() || 'the current place';
   const names = (opts.inScene ?? [])
     .filter((c) => !c.isPlayer)
@@ -553,9 +564,11 @@ export function chapterNarrationBrief(opts: {
     .map((c) => c.name.trim())
     .filter(Boolean);
   const bodies = names.length > 0 ? ` Named bodies present: ${names.join(', ')}.` : '';
-  const moveBit = move
-    ? `The player just did this (${opts.mode}) — show the consequence here, do not repeat their words, do not write their next action, and do not write anyone's spoken dialogue: "${move}".`
-    : 'Continue from where the place left off. No spoken dialogue.';
+  const moveBit = parsed
+    ? `${parsed.name} already said or did this — it is not the player. Show the consequence, do not repeat it, and do not give the line to anyone else: "${move}".`
+    : move
+      ? `The player just did this (${opts.mode}) — show the consequence here, do not repeat their words, do not write their next action, and do not write anyone's spoken dialogue: "${move}".`
+      : 'Continue from where the place left off. No spoken dialogue.';
   return `Place: ${loc}.${bodies} ${moveBit} Write the consequence through to the length asked on this turn, and leave them room to answer.`;
 }
 
@@ -569,7 +582,7 @@ export function isThinNarrationBrief(brief: string, playerText = '', inScene: Ch
   if (text.length < 40) return true;
   const lower = text.toLowerCase();
   const named = inScene.some((c) => !c.isPlayer && c.name.trim() && lower.includes(c.name.trim().toLowerCase()));
-  const move = playerText.trim();
+  const move = (splitInjectedMove(playerText)?.line ?? playerText).trim();
   const hasMove = move.length >= 8 && lower.includes(move.slice(0, 24).toLowerCase());
   if (named || hasMove) return false;
   if (THIN_NARRATION_WEATHER.test(text) && text.length < 90) return true;
@@ -719,10 +732,12 @@ function beatsForTurn(opts: {
   turns: Turn[];
   preferCharacterId?: string;
   preferGuestId?: string;
+  /** Raw line for who-was-addressed. The model-facing playerText may name the NPC. */
+  addressText?: string;
 }): DirectorBeat[] {
   const answerers = selectAnswerers({
     length: opts.length,
-    playerText: opts.playerText,
+    playerText: opts.addressText ?? opts.playerText,
     candidates: speakerCandidates(opts.inScene, opts.guests),
     turns: opts.turns,
     preferId: opts.preferCharacterId || opts.preferGuestId
@@ -766,7 +781,8 @@ export function directorFallbackNarrationBrief(opts: {
   location: string;
   inScene: Character[];
 }): string {
-  const move = opts.playerText.trim().replace(/\s+/g, ' ').slice(0, 160);
+  const parsed = splitInjectedMove(opts.playerText, 160);
+  const move = parsed?.line ?? opts.playerText.trim().replace(/\s+/g, ' ').slice(0, 160);
   const loc = opts.location.trim() || 'the current room';
   const onStage = opts.inScene.slice(0, 2).map((c) => {
     const want = c.state?.goal?.trim();
@@ -775,9 +791,11 @@ export function directorFallbackNarrationBrief(opts: {
     return bits ? `${c.name} (${bits})` : c.name;
   });
   const bodies = onStage.length > 0 ? ` On stage: ${onStage.join('; ')}.` : '';
-  const moveBit = move
-    ? ` Continue from the player's ${opts.mode}: "${move}".`
-    : ' Continue from the place.';
+  const moveBit = parsed
+    ? ` Continue from what ${parsed.name} already said or did (not the player): "${move}".`
+    : move
+      ? ` Continue from the player's ${opts.mode}: "${move}".`
+      : ' Continue from the place.';
   return (
     `${moveBit} Location: ${loc}.${bodies} ` +
     'Show named bodies and one sensory job; leave space for the player.'
@@ -968,7 +986,9 @@ export function normalizeBeats(
   prefer?: { characterId?: string; guestId?: string },
   /** transcript so far — drives addressee detection and turn-taking fairness */
   turns?: Turn[],
-  location = ''
+  location = '',
+  /** Raw spoken line. Address detection must not see the injection wrapper's name. */
+  addressText?: string
 ): DirectorBeat[] {
   const caps = planCapsForLength(length);
   const allowedGuests = new Set(guests.map((g) => g.id));
@@ -1025,8 +1045,9 @@ export function normalizeBeats(
       })
     };
   }
-  const ordered = ensurePlayerReplySpeak(beats, mode, playerText, inScene, guests, caps, prefer, turns);
-  return repairReaskSpeakBriefs(ordered, playerText, inScene, guests, turns);
+  const spoken = addressText ?? playerText;
+  const ordered = ensurePlayerReplySpeak(beats, mode, spoken, inScene, guests, caps, prefer, turns);
+  return repairReaskSpeakBriefs(ordered, spoken, inScene, guests, turns);
 }
 
 /** Race a utility call against a timeout; merges with an optional outer AbortSignal. */
@@ -1238,9 +1259,10 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
   const hands = opts.asCharacterId
     ? ctx.characters.find((c) => c.id === opts.asCharacterId)
     : undefined;
+  const moveText = opts.input.trim();
   const playerText = hands
-    ? `${hands.name} takes this action. Write what follows around it, and do not play the action again as if it had not happened:\n${opts.input.trim()}`
-    : opts.input.trim();
+    ? `${hands.name} already said or did this. It is not the player. Do not repeat it or give it to anyone else:\n${moveText}`
+    : moveText;
   let requireDialogue = requiresSpokenReply(opts.mode)
     || inScene.length > 0
     || activeGuests(ctx.episode).length > 0;
@@ -1249,7 +1271,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
     const hasSpeakers = inScene.length > 0 || activeGuests(ctx.episode).length > 0;
     const system = directorSystemPrompt(opts.mode, hasSpeakers, opts.length, storyStanceOf(opts.world));
     const tail = historyTailFor(model, 'director', 'normal', contextWindowFor());
-    const user = directorUserPrompt(ctx, opts.mode, playerText, {
+    const user = directorUserPrompt(ctx, opts.mode, moveText, {
       preferCharacterId: opts.preferCharacterId,
       preferGuestId: opts.preferGuestId,
       historyTailChars: tail.charBudget,
@@ -1303,7 +1325,8 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
         opts.length,
         { characterId: opts.preferCharacterId, guestId: opts.preferGuestId },
         ctx.turns,
-        ctx.episode.location
+        ctx.episode.location,
+        moveText
       ),
       enterIds: scene.enterIds
     };
@@ -1347,7 +1370,8 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
           guests: activeGuests(ctx.episode),
           turns: ctx.turns,
           preferCharacterId: opts.preferCharacterId,
-          preferGuestId: opts.preferGuestId
+          preferGuestId: opts.preferGuestId,
+          addressText: moveText
         });
       }
       await clearPendingPlan(opts.episode.id);
