@@ -400,6 +400,7 @@ describe('director prompt budgets', () => {
 
     const director = directorUserPrompt(ctx({ turns, characters: [ada] }), 'play', '"The ledger is forged."');
     expect(director).toMatch(/\[Ada\]\n"The ledger is forged\."/);
+    expect(director).toMatch(/Do not give Ada another speak beat/);
     expect(director).not.toMatch(/\[player/);
     expect(director).not.toMatch(/The player says/);
 
@@ -407,6 +408,61 @@ describe('director prompt budgets', () => {
     expect(digest).toMatch(/\[Ada\]/);
     expect(digest).toContain('The ledger is forged.');
     expect(digest).not.toMatch(/\[player/);
+  });
+
+  it('tells the narrator and the speaker that a steer direction wins', () => {
+    const ada = npc('c1', 'Ada', { mustNotKnow: 'Ivo took guild money' });
+    const turns: Turn[] = [{
+      id: 'u', episodeId: 'e', worldId: 'w', role: 'user', mode: 'steer',
+      text: 'The cartwright leaves.', createdAt: 1
+    }];
+    const narr = buildNarrationBeatMessages(
+      turns, [ada], 'rain', 'scene', [], undefined, 0, undefined, '', 'steer'
+    ).map((m) => m.content).join('\n');
+    expect(narr).toContain('The cartwright leaves.');
+    expect(narr).toMatch(/it wins/i);
+    expect(narr).toMatch(/outranks/i);
+    const speak = buildCharacterSpeakMessages(
+      turns, [ada], ada, 'press them', [], { composeMode: 'steer' }
+    ).map((m) => m.content).join('\n');
+    expect(speak).toContain('The cartwright leaves.');
+    expect(speak).toMatch(/it wins/i);
+    expect(speak).not.toMatch(/must not know, hint at, or act on this/);
+  });
+
+  it('tells Ben to answer the line Ada already said', () => {
+    const ada = npc('c1', 'Ada');
+    const ben = npc('c2', 'Ben');
+    const turns: Turn[] = [{
+      id: 'u1', episodeId: 'e', worldId: 'w', role: 'user', mode: 'play',
+      asCharacterId: 'c1', text: '"The ledger is forged."', createdAt: 1
+    }];
+    const joined = buildCharacterSpeakMessages(
+      turns, [ada, ben], ben, 'answer her', [], { composeMode: 'play' }
+    ).map((m) => m.content).join('\n');
+    expect(joined).toMatch(/Ada already said or did this exact line/);
+    expect(joined).toContain('The ledger is forged.');
+    expect(joined).toMatch(/Do not repeat it or speak as Ada/);
+    const narr = buildNarrationBeatMessages(
+      turns, [ada, ben], 'the room reacts', 'scene', [], undefined, 0, undefined, '', 'play'
+    ).map((m) => m.content).join('\n');
+    expect(narr).toMatch(/Do not reprint the line or hand it to anyone else/);
+  });
+
+  it('puts a steer after the transcript and tells a continuation to move forward', () => {
+    const turns: Turn[] = [{
+      id: 'u', episodeId: 'e', worldId: 'w', role: 'user', mode: 'steer',
+      text: 'The cartwright leaves.', createdAt: 1
+    }];
+    const steer = directorUserPrompt(ctx({ turns }), 'steer', 'The cartwright leaves.');
+    const transcriptAt = steer.indexOf('Recent transcript:');
+    const directionAt = steer.indexOf('Author direction (mandatory — carry it out exactly):');
+    expect(directionAt).toBeGreaterThan(transcriptAt);
+    expect(steer).toContain('The cartwright leaves.');
+    const continued = directorUserPrompt(ctx({ turns: [] }), 'continue', '');
+    expect(continued).toMatch(/Move the scene forward from the last beat/);
+    expect(continued).toMatch(/Do not wait for the player/);
+    expect(directorSystemPrompt('continue', true)).toMatch(/Do not wait for the player/);
   });
 
   it('tells the director to register an answer to the last NPC question', () => {

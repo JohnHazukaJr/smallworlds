@@ -338,6 +338,116 @@ describe('normalizeBeats', () => {
       expect(isThinNarrationBrief(narr.brief, 'I wait by the desk.', cast)).toBe(false);
     }
   });
+
+  it('pins the author direction onto every steer brief', () => {
+    const beats = normalizeBeats(
+      {
+        beats: [
+          { type: 'narration', brief: 'Ada stamps the page while the door stays shut.' },
+          { type: 'speak', characterId: 'Ada', brief: 'ask about the weather' }
+        ]
+      },
+      cast,
+      guests,
+      new Map(),
+      'steer',
+      'The cartwright leaves.'
+    );
+    expect(beats.length).toBeGreaterThan(0);
+    for (const beat of beats) {
+      expect(beat.brief).toContain('The cartwright leaves.');
+      expect(beat.brief).toMatch(/it outranks/i);
+    }
+  });
+
+  it('gives a character named in the direction their own speak beat', () => {
+    const beats = normalizeBeats(
+      { beats: [{ type: 'narration', brief: 'Ada stamps the page while the door stays shut.' }] },
+      cast,
+      [],
+      new Map(),
+      'steer',
+      'Ada says the ledger is forged and leaves.'
+    );
+    const speak = beats.find((b) => b.type === 'speak' && 'characterId' in b && b.characterId === 'c1');
+    expect(speak?.type).toBe('speak');
+    if (speak?.type === 'speak') {
+      expect(speak.brief).toContain('Ada says the ledger is forged and leaves.');
+    }
+    expect(beats.some((b) => b.type === 'speak' && 'characterId' in b && b.characterId === 'c2')).toBe(false);
+  });
+
+  it('gives a named character the short speak slot instead of someone else', () => {
+    const beats = normalizeBeats(
+      {
+        beats: [
+          { type: 'narration', brief: 'Ada stamps the page while the door stays shut.' },
+          { type: 'speak', characterId: 'Ben', brief: 'talk about the weather instead of leaving' }
+        ]
+      },
+      cast,
+      [],
+      new Map(),
+      'steer',
+      'Ada says the ledger is forged.',
+      'beat'
+    );
+    const speak = beats.filter((b) => b.type === 'speak');
+    expect(speak).toHaveLength(1);
+    expect(speak[0]).toMatchObject({ type: 'speak', characterId: 'c1' });
+    if (speak[0].type === 'speak') {
+      expect(speak[0].brief).toContain('Ada says the ledger is forged.');
+    }
+  });
+
+  it('does not give the Write-as character another speak beat', () => {
+    const beats = normalizeBeats(
+      {
+        beats: [
+          { type: 'speak', characterId: 'Ada', brief: 'say something else about the books' },
+          { type: 'speak', characterId: 'Ben', brief: 'answer the ledger accusation in the room' },
+          { type: 'narration', brief: 'The office holds the confession between them.' }
+        ]
+      },
+      cast,
+      [],
+      new Map(),
+      'play',
+      'Ada already said this.',
+      'scene',
+      undefined,
+      undefined,
+      'Harbour office',
+      'Ben, the ledger is forged.',
+      'c1'
+    );
+    expect(beats.some((b) => b.type === 'speak' && 'characterId' in b && b.characterId === 'c1')).toBe(false);
+    expect(beats.some((b) => b.type === 'speak' && 'characterId' in b && b.characterId === 'c2')).toBe(true);
+  });
+
+  it('stays narration when the Write-as character is the only one on stage', () => {
+    const beats = normalizeBeats(
+      {
+        beats: [
+          { type: 'speak', characterId: 'Ada', brief: 'say it again in the office' },
+          { type: 'narration', brief: 'The office holds the confession she already made.' }
+        ]
+      },
+      [npc('c1', 'Ada')],
+      [],
+      new Map(),
+      'play',
+      '"The ledger is forged."',
+      'scene',
+      undefined,
+      undefined,
+      '',
+      '"The ledger is forged."',
+      'c1'
+    );
+    expect(beats.some((b) => b.type === 'speak')).toBe(false);
+    expect(beats.some((b) => b.type === 'narration')).toBe(true);
+  });
 });
 
 describe('strengthenNarrationBrief', () => {

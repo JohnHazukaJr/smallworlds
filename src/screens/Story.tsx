@@ -1089,6 +1089,26 @@ export function Story() {
     }
   };
 
+  /** Advance the chapter from where it left off. The draft in the box stays unsent. */
+  const continueStory = async () => {
+    if (!world || !season || !episode || streaming) return;
+    if (!hasAI) {
+      setNotice(NOTICE_ADD_MODEL);
+      return;
+    }
+    if (writeReady && writeReady.missing.length > 0 && !writeAnyway) {
+      setNotice('Add the missing items above, or press Write anyway.');
+      return;
+    }
+    const token = tryBeginStoryWrite();
+    if (!token) return;
+    try {
+      await runNarration('continue', '', undefined, undefined, weight, null, token);
+    } finally {
+      endStoryWrite(token);
+    }
+  };
+
   const beginEdit = (turn: Turn) => {
     flushSync(() => {
       setComposerOpen(true);
@@ -2378,15 +2398,25 @@ export function Story() {
             {streaming ? (
               <button className="btn-quiet" style={{ alignSelf: 'flex-end', minHeight: 44 }} onClick={() => abortRef.current?.abort()}>Stop</button>
             ) : (
-              <button
-                className="btn-primary"
-                style={{ alignSelf: 'flex-end', padding: '10px 19px', minHeight: 44 }}
-                title={sendTitle}
-                disabled={!input.trim()}
-                onClick={() => void write()}
-              >
-                Send
-              </button>
+              <>
+                <button
+                  className="btn-quiet"
+                  style={{ alignSelf: 'flex-end', minHeight: 44 }}
+                  title="Continue the story from here"
+                  onClick={() => void continueStory()}
+                >
+                  Continue
+                </button>
+                <button
+                  className="btn-primary"
+                  style={{ alignSelf: 'flex-end', padding: '10px 19px', minHeight: 44 }}
+                  title={sendTitle}
+                  disabled={!input.trim()}
+                  onClick={() => void write()}
+                >
+                  Send
+                </button>
+              </>
             )}
           </div>
         </div>

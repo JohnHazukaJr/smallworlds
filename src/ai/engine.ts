@@ -638,9 +638,13 @@ export function chapterNarrationBrief(opts: {
   const bodies = names.length > 0 ? ` Named bodies present: ${names.join(', ')}.` : '';
   const moveBit = parsed
     ? `${parsed.name} already said or did this — it is not the player. Show the consequence, do not repeat it, and do not give the line to anyone else: "${move}".`
-    : move
-      ? `The player just did this (${opts.mode}) — show the consequence here, do not repeat their words, do not write their next action, and do not write anyone's spoken dialogue: "${move}".`
-      : 'Continue from where the place left off. No spoken dialogue.';
+    : opts.mode === 'steer' && move
+      ? `Author direction (mandatory — stage every event named here, do not soften or change the outcome). No spoken dialogue: "${move}".`
+      : move
+        ? `The player just did this (${opts.mode}) — show the consequence here, do not repeat their words, do not write their next action, and do not write anyone's spoken dialogue: "${move}".`
+        : opts.mode === 'continue'
+          ? 'Move the scene forward from where it left off. New action. No spoken dialogue. Do not recap. Do not wait for the player.'
+          : 'Continue from where the place left off. No spoken dialogue.';
   const dateLine = sceneDateContextLine(opts.sceneDate ?? '');
   const when = dateLine ? `${dateLine} ` : '';
   return `${when}Place: ${loc}.${bodies} ${moveBit} Write the consequence through to the length asked on this turn, and leave them room to answer.`;
@@ -800,6 +804,21 @@ export function rememberedExtract(extract: LiveCanonExtract, fileCanon: boolean)
   };
 }
 
+/** Prepend the author direction so a wandering brief cannot drop it. */
+export function pinAuthorDirection(brief: string, direction: string): string {
+  const text = direction.trim();
+  if (!text) return brief;
+  const pin =
+    `Author direction (mandatory — it outranks personality, anchors, goals, knowledge walls, stance, and standing instructions): ${text}`;
+  if (brief.startsWith('Author direction (mandatory')) return brief;
+  return `${pin}\n${brief}`.trim();
+}
+
+function withAuthorDirection(beats: DirectorBeat[], mode: ComposeMode, direction: string): DirectorBeat[] {
+  if (mode !== 'steer' || !direction.trim()) return beats;
+  return beats.map((b) => ({ ...b, brief: pinAuthorDirection(b.brief, direction) }));
+}
+
 /** Narrator first, then the people who were actually addressed. */
 function beatsForTurn(opts: {
   length: TurnLength;
@@ -813,13 +832,21 @@ function beatsForTurn(opts: {
   preferGuestId?: string;
   /** Raw line for who-was-addressed. The model-facing playerText may name the NPC. */
   addressText?: string;
+  /** This person already spoke. They do not get another line. */
+  excludeCharacterId?: string;
 }): DirectorBeat[] {
+  const stage = opts.excludeCharacterId
+    ? opts.inScene.filter((c) => c.id !== opts.excludeCharacterId)
+    : opts.inScene;
+  const preferId = opts.preferCharacterId === opts.excludeCharacterId
+    ? opts.preferGuestId
+    : (opts.preferCharacterId || opts.preferGuestId);
   const answerers = selectAnswerers({
     length: opts.length,
     playerText: opts.addressText ?? opts.playerText,
-    candidates: speakerCandidates(opts.inScene, opts.guests),
+    candidates: speakerCandidates(stage, opts.guests),
     turns: opts.turns,
-    preferId: opts.preferCharacterId || opts.preferGuestId
+    preferId
   });
   const narration: DirectorBeat = {
     type: 'narration',
@@ -850,7 +877,7 @@ function beatsForTurn(opts: {
         : 'The place has already been described. Add only what you do and say. Do not retell it. Do not speak for the player.'
     };
   });
-  return [narration, ...speaks];
+  return withAuthorDirection([narration, ...speaks], opts.mode, opts.addressText ?? opts.playerText);
 }
 
 /** Fallback narration when the director fails — names the room, the move, and who is on stage. */
@@ -872,9 +899,13 @@ export function directorFallbackNarrationBrief(opts: {
   const bodies = onStage.length > 0 ? ` On stage: ${onStage.join('; ')}.` : '';
   const moveBit = parsed
     ? ` Continue from what ${parsed.name} already said or did (not the player): "${move}".`
-    : move
-      ? ` Continue from the player's ${opts.mode}: "${move}".`
-      : ' Continue from the place.';
+    : opts.mode === 'steer' && move
+      ? ` Author direction (mandatory — stage every event, do not soften or change the outcome): "${move}".`
+      : move
+        ? ` Continue from the player's ${opts.mode}: "${move}".`
+        : opts.mode === 'continue'
+          ? ' Move the scene forward from the last beat. New action or speech. Do not recap. Do not wait for the player.'
+          : ' Continue from the place.';
   return (
     `${moveBit} Location: ${loc}.${bodies} ` +
     'Show named bodies and one sensory job; leave space for the player.'
@@ -1056,7 +1087,9 @@ export function normalizeBeats(
   turns?: Turn[],
   location = '',
   /** Raw spoken line. Address detection must not see the injection wrapper's name. */
-  addressText?: string
+  addressText?: string,
+  /** This person already spoke or acted. Drop their speak beat. */
+  excludeCharacterId?: string
 ): DirectorBeat[] {
   const caps = planCapsForLength(length);
   const allowedGuests = new Set(guests.map((g) => g.id));
@@ -1082,7 +1115,7 @@ export function normalizeBeats(
         speakCount++;
       } else if (castRaw) {
         const castId = resolveCastSpeakerId(castRaw, inScene);
-        if (!castId) continue;
+        if (!castId || castId === excludeCharacterId) continue;
         const key = `c:${castId}`;
         if (seenSpeak.has(key)) continue;
         seenSpeak.add(key);
@@ -1114,8 +1147,45 @@ export function normalizeBeats(
     };
   }
   const spoken = addressText ?? playerText;
-  const ordered = ensurePlayerReplySpeak(beats, mode, spoken, inScene, guests, caps, prefer, turns);
-  return repairReaskSpeakBriefs(ordered, spoken, inScene, guests, turns);
+  const replyCast = excludeCharacterId
+    ? inScene.filter((c) => c.id !== excludeCharacterId)
+    : inScene;
+  const replyPrefer = excludeCharacterId && prefer?.characterId === excludeCharacterId
+    ? { guestId: prefer.guestId }
+    : prefer;
+  const ordered = ensurePlayerReplySpeak(beats, mode, spoken, replyCast, guests, caps, replyPrefer, turns);
+  const repaired = repairReaskSpeakBriefs(ordered, spoken, replyCast, guests, turns);
+  if (mode === 'steer' && spoken.trim()) {
+    const named = replyCast.filter((c) => {
+      const name = c.name.trim();
+      if (name.length < 2) return false;
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(`\\b${escaped}\\b`, 'i').test(spoken);
+    });
+    for (const c of named) {
+      if (repaired.some((b) => b.type === 'speak' && 'characterId' in b && b.characterId === c.id)) continue;
+      const beat: DirectorBeat = {
+        type: 'speak',
+        characterId: c.id,
+        brief: 'Do the part of the author direction that is yours, including any words it gives you.'
+      };
+      const unnamed = repaired.findIndex((b) => (
+        b.type === 'speak' &&
+        'characterId' in b &&
+        !named.some((n) => n.id === b.characterId)
+      ));
+      const atCap = repaired.filter((b) => b.type === 'speak').length >= caps.maxSpeak
+        || repaired.length >= caps.maxTotal;
+      if (atCap && unnamed >= 0) {
+        repaired[unnamed] = beat;
+        continue;
+      }
+      if (repaired.filter((b) => b.type === 'speak').length >= caps.maxSpeak) continue;
+      if (repaired.length >= caps.maxTotal) continue;
+      repaired.push(beat);
+    }
+  }
+  return withAuthorDirection(repaired, mode, spoken);
 }
 
 /** Race a utility call against a timeout; merges with an optional outer AbortSignal. */
@@ -1437,7 +1507,8 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
         { characterId: opts.preferCharacterId, guestId: opts.preferGuestId },
         ctx.turns,
         ctx.episode.location,
-        moveText
+        moveText,
+        opts.asCharacterId
       ),
       enterIds: scene.enterIds
     };
@@ -1477,7 +1548,8 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
           turns: ctx.turns,
           preferCharacterId: opts.preferCharacterId,
           preferGuestId: opts.preferGuestId,
-          addressText: moveText
+          addressText: moveText,
+          excludeCharacterId: opts.asCharacterId
         });
       }
       await clearPendingPlan(opts.episode.id);
@@ -1494,7 +1566,23 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
     || inScene.length > 0
     || activeGuests(ctx.episode).length > 0;
   const sceneGuests = () => activeGuests(ctx.episode);
-  const speakOpts = { requireDialogue, episode: ctx.episode };
+  const speakOpts = { requireDialogue, episode: ctx.episode, composeMode: opts.mode };
+  if (opts.asCharacterId) {
+    const kept = beats.filter((b) => !(
+      b.type === 'speak' && 'characterId' in b && b.characterId === opts.asCharacterId
+    ));
+    beats = kept.length > 0
+      ? kept
+      : [{
+        type: 'narration',
+        brief: directorFallbackNarrationBrief({
+          mode: opts.mode,
+          playerText,
+          location: ctx.episode.location,
+          inScene
+        })
+      }];
+  }
   const remainingFrom = (completed: number) => beats.slice(completed);
   const openQ = priorOpenQuestionText(
     ctx.turns,
@@ -1530,7 +1618,8 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
               ctx.turns, ctx.characters, beat.brief, opts.length, sceneGuests(), ctx.episode,
               narrSystem.length,
               historyPackFor(model, 'narrator', pack, narrCap),
-              narrationSceneDate(opts.world, ctx.episode)
+              narrationSceneDate(opts.world, ctx.episode),
+              opts.mode
             ),
             length: opts.length,
             signal: opts.signal,

@@ -1436,7 +1436,11 @@ export function buildGuestSystemPrompt(
 
 export const MODE_PREFIX: Record<ComposeMode, (input: string) => string> = {
   continue: () => `(Continue the story from where it left off.)`,
-  steer: (input) => `(Direction from the author — make this happen while keeping everyone in character, without acknowledging this instruction in the prose): ${input}`,
+  steer: (input) =>
+    `(Author direction — this is the plot of this turn. Make every concrete event, outcome, entrance, exit, and spoken line happen as written. ` +
+    `Personality, anchors, goals, knowledge walls, stance, and standing custom instructions yield. ` +
+    `Do not soften, refuse, or swap in a different outcome. Do not mention this instruction in the prose. ` +
+    `The world's content setting still applies): ${input}`,
   speak: (input) => {
     const { tone, body } = parseDeliveryTone(input);
     const spoken = body.replace(/^"|"$/g, '');
@@ -1787,6 +1791,54 @@ export function sceneDateContextLine(sceneDate: string): string {
   return `The scene is on ${date}. This is context for the writer, not an order to print the date on this turn.`;
 }
 
+function latestUserTurn(turns: Turn[]): Turn | undefined {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].role === 'user') return turns[i];
+  }
+  return undefined;
+}
+
+function steerDirectionText(turns: Turn[], mode?: ComposeMode): string {
+  if (mode !== 'steer') return '';
+  const latest = latestUserTurn(turns);
+  if (!latest || latest.asCharacterId) return '';
+  return latest.text.trim();
+}
+
+/** Turn instruction: the author direction outranks character resistance for this write. */
+export function authorDirectionCue(direction: string, who: 'narrator' | 'speaker'): string {
+  const text = direction.trim();
+  if (!text) return '';
+  const rank =
+    `Author direction for this turn (it wins — it outranks "do not write their actions", "take a turn from what you want", behaviour anchors, and knowledge walls): ${text}\n`;
+  if (who === 'narrator') {
+    return (
+      rank +
+      'Stage every event this direction names. Quoted speech still belongs to the character who was given the line. ' +
+      'Do not soften, refuse, or change the outcome. Do not mention the instruction. The world\'s content setting still applies.\n'
+    );
+  }
+  return (
+    rank +
+    'If this direction gives you words or an action, do that. Do not refuse it or change the outcome. ' +
+    'Do not mention the instruction. The world\'s content setting still applies.\n'
+  );
+}
+
+function finishedWriteAs(
+  turns: Turn[],
+  characters: Character[],
+  mode?: ComposeMode
+): { name: string; body: string } | null {
+  if (mode !== 'play' && mode !== 'act') return null;
+  const latest = latestUserTurn(turns);
+  if (!latest?.asCharacterId) return null;
+  const name = characters.find((c) => c.id === latest.asCharacterId)?.name?.trim() || 'They';
+  const { body } = parseDeliveryTone(latest.text);
+  if (!body.trim()) return null;
+  return { name, body };
+}
+
 /** History + a narration-beat instruction. */
 export function buildNarrationBeatMessages(
   turns: Turn[],
@@ -1797,15 +1849,25 @@ export function buildNarrationBeatMessages(
   episode?: Episode,
   systemChars = 0,
   pack?: Pick<PromptBuildOpts, 'totalCap' | 'skipOmittedDigest' | 'historyTailChars' | 'historyTailMaxTurns'>,
-  sceneDate = ''
+  sceneDate = '',
+  composeMode?: ComposeMode
 ): ChatMessage[] {
   const messages = historyMessages(turns, characters, guests, episode, systemChars, pack);
   const dateLine = sceneDateContextLine(sceneDate);
+  const direction = authorDirectionCue(steerDirectionText(turns, composeMode), 'narrator');
+  const finished = finishedWriteAs(turns, characters, composeMode);
+  const moveJob = direction
+    ? direction
+    : finished
+      ? `${finished.name} already said or did this exact line: ${finished.body}. Show what changes. Do not reprint the line or hand it to anyone else.\n`
+      : (
+        `First job: show the consequence of the player's last move on named bodies in this room. ` +
+        `Atmosphere only serves that consequence — no weather catalogue. Do not recap earlier beats.\n` +
+        `Do not write the player's actions, speech, or thoughts. Do not repeat their line. Leave them room to answer.\n`
+      );
   const userContent =
     `(Narration only — no spoken dialogue, no CharacterName: "…" lines.)\n` +
-    `First job: show the consequence of the player's last move on named bodies in this room. ` +
-    `Atmosphere only serves that consequence — no weather catalogue. Do not recap earlier beats.\n` +
-    `Do not write the player's actions, speech, or thoughts. Do not repeat their line. Leave them room to answer.\n` +
+    moveJob +
     (dateLine ? `${dateLine}\n` : '') +
     `Write this: ${brief}\n` +
     `Only the people already in this room, and walk-ons already here, may appear. Do not invent a named person. Do not have anyone walk in.\n` +
@@ -1833,6 +1895,8 @@ export type SpeakMessageOpts = {
   skipOmittedDigest?: boolean;
   historyTailChars?: number;
   historyTailMaxTurns?: number;
+  /** The write that produced this beat. Steer and Write-as change the turn instruction. */
+  composeMode?: ComposeMode;
 };
 
 /** Clip helper for speak cues (mirrors clipText; kept local so this stays near callers). */
@@ -1950,14 +2014,32 @@ export function buildCharacterSpeakMessages(
     { kind: 'speaker', speakerId: speaking.id }
   );
   const length = opts?.length ?? 'scene';
+  const direction = authorDirectionCue(steerDirectionText(turns, opts?.composeMode), 'speaker');
+  const finished = finishedWriteAs(turns, characters, opts?.composeMode);
+  const sameVoice = !!finished && finished.name.toLowerCase() === speaking.name.trim().toLowerCase();
+  const ownership = sameVoice
+    ? `Your latest line is already in the chapter. Do not say it again or replace it.\n`
+    : finished
+      ? `Only [${speaking.name}] lines are yours. ${finished.name} already spoke; answer that line. [Narrator] is the scene.\n`
+      : `Only [${speaking.name}] lines are yours. [Narrator] and other names are the scene — do not repeat them or treat them as something you already said.\n`;
+  const finishedCue = !finished
+    ? ''
+    : sameVoice
+      ? `${speaking.name} already said or did this exact line. Do not speak again this turn.\n`
+      : `${finished.name} already said or did this exact line: ${finished.body}. Answer it. Do not repeat it or speak as ${finished.name}.\n`;
+  const takeTurn = direction
+    ? `This turn the author direction outranks what you want, your anchors, and what you must not know. If the direction gives you words or an action, do that.\n`
+    : `Take a turn as ${speaking.name} from what you want right now: a fragment, a deflection, a task, or a gesture. You do not owe a complete reply.\n`;
   const userContent =
     `(You are ${speaking.name}. Respond now in character.)\n` +
-    `Only [${speaking.name}] lines are yours. [Narrator] and other names are the scene — do not repeat them or treat them as something you already said.\n` +
+    ownership +
     speakVoiceReminder(speaking) +
-    heardAnswerCue(turns, characters, guests) +
+    (direction || finished ? '' : heardAnswerCue(turns, characters, guests)) +
+    direction +
+    finishedCue +
     `Intent for this line: ${brief}\n\n` +
-    knowledgeWallCue(speaking.mustNotKnow) +
-    `Take a turn as ${speaking.name} from what you want right now: a fragment, a deflection, a task, or a gesture. You do not owe a complete reply.\n` +
+    (opts?.composeMode === 'steer' ? '' : knowledgeWallCue(speaking.mustNotKnow)) +
+    takeTurn +
     `Say only what you would say out loud. Do not comfort, clarify, agree, or explain yourself in order to be helpful. Do not restage the room. Do not speak for anyone else.\n` +
     `${SPEAK_QUESTION_RULE}\n` +
     `Use the required *action* "dialogue" format. No other speakers.\n` +
@@ -1992,13 +2074,26 @@ export function buildGuestSpeakMessages(
   const voiceLine = guestVoice
     ? `Voice: ${cueClip(guestVoice, 100)}\n\n`
     : '';
+  const direction = authorDirectionCue(steerDirectionText(turns, opts?.composeMode), 'speaker');
+  const finished = finishedWriteAs(turns, characters, opts?.composeMode);
+  const finishedCue = finished
+    ? `${finished.name} already said or did this exact line: ${finished.body}. Answer it. Do not repeat it or speak as ${finished.name}.\n`
+    : '';
+  const ownership = finished
+    ? `Only [${guest.name}] lines are yours. ${finished.name} already spoke; answer that line. [Narrator] is the scene.\n`
+    : `Only [${guest.name}] lines are yours. [Narrator] and other names are the scene — do not repeat them or treat them as something you already said.\n`;
+  const takeTurn = direction
+    ? `This turn the author direction outranks what you want and what you must not know. If the direction gives you words or an action, do that.\n`
+    : `Take a turn as ${guest.name} from what you want right now: a fragment, a deflection, a task, or a gesture. You do not owe a complete reply.\n`;
   const userContent =
     `(You are ${guest.name}, a walk-on. Respond now.)\n` +
-    `Only [${guest.name}] lines are yours. [Narrator] and other names are the scene — do not repeat them or treat them as something you already said.\n` +
+    ownership +
     voiceLine +
-    heardAnswerCue(turns, characters, guests) +
+    (direction || finished ? '' : heardAnswerCue(turns, characters, guests)) +
+    direction +
+    finishedCue +
     `Intent for this line: ${brief}\n\n` +
-    `Take a turn as ${guest.name} from what you want right now: a fragment, a deflection, a task, or a gesture. You do not owe a complete reply.\n` +
+    takeTurn +
     `Say only what you would say out loud. Do not comfort, clarify, agree, or explain yourself in order to be helpful. Do not restage the room. Do not speak for anyone else.\n` +
     `${SPEAK_QUESTION_RULE}\n` +
     `${speakSizeHint(length)}\n\n` +
@@ -2067,6 +2162,16 @@ export function directorSystemPrompt(
         ? 'Reply size is Medium: a tight exchange — typically 1–2 narration and at most 2 speak beats. '
         : 'Reply size is Long: room for a fuller beat sequence, still sharp — do not fill the cap without reason. ';
 
+  const steerRule = mode === 'steer'
+    ? 'AUTHOR DIRECTION overrides this turn. The latest direction is the plot. ' +
+      'Plan beats that carry out every concrete event. Speech the direction assigns becomes that person\'s speak brief and includes the required words. ' +
+      'Physical outcomes go in the narration brief. Do not plan a contradicting reaction. ' +
+      'Personality, anchors, goals, knowledge walls, stance, and standing custom instructions yield. The world\'s content setting still applies. '
+    : '';
+  const continueRule = mode === 'continue'
+    ? 'No new player line. Move the scene forward from the last beat: new action or speech. Do not recap. Do not wait for the player. '
+    : '';
+
   return (
     'You are the scene director for an interactive story. ' +
     stancePlaybook(stance) + ' ' +
@@ -2085,18 +2190,24 @@ export function directorSystemPrompt(
     '\n' +
     'castDelta.enter: only someone listed under Also fits, or whom this line brought in — character id OR exact name. ' +
     'castDelta.leave: Cast ids/names or guest ids who exit the scene. ' +
-    'Never contradict Continuity facts or Knowledge walls below. ' +
+    (mode === 'steer'
+      ? 'Continuity facts hold unless the author direction changes this scene. Knowledge walls yield to that direction. '
+      : 'Never contradict Continuity facts or Knowledge walls below. ') +
     'castDelta.introduce: optional walk-ons who are NOT Cast cards — temporary for this episode only. At most 2 per plan. ' +
     'For a newly introduced guest\'s speak beat, set guestId to the exact name string from introduce (the app will bind ids). ' +
     'For an existing guest already listed, use their guest id or exact name. ' +
     'Speak characterId may be the cast id OR the exact character name (never the player). ' +
     'Narration briefs name who moves in the room and one sensory job (sight, sound, smell, temperature, or touch) — never a weather catalogue, never finished dialogue. ' +
-    'Speak briefs name want or friction (answer, refuse, deflect, bargain, stall) plus tone — a single intent, never the finished line, never "give a speech" or a multi-point monologue. ' +
+    (mode === 'steer'
+      ? 'Speak briefs carry the words or outcome the direction assigns, including those words. '
+      : 'Speak briefs name want or friction (answer, refuse, deflect, bargain, stall) plus tone — a single intent, never the finished line, never "give a speech" or a multi-point monologue. ') +
     'The intent is something a person would say in a sentence or two, not a rhetorical flourish. ' +
     'If a speak beat asks the player a question, it must be the last speak in the plan — do not pile another voice on after an unanswered question. ' +
     'The room is not a queue. One speak beat: the person addressed. If several people were each addressed, one beat each. If nobody was addressed, the person who just asked, otherwise the last voice. Bystanders stay in the narration. ' +
     'Do not give the floor to someone because they have been quiet. ' +
     engageReply +
+    steerRule +
+    continueRule +
     sizeGuidance +
     `Hard cap for ${sizeLabel}: at most ${maxSpeak} speak beat${maxSpeak === 1 ? '' : 's'} and at most ${maxTotal} beats total. ` +
     'Prefer fewer, sharper speak beats over several characters holding the floor. ' +
@@ -2134,7 +2245,7 @@ export function inSceneDyadLines(inScene: Character[], cap: number): string[] {
 
 export function directorUserPrompt(
   ctx: PromptContext,
-  _mode: ComposeMode,
+  mode: ComposeMode,
   input: string,
   opts?: {
     preferCharacterId?: string;
@@ -2292,6 +2403,18 @@ export function directorUserPrompt(
     ? locBlocks[0].replace(/^## /, '') + '\n'
     : '';
 
+  const finished = finishedWriteAs(ctx.turns, ctx.characters, mode);
+  const finishedBlock = finished
+    ? `${finished.name} already said or did exactly this: ${finished.body}\n` +
+      `Do not give ${finished.name} another speak beat this turn. Narration shows what changes and does not reprint the line. Other people may answer it.\n\n`
+    : '';
+  const steerBlock = mode === 'steer' && input.trim()
+    ? `Author direction (mandatory — carry it out exactly):\n${input.trim()}\n\n`
+    : '';
+  const continueBlock = mode === 'continue'
+    ? 'No new player line. Move the scene forward from the last beat: new action or speech. Do not recap. Do not wait for the player.\n\n'
+    : '';
+
   return (
     `World: ${ctx.world.title}\n` +
     `${calendarBlock(ctx.world, ctx.episode, 'directorLine')}\n` +
@@ -2312,6 +2435,9 @@ export function directorUserPrompt(
     preferLine +
     `Knowledge walls:\n${knowledgeWalls || '(none)'}\n\n` +
     `Recent transcript:\n${transcript || '(episode just opened)'}\n\n` +
+    finishedBlock +
+    steerBlock +
+    continueBlock +
     `Plan castDelta and beats as JSON.`
   );
 }
