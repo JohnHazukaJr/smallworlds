@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { COMPACT_AVATAR_MAX, storyAvatarHeight, useApp } from './app';
+import { storyAvatarHeight, useApp } from './app';
 
 describe('closeWorldIf', () => {
   afterEach(() => {
@@ -33,15 +33,18 @@ describe('closeWorldIf', () => {
 });
 
 describe('storyAvatarHeight', () => {
-  it('uses the full plate height off compact', () => {
-    expect(storyAvatarHeight('S', false)).toBe(56);
-    expect(storyAvatarHeight('M', false)).toBe(80);
-    expect(storyAvatarHeight('L', false)).toBe(104);
+  it('uses the chosen plate height on every screen', () => {
+    expect(storyAvatarHeight(56)).toBe(56);
+    expect(storyAvatarHeight(80)).toBe(80);
+    expect(storyAvatarHeight(144)).toBe(144);
   });
 
-  it('caps height on compact so prose still has room', () => {
-    expect(storyAvatarHeight('S', true)).toBe(56);
-    expect(storyAvatarHeight('M', true)).toBe(COMPACT_AVATAR_MAX);
-    expect(storyAvatarHeight('L', true)).toBe(COMPACT_AVATAR_MAX);
+  it('maps legacy S/M/L and clamps anything else onto the slider', () => {
+    expect(storyAvatarHeight('S')).toBe(56);
+    expect(storyAvatarHeight('M')).toBe(80);
+    expect(storyAvatarHeight('L')).toBe(104);
+    expect(storyAvatarHeight(20)).toBe(56);
+    expect(storyAvatarHeight(400)).toBe(144);
+    expect(storyAvatarHeight('nope')).toBe(80);
   });
 });

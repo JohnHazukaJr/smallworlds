@@ -1,6 +1,8 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef, useState } from 'react';
+import { characterImportance } from '../ai/characterWeight';
 import { draftCharacter, fleshOutCharacter, fleshOutRelationships } from '../ai/engine';
+import { StoryWeightPicker } from '../components/StoryWeightPicker';
 import { CharacterPortraitTools } from '../components/CharacterPortraitTools';
 import { RelationshipMap, type RelationshipMapMode } from '../components/RelationshipMap';
 import { db, recordTombstones, safeWrite } from '../db';
@@ -40,6 +42,9 @@ function useAutosave(draft: Character | null, onError: (msg: string) => void) {
       await db.characters.put({ ...d, updatedAt: Date.now() });
     }, (msg) => onErrorRef.current(msg));
   };
+  // Mark a freshly loaded card before the save effect runs, so the skip applies
+  // to that load and the first real edit still persists.
+  useEffect(() => { first.current = true; }, [draft?.id]);
   useEffect(() => {
     if (!draft || removed.current.has(draft.id)) return;
     if (first.current) { first.current = false; return; }
@@ -57,7 +62,6 @@ function useAutosave(draft: Character | null, onError: (msg: string) => void) {
       if (d) flush(d);
     };
   }, [draft]);
-  useEffect(() => { first.current = true; }, [draft?.id]);
   return {
     discard(id: string) {
       removed.current.add(id);
@@ -277,6 +281,7 @@ export function Cast() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
                 <div style={{ fontSize: stacked ? 12.5 : 13.5, fontWeight: 600, color: 'var(--ink-heading)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                   {c.name || 'unnamed'}{c.selfTag ? ' · me' : ''}
+                  {!c.isPlayer && characterImportance(c) !== 'regular' ? ` · ${characterImportance(c)}` : ''}
                 </div>
                 {!narrow && (
                   <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -482,6 +487,11 @@ export function Cast() {
                     placeholder="role · relation to the protagonist"
                     style={{ fontSize: 13.5, color: 'var(--paper)', marginTop: 8, background: 'transparent', border: 0, padding: 0, borderRadius: 0 }}
                   />
+                  {!d.isPlayer && (
+                    <div style={{ marginTop: 14 }}>
+                      <StoryWeightPicker value={d.importance} onChange={(importance) => patch({ importance })} />
+                    </div>
+                  )}
                 </div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 11 }}>
                   {([

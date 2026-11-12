@@ -1,4 +1,5 @@
 import type { Character, Location, ProviderConfig, World } from '../types';
+import { PORTRAIT_JPEG_QUALITY, PORTRAIT_MAX_PX } from '../ui/image';
 import { characterPortraits } from '../worldOps';
 import { AIError, providerTagFor } from './client';
 import { configuredImageModel, configuredMatureImageModel } from './models';
@@ -318,7 +319,8 @@ export async function generateSceneImage(opts: {
     model: opts.model,
     prompt,
     refs,
-    signal: opts.signal
+    signal: opts.signal,
+    sizes: imageSizeCandidates('landscape')
   });
   const dataUrl = await urlToJpegDataUrl(url);
   let warning: string | undefined;
@@ -330,6 +332,28 @@ export async function generateSceneImage(opts: {
   return { dataUrl, warning };
 }
 
+/** Generate a place photo from the location sheet and return a JPEG data URL. */
+export async function generateLocationPhoto(opts: {
+  world: World;
+  location: Location;
+  signal?: AbortSignal;
+}): Promise<string> {
+  const resolved = configuredImageModel(opts.world);
+  if (!resolved) {
+    throw new AIError('Set an image model in Settings before generating a place photo.');
+  }
+  if (resolved.provider.kind !== 'openai') {
+    throw new AIError('Place photo generation needs an OpenAI-compatible provider (OpenRouter or Z.ai).');
+  }
+  const result = await generateSceneImage({
+    provider: resolved.provider,
+    model: resolved.model,
+    world: opts.world,
+    location: opts.location,
+    signal: opts.signal
+  });
+  return result.dataUrl;
+}
 
 /** Generate a portrait from the character sheet and return a gallery-sized JPEG data URL. */
 export async function generateCharacterPortrait(opts: {
@@ -364,7 +388,7 @@ export async function generateCharacterPortrait(opts: {
     signal: opts.signal,
     sizes: imageSizeCandidates('portrait')
   });
-  return urlToJpegDataUrl(url, 720, 0.72);
+  return urlToJpegDataUrl(url, PORTRAIT_MAX_PX, PORTRAIT_JPEG_QUALITY);
 }
 
 export const ADULT_PORTRAIT_ERROR = 'Generate a portrait first. This picture keeps that face.';

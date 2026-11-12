@@ -1,12 +1,12 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef, useState } from 'react';
 import { draftLocation, fleshOutLocation } from '../ai/engine';
+import { PlacePhotoTools } from '../components/PlacePhotoTools';
 import { db, recordTombstones, safeWrite } from '../db';
 import { formatUserError } from '../errors';
 import { useApp } from '../store/app';
 import type { Location } from '../types';
 import { ConfirmBar, ErrorNote, Field, Mono, Spinner, editorsStacked, phoneChrome, useViewport } from '../ui/bits';
-import { fileToPortraitImage } from '../ui/image';
 import { avatarStyle, ACCENT } from '../ui/theme';
 import { clearDeletedPlaceFromEpisodes, emptyLocation, syncSceneLocationName } from '../worldOps';
 import { shouldFlushAutosave } from '../ui/autosave';
@@ -83,9 +83,6 @@ export function Locations() {
   const [fleshBusy, setFleshBusy] = useState(false);
   const [fleshError, setFleshError] = useState('');
   const [undoSnapshot, setUndoSnapshot] = useState<Location | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [portraitBusy, setPortraitBusy] = useState(false);
-  const [portraitError, setPortraitError] = useState('');
   const [confirmRemove, setConfirmRemove] = useState(false);
 
   const world = useLiveQuery(
@@ -137,7 +134,6 @@ export function Locations() {
     if (!selected) setDraft(null);
     setFleshError('');
     setUndoSnapshot(null);
-    setPortraitError('');
     setConfirmRemove(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selected?.id]);
@@ -145,27 +141,6 @@ export function Locations() {
   const { discard: discardAutosave, release: releaseAutosave } = useAutosave(draft, setError);
 
   const patch = (p: Partial<Location>) => setDraft((d) => (d ? { ...d, ...p } : d));
-
-  const onPortraitFile = async (file: File) => {
-    if (!draft) return;
-    setPortraitBusy(true);
-    setPortraitError('');
-    try {
-      const portrait = await fileToPortraitImage(file);
-      await db.locations.update(draft.id, { portrait, updatedAt: Date.now() });
-      patch({ portrait });
-    } catch (e) {
-      setPortraitError(formatUserError(e));
-    } finally {
-      setPortraitBusy(false);
-    }
-  };
-
-  const removePortrait = async () => {
-    if (!draft) return;
-    await db.locations.update(draft.id, { portrait: null, updatedAt: Date.now() });
-    patch({ portrait: null });
-  };
 
   const fleshOut = async () => {
     if (!draft) return;
@@ -365,17 +340,15 @@ export function Locations() {
                     </span>
                   )}
                 </div>
-                <input
-                  ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }}
-                  onChange={(e) => { const f = e.target.files?.[0]; if (f) void onPortraitFile(f); e.target.value = ''; }}
+                <PlacePhotoTools
+                  location={d}
+                  world={world ?? null}
+                  showPreview={false}
+                  onChange={async ({ portrait }) => {
+                    await db.locations.update(d.id, { portrait, updatedAt: Date.now() });
+                    patch({ portrait });
+                  }}
                 />
-                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                  <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }} disabled={portraitBusy} onClick={() => fileRef.current?.click()}>
-                    {portraitBusy ? 'Uploading…' : d.portrait ? 'Change photo' : 'Upload photo'}
-                  </button>
-                  {d.portrait && <button className="btn-quiet" style={{ fontSize: 11 }} onClick={() => void removePortrait()}>remove photo</button>}
-                </div>
-                {portraitError && <ErrorNote error={portraitError} onDismiss={() => setPortraitError('')} />}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <Mono style={{ fontSize: 9 }}>color</Mono>
                   <input

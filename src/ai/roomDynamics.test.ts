@@ -254,6 +254,42 @@ describe('lastOpenQuestion', () => {
   });
 });
 
+describe('story weight', () => {
+  const lead: SpeakerCandidate = { id: 'c1', name: 'Ada', kind: 'cast', importance: 'lead' };
+  const background: SpeakerCandidate = { id: 'c2', name: 'Gus', kind: 'cast', importance: 'background' };
+
+  it('lets an addressed background answer ahead of an unaddressed lead', () => {
+    const ranked = rankReplySpeakers({
+      candidates: [lead, background],
+      playerText: 'Gus, the rope.'
+    });
+    expect(ranked[0].id).toBe('c2');
+  });
+
+  it('prefers the lead when nobody was addressed and nobody has spoken', () => {
+    const ranked = rankReplySpeakers({
+      candidates: [background, lead],
+      playerText: 'I wait.'
+    });
+    expect(ranked[0].id).toBe('c1');
+  });
+
+  it('keeps the last voice even when they are background and a lead is in the room', () => {
+    const ranked = rankReplySpeakers({
+      candidates: [lead, background],
+      playerText: 'I wait.',
+      turns: [said('c2', 'The rope is wet.')]
+    });
+    expect(ranked[0].id).toBe('c2');
+  });
+
+  it('passes weight through from the cast card', () => {
+    const ada = npc('c1', 'Ada');
+    ada.importance = 'lead';
+    expect(speakerCandidates([ada], []).map((c) => c.importance)).toEqual(['lead']);
+  });
+});
+
 describe('selectAnswerers', () => {
   it('gives a short reply to the one person addressed', () => {
     const ids = selectAnswerers({

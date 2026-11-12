@@ -37,6 +37,7 @@ import { StoryDateFields } from '../components/StoryDateFields';
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
 import { db } from '../db';
 import {
+  AVATAR_MAX, AVATAR_MIN, AVATAR_STEP,
   DEFAULT_DISPLAY, moodFromHue, storyAvatarHeight, useApp,
   type DialogueStyle, type StoryLayout
 } from '../store/app';
@@ -737,7 +738,6 @@ export function Story() {
   const { band, height, keyboardOffset, keyboardOpen } = useViewport();
   const book = bookStageOpen(band, keyboardOpen, height);
   const phone = phoneChrome(band);
-  const compact = band === 'compact';
   const short = shortStoryChrome(band, height);
   const sheetBottom = sheetsFromBottom(band);
   const narrow = phone;
@@ -745,7 +745,7 @@ export function Story() {
   useSettings((s) => s.proseModel);
   const M = MOODS[mood];
   const readMode = layout === 'read';
-  const avatarPx = storyAvatarHeight(display.avatarSize, compact);
+  const avatarPx = storyAvatarHeight(display.avatarSize);
   const fontPx = readMode ? display.textSize + 1 : display.textSize;
 
   const world = useLiveQuery(
@@ -2491,8 +2491,9 @@ export function Story() {
 
 // ---------- display settings ----------
 
-function SliderRow({ label, value, min, max, unit, onChange }: {
-  label: string; value: number; min: number; max: number; unit?: string; onChange: (v: number) => void;
+function SliderRow({ label, value, min, max, step, unit, onChange }: {
+  label: string; value: number; min: number; max: number; step?: number; unit?: string;
+  onChange: (v: number) => void;
 }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
@@ -2503,7 +2504,7 @@ function SliderRow({ label, value, min, max, unit, onChange }: {
         </span>
       </div>
       <input
-        type="range" min={min} max={max} value={value}
+        type="range" min={min} max={max} step={step} value={value}
         onChange={(e) => onChange(Number(e.target.value))}
         style={{ padding: 0, height: 4 }}
       />
@@ -2527,6 +2528,11 @@ function DisplaySheet({ open, onClose, narrow }: {
           <Mono style={{ fontSize: 9 }}>text</Mono>
           <SliderRow label="Text size" value={display.textSize} min={15} max={24} unit="px"
             onChange={(v) => setDisplay({ textSize: v })} />
+          <SliderRow
+            label="Portrait size" value={display.avatarSize}
+            min={AVATAR_MIN} max={AVATAR_MAX} step={AVATAR_STEP} unit="px"
+            onChange={(v) => setDisplay({ avatarSize: v })}
+          />
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: '1px solid var(--rule)', paddingTop: 16 }}>

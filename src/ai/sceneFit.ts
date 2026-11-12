@@ -5,6 +5,7 @@
  */
 
 import type { Character, Turn } from '../types';
+import { autoStagePool, characterImportance, importanceRank } from './characterWeight';
 import {
   addressStrength,
   detectHardAddressees,
@@ -208,6 +209,7 @@ export function filterCastDelta(opts: {
   const enter = (delta.enter ?? []).filter((raw) => {
     const c = resolveCharacter(raw, opts.characters);
     if (!c) return false;
+    if (characterImportance(c) === 'background') return lineBringsCharacter(opts.playerText, c);
     return characterFitsPlace(c, place) || lineBringsCharacter(opts.playerText, c);
   });
   const introduce = (delta.introduce ?? []).filter((row) =>
@@ -242,6 +244,9 @@ export function stageSceneCast(opts: {
 
   const keepExisting = (c: Character): boolean => {
     if (brought.has(c.id)) return true;
+    const weight = characterImportance(c);
+    // Occasional and background stay for this scene. A move drops them unless the line brought them.
+    if (weight === 'occasional' || weight === 'background') return !opts.placeChanged;
     if (fitting.some((f) => f.id === c.id)) return true;
     if (!opts.placeChanged) return true;
     if (!closed) return true;
@@ -261,25 +266,45 @@ export function stageSceneCast(opts: {
   }
 
   const namedCount = () => ids.filter((id) => id !== player?.id).length;
-  const fittingToAdd = fitting.filter((c) => !ids.includes(c.id));
-  if (fitting.length <= ROOM_NAMED_CAP) {
-    for (const c of fittingToAdd) push(c.id);
-  } else {
-    const prioritized = [
-      ...fittingToAdd.filter((c) => spoken.has(c.id) || brought.has(c.id)),
-      ...fittingToAdd
-    ];
-    const seen = new Set<string>();
+  const pool = autoStagePool(fitting).filter((c) => !ids.includes(c.id));
+  const coreCount = fitting.filter((c) => {
+    const weight = characterImportance(c);
+    return weight === 'lead' || weight === 'regular';
+  }).length;
+  const addCapped = (list: Character[]) => {
+    const prioritized = [...list].sort((a, b) => {
+      const aHot = spoken.has(a.id) || brought.has(a.id) ? 1 : 0;
+      const bHot = spoken.has(b.id) || brought.has(b.id) ? 1 : 0;
+      if (aHot !== bHot) return bHot - aHot;
+      return importanceRank(b) - importanceRank(a);
+    });
     for (const c of prioritized) {
-      if (seen.has(c.id)) continue;
-      seen.add(c.id);
       if (namedCount() >= ROOM_NAMED_CAP) break;
       push(c.id);
     }
+  };
+  // A short list of leads and regulars all come in, as before.
+  // A crowd, or a room that only occasionals fit, stops at the cap: spoken and brought, then leads.
+  if (coreCount > 0 && coreCount <= ROOM_NAMED_CAP) {
+    for (const c of pool) push(c.id);
+  } else if (pool.length > 0) {
+    addCapped(pool);
   }
 
   for (const id of brought) push(id);
 
-  const alsoFits = fitting.filter((c) => !ids.includes(c.id)).slice(0, ALSO_FITS_CAP);
+  const alsoFits = fitting
+    .filter((c) => !ids.includes(c.id) && characterImportance(c) !== 'background')
+    .sort((a, b) => importanceRank(b) - importanceRank(a))
+    .slice(0, ALSO_FITS_CAP);
   return { castIds: ids, alsoFits };
+}
+
+/** Season-open roster: leads and regulars who fit, then occasionals if the place has no one more central. */
+export function openingFittingIds(fitting: Character[], cap = ROOM_NAMED_CAP): string[] {
+  return autoStagePool(fitting)
+    .slice()
+    .sort((a, b) => importanceRank(b) - importanceRank(a))
+    .slice(0, cap)
+    .map((c) => c.id);
 }

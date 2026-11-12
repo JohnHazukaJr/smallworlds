@@ -72,7 +72,8 @@ import {
   speakerCandidates,
   type RankedSpeaker
 } from './roomDynamics';
-import { characterFitsPlace, filterCastDelta, inferPlaceChanged, ROOM_NAMED_CAP, stageSceneCast } from './sceneFit';
+import { parseCharacterImportance } from './characterWeight';
+import { characterFitsPlace, filterCastDelta, inferPlaceChanged, openingFittingIds, stageSceneCast } from './sceneFit';
 import {
   isNearDuplicate,
   knowledgeFactLine,
@@ -487,6 +488,44 @@ export interface WriteOptions {
 /** A Write-as line: the player typed it, and it belongs to that character. */
 export function isUserInjection(turn: { role: string; asCharacterId?: string | null }): boolean {
   return turn.role === 'user' && !!turn.asCharacterId;
+}
+
+/** The latest user turn, when it is a Write-as line. A later You line hides it. */
+function latestInjectedUserTurn(turns: Turn[]): Turn | null {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    if (turns[i].role !== 'user') continue;
+    return turns[i].asCharacterId ? turns[i] : null;
+  }
+  return null;
+}
+
+/**
+ * Narration after a Write-as line. The injected words already count as that NPC's.
+ * One short paragraph. No new speaker, and nobody new enters the room.
+ */
+export function injectionFollowUpBrief(opts: {
+  name: string;
+  line: string;
+  location: string;
+}): string {
+  const name = opts.name.trim() || 'They';
+  const line = opts.line.trim().replace(/\s+/g, ' ').slice(0, 280);
+  const loc = opts.location.trim() || 'the current place';
+  const said = line
+    ? `${name} already said or did this, and it counts as ${name}'s line: "${line}". `
+    : `${name} already took a turn, and it counts as ${name}'s. `;
+  return (
+    `${said}Place: ${loc}. ` +
+    'Write one short paragraph that describes what they said or did and how the room takes it. ' +
+    'Do not quote a new speaker. Do not bring anyone into the room. Do not give the line to anyone else.'
+  );
+}
+
+/** A Write-as reply is narration only. Speak beats cannot survive a resume. */
+export function injectionFollowUpBeats(planned: DirectorBeat[], brief: string): DirectorBeat[] {
+  const narration = planned.filter((b) => b.type === 'narration' && b.brief.trim());
+  if (narration.length > 0) return narration;
+  return [{ type: 'narration', brief }];
 }
 
 /** You and Write-as lines can redo the reply that follows them. Narrator and NPC lines use Rewrite this passage. */
@@ -1518,11 +1557,30 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
   // The running summary stays on the post-turn pass so this reply does not wait on it.
   let beats: DirectorBeat[] = [];
   const enterIds: string[] = [];
+  const resumed = opts.resumeBeats ?? [];
+  const resumedInjection = !opts.asCharacterId && resumed.length > 0
+    ? latestInjectedUserTurn(ctx.turns)
+    : null;
+  const injectionReply = !!opts.asCharacterId || !!resumedInjection;
+  const injectionBrief = injectionReply
+    ? injectionFollowUpBrief({
+      name: opts.asCharacterId
+        ? (hands?.name?.trim() || 'They')
+        : (ctx.characters.find((c) => c.id === resumedInjection?.asCharacterId)?.name?.trim() || 'They'),
+      line: opts.asCharacterId ? moveText : (resumedInjection?.text ?? ''),
+      location: ctx.episode.location
+    })
+    : '';
   try {
-    // Who answers comes from the player's line. Resume still runs leftover replies after Stop.
-    if (opts.resumeBeats && opts.resumeBeats.length > 0) {
+    // A Write-as line is already that NPC's speech. The reply is narration, not another voice.
+    if (injectionReply) {
+      progress(resumed.length > 0 ? 'Writing…' : 'narrating…');
+      beats = injectionFollowUpBeats(resumed, injectionBrief);
+      if (resumed.length === 0) await clearPendingPlan(opts.episode.id);
+    } else if (resumed.length > 0) {
+      // Who answers comes from the player's line. Resume still runs leftover replies after Stop.
       progress('Writing…');
-      beats = opts.resumeBeats;
+      beats = resumed;
     } else {
       progress('Planning the scene…');
       try {
@@ -1567,22 +1625,10 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
     || activeGuests(ctx.episode).length > 0;
   const sceneGuests = () => activeGuests(ctx.episode);
   const speakOpts = { requireDialogue, episode: ctx.episode, composeMode: opts.mode };
-  if (opts.asCharacterId) {
-    const kept = beats.filter((b) => !(
-      b.type === 'speak' && 'characterId' in b && b.characterId === opts.asCharacterId
-    ));
-    beats = kept.length > 0
-      ? kept
-      : [{
-        type: 'narration',
-        brief: directorFallbackNarrationBrief({
-          mode: opts.mode,
-          playerText,
-          location: ctx.episode.location,
-          inScene
-        })
-      }];
+  if (injectionReply) {
+    beats = injectionFollowUpBeats(beats, injectionBrief);
   }
+  const narrLength: TurnLength = injectionReply ? 'beat' : opts.length;
   const remainingFrom = (completed: number) => beats.slice(completed);
   const openQ = priorOpenQuestionText(
     ctx.turns,
@@ -1602,7 +1648,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
         const meta: StreamMeta = { role: 'narrator' };
         progress('narrating…');
         opts.onDelta('', meta);
-        const narrCap = proseCharBudget(model, narrOutTokens(model, opts.length));
+        const narrCap = proseCharBudget(model, narrOutTokens(model, narrLength));
         const narrText = await withOverflowRetry(async (pack) => {
           const focus = focusFromBeat(beat, ctx.characters, sceneGuests(), enterIds);
           const narrSystem = buildNarratorSystemPrompt(ctx, {
@@ -1615,13 +1661,13 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
             provider, model,
             system: narrSystem,
             messages: buildNarrationBeatMessages(
-              ctx.turns, ctx.characters, beat.brief, opts.length, sceneGuests(), ctx.episode,
+              ctx.turns, ctx.characters, beat.brief, narrLength, sceneGuests(), ctx.episode,
               narrSystem.length,
               historyPackFor(model, 'narrator', pack, narrCap),
               narrationSceneDate(opts.world, ctx.episode),
               opts.mode
             ),
-            length: opts.length,
+            length: narrLength,
             signal: opts.signal,
             onProgress: progress,
             onAccumulated: (acc) => opts.onDelta(acc, meta)
@@ -4331,13 +4377,10 @@ export async function beginNextSeason(world: World, season: Season, wrap: Season
   const openPlace = openLocationId
     ? worldPlaces.find((l) => l.id === openLocationId)
     : worldPlaces.find((l) => l.name.trim() && l.name.trim().toLowerCase() === openLocation.trim().toLowerCase());
-  const fittingIds = allCharacters
-    .filter((c) => !c.isPlayer && characterFitsPlace(c, {
-      name: openPlace?.name || openLocation,
-      inhabitants: openPlace?.inhabitants ?? ''
-    }))
-    .slice(0, ROOM_NAMED_CAP)
-    .map((c) => c.id);
+  const fittingIds = openingFittingIds(allCharacters.filter((c) => !c.isPlayer && characterFitsPlace(c, {
+    name: openPlace?.name || openLocation,
+    inhabitants: openPlace?.inhabitants ?? ''
+  })));
   const castIds = playerId
     ? [playerId, ...fittingIds.filter((id) => id !== playerId)]
     : fittingIds;
@@ -4647,6 +4690,7 @@ export async function draftCharacter(world: World | null, description: string): 
     backstory: string; summary: string;
     speechStyle: string; exampleLines: string[]; traits: string; desires: string;
     fears: string; flaws: string; secrets: string; mustNotKnow?: string; anchors: string[];
+    importance?: string;
     state?: { goal?: string; emotion?: string; location?: string; condition?: string };
   }>(
     world,
@@ -4659,9 +4703,11 @@ export async function draftCharacter(world: World | null, description: string): 
     '"traits": string, "desires": string, "fears": string, "flaws": string, "secrets": "<something they hide>", ' +
     '"mustNotKnow": "<facts they must not know yet, or empty>", ' +
     '"anchors": [<3-4 hard behavioural rules they never break, e.g. "Never lies in writing">], ' +
+    '"importance": "lead|regular|occasional|background", ' +
     '"state":{"goal":"<what they want right now>","emotion":"<mood>","location":"<where they are>","condition":"<physical/social condition>"}}\n' +
     'Make them specific, contradictory in believable ways, never generic. ' +
-    'speechStyle is how they sound when heard. exampleLines are lines they would actually say, not narration.',
+    'speechStyle is how they sound when heard. exampleLines are lines they would actually say, not narration. ' +
+    'importance is how often they belong: lead carries the story, regular when the place fits, occasional when the moment needs them, background unless called on. Default regular.',
     `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}Character to create: ${description}`
   );
   const state: CharacterState | undefined = result.state
@@ -4672,9 +4718,10 @@ export async function draftCharacter(world: World | null, description: string): 
         condition: (result.state.condition ?? '').trim()
       }
     : undefined;
-  const { state: _s, ...rest } = result;
+  const { state: _s, importance: rawImportance, ...rest } = result;
   return {
     ...rest,
+    importance: parseCharacterImportance(rawImportance) ?? 'regular',
     mustNotKnow: (result.mustNotKnow ?? '').trim(),
     ...(state ? { state } : {})
   };

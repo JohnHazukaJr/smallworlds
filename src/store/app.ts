@@ -5,7 +5,6 @@ import { normalizeScrollBackdrop, type ScrollBackdrop } from '../ui/scrollBackdr
 export type Screen = 'library' | 'story' | 'cast' | 'locations' | 'sequel' | 'profile' | 'settings' | 'onboard';
 export type MoodId = 'ember' | 'ash' | 'frost' | 'rot' | 'dusk' | 'bloom' | 'storm' | 'brine';
 export type BackdropId = 'scene' | 'moment' | 'character' | 'none';
-export type AvatarSize = 'S' | 'M' | 'L';
 /** How spoken turns sit on the page: running prose, or a staged cast list. */
 export type DialogueStyle = 'prose' | 'staged';
 export type { ScrollBackdrop };
@@ -14,8 +13,8 @@ export type { ScrollBackdrop };
 export interface DisplayPrefs {
   /** prose = novel page with inline attribution; staged = avatar + name plate per line */
   dialogueStyle: DialogueStyle;
-  /** portrait plate height in the story scroll */
-  avatarSize: AvatarSize;
+  /** portrait plate height in the story scroll, in px */
+  avatarSize: number;
   /** prose font size in px */
   textSize: number;
   /** 0–80 — darkness of the air behind the story text */
@@ -33,9 +32,28 @@ export interface DisplayPrefs {
   aiSetsScrollBg: boolean;
 }
 
+export const AVATAR_MIN = 56;
+export const AVATAR_MAX = 144;
+export const AVATAR_STEP = 8;
+export const DEFAULT_AVATAR_PX = 80;
+
+const LEGACY_AVATAR_PX: Record<string, number> = { S: 56, M: 80, L: 104 };
+
+/** Map a saved portrait size onto the slider. Legacy S/M/L stay at their old heights. */
+export function normalizeAvatarSize(raw: unknown): number {
+  if (typeof raw === 'string' && Object.prototype.hasOwnProperty.call(LEGACY_AVATAR_PX, raw)) {
+    return LEGACY_AVATAR_PX[raw];
+  }
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
+  if (!Number.isFinite(n)) return DEFAULT_AVATAR_PX;
+  const clamped = Math.min(AVATAR_MAX, Math.max(AVATAR_MIN, n));
+  const steps = Math.round((clamped - AVATAR_MIN) / AVATAR_STEP);
+  return AVATAR_MIN + steps * AVATAR_STEP;
+}
+
 export const DEFAULT_DISPLAY: DisplayPrefs = {
   dialogueStyle: 'prose',
-  avatarSize: 'M',
+  avatarSize: DEFAULT_AVATAR_PX,
   textSize: 20,
   // Enough air for type to read, light enough that the place still shows through glass.
   textScrim: 22,
@@ -45,13 +63,9 @@ export const DEFAULT_DISPLAY: DisplayPrefs = {
   aiSetsScrollBg: true
 };
 
-export const AVATAR_PX: Record<AvatarSize, number> = { S: 56, M: 80, L: 104 };
-/** Compact story scroll — keep a line of prose beside the plate. */
-export const COMPACT_AVATAR_MAX = 72;
-
-export function storyAvatarHeight(size: AvatarSize, compact: boolean): number {
-  const raw = AVATAR_PX[size];
-  return compact ? Math.min(raw, COMPACT_AVATAR_MAX) : raw;
+/** Plate height for every speaker. The chosen size is the height on every screen. */
+export function storyAvatarHeight(size: unknown): number {
+  return normalizeAvatarSize(size);
 }
 
 /** Write = full chrome + composer; Read = distraction-free. Director is always an overlay. */
@@ -137,7 +151,15 @@ export const useApp = create<AppStore>()(
       setLayout: (layout) => set({ layout: normalizeStoryLayout(layout) }),
       setMood: (mood) => set({ mood }),
       setBackdrop: (backdrop) => set({ backdrop }),
-      setDisplay: (p) => set((s) => ({ display: { ...s.display, ...p } }))
+      setDisplay: (p) => set((s) => ({
+        display: {
+          ...s.display,
+          ...p,
+          avatarSize: p.avatarSize === undefined
+            ? s.display.avatarSize
+            : normalizeAvatarSize(p.avatarSize)
+        }
+      }))
     }),
     {
       name: 'small-worlds-app',
@@ -146,16 +168,16 @@ export const useApp = create<AppStore>()(
       }) as Partial<AppStore>,
       merge: (persisted, current) => {
         const p = (persisted ?? {}) as Partial<AppStore>;
+        const saved = p.display as (Partial<DisplayPrefs> & { avatarSize?: unknown }) | undefined;
         return {
           ...current,
           ...p,
           layout: normalizeStoryLayout(p.layout),
           display: {
             ...DEFAULT_DISPLAY,
-            ...(p.display ?? {}),
-            scrollBackdrop: normalizeScrollBackdrop(
-              (p.display as Partial<DisplayPrefs> | undefined)?.scrollBackdrop
-            )
+            ...(saved ?? {}),
+            avatarSize: normalizeAvatarSize(saved?.avatarSize ?? DEFAULT_DISPLAY.avatarSize),
+            scrollBackdrop: normalizeScrollBackdrop(saved?.scrollBackdrop)
           },
           // Never restore one-shot focus from disk.
           pendingCharacterId: null,

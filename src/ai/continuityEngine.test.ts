@@ -446,7 +446,10 @@ describe('director prompt budgets', () => {
     const narr = buildNarrationBeatMessages(
       turns, [ada, ben], 'the room reacts', 'scene', [], undefined, 0, undefined, '', 'play'
     ).map((m) => m.content).join('\n');
-    expect(narr).toMatch(/Do not reprint the line or hand it to anyone else/);
+    expect(narr).toMatch(/It already counts as Ada's line/);
+    expect(narr).toMatch(/Describe what they said or did in narration/);
+    expect(narr).toMatch(/Do not hand the line to anyone else/);
+    expect(narr).toMatch(/Describe that moment; do not add another quoted line/);
   });
 
   it('puts a steer after the transcript and tells a continuation to move forward', () => {

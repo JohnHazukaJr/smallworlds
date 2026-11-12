@@ -272,6 +272,7 @@ describe('image request adapter', () => {
 
   it('adds conservative sizes after the unsized body, not CogView-only 864x1152', () => {
     expect(imageSizeCandidates('portrait')).toEqual(['1024x1024', '1024x1536']);
+    expect(imageSizeCandidates('landscape')).toEqual(['1024x1024', '1792x1024']);
     expect(imageSizeCandidates('portrait').join(' ')).not.toMatch(/864x1152/);
     const bodies = imageGenerationsBodies({
       model: 'any-image-model',

@@ -301,6 +301,9 @@ export interface Turn {
 
 // ---------- Characters ----------
 
+/** How often this person belongs in the story. Missing on older cards means regular. */
+export type CharacterImportance = 'lead' | 'regular' | 'occasional' | 'background';
+
 export interface Relationship {
   targetId: string;
   /** ally, rival, lover, debt, family, ... */
@@ -321,6 +324,11 @@ export interface Character {
   name: string;
   /** short role line, e.g. "harbour registrar · reluctant ally" */
   role: string;
+  /**
+   * How often they belong on stage. Missing means regular.
+   * The player card has no weight.
+   */
+  importance?: CharacterImportance;
   /** Nicknames and forms of address. Missing on older cards means none. */
   aliases?: string[];
   hue: number;

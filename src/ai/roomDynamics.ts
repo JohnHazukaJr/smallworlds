@@ -6,7 +6,8 @@
  * decides the plan; this only supplies signals and picks the fallback replier.
  */
 
-import type { Character, EpisodeGuest, Turn, TurnLength } from '../types';
+import type { Character, CharacterImportance, EpisodeGuest, Turn, TurnLength } from '../types';
+import { characterImportance, importanceSpeakScore } from './characterWeight';
 
 export type SpeakerKind = 'cast' | 'guest';
 
@@ -18,6 +19,8 @@ export interface SpeakerCandidate {
   aliases?: string[];
   /** Role line. A distinctive word is used only when one person owns it. */
   role?: string;
+  /** Story weight. Missing reads as regular. */
+  importance?: CharacterImportance;
 }
 
 /** How directly a line points at a person. */
@@ -154,7 +157,8 @@ export function speakerCandidates(
       name: c.name.trim(),
       kind: 'cast' as const,
       aliases: (c.aliases ?? []).map((a) => a.trim()).filter(Boolean),
-      role: c.role
+      role: c.role,
+      importance: characterImportance(c)
     })),
     ...guests.map((g) => ({ id: g.id, name: g.name.trim(), kind: 'guest' as const }))
   ].filter((c) => c.name.length > 0);
@@ -335,7 +339,8 @@ export function rankReplySpeakers(opts: {
 
       if (turnsSince === 0) score += LAST_VOICE_PULL;
 
-      if (c.kind === 'cast') score += 2;
+      if (c.kind === 'guest') score += 2;
+      else score += importanceSpeakScore(c);
       score -= i * 0.01;
       return { ...c, score, address, turnsSince };
     })

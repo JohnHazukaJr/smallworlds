@@ -1,11 +1,14 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { useMemo, useRef, useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   draftColdOpenNarration, fleshOutCharacter, fleshOutLocation,
   fleshOutNarratorRules, fleshOutPremise, fleshOutRelationships, fleshOutWorldEverything,
   fleshOutWorldLore, seedOpeningMemory
 } from '../ai/engine';
+import { characterImportance } from '../ai/characterWeight';
 import { CharacterPortraitTools } from '../components/CharacterPortraitTools';
+import { StoryWeightPicker } from '../components/StoryWeightPicker';
+import { PlacePhotoTools } from '../components/PlacePhotoTools';
 import { db, deleteWorld, recordTombstones, safeWrite } from '../db';
 import { formatUserError } from '../errors';
 import { normalizeRelationships, pruneRelationshipsToCast } from '../relationships';
@@ -14,7 +17,6 @@ import { resolveModel, useSettings } from '../store/settings';
 import type { Character, Episode, Location, Season, World, WorldAISettings } from '../types';
 import { characterAvatarStyle } from '../ui/avatar';
 import { Bar, Chip, ErrorNote, Field, Spinner, Toggle, editorsStacked, useViewport } from '../ui/bits';
-import { fileToPortraitImage } from '../ui/image';
 import { avatarStyle, ACCENT } from '../ui/theme';
 import { LegalLinks } from './Legal';
 import {
@@ -1052,6 +1054,7 @@ export function Onboard() {
               {places.map((l) => (
                 <PlaceCard
                   key={l.id} l={l} expanded={expandedPlaceId === l.id}
+                  world={worldContext()}
                   isOpening={episode?.locationId === l.id}
                   hasAI={hasAI}
                   fleshBusy={busy === `Fleshing ${l.name || 'place'}…`}
@@ -1315,9 +1318,10 @@ function CastCard({ c, expanded, world, hasAI, fleshBusy, onToggle, onRemove, on
         <div style={characterAvatarStyle(c, 34)} />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
           <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>{c.name || 'unnamed'}{c.selfTag ? ' · me' : ''}</div>
-          {c.role && (
+          {(c.role || (!c.isPlayer && characterImportance(c) !== 'regular')) && (
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
               {c.role}
+              {!c.isPlayer && characterImportance(c) !== 'regular' ? `${c.role ? ' · ' : ''}${characterImportance(c)}` : ''}
             </div>
           )}
         </div>
@@ -1347,6 +1351,9 @@ function CastCard({ c, expanded, world, hasAI, fleshBusy, onToggle, onRemove, on
             </button>
           )}
           <Field label="Role"><input defaultValue={c.role} onBlur={(e) => onPatch({ role: e.target.value })} /></Field>
+          {!c.isPlayer && (
+            <StoryWeightPicker value={c.importance} onChange={(importance) => onPatch({ importance })} />
+          )}
           <Field label="Who they are"><textarea rows={3} defaultValue={c.summary} onBlur={(e) => onPatch({ summary: e.target.value })} /></Field>
           <Field label="Backstory"><textarea rows={2} defaultValue={c.backstory} onBlur={(e) => onPatch({ backstory: e.target.value })} /></Field>
           <Field label="How they talk"><textarea rows={2} defaultValue={c.speechStyle} onBlur={(e) => onPatch({ speechStyle: e.target.value })} /></Field>
@@ -1390,27 +1397,11 @@ function CastCard({ c, expanded, world, hasAI, fleshBusy, onToggle, onRemove, on
   );
 }
 
-function PlaceCard({ l, expanded, isOpening, hasAI, fleshBusy, onToggle, onRemove, onSetOpening, onPatch, onFlesh }: {
-  l: Location; expanded: boolean; isOpening: boolean; hasAI: boolean; fleshBusy: boolean;
+function PlaceCard({ l, world, expanded, isOpening, hasAI, fleshBusy, onToggle, onRemove, onSetOpening, onPatch, onFlesh }: {
+  l: Location; world: World; expanded: boolean; isOpening: boolean; hasAI: boolean; fleshBusy: boolean;
   onToggle: () => void; onRemove: () => void;
   onSetOpening: () => void; onPatch: (p: Partial<Location>) => void; onFlesh: () => void;
 }) {
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-
-  const onFile = async (file: File) => {
-    setBusy(true);
-    setError('');
-    try {
-      onPatch({ portrait: await fileToPortraitImage(file) });
-    } catch (e) {
-      setError(formatUserError(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <div className="craft-row" style={{ overflow: 'hidden', outline: isOpening ? `1px solid ${ACCENT}` : undefined }}>
       <div style={{ padding: '10px 14px', display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }} onClick={onToggle}>
@@ -1430,25 +1421,21 @@ function PlaceCard({ l, expanded, isOpening, hasAI, fleshBusy, onToggle, onRemov
       </div>
       {expanded && (
         <div style={{ padding: '2px 14px 14px', display: 'flex', flexDirection: 'column', gap: 10 }} onClick={(e) => e.stopPropagation()}>
-          <input
-            ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }}
-            onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); e.target.value = ''; }}
+          <PlacePhotoTools
+            location={l}
+            world={world}
+            onChange={(next) => onPatch(next)}
           />
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }} disabled={busy} onClick={() => fileRef.current?.click()}>
-              {busy ? 'Uploading…' : l.portrait ? 'Change photo' : 'Upload photo'}
-            </button>
-            {l.portrait && <button className="btn-quiet" style={{ fontSize: 11 }} onClick={() => onPatch({ portrait: null })}>remove photo</button>}
             {!isOpening && (
               <button className="btn-quiet" style={{ fontSize: 11 }} onClick={onSetOpening}>set as opening</button>
             )}
             {hasAI && (
-              <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }} disabled={fleshBusy || busy} onClick={onFlesh}>
+              <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }} disabled={fleshBusy} onClick={onFlesh}>
                 {fleshBusy ? 'Working…' : 'Fill in this sheet'}
               </button>
             )}
           </div>
-          {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
           <Field label="Name"><input defaultValue={l.name} onBlur={(e) => onPatch({ name: e.target.value })} /></Field>
           <Field label="Tagline"><input defaultValue={l.tagline} onBlur={(e) => onPatch({ tagline: e.target.value })} /></Field>
           <Field label="What it is"><textarea rows={3} defaultValue={l.summary} onBlur={(e) => onPatch({ summary: e.target.value })} /></Field>

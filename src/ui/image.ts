@@ -26,7 +26,10 @@ export async function fileToSceneImage(file: File, maxDim = 1920, quality = 0.85
   }
 }
 
-/** Tighter compression for character / location gallery photos (IndexedDB-friendly). */
+/** Character photos. Long edge stays at the portrait request size so story plates stay sharp. */
+export const PORTRAIT_MAX_PX = 1536;
+export const PORTRAIT_JPEG_QUALITY = 0.82;
+
 export async function fileToPortraitImage(file: File): Promise<string> {
-  return fileToSceneImage(file, 720, 0.72);
+  return fileToSceneImage(file, PORTRAIT_MAX_PX, PORTRAIT_JPEG_QUALITY);
 }

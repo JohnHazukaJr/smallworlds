@@ -12,6 +12,7 @@ import type {
   Character, ContinuityFact, Episode, Location, OpenThread, Season, StoryStance, World, WorldAISettings
 } from '../types';
 import { StoryDateFields } from './StoryDateFields';
+import { PlacePhotoTools } from './PlacePhotoTools';
 import { Bar, Chip, ErrorNote, Field, Mono, Sheet, Spinner, Toggle } from '../ui/bits';
 import { characterAvatarStyle } from '../ui/avatar';
 import { avatarStyle } from '../ui/theme';
@@ -651,6 +652,11 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               }}>set as the place</button>
               <button className="btn-quiet" style={{ fontSize: 10 }} onClick={() => { onClose(); goLocations(selectedLoc.id); }}>full editor</button>
             </div>
+            <PlacePhotoTools
+              location={selectedLoc}
+              world={world}
+              onChange={({ portrait }) => patchLoc(selectedLoc.id, { portrait })}
+            />
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 12 }}>
               <Field label="Name">
                 <input key={selectedLoc.id + '-name'} defaultValue={selectedLoc.name}

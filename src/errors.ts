@@ -117,7 +117,9 @@ function looksLikePortrait(msg: string): boolean {
   return (
     m.includes('generating a portrait') ||
     m.includes('sent for a portrait') ||
-    m.includes('portrait generation needs')
+    m.includes('portrait generation needs') ||
+    m.includes('generating a place photo') ||
+    m.includes('place photo generation needs')
   );
 }
 

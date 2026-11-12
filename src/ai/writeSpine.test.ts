@@ -23,12 +23,14 @@ import {
   selectDirectorFacts,
   selectDirectorThreads,
   selectFactsPinnedFirst,
-  selectThreadsPinnedFirst
+  selectThreadsPinnedFirst,
+  directorSystemPrompt,
+  presenceSheet
 } from './prompts';
 import { SPEAK_FORMAT_RULES, SPOKEN_VOICE_RULES } from './dialogueFormat';
-import { filterCastDelta, stageSceneCast } from './sceneFit';
+import { filterCastDelta, openingFittingIds, stageSceneCast } from './sceneFit';
 import { LIVE_MEMORY_TOOL } from './utilityCall';
-import type { Character, ContinuityFact, EpisodeGuest, OpenThread, PlotTarget, Turn } from '../types';
+import type { Character, CharacterImportance, ContinuityFact, EpisodeGuest, OpenThread, PlotTarget, Turn } from '../types';
 
 const npc = (id: string, name: string): Character => ({
   id, worldId: 'w', name, role: '', age: '', appearance: '', mannerisms: '', summary: '',
@@ -1020,12 +1022,13 @@ describe('stageSceneCast', () => {
   const person = (
     id: string,
     name: string,
-    patch: Partial<{ role: string; age: string; location: string; aliases: string[] }>
+    patch: Partial<{ role: string; age: string; location: string; aliases: string[]; importance: CharacterImportance }>
   ) => {
     const c = npc(id, name);
     c.role = patch.role ?? '';
     c.age = patch.age ?? '';
     c.aliases = patch.aliases;
+    c.importance = patch.importance;
     c.state = { ...c.state, location: patch.location ?? '' };
     return c;
   };
@@ -1113,5 +1116,203 @@ describe('stageSceneCast', () => {
       inhabitants: 'the teacher and the students'
     });
     expect(delta?.enter).toEqual(['t']);
+  });
+
+  it('leaves a fitting background out until the line names them', () => {
+    const gus = person('g', 'Gus', { role: 'dockhand', location: 'the harbour', importance: 'background' });
+    const quiet = stageSceneCast({
+      castIds: ['p'],
+      characters: [player, ada, gus],
+      placeName: 'Harbour office',
+      inhabitants: 'the registrar',
+      playerText: 'I look around.',
+      placeChanged: true
+    });
+    expect(quiet.castIds).toContain('a');
+    expect(quiet.castIds).not.toContain('g');
+    expect(quiet.alsoFits.map((c) => c.id)).not.toContain('g');
+
+    const named = stageSceneCast({
+      castIds: ['p'],
+      characters: [player, ada, gus],
+      placeName: 'Harbour office',
+      inhabitants: 'the registrar',
+      playerText: 'I ask Gus about the tide.',
+      placeChanged: true
+    });
+    expect(named.castIds).toContain('g');
+  });
+
+  it('keeps an occasional off the card and on the also-fits list', () => {
+    const nia = person('n', 'Nia', { role: 'tide clerk', location: 'the harbour', importance: 'occasional' });
+    const scene = stageSceneCast({
+      castIds: ['p'],
+      characters: [player, ada, nia],
+      placeName: 'Harbour office',
+      inhabitants: 'the registrar',
+      playerText: 'I look around.',
+      placeChanged: true
+    });
+    expect(scene.castIds).toContain('a');
+    expect(scene.castIds).not.toContain('n');
+    expect(scene.alsoFits.map((c) => c.id)).toContain('n');
+  });
+
+  it('drops an occasional when the place changes and keeps them when it does not', () => {
+    const nia = person('n', 'Nia', { role: 'tide clerk', location: 'the harbour', importance: 'occasional' });
+    const stayed = stageSceneCast({
+      castIds: ['p', 'n'],
+      characters: [player, ada, nia],
+      placeName: 'Harbour office',
+      inhabitants: 'the registrar',
+      playerText: 'I look around.',
+      placeChanged: false
+    });
+    expect(stayed.castIds).toContain('n');
+
+    const moved = stageSceneCast({
+      castIds: ['p', 'n'],
+      characters: [player, ada, nia],
+      placeName: 'Harbour office',
+      inhabitants: 'the registrar',
+      playerText: 'I look around.',
+      placeChanged: true
+    });
+    expect(moved.castIds).not.toContain('n');
+    expect(moved.alsoFits.map((c) => c.id)).toContain('n');
+  });
+
+  it('fills an empty room with occasionals who fit', () => {
+    const nia = person('n', 'Nia', { location: 'the harbour', importance: 'occasional' });
+    const scene = stageSceneCast({
+      castIds: ['p'],
+      characters: [player, nia],
+      placeName: 'Harbour office',
+      inhabitants: '',
+      playerText: 'I look around.',
+      placeChanged: true
+    });
+    expect(scene.castIds).toContain('n');
+  });
+
+  it('keeps leads when more regulars fit than the room can hold', () => {
+    const regulars = Array.from({ length: 6 }, (_, i) =>
+      person(`r${i}`, `Reg${i}`, { location: 'the harbour market', importance: 'regular' })
+    );
+    const leads = [
+      person('l0', 'Lark', { location: 'the harbour market', importance: 'lead' }),
+      person('l1', 'Ivo', { location: 'the harbour market', importance: 'lead' })
+    ];
+    const scene = stageSceneCast({
+      castIds: ['p'],
+      characters: [player, ...regulars, ...leads],
+      placeName: 'Harbour market',
+      inhabitants: '',
+      playerText: 'I look around.',
+      placeChanged: true
+    });
+    expect(scene.castIds).toEqual(['p', 'l0', 'l1', 'r0', 'r1', 'r2', 'r3']);
+    expect(scene.alsoFits.map((c) => c.id)).toEqual(['r4', 'r5']);
+  });
+
+  it('keeps someone who has spoken ahead of an unspoken lead in a crowded room', () => {
+    const leads = Array.from({ length: 6 }, (_, i) =>
+      person(`l${i}`, `Lead${i}`, { location: 'the harbour market', importance: 'lead' })
+    );
+    const spoken = person('r', 'Rin', { location: 'the harbour market', importance: 'regular' });
+    const scene = stageSceneCast({
+      castIds: ['p'],
+      characters: [player, ...leads, spoken],
+      placeName: 'Harbour market',
+      inhabitants: '',
+      playerText: 'I look around.',
+      placeChanged: true,
+      turns: [{
+        id: 't', episodeId: 'e', worldId: 'w', role: 'character', mode: null,
+        characterId: 'r', text: 'Morning.', createdAt: 0
+      }]
+    });
+    expect(scene.castIds).toContain('r');
+    expect(scene.castIds).not.toContain('l5');
+    expect(scene.castIds.filter((id) => id !== 'p')).toHaveLength(6);
+  });
+
+  it('rejects a background enter unless the line brings them', () => {
+    const gus = person('g', 'Gus', { role: 'dockhand', location: 'Room 12', importance: 'background' });
+    const blocked = filterCastDelta({
+      delta: { enter: ['g', 't'] },
+      playerText: 'I sit down.',
+      characters: [player, teacher, gus],
+      castIds: ['p'],
+      placeName: 'Room 12',
+      inhabitants: 'the teacher and the students'
+    });
+    expect(blocked?.enter).toEqual(['t']);
+
+    const brought = filterCastDelta({
+      delta: { enter: ['g'] },
+      playerText: 'I ask Gus about the tide.',
+      characters: [player, gus],
+      castIds: ['p'],
+      placeName: 'Harbour office',
+      inhabitants: 'the registrar'
+    });
+    expect(brought?.enter).toEqual(['g']);
+  });
+
+  it('still lets an occasional enter when they fit the place', () => {
+    const nia = person('n', 'Nia', { location: 'Room 12', importance: 'occasional' });
+    const delta = filterCastDelta({
+      delta: { enter: ['n'] },
+      playerText: 'I sit down.',
+      characters: [player, nia],
+      castIds: ['p'],
+      placeName: 'Room 12',
+      inhabitants: 'the teacher and the students'
+    });
+    expect(delta?.enter).toEqual(['n']);
+  });
+});
+
+describe('openingFittingIds', () => {
+  const weighted = (id: string, name: string, importance: CharacterImportance) => {
+    const c = npc(id, name);
+    c.importance = importance;
+    return c;
+  };
+
+  it('opens on leads before regulars and skips background', () => {
+    const ids = openingFittingIds([
+      weighted('g', 'Gus', 'background'),
+      weighted('r', 'Rin', 'regular'),
+      weighted('l', 'Lark', 'lead'),
+      weighted('o', 'Nia', 'occasional')
+    ]);
+    expect(ids).toEqual(['l', 'r']);
+  });
+
+  it('uses occasionals when nobody more central fits', () => {
+    expect(openingFittingIds([
+      weighted('g', 'Gus', 'background'),
+      weighted('o', 'Nia', 'occasional')
+    ])).toEqual(['o']);
+  });
+});
+
+describe('story weight in prompts', () => {
+  it('tells the director what the four weights mean', () => {
+    expect(directorSystemPrompt('speak', true, 'scene')).toMatch(/Background stays in narration/);
+    expect(directorSystemPrompt('speak', true, 'scene')).toMatch(/Do not give a background character the floor/);
+  });
+
+  it('labels a lead and a background body, and leaves regular unlabeled', () => {
+    const lead = npc('l', 'Ada');
+    lead.importance = 'lead';
+    const regular = npc('r', 'Ben');
+    const background = npc('g', 'Gus');
+    background.importance = 'background';
+    expect(presenceSheet(lead, [lead])).toMatch(/Weight: lead/);
+    expect(presenceSheet(regular, [regular])).not.toMatch(/Weight:/);
+    expect(presenceSheet(background, [background])).toMatch(/Weight: background/);
   });
 });

@@ -9,6 +9,7 @@ import { inferContextWindowTokens } from './contextBudget';
 import { deliveryPhrase, parseDeliveryTone } from './deliveryTone';
 import { SPEAK_FORMAT_RULES, SPOKEN_VOICE_RULES } from './dialogueFormat';
 import { lastOpenQuestion, roomDynamicsLines, speakerCandidates } from './roomDynamics';
+import { characterImportance } from './characterWeight';
 import { characterFitsPlace, lineBringsCharacter } from './sceneFit';
 import { directorCloseGuidance, narratorCloseGuidance, stancePlaybook } from './storyStance';
 
@@ -119,12 +120,30 @@ function liveStateBlock(c: Character, includeGoal: boolean): string | null {
   );
 }
 
+/** One line so narration treats a lead and a background body differently. Regular stays unlabeled. */
+function weightPresenceLine(c: Character): string | null {
+  if (c.isPlayer) return null;
+  const weight = characterImportance(c);
+  if (weight === 'regular') return null;
+  if (weight === 'lead') return 'Weight: lead — they carry this story; keep them present.';
+  if (weight === 'occasional') {
+    return 'Weight: occasional — use them when this moment needs them, not as a standing voice.';
+  }
+  return 'Weight: background — room texture; they speak only when addressed.';
+}
+
+function directorCastLine(c: Character, detail = ''): string {
+  const role = c.role ? ` (${c.role})` : '';
+  return `- ${c.id} · ${c.name}${role} · ${characterImportance(c)}${detail}`;
+}
+
 /** Physical body in the room — never cut for anyone on stage. */
 export function presenceSheet(c: Character, all: Character[]): string {
   const rel = playerRelLine(c, all);
   const lines = [
     `### ${c.name}${c.isPlayer ? ' (THE PLAYER — never write their dialogue, decisions, or inner thoughts)' : ''}`,
     c.role && `Role: ${c.role}`,
+    weightPresenceLine(c),
     c.age && `Age/read: ${c.age}`,
     c.appearance && `Appearance: ${c.appearance}`,
     c.mannerisms && `Mannerisms (recurring physical habits and tics — weave them in naturally, never all at once): ${c.mannerisms}`,
@@ -1859,7 +1878,7 @@ export function buildNarrationBeatMessages(
   const moveJob = direction
     ? direction
     : finished
-      ? `${finished.name} already said or did this exact line: ${finished.body}. Show what changes. Do not reprint the line or hand it to anyone else.\n`
+      ? `${finished.name} already said or did this exact line: ${finished.body}. It already counts as ${finished.name}'s line. Describe what they said or did in narration. Do not quote a new speaker. Do not hand the line to anyone else.\n`
       : (
         `First job: show the consequence of the player's last move on named bodies in this room. ` +
         `Atmosphere only serves that consequence — no weather catalogue. Do not recap earlier beats.\n` +
@@ -1871,7 +1890,9 @@ export function buildNarrationBeatMessages(
     (dateLine ? `${dateLine}\n` : '') +
     `Write this: ${brief}\n` +
     `Only the people already in this room, and walk-ons already here, may appear. Do not invent a named person. Do not have anyone walk in.\n` +
-    `Lines marked [Name] were spoken by that person. Do not continue them as narration.\n\n` +
+    (finished
+      ? `Lines marked [Name] were already spoken by that person. Describe that moment; do not add another quoted line.\n\n`
+      : `Lines marked [Name] were spoken by that person. Do not continue them as narration.\n\n`) +
     `${narrationSizeHint(length)}`;
   return mergeMessages([...messages, { role: 'user', content: userContent }]);
 }
@@ -2205,6 +2226,9 @@ export function directorSystemPrompt(
     'If a speak beat asks the player a question, it must be the last speak in the plan — do not pile another voice on after an unanswered question. ' +
     'The room is not a queue. One speak beat: the person addressed. If several people were each addressed, one beat each. If nobody was addressed, the person who just asked, otherwise the last voice. Bystanders stay in the narration. ' +
     'Do not give the floor to someone because they have been quiet. ' +
+    'Story weight is how often they belong. Leads carry the chapter. Regulars belong when the place fits. ' +
+    'Occasionals enter only when this moment needs them. Background stays in narration unless this line brought them or addressed them. ' +
+    'Do not give a background character the floor just to fill a beat. ' +
     engageReply +
     steerRule +
     continueRule +
@@ -2270,14 +2294,15 @@ export function directorUserPrompt(
     name: (placeLoc?.name || ctx.episode.location || '').trim(),
     inhabitants: placeLoc?.inhabitants ?? ''
   };
-  const fittingOff = opts?.alsoFitIds
+  const fittingOff = (opts?.alsoFitIds
     ? offScene.filter((c) => opts.alsoFitIds!.includes(c.id))
-    : offScene.filter((c) => characterFitsPlace(c, place));
+    : offScene.filter((c) => characterFitsPlace(c, place))
+  ).filter((c) => characterImportance(c) !== 'background');
   const fits = fittingOff.slice(0, 4);
   const brought = offScene.find((c) => lineBringsCharacter(input, c) && !fits.some((f) => f.id === c.id));
   const alsoShown = brought ? [...fits, brought] : fits;
   const alsoList = alsoShown.length > 0
-    ? alsoShown.map((c) => `- ${c.id} · ${c.name}${c.role ? ` (${c.role})` : ''}`).join('\n')
+    ? alsoShown.map((c) => directorCastLine(c)).join('\n')
     : '(none)';
   const castList = inScene.length > 0
     ? inScene.map((c) => {
@@ -2290,7 +2315,7 @@ export function directorUserPrompt(
         anchor ? `anchor: ${clipText(anchor, 56)}` : ''
       ].filter(Boolean);
       const detail = bits.length ? ` — ${bits.join('; ')}` : '';
-      return `- ${c.id} · ${c.name}${c.role ? ` (${c.role})` : ''}${detail}`;
+      return directorCastLine(c, detail);
     }).join('\n')
     : '(no NPCs in scene yet)';
   const guestList = guests.length > 0

@@ -6,9 +6,10 @@ import { activeCalendarEvents, emptyCalendarEvent } from '../calendarEvents';
 import { db, exportWorld, guardStorage, uid, type WorldExport } from '../db';
 import { normalizeRelationships } from '../relationships';
 import type {
-  CalendarEvent, Character, CharacterState, ContinuityFact, Episode, EpisodeGuest,
+  CalendarEvent, Character, CharacterImportance, CharacterState, ContinuityFact, Episode, EpisodeGuest,
   Location, OpenThread, PlotTarget, Relationship, Season, Turn, World
 } from '../types';
+import { characterImportance, parseCharacterImportance } from './characterWeight';
 import { CALENDAR_EVENT_CAP } from '../types';
 import { calendarPatch, PLOT_TARGET_CAP, worldCalendar } from '../worldOps';
 import { isContextOverflowError, streamChat } from './client';
@@ -38,6 +39,7 @@ export const VOLUME_CHARACTER_BATCH_SYSTEM =
   'Do not invent new people. Do not add unnamed NPCs. Match exact names from the batch. ' +
   'Do not soften anchors. Keep MUST NOT KNOW. Voice, appearance, and example-line rhythm stay ' +
   'unless the story earned a change. Backstory absorbs prior volume as history. ' +
+  'importance is lead, regular, occasional, or background — how often they belong. Keep it unless the story changed their place in it. Omit it for the player. ' +
   'Call return_json. Do not write prose.';
 
 export const VOLUME_LOCATION_BATCH_SYSTEM =
@@ -93,6 +95,7 @@ export interface CharacterVolumePatch {
   secrets?: string;
   mustNotKnow?: string;
   anchors?: string[];
+  importance?: CharacterImportance;
   state?: Partial<CharacterState>;
   relationships?: { targetName?: string; kind?: string; note?: string }[];
 }
@@ -507,6 +510,9 @@ function applyCharacterPatch(
     secrets: pickText(p?.secrets, source.secrets),
     mustNotKnow: pickText(p?.mustNotKnow, source.mustNotKnow),
     anchors: pickLines(p?.anchors, source.anchors),
+    importance: source.isPlayer
+      ? source.importance
+      : parseCharacterImportance(p?.importance) ?? source.importance,
     state,
     relationships: source.relationships,
     createdAt: now,
@@ -807,6 +813,7 @@ async function distillCharacters(
       secrets: c.secrets,
       mustNotKnow: c.mustNotKnow,
       anchors: c.anchors,
+      ...(c.isPlayer ? {} : { importance: characterImportance(c) }),
       state: c.state,
       relationships: c.relationships.map((r) => {
         const target = characters.find((x) => x.id === r.targetId);
@@ -816,7 +823,7 @@ async function distillCharacters(
     const result = await withOverflowRetry((tight) => utilityJson<{ characters?: CharacterVolumePatch[] }>(
       world,
       VOLUME_CHARACTER_BATCH_SYSTEM +
-      `\n{"characters":[{"name":"<exact>","role":"","age":"","appearance":"","mannerisms":"","backstory":"","summary":"","speechStyle":"","exampleLines":[],"traits":"","desires":"","fears":"","flaws":"","secrets":"","mustNotKnow":"","anchors":[],"state":{"goal":"","emotion":"","location":"","condition":""},"relationships":[{"targetName":"","kind":"","note":""}]}]}`,
+      `\n{"characters":[{"name":"<exact>","role":"","age":"","appearance":"","mannerisms":"","backstory":"","summary":"","speechStyle":"","exampleLines":[],"traits":"","desires":"","fears":"","flaws":"","secrets":"","mustNotKnow":"","anchors":[],"importance":"lead|regular|occasional|background","state":{"goal":"","emotion":"","location":"","condition":""},"relationships":[{"targetName":"","kind":"","note":""}]}]}`,
       `Digest:\n${clip(digest, tight ? 8_000 : 16_000)}\n\nBatch (rewrite only these names):\n${JSON.stringify(payload, null, 2)}`,
       3500,
       signal,
