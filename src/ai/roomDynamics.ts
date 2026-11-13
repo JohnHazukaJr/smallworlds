@@ -355,6 +355,17 @@ export function answererCap(length: TurnLength): number {
 }
 
 /**
+ * Voices who may have a spoken line in one scene reply.
+ * A short reply is one voice. A second voice only when two people were
+ * addressed, or the reply itself is long.
+ */
+export function sceneReplySpeakerCap(length: TurnLength, addressed: number): number {
+  if (length === 'beat') return 1;
+  if (length === 'episode') return 2;
+  return addressed >= 2 ? 2 : 1;
+}
+
+/**
  * Who speaks after the player.
  * The people actually addressed, up to the length cap.
  * If nobody was addressed: the person whose question was just answered,

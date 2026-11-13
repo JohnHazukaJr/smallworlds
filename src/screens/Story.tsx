@@ -30,8 +30,7 @@ import {
 } from '../ai/dialogueFormat';
 import {
   episodeSceneDay,
-  resolveSpeakerName,
-  type DirectorBeat
+  resolveSpeakerName
 } from '../ai/prompts';
 import { StoryDateFields } from '../components/StoryDateFields';
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
@@ -59,7 +58,8 @@ import { placeChapterPictures } from '../ui/chapterPictures';
 import { writingLineText } from '../ui/bookPage';
 import { Face } from '../ui/Face';
 import { attributionRun, isDialogueBlock, lastSpokenBy } from '../ui/attribution';
-import { abortWriteNotice, unfinishedWriteNotice, NOTICE_ADD_MODEL, noticeNavAction } from '../ui/writeNotices';
+import type { DirectorBeat } from '../ai/prompts';
+import { abortWriteNotice, NOTICE_ADD_MODEL, noticeNavAction } from '../ui/writeNotices';
 import { avatarStyle, speakerInk, MOODS, ACCENT, ACCENT_RGBA } from '../ui/theme';
 import {
   characterPortraits, evaluateWorldWriteReady, formatStoryDate,
@@ -1010,31 +1010,11 @@ export function Story() {
       setTailHasText(false);
       if (e instanceof WriteAbortedError || (e as Error).name === 'AbortError') {
         const n = e instanceof WriteAbortedError ? e.beatsCompleted : 0;
-        const left = e instanceof WriteAbortedError ? e.remainingBeats.length : 0;
-        setNotice(abortWriteNotice(n, left));
-        return { status: 'aborted', beatsCompleted: n, remaining: left };
+        setNotice(abortWriteNotice(n, 0));
+        return { status: 'aborted', beatsCompleted: n, remaining: 0 };
       }
-      const n = typeof e === 'object' && e && 'beatsCompleted' in e
-        ? Math.max(0, Number((e as { beatsCompleted: number }).beatsCompleted) || 0)
-        : 0;
-      const left = typeof e === 'object' && e && 'remainingBeats' in e
-        ? Math.max(0, ((e as { remainingBeats?: unknown[] }).remainingBeats ?? []).length)
-        : 0;
-      if (left > 0) {
-        setNotice(unfinishedWriteNotice(n, left));
-      } else {
-        const classified = classifyError(e);
-        // #region agent log
-        fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H5',location:'Story.tsx:runNarration',message:'reply error shown',data:{code:classified.code,userMessage:classified.userMessage,name:(e as Error)?.name??'',detail:(classified.detail??'').slice(0,180)},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
-        setError(classified);
-        if (n > 0) {
-          setNotice(
-            `${n} line${n === 1 ? '' : 's'} saved — retry from the last reply.`
-          );
-        }
-      }
-      return { status: 'error', beatsCompleted: n, remaining: left };
+      setError(classifyError(e));
+      return { status: 'error', beatsCompleted: 0, remaining: 0 };
     } finally {
       setStreaming(false);
       setProgressLabel('');
@@ -1226,16 +1206,9 @@ export function Story() {
     } catch (e) {
       setTailHasText(false);
       if (e instanceof WriteAbortedError || (e as Error).name === 'AbortError') {
-        // #region agent log
-        fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H2',location:'Story.tsx:rewritePassage',message:'rewrite treated as stop',data:{name:(e as Error)?.name??''},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
         setNotice('Rewrite stopped. The previous line is still there.');
       } else {
-        const classified = classifyError(e);
-        // #region agent log
-        fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H5',location:'Story.tsx:rewritePassage',message:'rewrite error shown',data:{code:classified.code,userMessage:classified.userMessage,name:(e as Error)?.name??'',detail:(classified.detail??'').slice(0,180)},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
-        setError(classified);
+        setError(classifyError(e));
       }
     } finally {
       setStreaming(false);
@@ -1299,25 +1272,6 @@ export function Story() {
         }).catch(() => undefined);
       }
       setError(classifyError(e));
-    } finally {
-      endStoryWrite(token);
-    }
-  };
-
-  const continueSavedPlan = async () => {
-    if (!episode?.pendingPlan?.beats.length || streaming) return;
-    const token = tryBeginStoryWrite();
-    if (!token) return;
-    try {
-      await runNarration(
-        'continue',
-        '',
-        episode.pendingPlan.beats,
-        episode.pendingPlan.length,
-        undefined,
-        undefined,
-        token
-      );
     } finally {
       endStoryWrite(token);
     }
@@ -2139,25 +2093,12 @@ export function Story() {
         )}
       </div>
 
-      {(error || notice || (episode?.pendingPlan?.beats.length ?? 0) > 0) && (
+      {(error || notice) && (
         <div style={{
           position: 'relative', zIndex: 3, flexShrink: 0,
           padding: narrow ? '10px 12px 0' : '12px 24px 0',
           display: 'flex', flexDirection: 'column', gap: 10
         }}>
-          {(episode?.pendingPlan?.beats.length ?? 0) > 0 && !streaming && (
-            <div className="glass-nudge" style={{
-              border: `1px solid ${ACCENT_RGBA.a35}`,
-              background: ACCENT_RGBA.a08, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap'
-            }}>
-              <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--paper)', flex: 1, minWidth: 0 }}>
-                The rest of that reply is still waiting.
-              </div>
-              <button className="btn-quiet" style={{ fontSize: 12, minHeight: 32 }} onClick={() => void continueSavedPlan()}>
-                Continue reply
-              </button>
-            </div>
-          )}
           {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
           {notice && (
             <div className="glass-nudge" style={{

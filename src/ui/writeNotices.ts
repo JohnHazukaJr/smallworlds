@@ -2,27 +2,21 @@ import type { Screen } from '../store/app';
 
 export const NOTICE_ADD_MODEL = 'Add a writing model in Settings first.';
 
-/** Copy after Stop. Leftover beats stay saved so Continue can finish them. */
-export function abortWriteNotice(beatsCompleted: number, remaining: number): string {
-  if (remaining > 0) {
-    const kept = beatsCompleted === 0
-      ? 'Stopped before any reply. Nothing new was kept.'
-      : `Stopped after ${beatsCompleted} line${beatsCompleted === 1 ? '' : 's'}. Those lines were kept.`;
-    return `${kept} Continue finishes the rest of that reply. A new line starts fresh.`;
+/** Copy after Stop. One reply: what landed stays, and nothing is queued behind it. */
+export function abortWriteNotice(beatsCompleted: number, remaining = 0): string {
+  if (beatsCompleted <= 0) {
+    return remaining < 0
+      ? 'Stopped before any reply — your line was not applied.'
+      : 'Stopped before any reply — your line was not applied.';
   }
-  if (beatsCompleted === 0) {
-    return 'Stopped before any reply — your line was not applied.';
-  }
-  return `Stopped after ${beatsCompleted} line${beatsCompleted === 1 ? '' : 's'}; incomplete line discarded.`;
+  return 'Stopped. What was written stays.';
 }
 
-/** Copy after a provider error. Leftover beats stay saved so Continue can finish them. */
+/** Copy after a provider error that ended the reply. There is no leftover queue. */
 export function unfinishedWriteNotice(beatsCompleted: number, remaining: number): string {
-  if (remaining <= 0) return '';
-  const kept = beatsCompleted === 0
-    ? 'Stopped before any reply. Nothing new was kept.'
-    : `Stopped after ${beatsCompleted} line${beatsCompleted === 1 ? '' : 's'}. Those lines were kept.`;
-  return `${kept} Continue finishes the rest of that reply. A new line starts fresh.`;
+  if (remaining <= 0 && beatsCompleted <= 0) return '';
+  if (beatsCompleted <= 0) return 'Stopped before any reply — your line was not applied.';
+  return 'Stopped. What was written stays.';
 }
 
 /** Only attach a nav chip when the notice is about that destination. */

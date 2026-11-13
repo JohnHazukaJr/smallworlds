@@ -10,7 +10,7 @@ import type {
   Turn, TurnLength, TurnRole, World, WrapBeat, WrapCharacterOutcome
 } from '../types';
 import {
-  CALENDAR_EVENT_CAP, defaultVisibilityForKind, isPlayerAgencyMode, requiresSpokenReply, worldCalendarEventPrefs
+  CALENDAR_EVENT_CAP, defaultVisibilityForKind, isPlayerAgencyMode, worldCalendarEventPrefs
 } from '../types';
 import { normalizeRelationships } from '../relationships';
 import {
@@ -18,49 +18,37 @@ import {
   formatEpisodeDateRange, formatStoryDate, inferStanceFromInstructions, nextEpisode, pendingPlotTargets,
   povPersonLabel, storyStanceOf, worldCalendar, BIBLE_MIN_CHARS
 } from '../worldOps';
-import { AIError, streamChat, isPromptPackRetryError, type ChatMessage, type StreamRequest } from './client';
+import { AIError, streamChat, isPromptPackRetryError, type ChatMessage } from './client';
 import { contextWindowFor, imageModelFor, proseModelFor, utilityModelFor } from './models';
-import { ANALYZE_EPISODE_TOOL, LIVE_MEMORY_TOOL, PLAN_TURN_TOOL, utilityCall, type ToolSpec } from './utilityCall';
+import { ANALYZE_EPISODE_TOOL, LIVE_MEMORY_TOOL, utilityCall, type ToolSpec } from './utilityCall';
 import { promptCharBudget } from './contextBudget';
 import { proseCompletionTokens } from './modelProfile';
 import { applyDeliveryTone, parseDeliveryTone } from './deliveryTone';
 import { stancePlaybook } from './storyStance';
-import { hasSpokenDialogue, narrationNeedsContinue, normalizeSpeakText, settleSpeakText, speakHoldsForPlayer, speakLineCutOff, stitchSpeakRetry, stripNarratorEmbeddedDialogue } from './dialogueFormat';
-import { SPEAK_WALL_NUDGE, acceptWallRetry, clearMustNotKnowClause, speakLeaksMustNotKnow } from './knowledgeWall';
+import { normalizeSpeakText, speakLineCutOff } from './dialogueFormat';
+import { clearMustNotKnowClause, speakLeaksMustNotKnow } from './knowledgeWall';
 import {
-  SPEAK_REASK_NUDGE,
   rewriteReaskSpeakBrief,
-  speakBriefLooksLikeReask,
-  speakReasksPriorQuestion
+  speakBriefLooksLikeReask
 } from './speakReask';
 import {
   activeGuests,
-  buildCharacterSpeakMessages,
-  buildCharacterSystemPrompt,
-  buildGuestSpeakMessages,
-  buildGuestSystemPrompt,
-  buildNarrationBeatMessages,
-  buildNarratorSystemPrompt,
+  buildSceneReply,
+  sceneReplyTokens,
+  type SceneVoice,
   episodeSceneDay,
   sceneDateContextLine,
-  characterSpeakTokens,
   historyTailFor,
   compressOmittedTurns,
-  DIRECTOR_PLAN_TOKENS,
-  directorSystemPrompt,
-  directorUserPrompt,
   turnsSinceCharMark,
-  memoryFocusQuery,
   episodeContextPressure,
   episodeHistoryChars,
   omittedTurnsForNarratorTail,
-  focusFromBeat,
   HISTORY_CHAR_BUDGET,
   injectedSpeakBriefForCharacter,
   injectedSpeakBriefForGuest,
   type DirectorBeat,
   type PromptBuildOpts,
-  narrationBeatTokens,
   planCapsForLength
 } from './prompts';
 import {
@@ -68,12 +56,14 @@ import {
   lastSpeaker,
   priorOpenQuestionText,
   rankReplySpeakers,
+  sceneReplySpeakerCap,
   selectAnswerers,
   speakerCandidates,
   type RankedSpeaker
 } from './roomDynamics';
 import { parseCharacterImportance } from './characterWeight';
-import { characterFitsPlace, filterCastDelta, inferPlaceChanged, openingFittingIds, stageSceneCast } from './sceneFit';
+import { characterFitsPlace, inferPlaceChanged, namedNewcomer, openingFittingIds, rosterChangeNotice, stageSceneCast } from './sceneFit';
+import { splitSceneReply, type SceneSpeaker } from './sceneReply';
 import {
   isNearDuplicate,
   knowledgeFactLine,
@@ -104,32 +94,11 @@ export { imageModelFor, proseModelFor, utilityModelFor };
 
 // ---------- Prose generation ----------
 
-const SPEAK_CONTINUE_NUDGE =
-  'Your previous reply was cut off mid-line. Continue from exactly where you stopped — ' +
-  'finish the unfinished *action* or "dialogue" only. Do not restart, repeat, or add new points. ' +
-  'Keep it brief. Same *action* / "speech" format.';
-
-const NARRATION_CONTINUE_NUDGE =
-  'Your previous narration was cut off mid-sentence. Continue from exactly where you stopped — ' +
-  'do not restart or repeat completed words. Stay in narrator voice; no character dialogue.';
-
-const SPEAK_DIALOGUE_NUDGE =
-  'Your reply had no spoken dialogue. Add one short line in "double quotes". ' +
-  'You may keep a brief *action*. One sentence is enough — do not expand into a speech.';
 
 function isAbortError(e: unknown): boolean {
   return e instanceof WriteAbortedError || (e as Error)?.name === 'AbortError';
 }
 
-/**
- * A follow-up call failed after words were already on the page.
- * Keep those words. Abort and context-overflow still propagate.
- */
-function keepStreamedSpeak(e: unknown, text: string): string | null {
-  if (isAbortError(e) || isPromptPackRetryError(e)) throw e;
-  const settled = settleSpeakText(text);
-  return settled.trim() ? settled : null;
-}
 
 export type SpeakFollowUp = 'continue' | 'dialogue' | 'wall' | 'reask' | 'none';
 
@@ -155,256 +124,9 @@ export function speakFollowUpKind(opts: {
   return 'none';
 }
 
-/**
- * Stream one character or guest line from whatever model is configured.
- * At most one follow-up. A thrown follow-up keeps any line already on the page.
- */
-async function streamSpeakComplete(opts: {
-  provider: StreamRequest['provider'];
-  model: string;
-  system: string;
-  messages: ChatMessage[];
-  length: TurnLength;
-  signal?: AbortSignal;
-  requireDialogue?: boolean;
-  mustNotKnow?: string;
-  /** Prior open-question text when this speaker is the asker the player just answered. */
-  priorQuestion?: string | null;
-  onProgress: (label: string) => void;
-  onAccumulated: (text: string) => void;
-}): Promise<string> {
-  const maxTokens = proseCompletionTokens(opts.model, characterSpeakTokens(opts.length));
-  let acc = '';
-  const absorb = (d: string) => {
-    acc += d;
-    opts.onAccumulated(acc);
-  };
-  const call = (messages: ChatMessage[], onDelta: (d: string) => void) => streamChat({
-    provider: opts.provider,
-    model: opts.model,
-    system: opts.system,
-    messages,
-    maxTokens,
-    signal: opts.signal,
-    job: 'prose',
-    onDelta
-  });
-
-  let first: Awaited<ReturnType<typeof streamChat>>;
-  try {
-    first = await call(opts.messages, absorb);
-  } catch (e) {
-    const kept = keepStreamedSpeak(e, acc);
-    if (kept) return kept;
-    throw e;
-  }
-
-  const wall = (opts.mustNotKnow ?? '').trim();
-  const priorQ = (opts.priorQuestion ?? '').trim();
-  let cleaned = settleSpeakText(acc);
-  const follow = speakFollowUpKind({
-    text: acc,
-    truncated: !!first.truncated,
-    stalled: first.stalled,
-    requireDialogue: opts.requireDialogue,
-    hasDialogue: hasSpokenDialogue(cleaned),
-    leaksWall: !!(wall && cleaned && speakLeaksMustNotKnow(cleaned, wall)),
-    reasks: !!(priorQ && cleaned && speakReasksPriorQuestion(cleaned, priorQ))
-  });
-  // #region agent log
-  fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H4',location:'engine.ts:streamSpeakComplete',message:'speak follow-up choice',data:{follow,truncated:!!first.truncated,stalled:!!first.stalled,chars:acc.length,open:speakLineCutOff(acc)},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
-
-  if (follow === 'continue') {
-    opts.onProgress('finishing line…');
-    try {
-      await call([
-        ...opts.messages,
-        { role: 'assistant', content: acc },
-        { role: 'user', content: SPEAK_CONTINUE_NUDGE }
-      ], absorb);
-    } catch (e) {
-      const kept = keepStreamedSpeak(e, acc);
-      if (kept) return kept;
-      throw e;
-    }
-    return settleSpeakText(acc);
-  }
-
-  if (follow === 'dialogue') {
-    opts.onProgress('adding dialogue…');
-    const base = cleaned;
-    let extra = '';
-    try {
-      await call([
-        ...opts.messages,
-        { role: 'assistant', content: base },
-        { role: 'user', content: SPEAK_DIALOGUE_NUDGE }
-      ], (d) => {
-        extra += d;
-        opts.onAccumulated(base + (base && extra ? ' ' : '') + extra);
-      });
-      const retried = settleSpeakText(extra);
-      if (retried && hasSpokenDialogue(retried)) {
-        cleaned = settleSpeakText(stitchSpeakRetry(base, retried));
-      }
-    } catch (e) {
-      const kept = keepStreamedSpeak(e, extra.trim() ? `${base} ${extra}` : base);
-      if (kept) return kept;
-      throw e;
-    }
-    return cleaned;
-  }
-
-  if (follow === 'wall') {
-    opts.onProgress('honouring what they must not know…');
-    const base = cleaned;
-    let extra = '';
-    try {
-      await call([
-        ...opts.messages,
-        { role: 'assistant', content: base },
-        { role: 'user', content: SPEAK_WALL_NUDGE }
-      ], (d) => {
-        extra += d;
-        opts.onAccumulated(stitchSpeakRetry(base, extra));
-      });
-    } catch (e) {
-      const kept = keepStreamedSpeak(e, base);
-      if (kept) return kept;
-      throw e;
-    }
-    const kept = acceptWallRetry(settleSpeakText(extra), wall);
-    if (!kept) {
-      throw new AIError('That line still says something they must not know. Try the beat again.');
-    }
-    return kept;
-  }
-
-  if (follow === 'reask') {
-    // Fail open: keep the settled line if the retry still loops.
-    opts.onProgress('taking the answer as heard…');
-    const base = cleaned;
-    let extra = '';
-    try {
-      await call([
-        ...opts.messages,
-        { role: 'assistant', content: base },
-        { role: 'user', content: SPEAK_REASK_NUDGE }
-      ], (d) => {
-        extra += d;
-        opts.onAccumulated(stitchSpeakRetry(base, extra));
-      });
-      const retried = settleSpeakText(extra);
-      if (retried && !speakReasksPriorQuestion(retried, priorQ)) {
-        cleaned = retried;
-      }
-    } catch (e) {
-      const kept = keepStreamedSpeak(e, base);
-      if (kept) return kept;
-      throw e;
-    }
-  }
-  return cleaned;
-}
-
-/**
- * A narration follow-up failed after words were already on the page.
- * Keep those words. Abort and context-overflow still propagate.
- */
-function keepStreamedNarration(e: unknown, text: string): string | null {
-  if (isAbortError(e) || isPromptPackRetryError(e)) throw e;
-  const cleaned = stripNarratorEmbeddedDialogue(text);
-  return cleaned.trim() ? cleaned : null;
-}
-
-/**
- * Stream a narration beat from whatever model is configured.
- * One continuation when the provider stops for length or a quote is still open.
- * A thrown stream keeps any narration already on the page.
- */
-async function streamNarrationComplete(opts: {
-  provider: StreamRequest['provider'];
-  model: string;
-  system: string;
-  messages: ChatMessage[];
-  length: TurnLength;
-  signal?: AbortSignal;
-  onProgress: (label: string) => void;
-  onAccumulated: (text: string) => void;
-}): Promise<string> {
-  const maxTokens = proseCompletionTokens(opts.model, narrationBeatTokens(opts.length));
-  let acc = '';
-  const absorb = (d: string) => {
-    acc += d;
-    opts.onAccumulated(acc);
-  };
-  const call = (messages: ChatMessage[], onDelta: (d: string) => void) => streamChat({
-    provider: opts.provider,
-    model: opts.model,
-    system: opts.system,
-    messages,
-    maxTokens,
-    signal: opts.signal,
-    job: 'prose',
-    onDelta
-  });
-
-  let first: Awaited<ReturnType<typeof streamChat>>;
-  try {
-    first = await call(opts.messages, absorb);
-  } catch (e) {
-    const kept = keepStreamedNarration(e, acc);
-    if (kept) return kept;
-    throw e;
-  }
-
-  const narrContinue = narrationNeedsContinue(acc, first);
-  // #region agent log
-  fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H4',location:'engine.ts:streamNarrationComplete',message:'narration follow-up choice',data:{continue:narrContinue,truncated:!!first.truncated,stalled:!!first.stalled,chars:acc.length},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
-  if (narrContinue) {
-    opts.onProgress('finishing narration…');
-    try {
-      await call([
-        ...opts.messages,
-        { role: 'assistant', content: acc },
-        { role: 'user', content: NARRATION_CONTINUE_NUDGE }
-      ], absorb);
-    } catch (e) {
-      const kept = keepStreamedNarration(e, acc);
-      if (kept) return kept;
-      throw e;
-    }
-  }
-  return stripNarratorEmbeddedDialogue(acc.trim());
-}
-
-function speakOutTokens(model: string, length: TurnLength): number {
-  return proseCompletionTokens(model, characterSpeakTokens(length));
-}
-
-function narrOutTokens(model: string, length: TurnLength): number {
-  return proseCompletionTokens(model, narrationBeatTokens(length));
-}
 
 function proseCharBudget(model: string, maxTokens: number): number {
   return promptCharBudget(model, maxTokens, { windowTokens: contextWindowFor() });
-}
-
-function historyPackFor(
-  model: string,
-  agent: 'narrator' | 'speak',
-  pack: PromptBuildOpts,
-  totalCap: number
-): Pick<PromptBuildOpts, 'totalCap' | 'skipOmittedDigest' | 'historyTailChars' | 'historyTailMaxTurns'> {
-  const tail = historyTailFor(model, agent, pack.pack, contextWindowFor());
-  return {
-    totalCap,
-    skipOmittedDigest: pack.skipOmittedDigest ?? false,
-    historyTailChars: tail.charBudget,
-    historyTailMaxTurns: tail.maxTurns
-  };
 }
 
 const OVERFLOW_NOTICE = 'Prompt was too large for this model — sent a tighter pack and a shorter recent transcript.';
@@ -488,15 +210,6 @@ export interface WriteOptions {
 /** A Write-as line: the player typed it, and it belongs to that character. */
 export function isUserInjection(turn: { role: string; asCharacterId?: string | null }): boolean {
   return turn.role === 'user' && !!turn.asCharacterId;
-}
-
-/** The latest user turn, when it is a Write-as line. A later You line hides it. */
-function latestInjectedUserTurn(turns: Turn[]): Turn | null {
-  for (let i = turns.length - 1; i >= 0; i--) {
-    if (turns[i].role !== 'user') continue;
-    return turns[i].asCharacterId ? turns[i] : null;
-  }
-  return null;
 }
 
 /**
@@ -858,67 +571,6 @@ function withAuthorDirection(beats: DirectorBeat[], mode: ComposeMode, direction
   return beats.map((b) => ({ ...b, brief: pinAuthorDirection(b.brief, direction) }));
 }
 
-/** Narrator first, then the people who were actually addressed. */
-function beatsForTurn(opts: {
-  length: TurnLength;
-  mode: ComposeMode;
-  playerText: string;
-  location: string;
-  inScene: Character[];
-  guests: EpisodeGuest[];
-  turns: Turn[];
-  preferCharacterId?: string;
-  preferGuestId?: string;
-  /** Raw line for who-was-addressed. The model-facing playerText may name the NPC. */
-  addressText?: string;
-  /** This person already spoke. They do not get another line. */
-  excludeCharacterId?: string;
-}): DirectorBeat[] {
-  const stage = opts.excludeCharacterId
-    ? opts.inScene.filter((c) => c.id !== opts.excludeCharacterId)
-    : opts.inScene;
-  const preferId = opts.preferCharacterId === opts.excludeCharacterId
-    ? opts.preferGuestId
-    : (opts.preferCharacterId || opts.preferGuestId);
-  const answerers = selectAnswerers({
-    length: opts.length,
-    playerText: opts.addressText ?? opts.playerText,
-    candidates: speakerCandidates(stage, opts.guests),
-    turns: opts.turns,
-    preferId
-  });
-  const narration: DirectorBeat = {
-    type: 'narration',
-    brief: directorFallbackNarrationBrief({
-      mode: opts.mode,
-      playerText: opts.playerText,
-      location: opts.location,
-      inScene: opts.inScene
-    })
-  };
-  const speaks: DirectorBeat[] = answerers.map((a) => {
-    if (a.kind === 'guest') {
-      const g = opts.guests.find((x) => x.id === a.id);
-      return {
-        type: 'speak',
-        guestId: a.id,
-        brief: g
-          ? injectedSpeakBriefForGuest(g, 'The place has already been described. Add only what you do and say. Do not retell it. Do not speak for the player.')
-          : 'The place has already been described. Add only what you do and say. Do not retell it. Do not speak for the player.'
-      };
-    }
-    const c = opts.inScene.find((x) => x.id === a.id);
-    return {
-      type: 'speak',
-      characterId: a.id,
-      brief: c
-        ? injectedSpeakBriefForCharacter(c, 'The place has already been described. Add only what you do and say. Do not retell it. Do not speak for the player.')
-        : 'The place has already been described. Add only what you do and say. Do not retell it. Do not speak for the player.'
-    };
-  });
-  return withAuthorDirection([narration, ...speaks], opts.mode, opts.addressText ?? opts.playerText);
-}
-
 /** Fallback narration when the director fails — names the room, the move, and who is on stage. */
 export function directorFallbackNarrationBrief(opts: {
   mode: ComposeMode;
@@ -1261,33 +913,6 @@ function throwIfAborted(
   if (signal?.aborted) throw new WriteAbortedError(beatsCompleted, remainingBeats);
 }
 
-function asWriteAbort(
-  e: unknown,
-  beatsCompleted: number,
-  remainingBeats: DirectorBeat[] = []
-): never {
-  if (e instanceof WriteAbortedError) throw e;
-  if ((e as Error)?.name === 'AbortError') {
-    throw new WriteAbortedError(beatsCompleted, remainingBeats);
-  }
-  throw e;
-}
-
-async function savePendingPlan(
-  episodeId: string,
-  remaining: DirectorBeat[],
-  length: TurnLength
-): Promise<void> {
-  if (remaining.length === 0) {
-    await db.episodes.update(episodeId, { pendingPlan: null, updatedAt: Date.now() }).catch(() => undefined);
-    return;
-  }
-  await db.episodes.update(episodeId, {
-    pendingPlan: { beats: remaining, length, createdAt: Date.now() },
-    updatedAt: Date.now()
-  }).catch(() => undefined);
-}
-
 async function clearPendingPlan(episodeId: string): Promise<void> {
   await db.episodes.update(episodeId, { pendingPlan: null, updatedAt: Date.now() }).catch(() => undefined);
 }
@@ -1303,24 +928,8 @@ export function pendingBeatsToKeep(remaining: DirectorBeat[]): DirectorBeat[] {
 }
 
 /**
- * Core writing loop: persist the user turn (unless continue), plan beats with
- * the director, then stream narrator (narration-only) and character agents.
- * Each completed beat is persisted immediately. Returns the last turn id.
- */
-function beatMemoryQuery(
-  ctx: { characters: Character[]; episode: Episode },
-  playerText: string,
-  brief: string
-): string {
-  const names = ctx.characters
-    .filter((c) => ctx.episode.castIds.includes(c.id))
-    .map((c) => c.name);
-  return memoryFocusQuery([playerText, brief, names.join(' '), ctx.episode.location]);
-}
-
-/**
- * Post-turn summary and live memory. The write that scheduled it has already
- * returned, so the next write or re-roll waits here before reading the episode.
+ * Post-turn summary and live memory. The reply has already returned.
+ * The next line does not wait on this. Closing the chapter does.
  */
 let postTurnTail: Promise<void> = Promise.resolve();
 
@@ -1371,12 +980,46 @@ export function writeTurn(opts: WriteOptions): Promise<string> {
   });
 }
 
+function sceneVoiceFromCharacter(c: Character): SceneVoice {
+  return {
+    id: c.id,
+    name: c.name,
+    kind: 'cast',
+    role: c.role,
+    voice: c.speechStyle,
+    want: c.state?.goal,
+    example: (c.exampleLines ?? []).find((line) => line.trim()),
+    mustNotKnow: c.mustNotKnow,
+    anchor: (c.anchors ?? []).find((line) => line.trim())
+  };
+}
+
+function sceneWallLeak(
+  text: string,
+  voices: SceneVoice[],
+  characters: Character[]
+): { name: string; wall: string } | null {
+  const speakers: SceneSpeaker[] = voices.map((voice) => ({
+    id: voice.id,
+    name: voice.name,
+    kind: voice.kind
+  }));
+  for (const piece of splitSceneReply(text, speakers)) {
+    if (piece.role !== 'character' || piece.kind !== 'cast' || !piece.speakerId) continue;
+    const character = characters.find((c) => c.id === piece.speakerId);
+    const wall = character?.mustNotKnow?.trim() ?? '';
+    if (character && wall && speakLeaksMustNotKnow(piece.text, wall)) {
+      return { name: character.name, wall };
+    }
+  }
+  return null;
+}
+
+/**
+ * One reply: stage the room, then one prose call writes narration and dialogue.
+ * Quoted lines that name someone here become that person's turn.
+ */
 async function writeTurnInner(opts: WriteOptions): Promise<string> {
-  const waitStarted = Date.now();
-  await waitForPostTurn();
-  // #region agent log
-  fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H3',location:'engine.ts:writeTurnInner',message:'post-turn wait finished',data:{waitMs:Date.now()-waitStarted,mode:opts.mode},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   throwIfAborted(opts.signal, 0);
   const { provider, model } = proseModelFor(opts.world);
   const ctx = await loadContext(opts.world, opts.season, opts.episode);
@@ -1446,22 +1089,19 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
     ? ctx.characters.find((c) => c.id === opts.asCharacterId)
     : undefined;
   const moveText = opts.input.trim();
-  const playerText = hands
-    ? `${hands.name} already said or did this. It is not the player. Do not repeat it or give it to anyone else:\n${moveText}`
-    : moveText;
-  let requireDialogue = requiresSpokenReply(opts.mode)
-    || inScene.length > 0
-    || activeGuests(ctx.episode).length > 0;
+  const injectionReply = !!opts.asCharacterId;
+  await clearPendingPlan(opts.episode.id);
 
-  const directThisTurn = async (): Promise<{ beats: DirectorBeat[]; enterIds: string[] }> => {
-    const placeLoc = ctx.locations.find((l) => ctx.episode.locationId && l.id === ctx.episode.locationId)
-      ?? ctx.locations.find((l) => {
-        const name = l.name.trim().toLowerCase();
-        const ep = ctx.episode.location.trim().toLowerCase();
-        return !!name && !!ep && (ep.includes(name) || name.includes(ep));
-      });
-    const placeName = (placeLoc?.name || ctx.episode.location || '').trim();
-    const inhabitants = placeLoc?.inhabitants ?? '';
+  const placeLoc = ctx.locations.find((l) => ctx.episode.locationId && l.id === ctx.episode.locationId)
+    ?? ctx.locations.find((l) => {
+      const name = l.name.trim().toLowerCase();
+      const ep = ctx.episode.location.trim().toLowerCase();
+      return !!name && !!ep && (ep.includes(name) || name.includes(ep));
+    });
+  const placeName = (placeLoc?.name || ctx.episode.location || '').trim();
+  const inhabitants = placeLoc?.inhabitants ?? '';
+
+  if (!injectionReply) {
     const staged = stageSceneCast({
       castIds: ctx.episode.castIds,
       characters: ctx.characters,
@@ -1471,6 +1111,9 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
       turns: ctx.turns,
       placeChanged: inferPlaceChanged(moveText, placeName)
     });
+    const notes: string[] = [];
+    const rosterNote = rosterChangeNotice(staged.changes);
+    if (rosterNote) notes.push(rosterNote);
     if (staged.castIds.join('\0') !== ctx.episode.castIds.join('\0')) {
       await guardStorage(() => db.episodes.update(ctx.episode.id, {
         castIds: staged.castIds,
@@ -1478,397 +1121,223 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
       }));
       ctx.episode = { ...ctx.episode, castIds: staged.castIds };
       sceneMutated = true;
-      inScene = ctx.characters.filter((c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer);
     }
-    const hasSpeakers = inScene.length > 0 || activeGuests(ctx.episode).length > 0;
-    const system = directorSystemPrompt(opts.mode, hasSpeakers, opts.length, storyStanceOf(opts.world));
-    const tail = historyTailFor(model, 'director', 'normal', contextWindowFor());
-    const user = directorUserPrompt(ctx, opts.mode, moveText, {
-      preferCharacterId: opts.preferCharacterId,
-      preferGuestId: opts.preferGuestId,
-      historyTailChars: tail.charBudget,
-      historyTailMaxTurns: tail.maxTurns,
-      alsoFitIds: staged.alsoFits.map((c) => c.id)
-    });
-    const raw = await utilityJson<{
-      beats?: Array<{ type?: string; brief?: string; characterId?: string; guestId?: string }>;
-      castDelta?: SceneCastDelta;
-    }>(
-      opts.world,
-      system,
-      user,
-      DIRECTOR_PLAN_TOKENS,
-      opts.signal,
-      UTILITY_TIMEOUT_MS,
-      'utility',
-      PLAN_TURN_TOOL
-    );
-    const scene = nextSceneCast({
-      castIds: ctx.episode.castIds,
-      guests: ctx.episode.guests ?? [],
-      activeGuestIds: ctx.episode.activeGuestIds,
-      characters: ctx.characters,
-      delta: filterCastDelta({
-        delta: raw.castDelta,
-        playerText: moveText,
-        characters: ctx.characters,
-        castIds: ctx.episode.castIds,
-        placeName,
-        inhabitants
-      }),
-      newId: uid
-    });
-    if (scene.changed) {
+    const known = [
+      ...ctx.characters.flatMap((c) => [c.name, ...(c.aliases ?? [])]),
+      ...(ctx.episode.guests ?? []).map((g) => g.name)
+    ];
+    const newbie = namedNewcomer(moveText, known);
+    if (newbie) {
+      const guest: EpisodeGuest = { id: uid(), name: newbie, brief: 'Named on this line.' };
+      const guests = [...(ctx.episode.guests ?? []), guest];
       await guardStorage(() => db.episodes.update(ctx.episode.id, {
-        castIds: scene.castIds,
-        guests: scene.guests,
-        activeGuestIds: scene.activeGuestIds,
+        guests,
         updatedAt: Date.now()
       }));
-      ctx.episode = {
-        ...ctx.episode,
-        castIds: scene.castIds,
-        guests: scene.guests,
-        activeGuestIds: scene.activeGuestIds
-      };
+      ctx.episode = { ...ctx.episode, guests };
       sceneMutated = true;
+      notes.push(`${newbie} is here — you named them.`);
     }
-    const present = ctx.characters.filter((c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer);
-    return {
-      beats: normalizeBeats(
-        raw,
-        present,
-        activeGuests(ctx.episode),
-        scene.introduceNameToId,
-        opts.mode,
-        playerText,
-        opts.length,
-        { characterId: opts.preferCharacterId, guestId: opts.preferGuestId },
-        ctx.turns,
-        ctx.episode.location,
-        moveText,
-        opts.asCharacterId
-      ),
-      enterIds: scene.enterIds
-    };
-  };
-
-  // Stop here has saved no reply, so the player line comes back out with it.
-  // The running summary stays on the post-turn pass so this reply does not wait on it.
-  let beats: DirectorBeat[] = [];
-  const enterIds: string[] = [];
-  const resumed = opts.resumeBeats ?? [];
-  const resumedInjection = !opts.asCharacterId && resumed.length > 0
-    ? latestInjectedUserTurn(ctx.turns)
-    : null;
-  const injectionReply = !!opts.asCharacterId || !!resumedInjection;
-  const injectionBrief = injectionReply
-    ? injectionFollowUpBrief({
-      name: opts.asCharacterId
-        ? (hands?.name?.trim() || 'They')
-        : (ctx.characters.find((c) => c.id === resumedInjection?.asCharacterId)?.name?.trim() || 'They'),
-      line: opts.asCharacterId ? moveText : (resumedInjection?.text ?? ''),
-      location: ctx.episode.location
-    })
-    : '';
-  try {
-    // A Write-as line is already that NPC's speech. The reply is narration, not another voice.
-    if (injectionReply) {
-      progress(resumed.length > 0 ? 'Writing…' : 'narrating…');
-      beats = injectionFollowUpBeats(resumed, injectionBrief);
-      if (resumed.length === 0) await clearPendingPlan(opts.episode.id);
-    } else if (resumed.length > 0) {
-      // Who answers comes from the player's line. Resume still runs leftover replies after Stop.
-      progress('Writing…');
-      beats = resumed;
-    } else {
-      progress('Planning the scene…');
-      try {
-        const planned = await directThisTurn();
-        if (planned.beats.length > 0) {
-          beats = planned.beats;
-          enterIds.push(...planned.enterIds);
-        }
-      } catch (e) {
-        if (isAbortError(e)) throw e;
-        logAppError(e, 'director');
-        opts.onNotice?.('The scene plan did not come back, so the room answered on its own.');
-      }
-      inScene = ctx.characters.filter((c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer);
-      if (beats.length === 0) {
-        beats = beatsForTurn({
-          length: opts.length,
-          mode: opts.mode,
-          playerText,
-          location: ctx.episode.location,
-          inScene,
-          guests: activeGuests(ctx.episode),
-          turns: ctx.turns,
-          preferCharacterId: opts.preferCharacterId,
-          preferGuestId: opts.preferGuestId,
-          addressText: moveText,
-          excludeCharacterId: opts.asCharacterId
-        });
-      }
-      await clearPendingPlan(opts.episode.id);
-    }
-  } catch (e) {
-    await rollbackSceneIfNeeded();
-    await dropUnansweredPlayer();
-    await clearPendingPlan(opts.episode.id);
-    asWriteAbort(e, 0, []);
+    if (notes.length > 0) opts.onNotice?.(notes.join(' '));
+    inScene = ctx.characters.filter((c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer);
   }
 
-  inScene = ctx.characters.filter((c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer);
-  requireDialogue = requiresSpokenReply(opts.mode)
-    || inScene.length > 0
-    || activeGuests(ctx.episode).length > 0;
   const sceneGuests = () => activeGuests(ctx.episode);
-  const speakOpts = { requireDialogue, episode: ctx.episode, composeMode: opts.mode };
-  if (injectionReply) {
-    beats = injectionFollowUpBeats(beats, injectionBrief);
+  const stage = opts.asCharacterId
+    ? inScene.filter((c) => c.id !== opts.asCharacterId)
+    : inScene;
+  const candidates = speakerCandidates(stage, sceneGuests());
+  const addressed = detectHardAddressees(moveText, candidates).length;
+  const picked = injectionReply
+    ? []
+    : selectAnswerers({
+      length: opts.length,
+      playerText: moveText,
+      candidates,
+      turns: ctx.turns,
+      preferId: opts.preferCharacterId || opts.preferGuestId
+    }).slice(0, sceneReplySpeakerCap(opts.length, addressed));
+
+  const voices: SceneVoice[] = [];
+  for (const speaker of picked) {
+    if (speaker.kind === 'guest') {
+      const guest = sceneGuests().find((g) => g.id === speaker.id);
+      if (!guest) continue;
+      voices.push({
+        id: guest.id,
+        name: guest.name,
+        kind: 'guest',
+        brief: guest.brief,
+        voice: guest.voice
+      });
+    } else {
+      const character = ctx.characters.find((c) => c.id === speaker.id);
+      if (!character) continue;
+      voices.push(sceneVoiceFromCharacter(character));
+    }
   }
-  const narrLength: TurnLength = injectionReply ? 'beat' : opts.length;
-  const remainingFrom = (completed: number) => beats.slice(completed);
-  const openQ = priorOpenQuestionText(
-    ctx.turns,
-    speakerCandidates(inScene, sceneGuests())
-  );
-  const priorQuestionFor = (speakerId: string) =>
-    openQ && openQ.asker.id === speakerId ? openQ.text : null;
+  const sceneSpeakers: SceneSpeaker[] = voices.map((voice) => ({
+    id: voice.id,
+    name: voice.name,
+    kind: voice.kind,
+    aliases: voice.kind === 'cast'
+      ? ctx.characters.find((c) => c.id === voice.id)?.aliases
+      : undefined
+  }));
+  const present = [
+    ...inScene.map((c) => ({ name: c.name, role: c.role })),
+    ...sceneGuests().map((g) => ({ name: g.name, role: g.brief }))
+  ];
+  const replyLength: TurnLength = injectionReply ? 'beat' : opts.length;
+  const cueText = injectionReply
+    ? `${hands?.name?.trim() || 'They'}: ${moveText}`
+    : moveText;
 
   let lastId = '';
-  let speakTurnsSaved = 0;
-  let holdForPlayer = false;
-  try {
-    for (const beat of beats) {
-      throwIfAborted(opts.signal, beatsCompleted, remainingFrom(beatsCompleted));
+  let acc = '';
+  /** Last snapshot that does not break a knowledge wall. A dead stream keeps this. */
+  let safeText = '';
+  const rememberSafe = (raw: string) => {
+    const next = raw.trim();
+    if (next && !sceneWallLeak(next, voices, ctx.characters)) safeText = next;
+  };
+  const meta: StreamMeta = { role: 'narrator' };
+  progress('Writing…');
+  opts.onDelta('', meta);
 
-      if (beat.type === 'narration') {
-        const meta: StreamMeta = { role: 'narrator' };
-        progress('narrating…');
-        opts.onDelta('', meta);
-        const narrCap = proseCharBudget(model, narrOutTokens(model, narrLength));
-        const narrText = await withOverflowRetry(async (pack) => {
-          const focus = focusFromBeat(beat, ctx.characters, sceneGuests(), enterIds);
-          const narrSystem = buildNarratorSystemPrompt(ctx, {
-            ...pack,
-            focusIds: focus.characterIds,
-            focusGuestIds: focus.guestIds,
-            memoryQuery: beatMemoryQuery(ctx, playerText, beat.brief)
-          });
-          return streamNarrationComplete({
-            provider, model,
-            system: narrSystem,
-            messages: buildNarrationBeatMessages(
-              ctx.turns, ctx.characters, beat.brief, narrLength, sceneGuests(), ctx.episode,
-              narrSystem.length,
-              historyPackFor(model, 'narrator', pack, narrCap),
-              narrationSceneDate(opts.world, ctx.episode),
-              opts.mode
-            ),
-            length: narrLength,
-            signal: opts.signal,
-            onProgress: progress,
-            onAccumulated: (acc) => opts.onDelta(acc, meta)
-          });
-        }, opts.onNotice);
-        if (!narrText) {
-          opts.onDelta('', meta);
-          continue;
-        }
-        const narratorTurn: Turn = {
-          id: uid(), episodeId: opts.episode.id, worldId: opts.world.id,
-          role: 'narrator', mode: null, text: narrText, createdAt: Date.now()
-        };
-        await guardStorage(() => db.turns.add(narratorTurn));
-        filedText.set(narratorTurn.id, narratorTurn.text);
-        ctx.turns.push(narratorTurn);
-        lastId = narratorTurn.id;
-        beatsCompleted++;
-        opts.onDelta('', meta);
-        continue;
-      }
-
-      if ('guestId' in beat && beat.guestId) {
-        if (holdForPlayer) continue;
-        const guest = (ctx.episode.guests ?? []).find((g) => g.id === beat.guestId);
-        if (!guest) continue;
-        const meta: StreamMeta = { role: 'character', guestId: guest.id };
-        progress(`${guest.name} speaking…`);
-        opts.onDelta('', meta);
-        const speakCap = proseCharBudget(model, speakOutTokens(model, opts.length));
-        const cleaned = await withOverflowRetry(async (pack) => {
-          const focus = focusFromBeat(beat, ctx.characters, sceneGuests(), enterIds);
-          const guestSystem = buildGuestSystemPrompt(ctx, guest, {
-            ...pack,
-            focusIds: focus.characterIds,
-            focusGuestIds: focus.guestIds,
-            memoryQuery: beatMemoryQuery(ctx, playerText, beat.brief)
-          });
-          return streamSpeakComplete({
-            provider, model,
-            system: guestSystem,
-            messages: buildGuestSpeakMessages(
-              ctx.turns, ctx.characters, guest, beat.brief, sceneGuests(),
-              {
-                ...speakOpts,
-                systemChars: guestSystem.length,
-                length: opts.length,
-                ...historyPackFor(model, 'speak', pack, speakCap)
-              }
-            ),
-            length: opts.length,
-            signal: opts.signal,
-            requireDialogue,
-            priorQuestion: priorQuestionFor(guest.id),
-            onProgress: progress,
-            onAccumulated: (acc) => opts.onDelta(acc, meta)
-          });
-        }, opts.onNotice);
-        if (!cleaned.trim()) {
-          opts.onDelta('', meta);
-          continue;
-        }
-        const guestTurn: Turn = {
-          id: uid(), episodeId: opts.episode.id, worldId: opts.world.id,
-          role: 'character', mode: null, guestId: guest.id,
-          text: cleaned, createdAt: Date.now()
-        };
-        await guardStorage(() => db.turns.add(guestTurn));
-        filedText.set(guestTurn.id, guestTurn.text);
-        ctx.turns.push(guestTurn);
-        lastId = guestTurn.id;
-        beatsCompleted++;
-        speakTurnsSaved++;
-        if (speakHoldsForPlayer(cleaned)) holdForPlayer = true;
-        opts.onDelta('', meta);
-        continue;
-      }
-
-      if (holdForPlayer) continue;
-      const speaking = ctx.characters.find((c) => c.id === ('characterId' in beat ? beat.characterId : ''));
-      if (!speaking || speaking.isPlayer) continue;
-
-      const meta: StreamMeta = { role: 'character', characterId: speaking.id };
-      progress(`${speaking.name} speaking…`);
-      opts.onDelta('', meta);
-      const speakCap = proseCharBudget(model, speakOutTokens(model, opts.length));
-      const cleaned = await withOverflowRetry(async (pack) => {
-        const focus = focusFromBeat(beat, ctx.characters, sceneGuests(), enterIds);
-        const charSystem = buildCharacterSystemPrompt(ctx, speaking, {
-          ...pack,
-          focusIds: focus.characterIds,
-          focusGuestIds: focus.guestIds,
-          memoryQuery: beatMemoryQuery(ctx, playerText, beat.brief)
-        });
-        return streamSpeakComplete({
-          provider, model,
-          system: charSystem,
-          messages: buildCharacterSpeakMessages(
-            ctx.turns, ctx.characters, speaking, beat.brief, sceneGuests(),
-            {
-              ...speakOpts,
-              systemChars: charSystem.length,
-              length: opts.length,
-              ...historyPackFor(model, 'speak', pack, speakCap)
-            }
-          ),
-          length: opts.length,
-          signal: opts.signal,
-          requireDialogue,
-          mustNotKnow: speaking.mustNotKnow,
-          priorQuestion: priorQuestionFor(speaking.id),
-          onProgress: progress,
-          onAccumulated: (acc) => opts.onDelta(acc, meta)
-        });
-      }, opts.onNotice);
-      if (!cleaned.trim()) {
-        opts.onDelta('', meta);
-        continue;
-      }
-      const characterTurn: Turn = {
-        id: uid(), episodeId: opts.episode.id, worldId: opts.world.id,
-        role: 'character', mode: null, characterId: speaking.id,
-        text: cleaned, createdAt: Date.now()
+  const persistScene = async (raw: string): Promise<number> => {
+    const pieces = splitSceneReply(raw, sceneSpeakers).filter((piece) => piece.text.trim());
+    if (pieces.length === 0) return 0;
+    const base = Date.now();
+    for (let i = 0; i < pieces.length; i++) {
+      const piece = pieces[i];
+      const turn: Turn = {
+        id: uid(),
+        episodeId: opts.episode.id,
+        worldId: opts.world.id,
+        role: piece.role === 'character' ? 'character' : 'narrator',
+        mode: null,
+        text: piece.text,
+        createdAt: base + i,
+        ...(piece.role === 'character' && piece.kind === 'guest' ? { guestId: piece.speakerId } : {}),
+        ...(piece.role === 'character' && piece.kind === 'cast' ? { characterId: piece.speakerId } : {})
       };
-      await guardStorage(() => db.turns.add(characterTurn));
-      filedText.set(characterTurn.id, characterTurn.text);
-      ctx.turns.push(characterTurn);
-      lastId = characterTurn.id;
+      await guardStorage(() => db.turns.add(turn));
+      filedText.set(turn.id, turn.text);
+      ctx.turns.push(turn);
+      lastId = turn.id;
       beatsCompleted++;
-      speakTurnsSaved++;
-      if (speakHoldsForPlayer(cleaned)) holdForPlayer = true;
-      opts.onDelta('', meta);
+    }
+    return pieces.length;
+  };
+
+  const streamScene = async (pack: PromptBuildOpts, extra: ChatMessage[] = []): Promise<string> => {
+    const maxTokens = proseCompletionTokens(model, sceneReplyTokens(replyLength));
+    const budget = proseCharBudget(model, maxTokens);
+    const tail = historyTailFor(model, 'narrator', pack.pack, contextWindowFor());
+    const built = buildSceneReply({
+      ctx,
+      mode: opts.mode,
+      playerText: cueText,
+      length: replyLength,
+      speakers: voices,
+      present,
+      pack: pack.pack,
+      historyTailChars: tail.charBudget,
+      historyTailMaxTurns: tail.maxTurns,
+      totalCap: budget,
+      narrationOnly: injectionReply
+    });
+    let local = '';
+    const result = await streamChat({
+      provider,
+      model,
+      system: built.system,
+      messages: [...built.messages, ...extra],
+      maxTokens,
+      signal: opts.signal,
+      job: 'prose',
+      onDelta: (delta) => {
+        local += delta;
+        rememberSafe(local);
+        if (extra.length === 0) acc = local;
+        opts.onDelta(local, meta);
+      }
+    });
+    const text = (result.text || local).trim();
+    rememberSafe(text);
+    if (extra.length === 0) acc = text;
+    return text;
+  };
+
+  let text = '';
+  try {
+    throwIfAborted(opts.signal, 0);
+    text = await withOverflowRetry((pack) => streamScene(pack), opts.onNotice);
+    const leak = sceneWallLeak(text, voices, ctx.characters);
+    if (leak) {
+      progress('honouring what they must not know…');
+      const rewritten = await withOverflowRetry(
+        (pack) => streamScene(pack, [
+          { role: 'assistant', content: text },
+          {
+            role: 'user',
+            content:
+              `${leak.name} must not know or say this: ${leak.wall}. ` +
+              'Rewrite the scene so that secret is absent. Keep the same events otherwise.'
+          }
+        ]),
+        opts.onNotice
+      );
+      if (!rewritten.trim() || sceneWallLeak(rewritten, voices, ctx.characters)) {
+        opts.onDelta('', meta);
+        throw new AIError('That line still says something they must not know. Try the beat again.');
+      }
+      text = rewritten.trim();
+      acc = text;
+      opts.onDelta(text, meta);
     }
   } catch (e) {
-    const remaining = remainingFrom(beatsCompleted);
-    try {
-      asWriteAbort(e, beatsCompleted, remaining);
-    } catch (abortErr) {
-      const keep = pendingBeatsToKeep(remaining);
-      if (keep.length > 0) {
-        // Continue finishes these beats. Keep the player line and the cast
-        // the director already applied, even if no reply line has landed yet.
-        await savePendingPlan(opts.episode.id, keep, opts.length);
-      } else if (beatsCompleted === 0) {
-        await rollbackSceneIfNeeded();
-        await dropUnansweredPlayer();
-        await clearPendingPlan(opts.episode.id);
-      } else {
-        await rollbackSceneIfNeeded();
-        await clearPendingPlan(opts.episode.id);
+    const keep = (safeText || acc).trim();
+    const keepable = !!keep && !sceneWallLeak(keep, voices, ctx.characters);
+    if (isAbortError(e)) {
+      if (keepable) {
+        await persistScene(keep);
+        opts.onDelta('', meta);
+        throw new WriteAbortedError(beatsCompleted, []);
       }
-      if (abortErr instanceof WriteAbortedError) throw abortErr;
-      // Non-abort: attach beatsCompleted so UI can keep partial replies.
-      if (abortErr && typeof abortErr === 'object') {
-        (abortErr as { beatsCompleted?: number }).beatsCompleted = beatsCompleted;
-        (abortErr as { remainingBeats?: DirectorBeat[] }).remainingBeats = remaining;
-      }
-      throw abortErr;
+      await rollbackSceneIfNeeded();
+      await dropUnansweredPlayer();
+      throw new WriteAbortedError(0, []);
     }
+    if (keepable) {
+      text = keep;
+    } else {
+      opts.onDelta('', meta);
+      await rollbackSceneIfNeeded();
+      await dropUnansweredPlayer();
+      throw e;
+    }
+  }
+
+  if (!text.trim()) {
+    await rollbackSceneIfNeeded();
+    await dropUnansweredPlayer();
+    throw new AIError('The model did not answer. Try again.');
   }
 
   if (beatsCompleted === 0) {
-    await rollbackSceneIfNeeded();
-    await dropUnansweredPlayer();
-    // When this is a resume run (resumeBeats provided), beats were real but all
-    // got skipped at runtime — preserve the plan so the user can try again via
-    // Continue plan.  On a fresh run there is nothing to preserve.
-    if (opts.resumeBeats?.length) {
-      await savePendingPlan(opts.episode.id, opts.resumeBeats, opts.length);
-    } else {
-      await clearPendingPlan(opts.episode.id);
+    const saved = await persistScene(text);
+    if (saved === 0) {
+      await rollbackSceneIfNeeded();
+      await dropUnansweredPlayer();
+      throw new AIError('The model did not answer. Try again.');
     }
-    const err = new AIError(
-      'The model produced no usable narration or dialogue. Try again, or choose a shorter reply size.'
-    ) as AIError & { beatsCompleted?: number; remainingBeats?: DirectorBeat[] };
-    err.beatsCompleted = 0;
-    err.remainingBeats = opts.resumeBeats ?? [];
-    throw err;
   }
-
-  // Speak/Play must land at least one spoken reply — narration-only is not enough.
-  if (requireDialogue && speakTurnsSaved === 0) {
-    const leftover = pendingBeatsToKeep(remainingFrom(beatsCompleted));
-    if (leftover.length > 0) {
-      await savePendingPlan(opts.episode.id, leftover, opts.length);
-    } else {
-      await clearPendingPlan(opts.episode.id);
-    }
-    const err = new AIError(
-      'No character replied aloud. Try again, or add someone to this chapter.'
-    ) as AIError & { beatsCompleted?: number; remainingBeats?: DirectorBeat[] };
-    err.beatsCompleted = beatsCompleted;
-    err.remainingBeats = leftover;
-    throw err;
-  }
-
+  opts.onDelta('', meta);
   await clearPendingPlan(opts.episode.id);
   await db.worlds.update(opts.world.id, { updatedAt: Date.now() });
 
-  // Beats are already saved. Memory refresh must not keep the composer locked,
-  // and an abort here must not look like a zero-beat stop.
   if (!opts.signal?.aborted) {
     const saved = beatsCompleted;
     const textStillFiled = async () => {
@@ -1932,134 +1401,107 @@ async function regenerateBeatInner(opts: {
   if (opts.turn.role !== 'narrator' && opts.turn.role !== 'character') {
     throw new AIError('Only narrator or character turns can be re-rolled.');
   }
-  const rewriteWaitStarted = Date.now();
-  await waitForPostTurn();
-  // #region agent log
-  fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H3',location:'engine.ts:regenerateBeatInner',message:'rewrite post-turn wait finished',data:{waitMs:Date.now()-rewriteWaitStarted,role:opts.turn.role},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
   throwIfAborted(opts.signal, 0);
   const { provider, model } = proseModelFor(opts.world);
   const ctx = await loadContext(opts.world, opts.season, opts.episode);
   const progress = opts.onProgress ?? (() => {});
-  const sceneGuests = () => activeGuests(ctx.episode);
-  // History for the model excludes the turn being replaced.
   const replaceAt = ctx.turns.findIndex((t) => t.id === opts.turn.id);
-  const historyTurns = replaceAt < 0 ? ctx.turns : ctx.turns.slice(0, replaceAt);
-
-  if (opts.turn.role === 'narrator') {
-    const meta: StreamMeta = { role: 'narrator' };
-    progress('re-rolling narration…');
-    opts.onDelta('', meta);
-    const brief =
-      'Rewrite this narration beat with fresh wording and the same dramatic function. ' +
-      'Do not jump ahead of the scene. Prior wording for reference (do not copy):\n' +
-      opts.turn.text.slice(0, 900);
-    const narrCap = proseCharBudget(model, narrOutTokens(model, opts.length));
-    const narrText = await withOverflowRetry(async (pack) => {
-      const narrSystem = buildNarratorSystemPrompt(ctx, {
-        ...pack,
-        memoryQuery: beatMemoryQuery(ctx, '', brief)
-      });
-      return streamNarrationComplete({
-        provider, model,
-        system: narrSystem,
-        messages: buildNarrationBeatMessages(
-          historyTurns, ctx.characters, brief, opts.length, sceneGuests(), ctx.episode,
-          narrSystem.length,
-          historyPackFor(model, 'narrator', pack, narrCap),
-          narrationSceneDate(opts.world, ctx.episode)
-        ),
-        length: opts.length,
-        signal: opts.signal,
-        onProgress: progress,
-        onAccumulated: (acc) => opts.onDelta(acc, meta)
-      });
-    });
-    if (!narrText) throw new AIError('Re-roll produced no narration. Try again.');
-    await guardStorage(() => db.turns.update(opts.turn.id, { text: narrText, updatedAt: Date.now() }));
-    await finalizeChapterMemory(opts.episode.id);
-    opts.onDelta('', meta);
-    return;
-  }
-
+  const historyCtx = {
+    ...ctx,
+    turns: replaceAt < 0 ? ctx.turns : ctx.turns.slice(0, replaceAt)
+  };
   const guest = opts.turn.guestId
     ? (ctx.episode.guests ?? []).find((g) => g.id === opts.turn.guestId)
     : undefined;
   const speaking = opts.turn.characterId
     ? ctx.characters.find((c) => c.id === opts.turn.characterId)
     : undefined;
-  if (!guest && (!speaking || speaking.isPlayer)) {
+  if (opts.turn.role === 'character' && !guest && (!speaking || speaking.isPlayer)) {
     throw new AIError('Could not find the speaker for this turn.');
   }
 
-  const brief =
-    'Deliver the same intent with fresh wording. Prior line for reference (do not copy):\n' +
-    opts.turn.text.slice(0, 700);
-  const meta: StreamMeta = guest
-    ? { role: 'character', guestId: guest.id }
-    : { role: 'character', characterId: speaking!.id };
-  progress(`${(guest?.name ?? speaking!.name)} re-rolling…`);
+  const narrationOnly = opts.turn.role === 'narrator';
+  const name = guest?.name ?? speaking?.name ?? 'the narrator';
+  const voices: SceneVoice[] = narrationOnly
+    ? []
+    : guest
+      ? [{ id: guest.id, name: guest.name, kind: 'guest', brief: guest.brief, voice: guest.voice }]
+      : [sceneVoiceFromCharacter(speaking!)];
+  const sceneSpeakers: SceneSpeaker[] = voices.map((voice) => ({
+    id: voice.id,
+    name: voice.name,
+    kind: voice.kind,
+    aliases: voice.kind === 'cast'
+      ? ctx.characters.find((c) => c.id === voice.id)?.aliases
+      : undefined
+  }));
+  const present = [
+    ...ctx.characters.filter((c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer).map((c) => ({
+      name: c.name,
+      role: c.role
+    })),
+    ...activeGuests(ctx.episode).map((g) => ({ name: g.name, role: g.brief }))
+  ];
+  const meta: StreamMeta = narrationOnly
+    ? { role: 'narrator' }
+    : guest
+      ? { role: 'character', guestId: guest.id }
+      : { role: 'character', characterId: speaking!.id };
+  progress(narrationOnly ? 're-rolling narration…' : `${name} re-rolling…`);
   opts.onDelta('', meta);
 
-  const speakCap = proseCharBudget(model, speakOutTokens(model, opts.length));
-  const focusIds = speaking ? [speaking.id] : [];
-  const focusGuestIds = guest ? [guest.id] : [];
-  const cleaned = await withOverflowRetry(async (pack) => {
-    if (guest) {
-      const guestSystem = buildGuestSystemPrompt(ctx, guest, {
-        ...pack,
-        focusIds,
-        focusGuestIds,
-        memoryQuery: beatMemoryQuery(ctx, '', brief)
-      });
-      return streamSpeakComplete({
-        provider, model,
-        system: guestSystem,
-        messages: buildGuestSpeakMessages(
-          historyTurns, ctx.characters, guest, brief, sceneGuests(),
-          {
-            episode: ctx.episode,
-            systemChars: guestSystem.length,
-            length: opts.length,
-            ...historyPackFor(model, 'speak', pack, speakCap)
-          }
-        ),
-        length: opts.length,
-        signal: opts.signal,
-        requireDialogue: true,
-        onProgress: progress,
-        onAccumulated: (acc) => opts.onDelta(acc, meta)
-      });
-    }
-    const charSystem = buildCharacterSystemPrompt(ctx, speaking!, {
-      ...pack,
-      focusIds,
-      focusGuestIds,
-      memoryQuery: beatMemoryQuery(ctx, '', brief)
-    });
-    return streamSpeakComplete({
-      provider, model,
-      system: charSystem,
-      messages: buildCharacterSpeakMessages(
-        historyTurns, ctx.characters, speaking!, brief, sceneGuests(),
-        {
-          episode: ctx.episode,
-          systemChars: charSystem.length,
-          length: opts.length,
-          ...historyPackFor(model, 'speak', pack, speakCap)
-        }
-      ),
+  let acc = '';
+  const text = await withOverflowRetry(async (pack) => {
+    const maxTokens = proseCompletionTokens(model, sceneReplyTokens(opts.length));
+    const budget = proseCharBudget(model, maxTokens);
+    const tail = historyTailFor(model, 'narrator', pack.pack, contextWindowFor());
+    const built = buildSceneReply({
+      ctx: historyCtx,
+      mode: 'continue',
+      playerText: '',
       length: opts.length,
-      signal: opts.signal,
-      requireDialogue: true,
-      mustNotKnow: speaking!.mustNotKnow,
-      onProgress: progress,
-      onAccumulated: (acc) => opts.onDelta(acc, meta)
+      speakers: voices,
+      present,
+      pack: pack.pack,
+      historyTailChars: tail.charBudget,
+      historyTailMaxTurns: tail.maxTurns,
+      totalCap: budget,
+      narrationOnly,
+      rewrite: { speakerName: name, prior: opts.turn.text.slice(0, 900) }
     });
+    const result = await streamChat({
+      provider,
+      model,
+      system: built.system,
+      messages: built.messages,
+      maxTokens,
+      signal: opts.signal,
+      job: 'prose',
+      onDelta: (delta) => {
+        acc += delta;
+        opts.onDelta(acc, meta);
+      }
+    });
+    return (result.text || acc).trim();
   });
 
-  if (!cleaned) throw new AIError('Re-roll produced no dialogue. Try again.');
-  await guardStorage(() => db.turns.update(opts.turn.id, { text: cleaned, updatedAt: Date.now() }));
+  let saved = text.trim();
+  if (!narrationOnly && voices[0]) {
+    const own = splitSceneReply(saved, sceneSpeakers).filter((piece) =>
+      piece.role === 'character' && piece.speakerId === voices[0].id
+    );
+    if (own.length > 0) saved = own.map((piece) => piece.text).join('\n\n');
+  }
+  if (!saved) {
+    throw new AIError(
+      narrationOnly ? 'Re-roll produced no narration. Try again.' : 'Re-roll produced no dialogue. Try again.'
+    );
+  }
+  const wall = speaking?.mustNotKnow?.trim() ?? '';
+  if (wall && speakLeaksMustNotKnow(saved, wall)) {
+    throw new AIError('That line still says something they must not know. Try the beat again.');
+  }
+  await guardStorage(() => db.turns.update(opts.turn.id, { text: saved, updatedAt: Date.now() }));
   await finalizeChapterMemory(opts.episode.id);
   opts.onDelta('', meta);
 }

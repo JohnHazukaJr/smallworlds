@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  PROSE_FIRST_TOKEN_MS,
   PROSE_IDLE_MS,
   StreamStallError,
   isTimeoutFailure,
+  proseFirstTokenMs,
   proseIdleMs,
   streamChat,
   type StreamRequest
@@ -69,13 +71,29 @@ afterEach(() => {
 });
 
 describe('prose idle limit', () => {
-  it('applies only to prose', () => {
+  it('waits longer for the first token than between tokens', () => {
+    expect(proseFirstTokenMs({ job: 'prose' })).toBe(PROSE_FIRST_TOKEN_MS);
     expect(proseIdleMs({ job: 'prose' })).toBe(PROSE_IDLE_MS);
     expect(proseIdleMs({ job: 'prose', idleMs: 40 })).toBe(40);
     expect(proseIdleMs({ job: 'prose', idleMs: 0 })).toBeUndefined();
+    expect(PROSE_FIRST_TOKEN_MS).toBeGreaterThan(PROSE_IDLE_MS);
+    expect(proseFirstTokenMs({ job: 'prose', idleMs: 40 })).toBe(40);
+    expect(proseFirstTokenMs({ job: 'prose', firstTokenMs: 90, idleMs: 40 })).toBe(90);
+    expect(proseFirstTokenMs({ job: 'prose', idleMs: 0 })).toBeUndefined();
     expect(proseIdleMs({ job: 'utility' })).toBeUndefined();
     expect(proseIdleMs({ job: 'wrap' })).toBeUndefined();
     expect(proseIdleMs({ job: 'test' })).toBeUndefined();
+  });
+
+  it('uses the first-token window before any bytes arrive', async () => {
+    fetchMock.mockResolvedValue(sseResponse(silentBody()));
+    vi.stubGlobal('fetch', fetchMock);
+    const pending = streamChat(request({ firstTokenMs: 25, idleMs: 2000, thinking: false }));
+    const result = await Promise.race([
+      pending.then(() => 'ok', () => 'err'),
+      new Promise((resolve) => setTimeout(() => resolve('slow'), 500))
+    ]);
+    expect(result).toBe('err');
   });
 
   it('stalls a silent prose read and retries once with thinking off', async () => {
@@ -92,6 +110,28 @@ describe('prose idle limit', () => {
     expect(bodies[0]?.thinking).toEqual({ type: 'enabled' });
     expect(bodies[1]?.thinking).toEqual({ type: 'disabled' });
     expect(isTimeoutFailure(new StreamStallError())).toBe(true);
+  });
+
+  it('keeps visible text when the stream dies after words have arrived', async () => {
+    const line = 'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n';
+    let sent = false;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (!sent) {
+          sent = true;
+          controller.enqueue(new TextEncoder().encode(line));
+          return;
+        }
+        controller.error(new TypeError('network down'));
+      }
+    });
+    fetchMock.mockResolvedValue(sseResponse(body));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await streamChat(request());
+    expect(result.text).toBe('Hello');
+    expect(result.truncated).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('keeps visible text when the stream goes quiet mid-reply', async () => {

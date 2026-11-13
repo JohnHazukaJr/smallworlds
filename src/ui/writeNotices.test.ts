@@ -7,39 +7,39 @@ import {
 } from './writeNotices';
 
 describe('abortWriteNotice', () => {
-  it('says writing stopped and nothing was kept when no reply landed', () => {
-    const copy = abortWriteNotice(0, 3);
+  it('says the line was not applied when nothing landed', () => {
+    const copy = abortWriteNotice(0, 0);
     expect(copy).toMatch(/stopped/i);
-    expect(copy).toMatch(/Nothing new was kept/);
-    expect(copy).toMatch(/Continue finishes/);
-    expect(copy).not.toMatch(/was not applied/);
+    expect(copy).toMatch(/was not applied/);
+    expect(copy).not.toMatch(/continue finishes/i);
+    expect(copy).not.toMatch(/lines saved/i);
   });
 
-  it('does not mention a plan when nothing remains', () => {
-    expect(abortWriteNotice(0, 0)).toMatch(/was not applied/);
-    expect(abortWriteNotice(0, 0)).not.toMatch(/plan/);
-    expect(abortWriteNotice(2, 0)).toMatch(/incomplete line discarded/);
-    expect(abortWriteNotice(2, 0)).not.toMatch(/plan/);
+  it('keeps the same stop copy when an old queue count is passed', () => {
+    expect(abortWriteNotice(0, 3)).toMatch(/was not applied/);
+    expect(abortWriteNotice(0, 3)).not.toMatch(/continue finishes/i);
   });
 
-  it('says how many lines were kept when some landed', () => {
-    expect(abortWriteNotice(2, 1)).toMatch(/stopped after 2 lines/i);
-    expect(abortWriteNotice(2, 1)).toMatch(/Those lines were kept/);
-    expect(abortWriteNotice(2, 1)).toMatch(/Continue finishes/);
+  it('says what was written stays when a reply landed', () => {
+    expect(abortWriteNotice(2, 0)).toMatch(/Stopped\. What was written stays\./);
+    expect(abortWriteNotice(2, 1)).not.toMatch(/lines saved/i);
+    expect(abortWriteNotice(2, 1)).not.toMatch(/continue finishes/i);
   });
 });
 
 describe('unfinishedWriteNotice', () => {
-  it('says writing stopped before a reply when the first beat failed', () => {
+  it('says the line was not applied when nothing landed', () => {
     const copy = unfinishedWriteNotice(0, 3);
-    expect(copy).toMatch(/stopped/i);
-    expect(copy).toMatch(/Nothing new was kept/);
-    expect(copy).toMatch(/Continue finishes/);
+    expect(copy).toMatch(/was not applied/);
+    expect(copy).not.toMatch(/continue finishes/i);
   });
 
-  it('is empty when nothing remains', () => {
+  it('is empty when nothing remains and nothing landed', () => {
     expect(unfinishedWriteNotice(0, 0)).toBe('');
-    expect(unfinishedWriteNotice(2, 0)).toBe('');
+  });
+
+  it('keeps a landed reply without a queue', () => {
+    expect(unfinishedWriteNotice(2, 0)).toMatch(/What was written stays/);
   });
 });
 

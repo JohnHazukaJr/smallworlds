@@ -1,7 +1,8 @@
 /**
  * Who belongs in this kind of place. Local string checks only — no model call.
- * A classroom holds the teacher and the students. An adult who is not staff
- * stays out unless this line brought them.
+ * The roster is sticky. People enter when the line names them, or when the
+ * player arrives in a closed room that their role matches. A location string
+ * alone does not pull anyone in.
  */
 
 import type { Character, Turn } from '../types';
@@ -94,6 +95,16 @@ function locationsMatch(charLoc: string, placeName: string): boolean {
   if (a.length < 4 || b.length < 4) return false;
   if (isVaguePlace(charLoc) || isVaguePlace(placeName)) return false;
   return wordIn(a, b) || wordIn(b, a);
+}
+
+/** Role words overlap the room's inhabitants. A location string does not count. */
+export function roleMatchesRoom(character: Character, inhabitants: string): boolean {
+  if (character.isPlayer) return false;
+  if (!roleOverlaps(character, inhabitants)) return false;
+  if (youthClass(inhabitants) && readsAsAdult(character.age) && !staffRole(character.role)) {
+    return false;
+  }
+  return true;
 }
 
 function roleOverlaps(character: Character, inhabitants: string): boolean {
@@ -218,10 +229,19 @@ export function filterCastDelta(opts: {
   return { enter, leave: delta.leave, introduce };
 }
 
+export interface RosterMove {
+  id: string;
+  name: string;
+  action: 'enter' | 'leave';
+  reason: 'named' | 'place';
+}
+
 /**
- * The scene card for this place.
- * People who fit are here. Company stays in an open place and in the same room.
- * A closed room drops outsiders when the place changes, unless this line brought them.
+ * The scene card.
+ * Same place: the roster stays, plus anyone this line names.
+ * Arrival in a closed room: leads and regulars whose role matches the inhabitants
+ * come in, up to the cap, and people who were not named and do not match leave.
+ * An open place keeps the company already with you and does not summon a crowd.
  */
 export function stageSceneCast(opts: {
   castIds: string[];
@@ -231,27 +251,13 @@ export function stageSceneCast(opts: {
   playerText: string;
   turns?: Turn[];
   placeChanged: boolean;
-}): { castIds: string[]; alsoFits: Character[] } {
+}): { castIds: string[]; alsoFits: Character[]; changes: RosterMove[] } {
   const player = opts.characters.find((c) => c.isPlayer);
   const npcs = opts.characters.filter((c) => !c.isPlayer);
-  const place = { name: opts.placeName, inhabitants: opts.inhabitants };
-  const closed = placeIsClosed(opts.inhabitants);
-  const fitting = npcs.filter((c) => characterFitsPlace(c, place));
+  const arrivedClosed = opts.placeChanged && placeIsClosed(opts.inhabitants);
   const brought = new Set(npcs.filter((c) => lineBringsCharacter(opts.playerText, c)).map((c) => c.id));
-  const spoken = new Set(
-    (opts.turns ?? []).filter((t) => t.role === 'character' && t.characterId).map((t) => t.characterId as string)
-  );
-
-  const keepExisting = (c: Character): boolean => {
-    if (brought.has(c.id)) return true;
-    const weight = characterImportance(c);
-    // Occasional and background stay for this scene. A move drops them unless the line brought them.
-    if (weight === 'occasional' || weight === 'background') return !opts.placeChanged;
-    if (fitting.some((f) => f.id === c.id)) return true;
-    if (!opts.placeChanged) return true;
-    if (!closed) return true;
-    return false;
-  };
+  const matching = npcs.filter((c) => roleMatchesRoom(c, opts.inhabitants));
+  const changes: RosterMove[] = [];
 
   const ids: string[] = [];
   const push = (id: string) => {
@@ -259,45 +265,69 @@ export function stageSceneCast(opts: {
   };
   if (player) push(player.id);
 
-  for (const id of opts.castIds) {
-    if (player && id === player.id) continue;
-    const c = npcs.find((x) => x.id === id);
-    if (c && keepExisting(c)) push(c.id);
-  }
+  const note = (c: Character, action: RosterMove['action'], reason: RosterMove['reason']) => {
+    changes.push({ id: c.id, name: c.name, action, reason });
+  };
 
-  const namedCount = () => ids.filter((id) => id !== player?.id).length;
-  const pool = autoStagePool(fitting).filter((c) => !ids.includes(c.id));
-  const coreCount = fitting.filter((c) => {
-    const weight = characterImportance(c);
-    return weight === 'lead' || weight === 'regular';
-  }).length;
-  const addCapped = (list: Character[]) => {
-    const prioritized = [...list].sort((a, b) => {
-      const aHot = spoken.has(a.id) || brought.has(a.id) ? 1 : 0;
-      const bHot = spoken.has(b.id) || brought.has(b.id) ? 1 : 0;
-      if (aHot !== bHot) return bHot - aHot;
-      return importanceRank(b) - importanceRank(a);
-    });
-    for (const c of prioritized) {
+  if (!arrivedClosed) {
+    for (const id of opts.castIds) {
+      if (player && id === player.id) continue;
+      const c = npcs.find((x) => x.id === id);
+      if (c) push(c.id);
+    }
+  } else {
+    for (const id of opts.castIds) {
+      if (player && id === player.id) continue;
+      const c = npcs.find((x) => x.id === id);
+      if (!c) continue;
+      if (brought.has(c.id) || roleMatchesRoom(c, opts.inhabitants)) push(c.id);
+      else note(c, 'leave', 'place');
+    }
+
+    const namedCount = () => ids.filter((id) => id !== player?.id).length;
+    const pool = autoStagePool(matching)
+      .filter((c) => !ids.includes(c.id))
+      .sort((a, b) => importanceRank(b) - importanceRank(a));
+    for (const c of pool) {
       if (namedCount() >= ROOM_NAMED_CAP) break;
       push(c.id);
+      note(c, 'enter', 'place');
     }
-  };
-  // A short list of leads and regulars all come in, as before.
-  // A crowd, or a room that only occasionals fit, stops at the cap: spoken and brought, then leads.
-  if (coreCount > 0 && coreCount <= ROOM_NAMED_CAP) {
-    for (const c of pool) push(c.id);
-  } else if (pool.length > 0) {
-    addCapped(pool);
   }
 
-  for (const id of brought) push(id);
+  for (const c of npcs) {
+    if (!brought.has(c.id) || ids.includes(c.id)) continue;
+    push(c.id);
+    note(c, 'enter', 'named');
+  }
 
-  const alsoFits = fitting
+  const alsoFits = matching
     .filter((c) => !ids.includes(c.id) && characterImportance(c) !== 'background')
     .sort((a, b) => importanceRank(b) - importanceRank(a))
     .slice(0, ALSO_FITS_CAP);
-  return { castIds: ids, alsoFits };
+  return { castIds: ids, alsoFits, changes };
+}
+
+/** One sentence the player can read when the room changes. */
+export function rosterChangeNotice(changes: RosterMove[]): string {
+  return changes.map((c) => {
+    if (c.action === 'leave') return `${c.name} left — this place does not hold them.`;
+    if (c.reason === 'named') return `${c.name} is here — you named them.`;
+    return `${c.name} is here — this place holds them.`;
+  }).join(' ');
+}
+
+const INTRODUCE_NAME =
+  /\b(?:meet|meets|met|named|called)\s+([A-Z][\p{L}'’-]{1,40}(?:\s+[A-Z][\p{L}'’-]{1,40})?)/u;
+
+/** A proper name the line introduces, when nobody in the cast already has it. */
+export function namedNewcomer(playerText: string, knownNames: string[]): string | null {
+  const match = playerText.match(INTRODUCE_NAME);
+  const name = match?.[1]?.trim() ?? '';
+  if (!name) return null;
+  const key = name.toLowerCase();
+  if (knownNames.some((n) => n.trim().toLowerCase() === key)) return null;
+  return name;
 }
 
 /** Season-open roster: leads and regulars who fit, then occasionals if the place has no one more central. */

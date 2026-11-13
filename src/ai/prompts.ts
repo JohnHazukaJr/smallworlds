@@ -2466,3 +2466,162 @@ export function directorUserPrompt(
     `Plan castDelta and beats as JSON.`
   );
 }
+
+/** One reply for the whole beat: narration and the lines of the people who may speak. */
+const SCENE_REPLY_TOKENS: Record<TurnLength, number> = {
+  beat: 900,
+  scene: 1600,
+  episode: 2600
+};
+
+export function sceneReplyTokens(length: TurnLength): number {
+  return SCENE_REPLY_TOKENS[length];
+}
+
+export function sceneLengthHint(length: TurnLength): string {
+  if (length === 'beat') return 'Short reply: about 80–150 words for the whole scene.';
+  if (length === 'scene') return 'Medium reply: about 200–400 words for the whole scene.';
+  return 'Long reply: about 500–800 words for the whole scene.';
+}
+
+export interface SceneVoice {
+  id: string;
+  name: string;
+  kind: 'cast' | 'guest';
+  role?: string;
+  voice?: string;
+  want?: string;
+  example?: string;
+  mustNotKnow?: string;
+  anchor?: string;
+  brief?: string;
+}
+
+export interface SceneReplyInput {
+  ctx: PromptContext;
+  mode: ComposeMode;
+  playerText: string;
+  length: TurnLength;
+  speakers: SceneVoice[];
+  /** Everyone physically here, including people who do not get a line. */
+  present: Array<{ name: string; role?: string }>;
+  pack?: PromptPack;
+  historyTailChars?: number;
+  historyTailMaxTurns?: number;
+  totalCap?: number;
+  /** Write-as, or a narration re-roll: no new quoted speaker. */
+  narrationOnly?: boolean;
+  /** Re-roll of one existing line. */
+  rewrite?: { speakerName: string; prior: string };
+}
+
+function sceneSpeakerCard(voice: SceneVoice): string {
+  const example = voice.example?.trim();
+  const lines = [
+    `### ${voice.name}`,
+    voice.role && `Role: ${voice.role}`,
+    voice.brief && `Who they are here: ${clipText(voice.brief, 180)}`,
+    voice.voice && `Voice: ${clipText(voice.voice, 240)}`,
+    voice.want && `Wants: ${clipText(voice.want, 160)}`,
+    example && `Example line (rhythm only, do not reuse it): "${clipText(example, 160)}"`,
+    voice.anchor && `Anchor: ${clipText(voice.anchor, 160)}`,
+    voice.mustNotKnow && `Must not know or say: ${clipText(voice.mustNotKnow, 240)}`
+  ];
+  return lines.filter(Boolean).join('\n');
+}
+
+/** The last instruction: who may speak, how long, then the player's line. */
+export function sceneTurnCue(opts: {
+  mode: ComposeMode;
+  playerText: string;
+  length: TurnLength;
+  speakers: Array<{ name: string }>;
+  narrationOnly?: boolean;
+  rewrite?: { speakerName: string; prior: string };
+}): string {
+  const names = opts.speakers.map((s) => s.name.trim()).filter(Boolean);
+  const who = opts.narrationOnly
+    ? 'Nobody new speaks. Write narration only. No quoted dialogue.'
+    : names.length === 0
+      ? 'Nobody is here to speak. Write the consequence in narration. No quoted dialogue.'
+      : names.length === 1
+        ? `Only ${names[0]} may speak. Everyone else stays in the narration without a line.`
+        : `Only ${names.slice(0, -1).join(', ')} and ${names[names.length - 1]} may speak. Everyone else stays in the narration without a line.`;
+  const move = opts.narrationOnly && opts.playerText.trim()
+    ? `This already happened, as them, not as the player. Describe it. Do not quote a new speaker and do not hand the line to anyone else:\n${opts.playerText.trim()}`
+    : opts.mode === 'continue' && !opts.playerText.trim()
+      ? 'No new player line. Continue the scene from the last beat. Do not recap. Do not wait for the player.'
+      : MODE_PREFIX[opts.mode](opts.playerText);
+  const rewrite = opts.rewrite
+    ? `Rewrite only ${opts.rewrite.speakerName}'s previous line with fresh wording and the same job. Do not copy it.\nPrevious line:\n${opts.rewrite.prior.trim()}`
+    : '';
+  return [who, sceneLengthHint(opts.length), rewrite, move].filter(Boolean).join('\n\n');
+}
+
+/**
+ * Standing rules, who is here, keyword memory, the recent transcript,
+ * and this turn's instruction last.
+ */
+export function buildSceneReply(opts: SceneReplyInput): { system: string; messages: ChatMessage[] } {
+  const { ctx } = opts;
+  const ai = ctx.world.ai;
+  const tight = opts.pack === 'tight';
+  const query = memoryFocusQuery([
+    opts.playerText,
+    opts.speakers.map((s) => s.name).join(' '),
+    opts.present.map((p) => p.name).join(' '),
+    ctx.episode.location
+  ]);
+  const sections: string[] = [];
+  const rules = ai.narratorRules.filter((r) => r.trim());
+  sections.push(
+    [
+      `You write the next stretch of "${ctx.world.title}" in ${ai.pov} person, ${ai.tense} tense.`,
+      'Write narration and spoken dialogue as one continuous scene.',
+      'Put each spoken line in double quotes, and name the speaker in that same sentence.',
+      'Never write the player\'s dialogue, decisions, or inner thoughts. Do not repeat their line.',
+      'Do not recap the transcript. Do not bring in anyone who is not already here.',
+      proseDensityLine(ai),
+      pacingLine(ai),
+      rules.length > 0 ? rules.map((r) => `- ${r}`).join('\n') : ''
+    ].filter(Boolean).join('\n')
+  );
+  sections.push(ANTI_SLOP_PROSE);
+  sections.push(contentSection(ai));
+  if (ai.customInstructions.trim()) {
+    sections.push(`## Author's instructions (follow verbatim)\n${ai.customInstructions.trim()}`);
+  }
+  sections.push(situationPremise(ctx));
+  const threads = threadsBlock(ctx, 'narrator', 'narrator', tight ? 4 : 8, query);
+  if (threads) sections.push(threads);
+  const cards = opts.speakers.map(sceneSpeakerCard).filter(Boolean);
+  const speakerNames = new Set(opts.speakers.map((s) => s.name.trim().toLowerCase()));
+  const quiet = opts.present.filter((p) => p.name.trim() && !speakerNames.has(p.name.trim().toLowerCase()));
+  const here = [
+    '## Here',
+    cards.length > 0 ? cards.join('\n\n') : 'Nobody has a speaking part on this turn.',
+    quiet.length > 0
+      ? `Also here, and they do not get a line: ${quiet.map((p) => p.role?.trim() ? `${p.name} (${p.role.trim()})` : p.name).join(', ')}.`
+      : ''
+  ].filter(Boolean).join('\n\n');
+  sections.push(here);
+  const facts = continuityBlock(ctx, 'narrator', 'hard', tight ? 6 : 12, query);
+  if (facts) sections.push(facts);
+  sections.push(...currentLocationBlock(ctx, { atmosphereOnly: true }));
+
+  const system = sections.join('\n\n');
+  const history = historyMessages(
+    ctx.turns,
+    ctx.characters,
+    ctx.episode.guests ?? [],
+    ctx.episode,
+    system.length,
+    {
+      totalCap: opts.totalCap,
+      historyTailChars: opts.historyTailChars,
+      historyTailMaxTurns: opts.historyTailMaxTurns
+    }
+  );
+  const cue = sceneTurnCue(opts);
+  return { system, messages: mergeMessages([...history, { role: 'user', content: cue }]) };
+}

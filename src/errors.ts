@@ -3,7 +3,7 @@
  * Keep AIError / WriteAbortedError; wrap them here at UI and soft-fail boundaries.
  */
 
-import { isContextOverflowError, isEmptyModelResponse } from './ai/client';
+import { isContextOverflowError, isEmptyModelResponse, isStreamStall } from './ai/client';
 
 export type AppErrorCode =
   | 'aborted'
@@ -142,7 +142,9 @@ function looksLikeWriteLoop(msg: string): boolean {
   const m = msg.toLowerCase();
   return (
     m.includes('no usable narration') ||
+    m.includes('did not answer') ||
     m.includes('no character replied') ||
+    m.includes('must not know') ||
     m.includes('pin who should answer') ||
     m.includes('re-roll produced') ||
     m.includes('only narrator or character') ||
@@ -301,7 +303,7 @@ export function classifyError(e: unknown): AppError {
     });
   }
 
-  if (looksLikeTimeout(msg)) {
+  if (isStreamStall(e) || looksLikeTimeout(msg)) {
     return new AppError({
       code: 'timeout',
       userMessage: 'That took too long. Try a shorter stretch, or check your connection.',

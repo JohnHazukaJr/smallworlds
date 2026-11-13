@@ -28,7 +28,7 @@ import {
   presenceSheet
 } from './prompts';
 import { SPEAK_FORMAT_RULES, SPOKEN_VOICE_RULES } from './dialogueFormat';
-import { filterCastDelta, openingFittingIds, stageSceneCast } from './sceneFit';
+import { filterCastDelta, namedNewcomer, openingFittingIds, rosterChangeNotice, stageSceneCast } from './sceneFit';
 import { LIVE_MEMORY_TOOL } from './utilityCall';
 import type { Character, CharacterImportance, ContinuityFact, EpisodeGuest, OpenThread, PlotTarget, Turn } from '../types';
 
@@ -1092,7 +1092,7 @@ describe('stageSceneCast', () => {
       placeChanged: true
     });
     expect(inn.castIds).toContain('m');
-    expect(inn.castIds).toContain('k');
+    expect(inn.castIds).not.toContain('k');
 
     const room = stageSceneCast({
       castIds: ['p', 'm'],
@@ -1144,7 +1144,7 @@ describe('stageSceneCast', () => {
   });
 
   it('keeps an occasional off the card and on the also-fits list', () => {
-    const nia = person('n', 'Nia', { role: 'tide clerk', location: 'the harbour', importance: 'occasional' });
+    const nia = person('n', 'Nia', { role: 'assistant registrar', location: 'the harbour', importance: 'occasional' });
     const scene = stageSceneCast({
       castIds: ['p'],
       characters: [player, ada, nia],
@@ -1179,35 +1179,50 @@ describe('stageSceneCast', () => {
       placeChanged: true
     });
     expect(moved.castIds).not.toContain('n');
-    expect(moved.alsoFits.map((c) => c.id)).toContain('n');
+    expect(moved.alsoFits.map((c) => c.id)).not.toContain('n');
   });
 
-  it('fills an empty room with occasionals who fit', () => {
-    const nia = person('n', 'Nia', { location: 'the harbour', importance: 'occasional' });
+  it('does not pull someone in just because their location string matches', () => {
+    const rex = person('x', 'Rex', { role: 'sailor', location: 'Harbour office', importance: 'lead' });
     const scene = stageSceneCast({
       castIds: ['p'],
-      characters: [player, nia],
+      characters: [player, rex],
       placeName: 'Harbour office',
-      inhabitants: '',
+      inhabitants: 'the registrar',
       playerText: 'I look around.',
       placeChanged: true
     });
-    expect(scene.castIds).toContain('n');
+    expect(scene.castIds).not.toContain('x');
   });
 
-  it('keeps leads when more regulars fit than the room can hold', () => {
+  it('does not pull a fitting regular into a room you are already in', () => {
+    const adaHere = person('a2', 'Ada', { role: 'registrar', importance: 'lead' });
+    const ben = person('b2', 'Ben', { role: 'registrar', importance: 'regular' });
+    const scene = stageSceneCast({
+      castIds: ['p', 'a2'],
+      characters: [player, adaHere, ben],
+      placeName: 'Harbour office',
+      inhabitants: 'the registrar',
+      playerText: 'I look around.',
+      placeChanged: false
+    });
+    expect(scene.castIds).toEqual(['p', 'a2']);
+    expect(scene.changes).toEqual([]);
+  });
+
+  it('keeps leads when more role-matching regulars fit than the room can hold', () => {
     const regulars = Array.from({ length: 6 }, (_, i) =>
-      person(`r${i}`, `Reg${i}`, { location: 'the harbour market', importance: 'regular' })
+      person(`r${i}`, `Reg${i}`, { role: 'clerk', importance: 'regular' })
     );
     const leads = [
-      person('l0', 'Lark', { location: 'the harbour market', importance: 'lead' }),
-      person('l1', 'Ivo', { location: 'the harbour market', importance: 'lead' })
+      person('l0', 'Lark', { role: 'clerk', importance: 'lead' }),
+      person('l1', 'Ivo', { role: 'clerk', importance: 'lead' })
     ];
     const scene = stageSceneCast({
       castIds: ['p'],
       characters: [player, ...regulars, ...leads],
-      placeName: 'Harbour market',
-      inhabitants: '',
+      placeName: 'Harbour office',
+      inhabitants: 'the clerks',
       playerText: 'I look around.',
       placeChanged: true
     });
@@ -1215,26 +1230,16 @@ describe('stageSceneCast', () => {
     expect(scene.alsoFits.map((c) => c.id)).toEqual(['r4', 'r5']);
   });
 
-  it('keeps someone who has spoken ahead of an unspoken lead in a crowded room', () => {
-    const leads = Array.from({ length: 6 }, (_, i) =>
-      person(`l${i}`, `Lead${i}`, { location: 'the harbour market', importance: 'lead' })
+  it('says why someone entered or left', () => {
+    expect(rosterChangeNotice([
+      { id: 't', name: 'Mara', action: 'enter', reason: 'place' },
+      { id: 'm', name: 'Otto', action: 'enter', reason: 'named' },
+      { id: 'b', name: 'Ben', action: 'leave', reason: 'place' }
+    ])).toBe(
+      'Mara is here — this place holds them. Otto is here — you named them. Ben left — this place does not hold them.'
     );
-    const spoken = person('r', 'Rin', { location: 'the harbour market', importance: 'regular' });
-    const scene = stageSceneCast({
-      castIds: ['p'],
-      characters: [player, ...leads, spoken],
-      placeName: 'Harbour market',
-      inhabitants: '',
-      playerText: 'I look around.',
-      placeChanged: true,
-      turns: [{
-        id: 't', episodeId: 'e', worldId: 'w', role: 'character', mode: null,
-        characterId: 'r', text: 'Morning.', createdAt: 0
-      }]
-    });
-    expect(scene.castIds).toContain('r');
-    expect(scene.castIds).not.toContain('l5');
-    expect(scene.castIds.filter((id) => id !== 'p')).toHaveLength(6);
+    expect(namedNewcomer('I met Lila at the door.', ['Otto', 'Mara'])).toBe('Lila');
+    expect(namedNewcomer('I met Otto at the door.', ['Otto'])).toBeNull();
   });
 
   it('rejects a background enter unless the line brings them', () => {

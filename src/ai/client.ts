@@ -35,10 +35,15 @@ export interface StreamRequest {
   tools?: ToolSpec[];
   toolChoice?: 'auto' | { name: string };
   /**
-   * Prose only. Silence before a read stalls, in milliseconds.
+   * Prose only. Silence between tokens before a read stalls, in milliseconds.
    * Omit for the default. 0 turns the idle limit off.
    */
   idleMs?: number;
+  /**
+   * Prose only. Silence allowed before the first byte.
+   * Omit for the default. When idleMs is set and this is not, tests use idleMs for both windows.
+   */
+  firstTokenMs?: number;
 }
 
 /** Full streamed text plus whether the provider stopped for length. */
@@ -192,8 +197,11 @@ function isRetryableStatus(status: number | undefined): boolean {
   return status === 429 || status === 502 || status === 503;
 }
 
-/** Prose reads give up after this much silence. Utility and wrap keep their own deadlines. */
-export const PROSE_IDLE_MS = 20_000;
+/** Silence allowed before the first byte of a prose stream. */
+export const PROSE_FIRST_TOKEN_MS = 90_000;
+
+/** Silence allowed between tokens once a prose stream has started. */
+export const PROSE_IDLE_MS = 45_000;
 
 /** A prose stream sent nothing for the idle window. Not a user Stop. */
 export class StreamStallError extends Error {
@@ -216,10 +224,24 @@ export function isTimeoutFailure(e: unknown): boolean {
   return msg.includes('timed out') || msg.includes('timeout');
 }
 
-/** Idle limit for a prose read, or none for utility, wrap, and tests. */
+function proseJob(req: Pick<StreamRequest, 'job' | 'idleMs'>): boolean {
+  return (req.job ?? 'prose') === 'prose' && req.idleMs !== 0;
+}
+
+/** How long to wait for the first byte. Utility, wrap, and tests wait without a limit. */
+export function proseFirstTokenMs(
+  req: Pick<StreamRequest, 'job' | 'idleMs' | 'firstTokenMs'>
+): number | undefined {
+  if (!proseJob(req)) return undefined;
+  if (req.firstTokenMs === 0) return undefined;
+  if (req.firstTokenMs != null) return req.firstTokenMs;
+  if (req.idleMs != null) return req.idleMs;
+  return PROSE_FIRST_TOKEN_MS;
+}
+
+/** Idle limit between tokens, or none for utility, wrap, and tests. */
 export function proseIdleMs(req: Pick<StreamRequest, 'job' | 'idleMs'>): number | undefined {
-  if ((req.job ?? 'prose') !== 'prose') return undefined;
-  if (req.idleMs === 0) return undefined;
+  if (!proseJob(req)) return undefined;
   return req.idleMs ?? PROSE_IDLE_MS;
 }
 
@@ -343,7 +365,6 @@ function emptyStopHint(r: StreamResult): string {
 export async function streamChat(req: StreamRequest): Promise<StreamResult> {
   const run = (next: StreamRequest) => streamChatOnce(next);
   const job = req.job ?? 'prose';
-  const started = Date.now();
 
   const retryEmpty = async (first: StreamResult): Promise<StreamResult> => {
     if (!resultEmpty(first)) return first;
@@ -374,15 +395,8 @@ export async function streamChat(req: StreamRequest): Promise<StreamResult> {
 
   try {
     const first = await run(req);
-    const result = await retryEmpty(first);
-    // #region agent log
-    fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H1',location:'client.ts:streamChat',message:'stream finished',data:{job,ms:Date.now()-started,chars:result.text.length,truncated:!!result.truncated,stalled:!!result.stalled,finish:result.finishReason??''},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
-    return result;
+    return await retryEmpty(first);
   } catch (e) {
-    // #region agent log
-    fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H1-H2-H5',location:'client.ts:streamChat:catch',message:'stream failed',data:{job,ms:Date.now()-started,name:(e as Error)?.name??'',status:e instanceof AIError?e.status??null:null,stall:isStreamStall(e),timeout:isTimeoutFailure(e),aborted:!!req.signal?.aborted,msg:((e as Error)?.message??'').slice(0,180)},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     if (req.signal?.aborted) throw e;
     if ((e as Error)?.name === 'AbortError') throw e;
 
@@ -404,6 +418,21 @@ export async function streamChat(req: StreamRequest): Promise<StreamResult> {
     await sleep(fromHeader ?? 800, req.signal);
     return retryEmpty(await run(req));
   }
+}
+
+function proseReadOpts(req: StreamRequest): { signal?: AbortSignal; idleMs?: number; firstIdleMs?: number } {
+  return {
+    signal: req.signal,
+    idleMs: proseIdleMs(req),
+    firstIdleMs: proseFirstTokenMs(req)
+  };
+}
+
+/** A stream that already produced words is the reply. Abort still propagates. */
+function partialStream(e: unknown, full: string, extra: Partial<StreamResult> = {}): StreamResult {
+  if ((e as Error)?.name === 'AbortError') throw e;
+  if (!full.trim()) throw e;
+  return { text: full, truncated: true, stalled: true, ...extra };
 }
 
 /**
@@ -432,11 +461,7 @@ function readNextChunk(
     timer = setTimeout(() => {
       stop(() => {
         reader.cancel().catch(() => undefined);
-        const userStop = !!signal?.aborted;
-        // #region agent log
-        fetch('http://127.0.0.1:7268/ingest/c7c14156-1540-46cc-b504-94c7745617d6',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'e1355f'},body:JSON.stringify({sessionId:'e1355f',hypothesisId:'H1-H2',location:'client.ts:readNextChunk',message:'prose read went silent',data:{idleMs,userStop},timestamp:Date.now()})}).catch(()=>{});
-        // #endregion
-        if (userStop) reject(new DOMException('Aborted', 'AbortError'));
+        if (signal?.aborted) reject(new DOMException('Aborted', 'AbortError'));
         else reject(new StreamStallError());
       });
     }, idleMs);
@@ -460,13 +485,16 @@ function readNextChunk(
 async function readSSE(
   res: Response,
   onEvent: (data: string) => void,
-  opts?: { signal?: AbortSignal; idleMs?: number }
+  opts?: { signal?: AbortSignal; idleMs?: number; firstIdleMs?: number }
 ): Promise<void> {
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let sawByte = false;
   for (;;) {
-    const { done, value } = await readNextChunk(reader, opts?.signal, opts?.idleMs);
+    const idle = sawByte ? opts?.idleMs : (opts?.firstIdleMs ?? opts?.idleMs);
+    const { done, value } = await readNextChunk(reader, opts?.signal, idle);
+    sawByte = true;
     if (done) {
       buffer += decoder.decode(value);
       break;
@@ -562,20 +590,14 @@ async function streamOpenAI(req: StreamRequest): Promise<StreamResult> {
       if (reason) finishReason = reason;
       if (isLengthStop(reason)) truncated = true;
     } catch { /* keep-alive or malformed chunk */ }
-  }, { signal: req.signal, idleMs: proseIdleMs(req) });
+  }, proseReadOpts(req));
   } catch (e) {
-    if (isStreamStall(e) && full.trim()) {
-      const toolCalls = Object.values(toolBuf).filter((t) => t.name || t.arguments);
-      return {
-        text: full,
-        truncated: true,
-        stalled: true,
-        finishReason,
-        sawReasoning,
-        ...(toolCalls.length ? { toolCalls } : {})
-      };
-    }
-    throw e;
+    const toolCalls = Object.values(toolBuf).filter((t) => t.name || t.arguments);
+    return partialStream(e, full, {
+      finishReason,
+      sawReasoning,
+      ...(toolCalls.length ? { toolCalls } : {})
+    });
   }
   const toolCalls = Object.values(toolBuf).filter((t) => t.name || t.arguments);
   if (!full.trim() && toolCalls.length === 0) {
@@ -632,12 +654,9 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
     } catch (e) {
       if (e instanceof AIError) throw e;
     }
-  }, { signal: req.signal, idleMs: proseIdleMs(req) });
+  }, proseReadOpts(req));
   } catch (e) {
-    if (isStreamStall(e) && full.trim()) {
-      return { text: full, truncated: true, stalled: true, finishReason };
-    }
-    throw e;
+    return partialStream(e, full, { finishReason });
   }
   if (!full.trim()) return { text: '', truncated, finishReason };
   return { text: full, truncated, finishReason };
@@ -689,12 +708,9 @@ async function streamGemini(req: StreamRequest): Promise<StreamResult> {
       if (reason) finishReason = reason;
       if (isLengthStop(reason)) truncated = true;
     } catch { /* ignore malformed chunk */ }
-  }, { signal: req.signal, idleMs: proseIdleMs(req) });
+  }, proseReadOpts(req));
   } catch (e) {
-    if (isStreamStall(e) && full.trim()) {
-      return { text: full, truncated: true, stalled: true, finishReason, sawReasoning: sawThought };
-    }
-    throw e;
+    return partialStream(e, full, { finishReason, sawReasoning: sawThought });
   }
   if (!full.trim()) return { text: '', truncated, finishReason, sawReasoning: sawThought };
   return { text: full, truncated, finishReason, sawReasoning: sawThought };
