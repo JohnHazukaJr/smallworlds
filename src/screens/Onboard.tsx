@@ -1,9 +1,9 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { useMemo, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState, type ChangeEvent, type MutableRefObject } from 'react';
 import {
   draftColdOpenNarration, fleshOutCharacter, fleshOutLocation,
   fleshOutNarratorRules, fleshOutPremise, fleshOutRelationships, fleshOutWorldEverything,
-  fleshOutWorldLore, seedOpeningMemory
+  fleshOutWorldLore, fleshSectionsToRun, seedOpeningMemory
 } from '../ai/engine';
 import { characterImportance } from '../ai/characterWeight';
 import { CharacterPortraitTools } from '../components/CharacterPortraitTools';
@@ -14,7 +14,7 @@ import { formatUserError } from '../errors';
 import { normalizeRelationships, pruneRelationshipsToCast } from '../relationships';
 import { useApp } from '../store/app';
 import { resolveModel, useSettings } from '../store/settings';
-import type { Character, Episode, Location, Season, World, WorldAISettings } from '../types';
+import type { Character, CharacterState, Episode, Location, Season, World, WorldAISettings } from '../types';
 import { characterAvatarStyle } from '../ui/avatar';
 import { Bar, Chip, ErrorNote, Field, Spinner, Toggle, editorsStacked, useViewport } from '../ui/bits';
 import { avatarStyle, ACCENT } from '../ui/theme';
@@ -24,6 +24,12 @@ import {
   evaluateWorldWriteReady, shapeTagFor,
   stanceFromShapeIndex, STORY_STANCES, worldWriteReady
 } from '../worldOps';
+
+type CharacterSheetPatch = Omit<Partial<Character>, 'state'> & {
+  state?: Partial<CharacterState>;
+};
+
+const SheetFlushContext = createContext<MutableRefObject<Set<() => void>> | null>(null);
 
 /** Cast/place counts for bulk flesh-out, tuned by story shape. */
 function rosterTargets(shapeIndex: number): { characters: number; locations: number } {
@@ -99,6 +105,30 @@ export function Onboard() {
   const [error, setError] = useState('');
   const [gateNote, setGateNote] = useState('');
   const [reviewBanner, setReviewBanner] = useState('');
+  const writesRef = useRef<Set<Promise<void>>>(new Set());
+  const patchChainRef = useRef<Map<string, Promise<void>>>(new Map());
+  const flushesRef = useRef(new Set<() => void>());
+
+  const trackWrite = (job: Promise<void>) => {
+    writesRef.current.add(job);
+    void job.finally(() => writesRef.current.delete(job));
+    return job;
+  };
+
+  const enqueuePatch = (id: string, run: () => Promise<unknown>): Promise<void> => {
+    const prev = patchChainRef.current.get(id) ?? Promise.resolve();
+    const job = prev.then(run, run).then(() => undefined);
+    patchChainRef.current.set(id, job);
+    return trackWrite(job);
+  };
+
+  /** Save every open sheet box, including the one that still has the cursor. */
+  const commitFocusedField = async () => {
+    const el = document.activeElement;
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) el.blur();
+    flushesRef.current.forEach((flush) => flush());
+    await Promise.all([...writesRef.current]);
+  };
 
   // The world is created as soon as we leave step 1 — everything after that is a real, live record.
   const [worldId, setWorldId] = useState<string | null>(null);
@@ -271,13 +301,27 @@ export function Onboard() {
     }
   };
 
-  const patchPlayer = (p: Partial<Character>) => {
-    if (!player) return;
-    void safeWrite(
-      () => db.characters.update(player.id, { ...p, isPlayer: true, updatedAt: Date.now() }),
-      setError
-    );
+  const patchCharacter = (id: string, p: CharacterSheetPatch, isPlayer = false) =>
+    enqueuePatch(id, () => safeWrite(async () => {
+      const row = await db.characters.get(id);
+      if (!row) return;
+      const { state, ...rest } = p;
+      const next: Partial<Character> = { ...rest, updatedAt: Date.now() };
+      if (state) next.state = { ...row.state, ...state };
+      if (isPlayer || row.isPlayer) next.isPlayer = true;
+      await db.characters.update(id, next);
+    }, setError));
+
+  const patchPlayer = (p: CharacterSheetPatch) => {
+    if (!player) return Promise.resolve();
+    return patchCharacter(player.id, p, true);
   };
+
+  const patchPlace = (id: string, p: Partial<Location>) =>
+    enqueuePatch(id, () => safeWrite(
+      () => db.locations.update(id, { ...p, updatedAt: Date.now() }),
+      setError
+    ));
 
   const addCastPlain = async () => {
     if (!worldId) return;
@@ -461,8 +505,9 @@ export function Onboard() {
     });
   };
 
-  const openFullEditor = (screen: 'cast' | 'locations') => {
+  const openFullEditor = async (screen: 'cast' | 'locations') => {
     if (!worldId) return;
+    await commitFocusedField();
     useApp.setState({ currentWorldId: worldId });
     if (screen === 'cast') {
       const focus = expandedCastId ?? npcCast[0]?.id ?? null;
@@ -567,7 +612,7 @@ export function Onboard() {
                 type="button"
                 className="btn-quiet"
                 style={{ fontSize: 12.5, padding: 0, textAlign: 'left', color: 'var(--paper)' }}
-                onClick={() => jumpForMissing(m)}
+                onClick={() => { void commitFocusedField().then(() => jumpForMissing(m)); }}
               >
                 {m}
               </button>
@@ -581,7 +626,7 @@ export function Onboard() {
           type="button"
           className="btn-quiet"
           style={{ fontSize: 12, padding: 0, textAlign: 'left', color: 'oklch(0.78 0.06 195)' }}
-          onClick={() => jumpForMissing(w)}
+          onClick={() => { void commitFocusedField().then(() => jumpForMissing(w)); }}
         >
           {w}
         </button>
@@ -658,7 +703,7 @@ export function Onboard() {
       return;
     }
     setError('');
-    setBusy('Fleshing lore…');
+    setBusy('Planning cast & places…');
     try {
       const world = await db.worlds.get(worldId);
       const s = await db.seasons.get(seasonId);
@@ -670,11 +715,25 @@ export function Onboard() {
       setAi(nextAi);
       const liveWorld = { ...world, storyStance: stance, ai: nextAi };
       const targets = rosterTargets(shape);
+      const sections = fleshSectionsToRun({
+        bible: liveWorld.bible,
+        premise: s.premise,
+        narratorRules: liveWorld.ai.narratorRules,
+        hasPlayer: !!player,
+        playerSummary: player?.summary ?? '',
+        playerGoal: player?.state.goal ?? ''
+      });
+      setBusy(
+        sections.lore ? 'Fleshing lore…'
+          : sections.premise ? 'Fleshing premise…'
+            : sections.rules ? 'Fleshing narrator rules…'
+              : sections.player ? 'Fleshing you…'
+                : 'Planning cast & places…'
+      );
       await fleshOutWorldEverything(liveWorld, s, ep, {
         shape: shapeTag(shape),
         targetCharacters: targets.characters,
         targetLocations: targets.locations,
-        seedColdOpen: true,
         onProgress: setBusy
       });
       const refreshed = await db.worlds.get(worldId);
@@ -910,55 +969,50 @@ export function Onboard() {
           ) : (
             <>
               <Field label="Who you are">
-                <textarea
+                <SheetText
                   rows={3}
-                  defaultValue={player.summary}
-                  key={`sum-${player.id}-${player.updatedAt}`}
-                  onBlur={(e) => patchPlayer({ summary: e.target.value })}
+                  value={player.summary}
+                  onCommit={(summary) => patchPlayer({ summary })}
                   placeholder="Second-person summary — who you are as the story opens."
                 />
               </Field>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 160px), 1fr))', gap: 10 }}>
                 <Field label="Goal now">
-                  <input
-                    defaultValue={player.state.goal}
-                    key={`g-${player.updatedAt}`}
-                    onBlur={(e) => patchPlayer({ state: { ...player.state, goal: e.target.value } })}
+                  <SheetText
+                    value={player.state.goal}
+                    onCommit={(goal) => patchPlayer({ state: { goal } })}
                     placeholder="What you want right now"
                   />
                 </Field>
                 <Field label="Emotion">
-                  <input
-                    defaultValue={player.state.emotion}
-                    key={`e-${player.updatedAt}`}
-                    onBlur={(e) => patchPlayer({ state: { ...player.state, emotion: e.target.value } })}
+                  <SheetText
+                    value={player.state.emotion}
+                    onCommit={(emotion) => patchPlayer({ state: { emotion } })}
                   />
                 </Field>
                 <Field label="Where">
-                  <input
-                    defaultValue={player.state.location}
-                    key={`l-${player.updatedAt}`}
-                    onBlur={(e) => patchPlayer({ state: { ...player.state, location: e.target.value } })}
+                  <SheetText
+                    value={player.state.location}
+                    onCommit={(location) => patchPlayer({ state: { location } })}
                   />
                 </Field>
                 <Field label="Condition">
-                  <input
-                    defaultValue={player.state.condition}
-                    key={`c-${player.updatedAt}`}
-                    onBlur={(e) => patchPlayer({ state: { ...player.state, condition: e.target.value } })}
+                  <SheetText
+                    value={player.state.condition}
+                    onCommit={(condition) => patchPlayer({ state: { condition } })}
                   />
                 </Field>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 10 }}>
                 <Field label="Desires">
-                  <textarea rows={2} defaultValue={player.desires} key={`d-${player.updatedAt}`} onBlur={(e) => patchPlayer({ desires: e.target.value })} />
+                  <SheetText rows={2} value={player.desires} onCommit={(desires) => patchPlayer({ desires })} />
                 </Field>
                 <Field label="Fears">
-                  <textarea rows={2} defaultValue={player.fears} key={`f-${player.updatedAt}`} onBlur={(e) => patchPlayer({ fears: e.target.value })} />
+                  <SheetText rows={2} value={player.fears} onCommit={(fears) => patchPlayer({ fears })} />
                 </Field>
               </div>
               <Field label="Appearance">
-                <textarea rows={2} defaultValue={player.appearance} key={`a-${player.updatedAt}`} onBlur={(e) => patchPlayer({ appearance: e.target.value })} />
+                <SheetText rows={2} value={player.appearance} onCommit={(appearance) => patchPlayer({ appearance })} />
               </Field>
               <CharacterPortraitTools
                 key={player.id}
@@ -995,10 +1049,7 @@ export function Onboard() {
                   fleshBusy={busy === `Fleshing ${c.name || 'cast'}…`}
                   onToggle={() => setExpandedCastId((id) => (id === c.id ? null : c.id))}
                   onRemove={() => void removeCastEntry(c.id)}
-                  onPatch={(p) => void safeWrite(
-                    () => db.characters.update(c.id, { ...p, updatedAt: Date.now() }),
-                    setError
-                  )}
+                  onPatch={(p) => { void patchCharacter(c.id, p); }}
                   onToggleSelfTag={() => void toggleSelfTag(c.id)}
                   onFlesh={() => void (async () => {
                     setBusy(`Fleshing ${c.name || 'cast'}…`);
@@ -1061,10 +1112,7 @@ export function Onboard() {
                   onToggle={() => setExpandedPlaceId((id) => (id === l.id ? null : l.id))}
                   onRemove={() => void removePlaceEntry(l.id)}
                   onSetOpening={() => void setOpeningPlace(l.id)}
-                  onPatch={(p) => void safeWrite(
-                    () => db.locations.update(l.id, { ...p, updatedAt: Date.now() }),
-                    setError
-                  )}
+                  onPatch={(p) => { void patchPlace(l.id, p); }}
                   onFlesh={() => void (async () => {
                     setBusy(`Fleshing ${l.name || 'place'}…`);
                     setError('');
@@ -1176,6 +1224,7 @@ export function Onboard() {
   const lastStep = steps.length - 1;
 
   const goNext = async () => {
+    await commitFocusedField();
     if (step === 0) {
       setError('');
       setStep(1);
@@ -1234,6 +1283,7 @@ export function Onboard() {
   };
 
   return (
+    <SheetFlushContext.Provider value={flushesRef}>
     <div className="fade-in" style={{ minHeight: 0, height: '100%', flex: 1, display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)' }}>
       <div style={{ padding: narrow ? '30px 20px 46px' : '52px 44px 56px', display: 'flex', flexDirection: 'column', gap: 28, maxWidth: 660, minWidth: 0, minHeight: 0, overflow: 'auto' }}>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -1265,10 +1315,14 @@ export function Onboard() {
         {busy && !busy.startsWith('Generating') && <Spinner label={busy} />}
 
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 'auto', flexWrap: 'wrap' }}>
-          {step > 0 && <button className="btn-ghost" disabled={!!busy} onClick={() => setStep(step - 1)}>Back</button>}
+          {step > 0 && (
+            <button className="btn-ghost" onClick={() => { void commitFocusedField().then(() => setStep(step - 1)); }}>
+              Back
+            </button>
+          )}
           <button
             className="btn-primary" style={{ padding: '12px 24px', fontSize: 13.5 }}
-            disabled={!!busy || (step === lastStep && !ready.ok)}
+            disabled={step === lastStep && !ready.ok}
             onClick={() => void goNext()}
           >
             {ob.cta}
@@ -1281,6 +1335,7 @@ export function Onboard() {
       </div>
 
     </div>
+    </SheetFlushContext.Provider>
   );
 }
 
@@ -1304,10 +1359,97 @@ function SliderCard({ label, value, onChange, note, valueLabel }: {
   );
 }
 
+function linesFromField(text: string): string[] {
+  return text.split('\n').filter((line) => line.trim());
+}
+
+/**
+ * A sheet box seeded from the saved row. A focused box keeps what you're typing
+ * when another field saves or an AI fill refreshes the row. An unfocused box
+ * picks up that new text.
+ */
+function SheetText({
+  value, onCommit, rows, placeholder
+}: {
+  value: string;
+  onCommit: (next: string) => void;
+  rows?: number;
+  placeholder?: string;
+}) {
+  const [draft, setDraft] = useState(value);
+  const focused = useRef(false);
+  const draftRef = useRef(value);
+  const seedRef = useRef(value);
+  const valueRef = useRef(value);
+  valueRef.current = value;
+
+  useEffect(() => {
+    if (focused.current) return;
+    if (value === seedRef.current && value === draftRef.current) return;
+    seedRef.current = value;
+    draftRef.current = value;
+    setDraft(value);
+  }, [value]);
+
+  const commit = (fromBlur = false) => {
+    if (fromBlur) focused.current = false;
+    const next = draftRef.current;
+    if (next === seedRef.current) {
+      if (!fromBlur) return;
+      const saved = valueRef.current;
+      if (saved !== draftRef.current) {
+        seedRef.current = saved;
+        draftRef.current = saved;
+        setDraft(saved);
+      }
+      return;
+    }
+    seedRef.current = next;
+    onCommit(next);
+  };
+
+  const commitRef = useRef(commit);
+  commitRef.current = commit;
+  const flushes = useContext(SheetFlushContext);
+  useEffect(() => {
+    if (!flushes) return;
+    const flush = () => commitRef.current();
+    flushes.current.add(flush);
+    return () => { flushes.current.delete(flush); };
+  }, [flushes]);
+
+  const onChange = (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    draftRef.current = e.target.value;
+    setDraft(e.target.value);
+  };
+
+  if (rows) {
+    return (
+      <textarea
+        rows={rows}
+        value={draft}
+        placeholder={placeholder}
+        onChange={onChange}
+        onFocus={() => { focused.current = true; }}
+        onBlur={() => commit(true)}
+      />
+    );
+  }
+  return (
+    <input
+      value={draft}
+      placeholder={placeholder}
+      onChange={onChange}
+      onFocus={() => { focused.current = true; }}
+      onBlur={() => commit(true)}
+    />
+  );
+}
+
 function CastCard({ c, expanded, world, hasAI, fleshBusy, onToggle, onRemove, onPatch, onToggleSelfTag, onFlesh }: {
   c: Character; expanded: boolean; world: World; hasAI: boolean; fleshBusy: boolean;
   onToggle: () => void; onRemove: () => void;
-  onPatch: (p: Partial<Character>) => void; onToggleSelfTag: () => void; onFlesh: () => void;
+  onPatch: (p: CharacterSheetPatch) => void; onToggleSelfTag: () => void; onFlesh: () => void;
 }) {
   const gallery = characterPortraits(c);
   const primary = gallery[0] ?? null;
@@ -1350,46 +1492,70 @@ function CastCard({ c, expanded, world, hasAI, fleshBusy, onToggle, onRemove, on
               {fleshBusy ? 'Working…' : 'Fill in this sheet'}
             </button>
           )}
-          <Field label="Role"><input defaultValue={c.role} onBlur={(e) => onPatch({ role: e.target.value })} /></Field>
+          <Field label="Role">
+            <SheetText value={c.role} onCommit={(role) => onPatch({ role })} />
+          </Field>
           {!c.isPlayer && (
             <StoryWeightPicker value={c.importance} onChange={(importance) => onPatch({ importance })} />
           )}
-          <Field label="Who they are"><textarea rows={3} defaultValue={c.summary} onBlur={(e) => onPatch({ summary: e.target.value })} /></Field>
-          <Field label="Backstory"><textarea rows={2} defaultValue={c.backstory} onBlur={(e) => onPatch({ backstory: e.target.value })} /></Field>
-          <Field label="How they talk"><textarea rows={2} defaultValue={c.speechStyle} onBlur={(e) => onPatch({ speechStyle: e.target.value })} /></Field>
+          <Field label="Who they are">
+            <SheetText rows={3} value={c.summary} onCommit={(summary) => onPatch({ summary })} />
+          </Field>
+          <Field label="Backstory">
+            <SheetText rows={2} value={c.backstory} onCommit={(backstory) => onPatch({ backstory })} />
+          </Field>
+          <Field label="How they talk">
+            <SheetText rows={2} value={c.speechStyle} onCommit={(speechStyle) => onPatch({ speechStyle })} />
+          </Field>
           <Field label="Example lines" note="one per line">
-            <textarea rows={2} defaultValue={c.exampleLines.join('\n')} onBlur={(e) => onPatch({ exampleLines: e.target.value.split('\n').filter((l) => l.trim()) })} />
+            <SheetText rows={2} value={c.exampleLines.join('\n')} onCommit={(text) => onPatch({ exampleLines: linesFromField(text) })} />
           </Field>
           <Field label="Anchors" note="one per line — never broken">
-            <textarea rows={2} defaultValue={c.anchors.join('\n')} onBlur={(e) => onPatch({ anchors: e.target.value.split('\n').filter((l) => l.trim()) })} />
+            <SheetText rows={2} value={c.anchors.join('\n')} onCommit={(text) => onPatch({ anchors: linesFromField(text) })} />
           </Field>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 140px), 1fr))', gap: 10 }}>
             <Field label="Goal now">
-              <input defaultValue={c.state.goal} onBlur={(e) => onPatch({ state: { ...c.state, goal: e.target.value } })} />
+              <SheetText value={c.state.goal} onCommit={(goal) => onPatch({ state: { goal } })} />
             </Field>
             <Field label="Emotion">
-              <input defaultValue={c.state.emotion} onBlur={(e) => onPatch({ state: { ...c.state, emotion: e.target.value } })} />
+              <SheetText value={c.state.emotion} onCommit={(emotion) => onPatch({ state: { emotion } })} />
             </Field>
             <Field label="Where">
-              <input defaultValue={c.state.location} onBlur={(e) => onPatch({ state: { ...c.state, location: e.target.value } })} />
+              <SheetText value={c.state.location} onCommit={(location) => onPatch({ state: { location } })} />
             </Field>
             <Field label="Condition">
-              <input defaultValue={c.state.condition} onBlur={(e) => onPatch({ state: { ...c.state, condition: e.target.value } })} />
+              <SheetText value={c.state.condition} onCommit={(condition) => onPatch({ state: { condition } })} />
             </Field>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 10 }}>
-            <Field label="Traits"><textarea rows={2} defaultValue={c.traits} onBlur={(e) => onPatch({ traits: e.target.value })} /></Field>
-            <Field label="Flaws"><textarea rows={2} defaultValue={c.flaws} onBlur={(e) => onPatch({ flaws: e.target.value })} /></Field>
+            <Field label="Traits">
+              <SheetText rows={2} value={c.traits} onCommit={(traits) => onPatch({ traits })} />
+            </Field>
+            <Field label="Flaws">
+              <SheetText rows={2} value={c.flaws} onCommit={(flaws) => onPatch({ flaws })} />
+            </Field>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 10 }}>
-            <Field label="Desires"><textarea rows={2} defaultValue={c.desires} onBlur={(e) => onPatch({ desires: e.target.value })} /></Field>
-            <Field label="Fears"><textarea rows={2} defaultValue={c.fears} onBlur={(e) => onPatch({ fears: e.target.value })} /></Field>
+            <Field label="Desires">
+              <SheetText rows={2} value={c.desires} onCommit={(desires) => onPatch({ desires })} />
+            </Field>
+            <Field label="Fears">
+              <SheetText rows={2} value={c.fears} onCommit={(fears) => onPatch({ fears })} />
+            </Field>
           </div>
-          <Field label="Secrets"><textarea rows={2} defaultValue={c.secrets} onBlur={(e) => onPatch({ secrets: e.target.value })} /></Field>
-          <Field label="Must not know"><textarea rows={2} defaultValue={c.mustNotKnow} onBlur={(e) => onPatch({ mustNotKnow: e.target.value })} /></Field>
+          <Field label="Secrets">
+            <SheetText rows={2} value={c.secrets} onCommit={(secrets) => onPatch({ secrets })} />
+          </Field>
+          <Field label="Must not know">
+            <SheetText rows={2} value={c.mustNotKnow} onCommit={(mustNotKnow) => onPatch({ mustNotKnow })} />
+          </Field>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 10 }}>
-            <Field label="Appearance"><textarea rows={2} defaultValue={c.appearance} onBlur={(e) => onPatch({ appearance: e.target.value })} /></Field>
-            <Field label="Mannerisms"><textarea rows={2} defaultValue={c.mannerisms} onBlur={(e) => onPatch({ mannerisms: e.target.value })} /></Field>
+            <Field label="Appearance">
+              <SheetText rows={2} value={c.appearance} onCommit={(appearance) => onPatch({ appearance })} />
+            </Field>
+            <Field label="Mannerisms">
+              <SheetText rows={2} value={c.mannerisms} onCommit={(mannerisms) => onPatch({ mannerisms })} />
+            </Field>
           </div>
         </div>
       )}
@@ -1436,18 +1602,36 @@ function PlaceCard({ l, world, expanded, isOpening, hasAI, fleshBusy, onToggle, 
               </button>
             )}
           </div>
-          <Field label="Name"><input defaultValue={l.name} onBlur={(e) => onPatch({ name: e.target.value })} /></Field>
-          <Field label="Tagline"><input defaultValue={l.tagline} onBlur={(e) => onPatch({ tagline: e.target.value })} /></Field>
-          <Field label="What it is"><textarea rows={3} defaultValue={l.summary} onBlur={(e) => onPatch({ summary: e.target.value })} /></Field>
-          <Field label="Atmosphere"><textarea rows={2} defaultValue={l.atmosphere} onBlur={(e) => onPatch({ atmosphere: e.target.value })} /></Field>
-          <Field label="Features"><textarea rows={2} defaultValue={l.features} onBlur={(e) => onPatch({ features: e.target.value })} /></Field>
-          <Field label="History"><textarea rows={2} defaultValue={l.history} onBlur={(e) => onPatch({ history: e.target.value })} /></Field>
-          <Field label="Inhabitants"><textarea rows={2} defaultValue={l.inhabitants} onBlur={(e) => onPatch({ inhabitants: e.target.value })} /></Field>
-          <Field label="Rules" note="one per line — at least one required">
-            <textarea rows={2} defaultValue={l.rules.join('\n')} onBlur={(e) => onPatch({ rules: e.target.value.split('\n').filter((r) => r.trim()) })} />
+          <Field label="Name">
+            <SheetText value={l.name} onCommit={(name) => onPatch({ name })} />
           </Field>
-          <Field label="Secrets"><textarea rows={2} defaultValue={l.secrets} onBlur={(e) => onPatch({ secrets: e.target.value })} /></Field>
-          <Field label="Current state"><textarea rows={2} defaultValue={l.currentState} onBlur={(e) => onPatch({ currentState: e.target.value })} /></Field>
+          <Field label="Tagline">
+            <SheetText value={l.tagline} onCommit={(tagline) => onPatch({ tagline })} />
+          </Field>
+          <Field label="What it is">
+            <SheetText rows={3} value={l.summary} onCommit={(summary) => onPatch({ summary })} />
+          </Field>
+          <Field label="Atmosphere">
+            <SheetText rows={2} value={l.atmosphere} onCommit={(atmosphere) => onPatch({ atmosphere })} />
+          </Field>
+          <Field label="Features">
+            <SheetText rows={2} value={l.features} onCommit={(features) => onPatch({ features })} />
+          </Field>
+          <Field label="History">
+            <SheetText rows={2} value={l.history} onCommit={(history) => onPatch({ history })} />
+          </Field>
+          <Field label="Inhabitants">
+            <SheetText rows={2} value={l.inhabitants} onCommit={(inhabitants) => onPatch({ inhabitants })} />
+          </Field>
+          <Field label="Rules" note="one per line — at least one required">
+            <SheetText rows={2} value={l.rules.join('\n')} onCommit={(text) => onPatch({ rules: linesFromField(text) })} />
+          </Field>
+          <Field label="Secrets">
+            <SheetText rows={2} value={l.secrets} onCommit={(secrets) => onPatch({ secrets })} />
+          </Field>
+          <Field label="Current state">
+            <SheetText rows={2} value={l.currentState} onCommit={(currentState) => onPatch({ currentState })} />
+          </Field>
         </div>
       )}
     </div>

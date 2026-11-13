@@ -4700,8 +4700,27 @@ export interface FleshOutEverythingOpts {
   targetCharacters: number;
   targetLocations: number;
   onProgress?: (label: string) => void;
-  /** When true, invent a short cold-open narrator turn if the episode has none. */
-  seedColdOpen?: boolean;
+}
+
+/**
+ * Which opening sections still need a model call.
+ * A filled bible, premise, rule, or player summary/goal is left as written.
+ */
+export function fleshSectionsToRun(input: {
+  bible: string;
+  premise: string;
+  narratorRules: string[];
+  hasPlayer: boolean;
+  playerSummary: string;
+  playerGoal: string;
+}): { lore: boolean; premise: boolean; rules: boolean; player: boolean } {
+  const playerBlank = !input.playerSummary.trim() && !input.playerGoal.trim();
+  return {
+    lore: input.bible.trim().length < BIBLE_MIN_CHARS,
+    premise: !input.premise.trim(),
+    rules: !input.narratorRules.some((rule) => rule.trim()),
+    player: input.hasPlayer && playerBlank
+  };
 }
 
 /** Link opening place; set episode title from place name when title is blank. */
@@ -4834,8 +4853,9 @@ export async function draftColdOpenNarration(
 }
 
 /**
- * Flesh lore/premise/rules, invent opening cast & places to roster targets,
- * relationship-pass NPCs, seed opening memory, optionally cold-open.
+ * Flesh whatever is still blank: lore, premise, rules, you, then opening cast
+ * and places in one round, relationships in one round, then opening memory.
+ * A cold open stays on the memory-step button.
  */
 export async function fleshOutWorldEverything(
   world: World,
@@ -4845,92 +4865,130 @@ export async function fleshOutWorldEverything(
 ): Promise<FleshOutEverythingResult> {
   const progress = opts.onProgress ?? (() => {});
   let liveEpisode = episode;
+  let live: World = world;
+  let liveSeason: Season = season;
 
-  progress('Fleshing lore…');
-  const lore = await fleshOutWorldLore(world);
-  const calPatch =
-    lore.calendarSystem && !(world.calendar?.system ?? '').trim()
-      ? calendarPatch(world, { system: lore.calendarSystem })
-      : undefined;
-  await db.worlds.update(world.id, {
-    title: lore.title,
-    line: lore.line,
-    bible: lore.bible,
-    ...(calPatch ? { calendar: calPatch } : {}),
-    updatedAt: Date.now()
+  const opening = fleshSectionsToRun({
+    bible: world.bible,
+    premise: season.premise,
+    narratorRules: world.ai.narratorRules,
+    hasPlayer: false,
+    playerSummary: '',
+    playerGoal: ''
   });
-  let live: World = {
-    ...world,
-    title: lore.title,
-    line: lore.line,
-    bible: lore.bible,
-    ...(calPatch ? { calendar: calPatch } : {})
-  };
 
-  progress('Fleshing premise…');
-  const premise = await fleshOutPremise(live, season);
-  await db.seasons.update(season.id, { premise });
-  const liveSeason: Season = { ...season, premise };
-
-  progress('Fleshing narrator rules…');
-  const rules = await fleshOutNarratorRules(live);
-  await db.worlds.update(live.id, {
-    ai: { ...live.ai, narratorRules: rules },
-    updatedAt: Date.now()
-  });
-  live = { ...live, ai: { ...live.ai, narratorRules: rules } };
+  if (opening.lore) {
+    progress('Fleshing lore…');
+    const lore = await fleshOutWorldLore(world);
+    const calPatch =
+      lore.calendarSystem && !(world.calendar?.system ?? '').trim()
+        ? calendarPatch(world, { system: lore.calendarSystem })
+        : undefined;
+    await db.worlds.update(world.id, {
+      title: lore.title,
+      line: lore.line,
+      bible: lore.bible,
+      ...(calPatch ? { calendar: calPatch } : {}),
+      updatedAt: Date.now()
+    });
+    live = {
+      ...world,
+      title: lore.title,
+      line: lore.line,
+      bible: lore.bible,
+      ...(calPatch ? { calendar: calPatch } : {})
+    };
+  }
 
   let allChars = await db.characters.where('worldId').equals(live.id).toArray();
   const player = allChars.find((c) => c.isPlayer);
-  if (player && (!player.summary.trim() || !player.state.goal.trim())) {
-    progress('Fleshing you…');
-    const sheet = await fleshOutCharacter(live, player, allChars);
-    await db.characters.update(player.id, { ...sheet, isPlayer: true, updatedAt: Date.now() });
-    allChars = await db.characters.where('worldId').equals(live.id).toArray();
-  }
-
   let npcs = allChars.filter((c) => !c.isPlayer);
   let existingPlaces = await db.locations.where('worldId').equals(live.id).toArray();
   const charSlots = Math.max(0, opts.targetCharacters - npcs.length);
   const placeSlots = Math.max(0, opts.targetLocations - existingPlaces.length);
+  const sections = fleshSectionsToRun({
+    bible: live.bible,
+    premise: liveSeason.premise,
+    narratorRules: live.ai.narratorRules,
+    hasPlayer: !!player,
+    playerSummary: player?.summary ?? '',
+    playerGoal: player?.state.goal ?? ''
+  });
+  const needRoster = charSlots > 0 || placeSlots > 0;
+
+  let roster: WorldRosterProposal | null = null;
+  if (sections.premise || sections.rules || sections.player || needRoster) {
+    progress(
+      sections.premise ? 'Fleshing premise…'
+        : sections.rules ? 'Fleshing narrator rules…'
+          : sections.player ? 'Fleshing you…'
+            : 'Planning cast & places…'
+    );
+    const [premise, rules, playerSheet, proposed] = await Promise.all([
+      sections.premise ? fleshOutPremise(live, liveSeason) : Promise.resolve(liveSeason.premise),
+      sections.rules ? fleshOutNarratorRules(live) : Promise.resolve(live.ai.narratorRules),
+      sections.player && player ? fleshOutCharacter(live, player, allChars) : Promise.resolve(null),
+      needRoster
+        ? proposeWorldRoster(live, opts.shape, { characters: charSlots, locations: placeSlots })
+        : Promise.resolve(null)
+    ]);
+
+    if (sections.premise) {
+      await db.seasons.update(season.id, { premise });
+      liveSeason = { ...liveSeason, premise };
+    }
+    if (sections.rules) {
+      await db.worlds.update(live.id, {
+        ai: { ...live.ai, narratorRules: rules },
+        updatedAt: Date.now()
+      });
+      live = { ...live, ai: { ...live.ai, narratorRules: rules } };
+    }
+    if (sections.player && player && playerSheet) {
+      await db.characters.update(player.id, { ...playerSheet, isPlayer: true, updatedAt: Date.now() });
+    }
+    roster = proposed;
+  }
 
   const createdCharacterIds: string[] = [];
   const createdLocationIds: string[] = [];
 
-  if (charSlots > 0 || placeSlots > 0) {
-    progress('Planning cast & places…');
-    const roster = await proposeWorldRoster(live, opts.shape, {
-      characters: charSlots,
-      locations: placeSlots
-    });
-
+  if (roster && (charSlots > 0 || placeSlots > 0)) {
     const charDescs = roster.characters.slice(0, charSlots);
     const placeDescs = roster.locations.slice(0, placeSlots);
 
-    for (const { description } of charDescs) {
-      const hint = description.trim().slice(0, 48);
-      progress(hint ? `Writing ${hint}…` : 'Writing cast…');
-      const draft = await draftCharacter(live, description);
-      const c = emptyCharacter(live.id, { ...draft, isPlayer: false, updatedAt: Date.now() });
-      if (!c.name.trim()) c.name = description.slice(0, 40);
-      await db.characters.add(c);
-      createdCharacterIds.push(c.id);
-    }
+    if (charDescs.length > 0 || placeDescs.length > 0) {
+      progress(charDescs.length > 0 ? 'Writing cast…' : 'Placing the world…');
+      const [charDrafts, placeDrafts] = await Promise.all([
+        Promise.all(charDescs.map(async ({ description }) => ({
+          description,
+          draft: await draftCharacter(live, description)
+        }))),
+        Promise.all(placeDescs.map(async ({ description }) => ({
+          description,
+          draft: await draftLocation(live, description)
+        })))
+      ]);
 
-    for (const { description } of placeDescs) {
-      const hint = description.trim().slice(0, 48);
-      progress(hint ? `Placing ${hint}…` : 'Placing the world…');
-      const draft = await draftLocation(live, description);
-      const l = emptyLocation(live.id, { ...draft, updatedAt: Date.now() });
-      if (!l.name.trim()) l.name = description.slice(0, 40);
-      // Leave rules empty if the draft missed them — write-ready gate requires a real rule.
-      await db.locations.add(l);
-      createdLocationIds.push(l.id);
+      for (const { description, draft } of charDrafts) {
+        const c = emptyCharacter(live.id, { ...draft, isPlayer: false, updatedAt: Date.now() });
+        if (!c.name.trim()) c.name = description.slice(0, 40);
+        await db.characters.add(c);
+        createdCharacterIds.push(c.id);
+      }
+
+      for (const { description, draft } of placeDrafts) {
+        const l = emptyLocation(live.id, { ...draft, updatedAt: Date.now() });
+        if (!l.name.trim()) l.name = description.slice(0, 40);
+        // Leave rules empty if the draft missed them — write-ready gate requires a real rule.
+        await db.locations.add(l);
+        createdLocationIds.push(l.id);
+      }
     }
 
     if (createdCharacterIds.length > 0) {
-      const opening = createdCharacterIds.slice(0, 2);
-      const castIds = [...new Set([...liveEpisode.castIds, ...opening])];
+      const openingCast = createdCharacterIds.slice(0, 2);
+      const castIds = [...new Set([...liveEpisode.castIds, ...openingCast])];
       await db.episodes.update(liveEpisode.id, { castIds, updatedAt: Date.now() });
       liveEpisode = { ...liveEpisode, castIds };
     }
@@ -4966,23 +5024,14 @@ export async function fleshOutWorldEverything(
   }
 
   progress('Linking relationships…');
-  for (const npc of npcs) {
+  await Promise.all(npcs.map(async (npc) => {
     const relationships = await fleshOutRelationships(live, npc, allChars);
     await db.characters.update(npc.id, { relationships, updatedAt: Date.now() });
-  }
+  }));
   allChars = await db.characters.where('worldId').equals(live.id).toArray();
 
   progress('Seeding opening memory…');
   const memory = await seedOpeningMemory(live, liveSeason, liveEpisode, allChars);
-
-  if (opts.seedColdOpen) {
-    progress('Drafting cold open…');
-    try {
-      await draftColdOpenNarration(live, liveSeason, liveEpisode);
-    } catch {
-      // Cold open is optional — don't fail the whole flesh pass.
-    }
-  }
 
   await db.worlds.update(live.id, { updatedAt: Date.now() });
 
