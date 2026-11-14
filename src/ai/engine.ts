@@ -172,6 +172,10 @@ export interface StreamMeta {
   role: TurnRole;
   characterId?: string;
   guestId?: string;
+  /** People in the room. Set on a scene reply so the live tail can credit quotes. */
+  speakers?: SceneSpeaker[];
+  /** The one person allowed to speak, when this reply has a single voice. */
+  fallbackSpeakerId?: string;
 }
 
 export interface WriteOptions {
@@ -994,17 +998,36 @@ function sceneVoiceFromCharacter(c: Character): SceneVoice {
   };
 }
 
+/** Everyone physically here, so a named line can be credited even if they were not the planned voice. */
+function roomSceneSpeakers(characters: Character[], guests: EpisodeGuest[]): SceneSpeaker[] {
+  return [
+    ...characters.flatMap((c) => {
+      const name = c.name.trim();
+      if (!name || c.isPlayer) return [];
+      const aliases = (c.aliases ?? []).map((alias) => alias.trim()).filter(Boolean);
+      return [{
+        id: c.id,
+        name,
+        kind: 'cast' as const,
+        ...(aliases.length > 0 ? { aliases } : {}),
+        ...(c.role?.trim() ? { role: c.role } : {})
+      }];
+    }),
+    ...guests.flatMap((g) => {
+      const name = g.name.trim();
+      if (!name) return [];
+      return [{ id: g.id, name, kind: 'guest' as const }];
+    })
+  ];
+}
+
 function sceneWallLeak(
   text: string,
-  voices: SceneVoice[],
-  characters: Character[]
+  speakers: SceneSpeaker[],
+  characters: Character[],
+  fallbackSpeakerId?: string
 ): { name: string; wall: string } | null {
-  const speakers: SceneSpeaker[] = voices.map((voice) => ({
-    id: voice.id,
-    name: voice.name,
-    kind: voice.kind
-  }));
-  for (const piece of splitSceneReply(text, speakers)) {
+  for (const piece of splitSceneReply(text, speakers, { fallbackSpeakerId })) {
     if (piece.role !== 'character' || piece.kind !== 'cast' || !piece.speakerId) continue;
     const character = characters.find((c) => c.id === piece.speakerId);
     const wall = character?.mustNotKnow?.trim() ?? '';
@@ -1017,7 +1040,7 @@ function sceneWallLeak(
 
 /**
  * One reply: stage the room, then one prose call writes narration and dialogue.
- * Quoted lines that name someone here become that person's turn.
+ * Quoted lines that belong to someone here become that person's turn.
  */
 async function writeTurnInner(opts: WriteOptions): Promise<string> {
   throwIfAborted(opts.signal, 0);
@@ -1176,14 +1199,8 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
       voices.push(sceneVoiceFromCharacter(character));
     }
   }
-  const sceneSpeakers: SceneSpeaker[] = voices.map((voice) => ({
-    id: voice.id,
-    name: voice.name,
-    kind: voice.kind,
-    aliases: voice.kind === 'cast'
-      ? ctx.characters.find((c) => c.id === voice.id)?.aliases
-      : undefined
-  }));
+  const roomSpeakers = injectionReply ? [] : roomSceneSpeakers(inScene, sceneGuests());
+  const fallbackSpeakerId = voices.length === 1 ? voices[0].id : undefined;
   const present = [
     ...inScene.map((c) => ({ name: c.name, role: c.role })),
     ...sceneGuests().map((g) => ({ name: g.name, role: g.brief }))
@@ -1199,14 +1216,20 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
   let safeText = '';
   const rememberSafe = (raw: string) => {
     const next = raw.trim();
-    if (next && !sceneWallLeak(next, voices, ctx.characters)) safeText = next;
+    if (next && !sceneWallLeak(next, roomSpeakers, ctx.characters, fallbackSpeakerId)) safeText = next;
   };
-  const meta: StreamMeta = { role: 'narrator' };
+  const meta: StreamMeta = {
+    role: 'narrator',
+    ...(roomSpeakers.length > 0 ? {
+      speakers: roomSpeakers,
+      ...(fallbackSpeakerId ? { fallbackSpeakerId } : {})
+    } : {})
+  };
   progress('Writing…');
   opts.onDelta('', meta);
 
   const persistScene = async (raw: string): Promise<number> => {
-    const pieces = splitSceneReply(raw, sceneSpeakers).filter((piece) => piece.text.trim());
+    const pieces = splitSceneReply(raw, roomSpeakers, { fallbackSpeakerId }).filter((piece) => piece.text.trim());
     if (pieces.length === 0) return 0;
     const base = Date.now();
     for (let i = 0; i < pieces.length; i++) {
@@ -1274,7 +1297,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
   try {
     throwIfAborted(opts.signal, 0);
     text = await withOverflowRetry((pack) => streamScene(pack), opts.onNotice);
-    const leak = sceneWallLeak(text, voices, ctx.characters);
+    const leak = sceneWallLeak(text, roomSpeakers, ctx.characters, fallbackSpeakerId);
     if (leak) {
       progress('honouring what they must not know…');
       const rewritten = await withOverflowRetry(
@@ -1289,7 +1312,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
         ]),
         opts.onNotice
       );
-      if (!rewritten.trim() || sceneWallLeak(rewritten, voices, ctx.characters)) {
+      if (!rewritten.trim() || sceneWallLeak(rewritten, roomSpeakers, ctx.characters, fallbackSpeakerId)) {
         opts.onDelta('', meta);
         throw new AIError('That line still says something they must not know. Try the beat again.');
       }
@@ -1299,7 +1322,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
     }
   } catch (e) {
     const keep = (safeText || acc).trim();
-    const keepable = !!keep && !sceneWallLeak(keep, voices, ctx.characters);
+    const keepable = !!keep && !sceneWallLeak(keep, roomSpeakers, ctx.characters, fallbackSpeakerId);
     if (isAbortError(e)) {
       if (keepable) {
         await persistScene(keep);
@@ -1433,7 +1456,8 @@ async function regenerateBeatInner(opts: {
     kind: voice.kind,
     aliases: voice.kind === 'cast'
       ? ctx.characters.find((c) => c.id === voice.id)?.aliases
-      : undefined
+      : undefined,
+    role: voice.kind === 'cast' ? speaking?.role : undefined
   }));
   const present = [
     ...ctx.characters.filter((c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer).map((c) => ({

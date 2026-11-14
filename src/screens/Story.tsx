@@ -42,6 +42,7 @@ import {
 } from '../store/app';
 import { generateChapterPicture } from '../ai/image';
 import { rememberedPortraitStyle } from '../ai/portrait';
+import { splitSceneReply } from '../ai/sceneReply';
 import { hasWritingModel } from '../ai/models';
 import { useSettings } from '../store/settings';
 import type {
@@ -569,6 +570,43 @@ function WritingLine({ text, fontPx }: { text: string; fontPx: number }) {
   );
 }
 
+function sceneStreamBlocks(
+  partial: string,
+  meta: StreamMeta,
+  characters: Character[],
+  guests: EpisodeGuest[],
+  episodeId: string,
+  worldId: string
+): ProseBlock[] {
+  const speakers = meta.speakers ?? [];
+  if (meta.role !== 'narrator' || speakers.length === 0) {
+    return parseTurn({
+      id: 'partial',
+      episodeId,
+      worldId,
+      role: meta.role,
+      mode: null,
+      characterId: meta.characterId,
+      guestId: meta.guestId,
+      text: meta.role === 'character' ? previewSpeakText(partial) : partial,
+      createdAt: 0
+    }, characters, guests);
+  }
+  return splitSceneReply(partial, speakers, { fallbackSpeakerId: meta.fallbackSpeakerId })
+    .filter((piece) => piece.text.trim())
+    .flatMap((piece) => parseTurn({
+      id: 'partial',
+      episodeId,
+      worldId,
+      role: piece.role === 'character' ? 'character' : 'narrator',
+      mode: null,
+      text: piece.role === 'character' ? previewSpeakText(piece.text) : piece.text,
+      createdAt: 0,
+      ...(piece.role === 'character' && piece.kind === 'guest' ? { guestId: piece.speakerId } : {}),
+      ...(piece.role === 'character' && piece.kind === 'cast' ? { characterId: piece.speakerId } : {})
+    }, characters, guests));
+}
+
 function StreamTail({
   sinkRef, active, scrollRef, followRef, pinRef, onHasText, characters, guests, episodeId, worldId,
   accent, prose, fontPx, avatarPx, dialogueStyle, opening
@@ -654,17 +692,8 @@ function StreamTail({
   }, [active, onHasText]);
 
   if (!active || !partial) return null;
-  const blocks = parseTurn({
-    id: 'partial',
-    episodeId,
-    worldId,
-    role: meta.role,
-    mode: null,
-    characterId: meta.characterId,
-    guestId: meta.guestId,
-    text: meta.role === 'character' ? previewSpeakText(partial) : partial,
-    createdAt: 0
-  }, characters, guests);
+  const blocks = sceneStreamBlocks(partial, meta, characters, guests, episodeId, worldId);
+  const continued = attributionRun(blocks, null);
   return (
     <>
       {blocks.map((b, i, arr) => (
@@ -676,6 +705,7 @@ function StreamTail({
           fontPx={fontPx}
           avatarPx={avatarPx}
           dialogueStyle={dialogueStyle}
+          continues={continued[i]}
           opening={opening && i === 0}
           fromPlayer={meta.role === 'user'}
           caret={i === arr.length - 1}

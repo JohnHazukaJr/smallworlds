@@ -52,6 +52,11 @@ const COMMON_LABELS = new Set([
   'where', 'while', 'still', 'never', 'every'
 ]);
 
+/** A name that is also an ordinary word. "will you" is not the person Will. */
+export function isCommonLabel(label: string): boolean {
+  return COMMON_LABELS.has(label.trim().toLowerCase());
+}
+
 function escapeRe(text: string): string {
   return text.replace(RE_SPECIALS, '\\$&');
 }
