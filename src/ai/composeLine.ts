@@ -13,11 +13,9 @@ export function composeOutgoingLine(opts: {
   if (opts.direct) {
     return { mode: 'steer', text: body, asCharacterId: null };
   }
-  // Writing as an NPC: quoted or gestured lines are their speech; a bare line is their action.
-  const npcSpoke = !!opts.asCharacterId && /["“”*]/.test(body);
-  const mode: ComposeMode = opts.asCharacterId
-    ? (npcSpoke ? 'play' : 'act')
-    : (!opts.sceneHasOthers ? 'act' : 'play');
+  // Quotes or gestures are speech. A bare line is an action, whether or not anyone else is here.
+  const spoke = /["“”*]/.test(body);
+  const mode: ComposeMode = spoke ? 'play' : 'act';
   return {
     mode,
     text: applyDeliveryTone(body, opts.tone),

@@ -290,6 +290,10 @@ export interface Turn {
   weight?: ActionWeight;
   /** When set, the player took this action with that person's hands. Omitted means the player. */
   asCharacterId?: string;
+  /** Who this line was said to. A cast id, including the player when an NPC speaks to them. */
+  toCharacterId?: string;
+  /** Who this line was said to, when they are a walk-on. */
+  toGuestId?: string;
   /** set when role === 'character' — which NPC Cast card spoke this turn */
   characterId?: string;
   /** set when role === 'character' — ephemeral episode guest spoke (no Cast card) */
@@ -394,6 +398,15 @@ export interface Location {
   history: string;
   /** who or what is typically found here */
   inhabitants: string;
+  /**
+   * Cast who belong here (home or work). Missing on older places means none.
+   * Separate from Character.state.location, which play still moves.
+   */
+  residentIds?: string[];
+  /** Neighborhood or district, e.g. "Briar Park". Places that share this string sit together. */
+  area?: string;
+  /** One short travel note, e.g. "about 15 minutes from the school". Not mirrored. */
+  near?: string;
   /** hazards, laws, or hard rules specific to this place — never broken */
   rules: string[];
   /** things hidden here, not common knowledge */

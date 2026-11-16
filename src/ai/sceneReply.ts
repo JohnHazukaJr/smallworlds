@@ -372,13 +372,15 @@ function addScreenplayHits(
     const lead = /^(?:\n)?[ \t]*/.exec(full)?.[0].length ?? 0;
     const start = matchStart + lead;
     const end = matchStart + full.length;
-    if (hits.some((hit) => hit.speaker && start < hit.end && end > hit.start)) continue;
+    // The whole beat stays with this person, including a gesture in *asterisks*.
+    // A quote already found inside the line must not leave that gesture in the narration.
     for (let i = hits.length - 1; i >= 0; i--) {
       const hit = hits[i];
-      if (!hit.speaker && start < hit.end && end > hit.start) hits.splice(i, 1);
+      if (start < hit.end && end > hit.start) hits.splice(i, 1);
     }
-    const spoken = /[“"”]/.test(body) ? body : `"${body}"`;
-    hits.push({ start, end, text: spoken, speaker: tag.speaker });
+    const gestureOnly = !/[“"”]/.test(body) && body.includes('*');
+    const text = gestureOnly ? body : (/[“"”]/.test(body) ? body : `"${body}"`);
+    hits.push({ start, end, text, speaker: tag.speaker });
   }
 }
 

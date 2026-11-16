@@ -253,6 +253,25 @@ describe('scene image refs', () => {
     expect(prompt).toMatch(/Image 1 is Ada/);
     expect(prompt).not.toMatch(/no people/);
   });
+
+  it('keeps the realistic establishing shot and uses the comic line only for comic', () => {
+    const plain = sceneImagePrompt(world(), loc(), 'rain');
+    const realistic = sceneImagePrompt(world(), loc(), 'rain', undefined, 'realistic');
+    const comic = sceneImagePrompt(world(), loc(), 'rain', undefined, 'comic');
+    const withFace = sceneImagePrompt(world(), loc(), 'rain', [
+      { name: 'Ada', dataUrl: 'data:image/jpeg;base64,x', kind: 'face' }
+    ]);
+    const withFaceRealistic = sceneImagePrompt(world(), loc(), 'rain', [
+      { name: 'Ada', dataUrl: 'data:image/jpeg;base64,x', kind: 'face' }
+    ], 'realistic');
+    expect(realistic).toBe(plain);
+    expect(withFaceRealistic).toBe(withFace);
+    expect(plain).toMatch(/painterly environment art/);
+    expect(comic).toMatch(/Comic book illustration/);
+    expect(comic).not.toMatch(/painterly/);
+    expect(comic).not.toMatch(/cinematic lighting/);
+    expect(comic).not.toMatch(/Photorealistic/);
+  });
 });
 
 describe('image request adapter', () => {

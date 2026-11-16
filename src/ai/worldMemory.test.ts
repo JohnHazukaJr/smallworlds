@@ -54,6 +54,10 @@ describe('matchLocationForPatch / merge', () => {
     expect(hit?.id).toBe('l1');
   });
 
+  it('uses a name that matches a different place ahead of the scene id', () => {
+    expect(matchLocationForPatch(places, { name: 'Quay', currentState: 'x' }, 'l1')?.id).toBe('l2');
+  });
+
   it('matches exact then contained names when no id is given', () => {
     expect(matchLocationForPatch(places, { name: 'Quay', currentState: 'x' })?.id).toBe('l2');
     expect(matchLocationForPatch(places, { name: 'harbour', currentState: 'x' })?.id).toBe('l1');

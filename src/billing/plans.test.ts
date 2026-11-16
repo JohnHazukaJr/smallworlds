@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { DIRECTOR_PLAN_TOKENS } from '../ai/prompts';
 import {
   COST_BEAT,
   COST_IMAGE,
@@ -34,9 +33,8 @@ describe('chatCredit', () => {
     });
   });
 
-  it('prices the director plan as a utility call', () => {
-    expect(DIRECTOR_PLAN_TOKENS).toBeLessThan(UTILITY_TOKEN_CEILING);
-    expect(chatCredit(HOSTED_UTILITY_MODEL, DIRECTOR_PLAN_TOKENS)).toEqual({
+  it('prices a short structured call as utility', () => {
+    expect(chatCredit(HOSTED_UTILITY_MODEL, 800)).toEqual({
       cost: COST_UTILITY,
       reason: 'utility'
     });

@@ -16,7 +16,7 @@ describe('composeOutgoingLine', () => {
     });
   });
 
-  it('stores a sarcastic player line with the tone tag', () => {
+  it('stores a bare player line as an action, even when someone else is here', () => {
     expect(composeOutgoingLine({
       direct: false,
       asCharacterId: null,
@@ -24,10 +24,20 @@ describe('composeOutgoingLine', () => {
       tone: 'sarcastic',
       text: 'Then write it again.'
     })).toEqual({
-      mode: 'play',
+      mode: 'act',
       text: '[sarcastic] Then write it again.',
       asCharacterId: null
     });
+  });
+
+  it('keeps a quoted line as speech when other people are here', () => {
+    expect(composeOutgoingLine({
+      direct: false,
+      asCharacterId: null,
+      sceneHasOthers: true,
+      tone: null,
+      text: '"Then write it again."'
+    })).toMatchObject({ mode: 'play', asCharacterId: null });
   });
 
   it('keeps a plain line untagged, and acts alone when nobody else is here', () => {

@@ -94,19 +94,24 @@ export function matchLocationForPatch(
   patch: PlacePatch,
   preferId?: string | null
 ): Location | undefined {
+  const key = patch.name.trim().toLowerCase();
+  const exact = key
+    ? locations.find((l) => l.name.trim().toLowerCase() === key)
+    : undefined;
+  if (exact) return exact;
+  const fuzzy = key
+    ? locations.find((l) => {
+      const n = l.name.trim().toLowerCase();
+      if (n.length < 3 || key.length < 3) return false;
+      return n.includes(key) || key.includes(n);
+    })
+    : undefined;
+  if (fuzzy && (!preferId || fuzzy.id !== preferId)) return fuzzy;
   if (preferId) {
     const byId = locations.find((l) => l.id === preferId);
     if (byId) return byId;
   }
-  const key = patch.name.trim().toLowerCase();
-  if (!key) return undefined;
-  const exact = locations.find((l) => l.name.trim().toLowerCase() === key);
-  if (exact) return exact;
-  return locations.find((l) => {
-    const n = l.name.trim().toLowerCase();
-    if (n.length < 3 || key.length < 3) return false;
-    return n.includes(key) || key.includes(n);
-  });
+  return fuzzy;
 }
 
 /**

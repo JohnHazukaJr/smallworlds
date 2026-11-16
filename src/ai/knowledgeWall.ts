@@ -63,7 +63,3 @@ export function acceptWallRetry(retried: string, wall: string): string | null {
   if (!text || speakLeaksMustNotKnow(text, wall)) return null;
   return text;
 }
-
-export const SPEAK_WALL_NUDGE =
-  'You stated a fact this character must not know yet. Rewrite the same beat without that knowledge. ' +
-  'Keep *action* and "speech". Do not hint at the forbidden fact.';

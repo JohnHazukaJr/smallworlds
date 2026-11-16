@@ -1,6 +1,6 @@
 import type { StoryStance } from '../types';
 
-/** Injected into director, narrator, interview, and flesh so stance is not only a Shape: tag. */
+/** Injected into the scene writer, season handoff, and flesh so stance is not only a Shape: tag. */
 export function stancePlaybook(stance: StoryStance): string {
   switch (stance) {
     case 'wander':
@@ -23,21 +23,4 @@ export function stancePlaybook(stance: StoryStance): string {
         'Do not demand a crisis or ticking clock every turn — stakes and desire are enough.'
       );
   }
-}
-
-export function directorCloseGuidance(stance: StoryStance): string {
-  const heard =
-    'An opening is a pause, a look, or a next move — not repeating a question the player just answered.';
-  if (stance === 'longform') {
-    return `End the plan on an opening for the player. Stakes may be present; do not require a crisis beat. ${heard}`;
-  }
-  return `End the plan on an opening for the player. Do not end on manufactured tension or a ticking clock. ${heard}`;
-}
-
-export function narratorCloseGuidance(stance: StoryStance): string {
-  const heard = 'Do not pose a question they already answered.';
-  if (stance === 'longform') {
-    return `End every response on an opening for the player, never on a tidy resolution. Stakes may hang; do not invent a crisis. ${heard}`;
-  }
-  return `End every response on an opening for the player, never on a tidy resolution. Do not invent tension or a plot clock. ${heard}`;
 }

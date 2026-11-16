@@ -3,12 +3,13 @@ import { createContext, useContext, useEffect, useMemo, useRef, useState, type C
 import {
   draftColdOpenNarration, fleshOutCharacter, fleshOutLocation,
   fleshOutNarratorRules, fleshOutPremise, fleshOutRelationships, fleshOutWorldEverything,
-  fleshOutWorldLore, fleshSectionsToRun, seedOpeningMemory
+  fleshOutWorldLore, fleshSectionsToRun, seedBlankResidentLocations, seedOpeningMemory
 } from '../ai/engine';
 import { characterImportance } from '../ai/characterWeight';
 import { CharacterPortraitTools } from '../components/CharacterPortraitTools';
 import { StoryWeightPicker } from '../components/StoryWeightPicker';
 import { PlacePhotoTools } from '../components/PlacePhotoTools';
+import { PlaceSettingFields } from '../components/PlaceSettingFields';
 import { db, deleteWorld, recordTombstones, safeWrite } from '../db';
 import { formatUserError } from '../errors';
 import { normalizeRelationships, pruneRelationshipsToCast } from '../relationships';
@@ -100,6 +101,11 @@ export function Onboard() {
   const [expandedCastId, setExpandedCastId] = useState<string | null>(null);
   const [placeName, setPlaceName] = useState('');
   const [placeNotes, setPlaceNotes] = useState('');
+  const [placeArea, setPlaceArea] = useState('');
+  const [placeNear, setPlaceNear] = useState('');
+  const [placeResidentIds, setPlaceResidentIds] = useState<string[]>([]);
+  const [placeDismissed, setPlaceDismissed] = useState<string[]>([]);
+  const placeDismissedById = useRef(new Map<string, string[]>());
   const [expandedPlaceId, setExpandedPlaceId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState('');
@@ -425,7 +431,13 @@ export function Onboard() {
     const name = placeName.trim();
     const notes = placeNotes.trim();
     if (!name && !notes) return;
-    const l = emptyLocation(worldId, { name: name || notes.slice(0, 40), summary: notes });
+    const l = emptyLocation(worldId, {
+      name: name || notes.slice(0, 40),
+      summary: notes,
+      area: placeArea.trim() || undefined,
+      near: placeNear.trim() || undefined,
+      residentIds: placeResidentIds
+    });
     const episodeId = episode?.id;
     await db.transaction('rw', db.locations, db.episodes, async () => {
       await db.locations.add(l);
@@ -438,7 +450,12 @@ export function Onboard() {
     });
     setPlaceName('');
     setPlaceNotes('');
+    setPlaceArea('');
+    setPlaceNear('');
+    setPlaceResidentIds([]);
+    setPlaceDismissed([]);
     setExpandedPlaceId(l.id);
+    await seedBlankResidentLocations(l.residentIds, l.name);
   };
 
   const addPlaceGenerate = async () => {
@@ -449,8 +466,20 @@ export function Onboard() {
     setBusy('Generating…');
     setError('');
     try {
-      const draft = emptyLocation(worldId, { name: name || notes.slice(0, 40), summary: notes });
-      const sheet = await fleshOutLocation(worldContext(), draft);
+      const draft = emptyLocation(worldId, {
+        name: name || notes.slice(0, 40),
+        summary: notes,
+        area: placeArea.trim() || undefined,
+        near: placeNear.trim() || undefined,
+        residentIds: placeResidentIds
+      });
+      const sheet = await fleshOutLocation(worldContext(), draft, {
+        cast: characters,
+        areas: [...new Set(places.map((place) => place.area?.trim() ?? '').filter(Boolean))],
+        places: places.map((place) => ({ id: place.id, name: place.name })),
+        selectedIds: placeResidentIds,
+        dismissedIds: placeDismissed
+      });
       const l: Location = { ...draft, ...sheet, updatedAt: Date.now() };
       const episodeId = episode?.id;
       await db.transaction('rw', db.locations, db.episodes, async () => {
@@ -464,7 +493,12 @@ export function Onboard() {
       });
       setPlaceName('');
       setPlaceNotes('');
+      setPlaceArea('');
+      setPlaceNear('');
+      setPlaceResidentIds([]);
+      setPlaceDismissed([]);
       setExpandedPlaceId(l.id);
+      await seedBlankResidentLocations(l.residentIds, l.name);
     } catch (e) {
       setError(formatUserError(e));
     } finally {
@@ -1106,6 +1140,9 @@ export function Onboard() {
                 <PlaceCard
                   key={l.id} l={l} expanded={expandedPlaceId === l.id}
                   world={worldContext()}
+                  cast={characters}
+                  areas={[...new Set(places.map((place) => place.area?.trim() ?? '').filter(Boolean))]}
+                  dismissedIds={placeDismissedById.current.get(l.id) ?? []}
                   isOpening={episode?.locationId === l.id}
                   hasAI={hasAI}
                   fleshBusy={busy === `Fleshing ${l.name || 'place'}…`}
@@ -1113,12 +1150,19 @@ export function Onboard() {
                   onRemove={() => void removePlaceEntry(l.id)}
                   onSetOpening={() => void setOpeningPlace(l.id)}
                   onPatch={(p) => { void patchPlace(l.id, p); }}
+                  onDismissedIds={(ids) => { placeDismissedById.current.set(l.id, ids); }}
                   onFlesh={() => void (async () => {
                     setBusy(`Fleshing ${l.name || 'place'}…`);
                     setError('');
                     try {
-                      const sheet = await fleshOutLocation(worldContext(), l);
+                      const sheet = await fleshOutLocation(worldContext(), l, {
+                        cast: characters,
+                        areas: [...new Set(places.map((place) => place.area?.trim() ?? '').filter(Boolean))],
+                        places: places.map((place) => ({ id: place.id, name: place.name })),
+                        dismissedIds: placeDismissedById.current.get(l.id) ?? []
+                      });
                       await db.locations.update(l.id, { ...sheet, updatedAt: Date.now() });
+                      await seedBlankResidentLocations(sheet.residentIds, (sheet.name || l.name).trim());
                     } catch (e) {
                       setError(formatUserError(e));
                     } finally {
@@ -1133,6 +1177,20 @@ export function Onboard() {
           <textarea
             rows={2} value={placeNotes} onChange={(e) => setPlaceNotes(e.target.value)}
             placeholder="Anything you already know — optional. Atmosphere, a rule, who runs it…"
+          />
+          <PlaceSettingFields
+            placeKey="new-onboard"
+            cast={characters.map((person) => ({ id: person.id, name: person.name, aliases: person.aliases, hue: person.hue }))}
+            areas={[...new Set(places.map((place) => place.area?.trim() ?? '').filter(Boolean))]}
+            area={placeArea}
+            near={placeNear}
+            residentIds={placeResidentIds}
+            dismissedIds={placeDismissed}
+            authorText={[placeName, placeNotes, placeArea && `in ${placeArea}`, placeNear].filter(Boolean).join('\n')}
+            onArea={setPlaceArea}
+            onNear={setPlaceNear}
+            onResidentIds={setPlaceResidentIds}
+            onDismissedIds={setPlaceDismissed}
           />
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
             <button className="btn-primary" style={{ padding: '8px 16px', fontSize: 12.5 }} disabled={!!busy || (!placeName.trim() && !placeNotes.trim())} onClick={() => void addPlacePlain()}>+ Add</button>
@@ -1563,10 +1621,13 @@ function CastCard({ c, expanded, world, hasAI, fleshBusy, onToggle, onRemove, on
   );
 }
 
-function PlaceCard({ l, world, expanded, isOpening, hasAI, fleshBusy, onToggle, onRemove, onSetOpening, onPatch, onFlesh }: {
-  l: Location; world: World; expanded: boolean; isOpening: boolean; hasAI: boolean; fleshBusy: boolean;
+function PlaceCard({ l, world, cast, areas, dismissedIds, expanded, isOpening, hasAI, fleshBusy, onToggle, onRemove, onSetOpening, onPatch, onDismissedIds, onFlesh }: {
+  l: Location; world: World; cast: Character[]; areas: string[]; dismissedIds: string[];
+  expanded: boolean; isOpening: boolean; hasAI: boolean; fleshBusy: boolean;
   onToggle: () => void; onRemove: () => void;
-  onSetOpening: () => void; onPatch: (p: Partial<Location>) => void; onFlesh: () => void;
+  onSetOpening: () => void; onPatch: (p: Partial<Location>) => void;
+  onDismissedIds: (ids: string[]) => void;
+  onFlesh: () => void;
 }) {
   return (
     <div className="craft-row" style={{ overflow: 'hidden', outline: isOpening ? `1px solid ${ACCENT}` : undefined }}>
@@ -1579,6 +1640,14 @@ function PlaceCard({ l, world, expanded, isOpening, hasAI, fleshBusy, onToggle, 
           {l.tagline && (
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
               {l.tagline}
+            </div>
+          )}
+          {(l.area?.trim() || (l.residentIds ?? []).length > 0) && (
+            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {[
+                l.area?.trim(),
+                (l.residentIds ?? []).map((id) => cast.find((person) => person.id === id)?.name.trim()).filter(Boolean).join(', ')
+              ].filter(Boolean).join(' · ')}
             </div>
           )}
         </div>
@@ -1603,7 +1672,10 @@ function PlaceCard({ l, world, expanded, isOpening, hasAI, fleshBusy, onToggle, 
             )}
           </div>
           <Field label="Name">
-            <SheetText value={l.name} onCommit={(name) => onPatch({ name })} />
+            <SheetText value={l.name} onCommit={(name) => {
+              onPatch({ name });
+              void seedBlankResidentLocations(l.residentIds, name);
+            }} />
           </Field>
           <Field label="Tagline">
             <SheetText value={l.tagline} onCommit={(tagline) => onPatch({ tagline })} />
@@ -1623,6 +1695,23 @@ function PlaceCard({ l, world, expanded, isOpening, hasAI, fleshBusy, onToggle, 
           <Field label="Inhabitants">
             <SheetText rows={2} value={l.inhabitants} onCommit={(inhabitants) => onPatch({ inhabitants })} />
           </Field>
+          <PlaceSettingFields
+            placeKey={l.id}
+            cast={cast.map((person) => ({ id: person.id, name: person.name, aliases: person.aliases, hue: person.hue }))}
+            areas={areas}
+            area={l.area ?? ''}
+            near={l.near ?? ''}
+            residentIds={l.residentIds ?? []}
+            dismissedIds={dismissedIds}
+            authorText={[l.name, l.summary, l.inhabitants, l.area ?? '', l.near ?? ''].join('\n')}
+            onArea={(area) => onPatch({ area })}
+            onNear={(near) => onPatch({ near })}
+            onResidentIds={(residentIds) => {
+              onPatch({ residentIds });
+              void seedBlankResidentLocations(residentIds, l.name);
+            }}
+            onDismissedIds={onDismissedIds}
+          />
           <Field label="Rules" note="one per line — at least one required">
             <SheetText rows={2} value={l.rules.join('\n')} onCommit={(text) => onPatch({ rules: linesFromField(text) })} />
           </Field>

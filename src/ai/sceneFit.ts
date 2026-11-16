@@ -44,6 +44,8 @@ const BRING =
 export interface ScenePlace {
   name: string;
   inhabitants: string;
+  /** Extra fit only. Missing or empty leaves the existing checks unchanged. */
+  residentIds?: string[];
 }
 
 export interface CastDeltaInput {
@@ -126,6 +128,7 @@ function roleOverlaps(character: Character, inhabitants: string): boolean {
 /** True when this person is the kind of person that place already holds. */
 export function characterFitsPlace(character: Character, place: ScenePlace): boolean {
   if (character.isPlayer) return false;
+  if (place.residentIds?.includes(character.id)) return true;
   if (roleOverlaps(character, place.inhabitants)) return true;
   if (youthClass(place.inhabitants) && readsAsAdult(character.age) && !staffRole(character.role)) {
     return false;
@@ -251,12 +254,16 @@ export function stageSceneCast(opts: {
   playerText: string;
   turns?: Turn[];
   placeChanged: boolean;
+  /** Extra people this place holds. Omitted leaves role matching unchanged. */
+  residentIds?: string[];
 }): { castIds: string[]; alsoFits: Character[]; changes: RosterMove[] } {
   const player = opts.characters.find((c) => c.isPlayer);
   const npcs = opts.characters.filter((c) => !c.isPlayer);
   const arrivedClosed = opts.placeChanged && placeIsClosed(opts.inhabitants);
   const brought = new Set(npcs.filter((c) => lineBringsCharacter(opts.playerText, c)).map((c) => c.id));
-  const matching = npcs.filter((c) => roleMatchesRoom(c, opts.inhabitants));
+  const residents = new Set(opts.residentIds ?? []);
+  const holdsPlace = (c: Character) => roleMatchesRoom(c, opts.inhabitants) || residents.has(c.id);
+  const matching = npcs.filter((c) => holdsPlace(c));
   const changes: RosterMove[] = [];
 
   const ids: string[] = [];
@@ -280,7 +287,7 @@ export function stageSceneCast(opts: {
       if (player && id === player.id) continue;
       const c = npcs.find((x) => x.id === id);
       if (!c) continue;
-      if (brought.has(c.id) || roleMatchesRoom(c, opts.inhabitants)) push(c.id);
+      if (brought.has(c.id) || holdsPlace(c)) push(c.id);
       else note(c, 'leave', 'place');
     }
 

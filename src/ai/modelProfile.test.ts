@@ -13,7 +13,7 @@ import {
   shouldReserveReasoningTokens,
   thinkingOnForJob
 } from './modelProfile';
-import { characterSpeakTokens, narrationBeatTokens } from './prompts';
+import { sceneReplyTokens } from './prompts';
 import type { ProviderConfig } from '../types';
 
 const openai = (model: string, job: 'prose' | 'utility' | 'wrap' | 'test' = 'prose') =>
@@ -114,9 +114,8 @@ describe('output token retry math', () => {
     expect(bumpMaxTokens(req).maxTokens).toBeGreaterThanOrEqual(2450);
   });
 
-  it('keeps speak/narration floors large enough for a short finished line', () => {
-    expect(characterSpeakTokens('beat')).toBeGreaterThanOrEqual(250);
-    expect(characterSpeakTokens('scene')).toBeGreaterThanOrEqual(400);
-    expect(narrationBeatTokens('scene')).toBeGreaterThanOrEqual(700);
+  it('keeps a scene reply large enough to finish a short line', () => {
+    expect(sceneReplyTokens('beat')).toBeGreaterThanOrEqual(700);
+    expect(sceneReplyTokens('scene')).toBeGreaterThanOrEqual(1200);
   });
 });

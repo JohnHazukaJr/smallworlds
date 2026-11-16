@@ -59,12 +59,11 @@ import { placeChapterPictures } from '../ui/chapterPictures';
 import { writingLineText } from '../ui/bookPage';
 import { Face } from '../ui/Face';
 import { attributionRun, isDialogueBlock, lastSpokenBy } from '../ui/attribution';
-import type { DirectorBeat } from '../ai/prompts';
 import { abortWriteNotice, NOTICE_ADD_MODEL, noticeNavAction } from '../ui/writeNotices';
 import { avatarStyle, speakerInk, MOODS, ACCENT, ACCENT_RGBA } from '../ui/theme';
 import {
   characterPortraits, evaluateWorldWriteReady, formatStoryDate,
-  buildEpisodePlotTargets, latestEndedEpisode, nextEpisode, worldCalendar
+  buildEpisodePlotTargets, latestEndedEpisode, nextEpisode, pendingPlotTargets, worldCalendar
 } from '../worldOps';
 
 // ---------- prose rendering ----------
@@ -225,10 +224,16 @@ function parseTurn(turn: Turn, characters: Character[], guests: EpisodeGuest[] =
     }];
   }
   const speakers = speakersOnPage(characters, guests);
+  const speakerLabels = speakers.flatMap((speaker) => [speaker.name, ...(speaker.aliases ?? [])]);
+  const stripNarration = (text: string) => {
+    const stripped = speakers.length > 0
+      ? stripNarratorEmbeddedDialogue(text, speakerLabels)
+      : stripNarratorEmbeddedDialogue(text);
+    return stripped || text;
+  };
   const pieces = speakers.length > 0 ? splitSceneReply(turn.text, speakers) : [];
   if (!pieces.some((piece) => piece.role === 'character' && piece.speakerId)) {
-    const text = stripNarratorEmbeddedDialogue(turn.text) || turn.text;
-    return [{ text, kind: 'narration' }];
+    return [{ text: stripNarration(turn.text), kind: 'narration' }];
   }
   const blocks: ProseBlock[] = [];
   for (const piece of pieces) {
@@ -247,7 +252,7 @@ function parseTurn(turn: Turn, characters: Character[], guests: EpisodeGuest[] =
       });
       continue;
     }
-    const narration = stripNarratorEmbeddedDialogue(text) || text;
+    const narration = stripNarration(text);
     if (!narration.trim()) continue;
     blocks.push({ text: narration, kind: 'narration' });
   }
@@ -591,6 +596,45 @@ function ProseBlockView({
 
 type StreamSink = (text: string, meta: StreamMeta) => void;
 
+type SpeakTarget =
+  | { kind: 'cast'; id: string }
+  | { kind: 'guest'; id: string }
+  | { kind: 'player' };
+
+type LineAddress = { toCharacterId?: string; toGuestId?: string; toPlayer?: boolean };
+
+/** The person this line is aimed at, or nothing when the choice no longer fits the room. */
+function lineAddress(opts: {
+  direct: boolean;
+  asCharacterId: string | null;
+  target: SpeakTarget | null;
+  characters: Character[];
+  castIds: string[];
+  guests: EpisodeGuest[];
+  activeGuestIds?: string[];
+}): LineAddress | undefined {
+  const target = opts.target;
+  if (opts.direct || !target) return undefined;
+  if (opts.asCharacterId) {
+    if (target.kind !== 'player') return undefined;
+    const player = opts.characters.find((c) => c.isPlayer);
+    return player ? { toCharacterId: player.id, toPlayer: true } : { toPlayer: true };
+  }
+  if (target.kind === 'cast') {
+    const id = target.id;
+    const npc = opts.characters.find((c) => c.id === id && opts.castIds.includes(c.id) && !c.isPlayer);
+    return npc ? { toCharacterId: npc.id } : undefined;
+  }
+  if (target.kind === 'guest') {
+    const id = target.id;
+    const active = opts.activeGuestIds == null
+      ? opts.guests
+      : opts.guests.filter((g) => opts.activeGuestIds?.includes(g.id));
+    return active.some((g) => g.id === id) ? { toGuestId: id } : undefined;
+  }
+  return undefined;
+}
+
 /** Identity for parsed blocks. Speaker name, hue, and portrait change the markup. */
 function castParseKey(characters: Character[], guests: EpisodeGuest[]): string {
   const cast = characters.map((c) =>
@@ -884,7 +928,28 @@ export function Story() {
   });
   const [weight, setWeight] = useState<ActionWeight>('matters');
   const [asCharacterId, setAsCharacterId] = useState<string | null>(null);
+  const [speakTo, setSpeakTo] = useState<SpeakTarget | null>(null);
   const [direct, setDirect] = useState(false);
+  useEffect(() => {
+    if (!episode) return;
+    setSpeakTo((current) => {
+      if (!current) return current;
+      if (direct) return null;
+      if (asCharacterId) return current.kind === 'player' ? current : null;
+      if (current.kind === 'player') return null;
+      if (current.kind === 'cast') {
+        const here = characters.some((c) =>
+          c.id === current.id && episode.castIds.includes(c.id) && !c.isPlayer
+        );
+        return here ? current : null;
+      }
+      const list = episode.guests ?? [];
+      const active = episode.activeGuestIds == null
+        ? list
+        : list.filter((g) => episode.activeGuestIds?.includes(g.id));
+      return active.some((g) => g.id === current.id) ? current : null;
+    });
+  }, [asCharacterId, direct, episode, characters]);
   const [speechTone, setSpeechTone] = useState<DeliveryTone | null>(null);
   const [toneGroup, setToneGroup] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
@@ -1035,12 +1100,12 @@ export function Story() {
   const runNarration = async (
     mode: ComposeMode,
     text: string,
-    resumeBeats?: DirectorBeat[],
     lengthOverride?: TurnLength,
     actionWeight?: ActionWeight,
     handsId?: string | null,
     writeToken?: symbol,
-    keepExistingUserTurn?: boolean
+    keepExistingUserTurn?: boolean,
+    address?: LineAddress
   ): Promise<{ status: 'ok' | 'error' | 'aborted'; beatsCompleted: number; remaining: number }> => {
     if (!world || !season || !episode) return { status: 'error', beatsCompleted: 0, remaining: 0 };
     setError('');
@@ -1053,9 +1118,11 @@ export function Story() {
     try {
       await writeTurn({
         world, season, episode, mode, input: text, length: lengthOverride ?? length,
-        resumeBeats,
         weight: actionWeight ?? weight,
         asCharacterId: handsId === undefined ? (asCharacterId ?? undefined) : (handsId ?? undefined),
+        ...(address?.toCharacterId ? { toCharacterId: address.toCharacterId } : {}),
+        ...(address?.toGuestId ? { toGuestId: address.toGuestId } : {}),
+        ...(address?.toPlayer ? { toPlayer: true } : {}),
         signal: controller.signal,
         writeToken,
         keepExistingUserTurn,
@@ -1111,6 +1178,15 @@ export function Story() {
       tone: speechTone,
       text: input
     });
+    const address = lineAddress({
+      direct,
+      asCharacterId,
+      target: speakTo,
+      characters,
+      castIds: episode.castIds,
+      guests: episode.guests ?? [],
+      activeGuestIds: episode.activeGuestIds
+    });
     const text = input;
     setInput('');
     try {
@@ -1118,10 +1194,11 @@ export function Story() {
         outgoing.mode,
         outgoing.text,
         undefined,
-        undefined,
         weight,
         outgoing.asCharacterId,
-        token
+        token,
+        undefined,
+        address
       );
       if (result.status !== 'ok' && result.beatsCompleted === 0 && result.remaining === 0) {
         setInput(text);
@@ -1145,7 +1222,7 @@ export function Story() {
     const token = tryBeginStoryWrite();
     if (!token) return;
     try {
-      await runNarration('continue', '', undefined, undefined, weight, null, token);
+      await runNarration('continue', '', undefined, weight, null, token);
     } finally {
       endStoryWrite(token);
     }
@@ -1308,17 +1385,19 @@ export function Story() {
         turn.mode && turn.mode !== 'continue' ? turn.mode : 'play',
         turn.text,
         undefined,
-        undefined,
         turn.weight ?? 'matters',
         turn.asCharacterId ?? null,
         token,
-        true
+        true,
+        {
+          ...(turn.toCharacterId ? { toCharacterId: turn.toCharacterId } : {}),
+          ...(turn.toGuestId ? { toGuestId: turn.toGuestId } : {})
+        }
       );
       if (result.status !== 'ok' && result.beatsCompleted === 0) {
         await rollbackTurnSnapshot(episode.id, following, started, memory);
         await db.episodes.update(episode.id, {
           pendingPlan: null,
-          sceneLedger: [],
           updatedAt: Date.now()
         });
         setError('');
@@ -1329,7 +1408,6 @@ export function Story() {
         await rollbackTurnSnapshot(episode.id, following, started, memory).catch(() => undefined);
         await db.episodes.update(episode.id, {
           pendingPlan: null,
-          sceneLedger: [],
           updatedAt: Date.now()
         }).catch(() => undefined);
       }
@@ -1347,10 +1425,16 @@ export function Story() {
     setWrapBusy(true);
     setError('');
     try {
+      let atmosphereNote: string | undefined;
       if (turns.length > 0) {
-        await commitSoftEpisodeWrap(world, season, episode);
+        const filed = await commitSoftEpisodeWrap(world, season, episode);
+        atmosphereNote = filed.atmosphereNote;
       }
-      await nextEpisode(episode);
+      const carried = pendingPlotTargets(episode.plotTargets);
+      await nextEpisode(episode, {
+        ...(atmosphereNote ? { atmosphereNote } : {}),
+        ...(carried.length > 0 ? { plotTargets: carried } : {})
+      });
       setNotice('Chapter ended. The next chapter is open.');
     } catch (e) {
       setError(classifyError(e));
@@ -1497,12 +1581,29 @@ export function Story() {
     : asCharacterId
       ? (characters.find((c) => c.id === asCharacterId)?.name.trim() || 'Them')
       : 'You';
+  const aimed = lineAddress({
+    direct,
+    asCharacterId,
+    target: speakTo,
+    characters,
+    castIds: episode.castIds,
+    guests: episode.guests ?? [],
+    activeGuestIds: episode.activeGuestIds
+  });
+  const toName = !aimed
+    ? ''
+    : aimed.toPlayer
+      ? 'you'
+      : aimed.toCharacterId
+        ? (characters.find((c) => c.id === aimed.toCharacterId)?.name.trim() || '')
+        : (stageGuests.find((g) => g.id === aimed.toGuestId)?.name.trim() || '');
+  const speakingLabel = toName ? `${speakingAs} to ${toName}` : speakingAs;
   const composePrompt = direct
     ? 'What should happen next?'
     : asCharacterId
       ? 'What do they do?'
       : 'What do you do, or what do you say?';
-  const composeStatus = `${speakingAs} · ${weight === 'moment' ? 'Just this moment' : 'Changes things'} · ${
+  const composeStatus = `${speakingLabel} · ${weight === 'moment' ? 'Just this moment' : 'Changes things'} · ${
     length === 'beat' ? 'Short' : length === 'episode' ? 'Long' : 'Normal'
   }`;
   const sendTitle = `Send (${/Mac|iPhone|iPad|iPod/.test(navigator.platform) ? 'Cmd' : 'Ctrl'}+Enter)`;
@@ -2368,6 +2469,47 @@ export function Story() {
                 <button className="btn-quiet" style={{ minHeight: 40 }} disabled={editBusy}
                   onClick={() => setEditing(null)}>Cancel</button>
               </div>
+            </div>
+          )}
+          {!direct && (
+            <div style={{
+              flexShrink: 0,
+              maxWidth: '40rem', margin: '0 auto', width: '100%',
+              display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap'
+            }}>
+              <span className="label" style={{ fontSize: 11 }}>To</span>
+              {asCharacterId ? (
+                <>
+                  <Chip active={speakTo?.kind !== 'player'} onClick={() => setSpeakTo(null)}>The room</Chip>
+                  <Chip active={speakTo?.kind === 'player'} onClick={() => setSpeakTo({ kind: 'player' })}>You</Chip>
+                </>
+              ) : (
+                <>
+                  <Chip active={speakTo === null} onClick={() => setSpeakTo(null)}>Anyone</Chip>
+                  {inScene.filter((c) => !c.isPlayer).map((c) => (
+                    <Chip
+                      key={c.id}
+                      active={speakTo?.kind === 'cast' && speakTo.id === c.id}
+                      onClick={() => setSpeakTo((current) =>
+                        current?.kind === 'cast' && current.id === c.id ? null : { kind: 'cast', id: c.id }
+                      )}
+                    >
+                      {c.name}
+                    </Chip>
+                  ))}
+                  {stageGuests.map((g) => (
+                    <Chip
+                      key={g.id}
+                      active={speakTo?.kind === 'guest' && speakTo.id === g.id}
+                      onClick={() => setSpeakTo((current) =>
+                        current?.kind === 'guest' && current.id === g.id ? null : { kind: 'guest', id: g.id }
+                      )}
+                    >
+                      {g.name}
+                    </Chip>
+                  ))}
+                </>
+              )}
             </div>
           )}
           <div className="label" style={{

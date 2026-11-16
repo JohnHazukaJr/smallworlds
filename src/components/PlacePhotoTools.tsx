@@ -1,9 +1,11 @@
 import { useRef, useState } from 'react';
 import { generateLocationPhoto } from '../ai/image';
+import { rememberedPortraitStyle, rememberPortraitStyle, type PortraitStyle } from '../ai/portrait';
 import { formatUserError } from '../errors';
 import type { Location, World } from '../types';
 import { ErrorNote } from '../ui/bits';
 import { fileToSceneImage } from '../ui/image';
+import { ACCENT } from '../ui/theme';
 
 function aborted(e: unknown): boolean {
   return e instanceof Error && e.name === 'AbortError';
@@ -27,6 +29,7 @@ export function PlacePhotoTools({
 }) {
   const fileRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const [style, setStyle] = useState<PortraitStyle>(rememberedPortraitStyle);
   const [uploadBusy, setUploadBusy] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState('');
@@ -62,6 +65,7 @@ export function PlacePhotoTools({
       const portrait = await generateLocationPhoto({
         world,
         location,
+        style,
         signal: controller.signal
       });
       await onChange({ portrait });
@@ -85,6 +89,28 @@ export function PlacePhotoTools({
         ref={fileRef} type="file" accept="image/*" style={{ display: 'none' }}
         onChange={(e) => { const f = e.target.files?.[0]; if (f) void onFile(f); e.target.value = ''; }}
       />
+      <div role="radiogroup" aria-label="Place picture style" style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+        {(['realistic', 'comic'] as const).map((id) => (
+          <button
+            key={id}
+            type="button"
+            role="radio"
+            aria-checked={style === id}
+            className="btn-ghost"
+            style={{
+              fontSize: 11, padding: '6px 12px', minHeight: 36,
+              borderColor: style === id ? ACCENT : undefined,
+              fontWeight: style === id ? 600 : 500
+            }}
+            onClick={() => {
+              setStyle(id);
+              rememberPortraitStyle(id);
+            }}
+          >
+            {id === 'realistic' ? 'Realistic' : 'Comic'}
+          </button>
+        ))}
+      </div>
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <button
           type="button"
@@ -120,7 +146,7 @@ export function PlacePhotoTools({
         )}
       </div>
       <div style={{ fontSize: 12, lineHeight: 1.45, color: 'var(--ink-muted)' }}>
-        A generated photo uses this place’s name, tagline, and atmosphere.
+        A generated picture uses this place’s name, tagline, and atmosphere. Comic uses the same illustration style as character portraits. Realistic keeps today’s establishing shot.
       </div>
       {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
     </>

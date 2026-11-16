@@ -1,68 +1,12 @@
 import type {
-  CalendarEvent, Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, Location, OpenThread, Season, StoryStance, Turn, TurnLength, World
+  CalendarEvent, Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, Location, OpenThread, Season, Turn, TurnLength, World
 } from '../types';
-import { isPlayerAgencyMode, worldCalendarEventPrefs } from '../types';
-import { selectCalendarEventsForPrompt } from '../calendarEvents';
-import { formatEpisodeDateRange, formatStoryDate, PLOT_TARGET_CAP, storyStanceOf, worldCalendar } from '../worldOps';
+import { PLOT_TARGET_CAP, storyStanceOf, worldCalendar } from '../worldOps';
 import type { ChatMessage } from './client';
 import { inferContextWindowTokens } from './contextBudget';
 import { deliveryPhrase, parseDeliveryTone } from './deliveryTone';
-import { SPEAK_FORMAT_RULES, SPOKEN_VOICE_RULES } from './dialogueFormat';
-import { lastOpenQuestion, roomDynamicsLines, speakerCandidates } from './roomDynamics';
-import { characterImportance } from './characterWeight';
-import { characterFitsPlace, lineBringsCharacter } from './sceneFit';
-import { directorCloseGuidance, narratorCloseGuidance, stancePlaybook } from './storyStance';
+import { stancePlaybook } from './storyStance';
 
-/** Narrator passage ceilings. The model should stop earlier when the moment is smaller. */
-const NARRATION_BEAT_TOKENS: Record<TurnLength, number> = {
-  beat: 700,
-  scene: 1200,
-  episode: 2000
-};
-
-/**
- * Character/guest speak ceilings — a few sentences, a paragraph, or two or three.
- * Soft word hints do the pacing; tokens are a hard ceiling.
- * Reasoning models get extra headroom via proseCompletionTokens.
- */
-const CHARACTER_SPEAK_TOKENS: Record<TurnLength, number> = {
-  beat: 500,
-  scene: 900,
-  episode: 1400
-};
-
-export function narrationBeatTokens(length: TurnLength): number {
-  return NARRATION_BEAT_TOKENS[length];
-}
-
-export function characterSpeakTokens(length: TurnLength = 'scene'): number {
-  return CHARACTER_SPEAK_TOKENS[length];
-}
-
-/** Soft word budgets for the narrator's connective prose. */
-export function narrationSizeHint(length: TurnLength): string {
-  if (length === 'beat') {
-    return 'A short paragraph (about 60–120 words). Do not stop after one sentence. No spoken dialogue.';
-  }
-  if (length === 'scene') {
-    return 'About a paragraph (120–220 words). Do not stop after one sentence. No spoken dialogue.';
-  }
-  return 'Two or three paragraphs (about 200–400 words). Do not stop after one sentence. No spoken dialogue.';
-}
-
-/** Soft word budgets for one person's reply. A ceiling, not a quota. */
-export function speakSizeHint(length: TurnLength): string {
-  const close =
-    'Do not write the player\'s actions, speech, or thoughts. Do not repeat their line. ' +
-    'At most one question; if you ask, stop there.';
-  if (length === 'beat') {
-    return `Usually one or two sentences, often under 40 words. A single line is fine. ${close}`;
-  }
-  if (length === 'scene') {
-    return `A turn someone would take in a conversation, usually 1–4 sentences, about 20–80 words. ${close}`;
-  }
-  return `Room to tell something, about 60–160 words, still one person's spoken turn. ${close}`;
-}
 
 /** Shared anti-generic-prose rules for narrator and speak agents. */
 export const ANTI_SLOP_PROSE =
@@ -92,128 +36,6 @@ export interface PromptBuildOpts {
   memoryQuery?: string;
 }
 
-function playerRelLine(c: Character, all: Character[]): string | null {
-  const player = all.find((x) => x.isPlayer);
-  if (!player || c.isPlayer) return null;
-  const out = c.relationships.find((r) => r.targetId === player.id);
-  if (out) {
-    const note = (out.note ?? '').trim();
-    return `- ${out.kind || 'linked'} of ${player.name}${note ? `: ${clipText(note, 80)}` : ''}`;
-  }
-  const inbound = player.relationships.find((r) => r.targetId === c.id);
-  if (!inbound) return null;
-  const note = (inbound.note ?? '').trim();
-  return `- ${player.name} sees them as ${inbound.kind}${note ? `: ${clipText(note, 80)}` : ''}`;
-}
-
-function liveStateBlock(c: Character, includeGoal: boolean): string | null {
-  const bits = [
-    includeGoal && c.state.goal && `  goal — ${c.state.goal}`,
-    c.state.emotion && `  emotional — ${c.state.emotion}`,
-    c.state.location && `  location — ${c.state.location}`,
-    c.state.condition && `  condition — ${c.state.condition}`
-  ].filter(Boolean);
-  if (bits.length === 0) return null;
-  return (
-    `Current state (live — may evolve with the story; colors this moment, does not rewrite Voice/anchors):\n` +
-    bits.join('\n')
-  );
-}
-
-/** One line so narration treats a lead and a background body differently. Regular stays unlabeled. */
-function weightPresenceLine(c: Character): string | null {
-  if (c.isPlayer) return null;
-  const weight = characterImportance(c);
-  if (weight === 'regular') return null;
-  if (weight === 'lead') return 'Weight: lead — they carry this story; keep them present.';
-  if (weight === 'occasional') {
-    return 'Weight: occasional — use them when this moment needs them, not as a standing voice.';
-  }
-  return 'Weight: background — room texture; they speak only when addressed.';
-}
-
-function directorCastLine(c: Character, detail = ''): string {
-  const role = c.role ? ` (${c.role})` : '';
-  return `- ${c.id} · ${c.name}${role} · ${characterImportance(c)}${detail}`;
-}
-
-/** Physical body in the room — never cut for anyone on stage. */
-export function presenceSheet(c: Character, all: Character[]): string {
-  const rel = playerRelLine(c, all);
-  const lines = [
-    `### ${c.name}${c.isPlayer ? ' (THE PLAYER — never write their dialogue, decisions, or inner thoughts)' : ''}`,
-    c.role && `Role: ${c.role}`,
-    weightPresenceLine(c),
-    c.age && `Age/read: ${c.age}`,
-    c.appearance && `Appearance: ${c.appearance}`,
-    c.mannerisms && `Mannerisms (recurring physical habits and tics — weave them in naturally, never all at once): ${c.mannerisms}`,
-    rel && `Tie to the player:\n${rel}`,
-    liveStateBlock(c, true)
-  ];
-  return lines.filter(Boolean).join('\n');
-}
-
-/** Want / fear / anchors — add after presence; never reprint the body. */
-export function psycheExtras(c: Character): string {
-  const lines = [
-    c.summary && `Who they are: ${c.summary}`,
-    c.desires && `Desires: ${c.desires}`,
-    c.fears && `Fears: ${c.fears}`,
-    c.mustNotKnow &&
-      `MUST NOT KNOW YET (never let this character learn, reference, or act on this): ${c.mustNotKnow}`,
-    c.anchors.length > 0 &&
-      `BEHAVIOUR ANCHORS — non-negotiable, never break these under any circumstances:\n${c.anchors.map((a, i) => `  ${String(i + 1).padStart(2, '0')}. ${a}`).join('\n')}`
-  ];
-  return lines.filter(Boolean).join('\n');
-}
-
-/** Presence plus want / fear / anchors for the beat's focus. */
-export function psycheSheet(c: Character, all: Character[]): string {
-  return [presenceSheet(c, all), psycheExtras(c)].filter(Boolean).join('\n');
-}
-
-/** Voice, backstory, ties — add after presence; never reprint the body. */
-export function voiceExtras(c: Character, all: Character[]): string {
-  const rel = c.relationships
-    .map((r) => {
-      const target = all.find((x) => x.id === r.targetId);
-      return target ? `- ${r.kind} of ${target.name}: ${r.note}` : null;
-    })
-    .filter(Boolean)
-    .join('\n');
-  const knownTo = all
-    .filter((other) => other.id !== c.id)
-    .flatMap((other) =>
-      other.relationships
-        .filter((r) => r.targetId === c.id)
-        .map((r) => `- ${other.name} sees them as ${r.kind}${r.note ? `: ${r.note}` : ''}`)
-    )
-    .slice(0, 4)
-    .join('\n');
-  const lines = [
-    c.backstory && `Backstory (informs behaviour; reveal only in earned fragments, never as exposition): ${c.backstory}`,
-    c.speechStyle && `Voice (stable identity — keep this cadence even as mood/goals shift): ${c.speechStyle}`,
-    c.exampleLines.length > 0 &&
-      `Example lines (imitate the rhythm, never reuse verbatim):\n${c.exampleLines.map((l) => `  "${l}"`).join('\n')}`,
-    c.traits && `Traits: ${c.traits}`,
-    c.flaws && `Flaws: ${c.flaws}`,
-    c.secrets && `Secrets they carry (may act on, never announce): ${c.secrets}`,
-    rel && `Relationships:\n${rel}`,
-    knownTo && `Known to others:\n${knownTo}`,
-    c.customInstructions && `Author's directives for this character (follow verbatim): ${c.customInstructions}`
-  ];
-  return lines.filter(Boolean).join('\n');
-}
-
-/** Speak-agent self: psyche plus voice, example lines, backstory. */
-export function voiceSheet(c: Character, all: Character[]): string {
-  return [psycheSheet(c, all), voiceExtras(c, all)].filter(Boolean).join('\n');
-}
-
-/** Speak self-sheet when presence already listed the body. */
-function speakSelfSheet(c: Character, all: Character[]): string {
-  return [psycheExtras(c), voiceExtras(c, all)].filter(Boolean).join('\n');
-}
 
 function locationHardRules(l: Location): string | null {
   if (l.rules.length === 0) return null;
@@ -223,11 +45,31 @@ function locationHardRules(l: Location): string | null {
   );
 }
 
+function joinPlaceNames(names: string[]): string {
+  if (names.length <= 1) return names[0] ?? '';
+  if (names.length === 2) return `${names[0]} and ${names[1]}`;
+  return `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`;
+}
+
+/** Area, home, and nearby — only when those fields are set. Omitted fields add no text. */
+function locationSituationLines(l: Location, characters?: Character[]): Array<string | false | undefined> {
+  const names = (l.residentIds ?? [])
+    .map((id) => characters?.find((person) => person.id === id)?.name.trim())
+    .filter((name): name is string => !!name);
+  const alreadyNamed = names.length > 0 && names.every((name) => l.inhabitants.toLowerCase().includes(name.toLowerCase()));
+  return [
+    l.area?.trim() && `Area: ${l.area.trim()}`,
+    names.length > 0 && !alreadyNamed && `Home of ${joinPlaceNames(names)}`,
+    l.near?.trim() && `Nearby: ${l.near.trim()}`
+  ];
+}
+
 /** Lore body without HARD RULES — used when clipping so rules can be kept first. */
-function locationLoreSheet(l: Location): string {
+function locationLoreSheet(l: Location, characters?: Character[]): string {
   const lines = [
     `### ${l.name}`,
     l.tagline && `Tagline: ${l.tagline}`,
+    ...locationSituationLines(l, characters),
     l.summary && `Overview: ${l.summary}`,
     l.atmosphere && `Atmosphere (sensory detail to lean on): ${l.atmosphere}`,
     l.features && `Notable features: ${l.features}`,
@@ -240,16 +82,17 @@ function locationLoreSheet(l: Location): string {
   return lines.filter(Boolean).join('\n');
 }
 
-function locationSheet(l: Location): string {
+function locationSheet(l: Location, characters?: Character[]): string {
   const rules = locationHardRules(l);
-  return [locationLoreSheet(l), rules].filter(Boolean).join('\n');
+  return [locationLoreSheet(l, characters), rules].filter(Boolean).join('\n');
 }
 
 /** Atmosphere + hard rules only — never-cut location payload for tight packs. */
-function locationAtmosphereSheet(l: Location): string {
+function locationAtmosphereSheet(l: Location, characters?: Character[]): string {
   const lines = [
     `### ${l.name}`,
     l.tagline && `Tagline: ${l.tagline}`,
+    ...locationSituationLines(l, characters),
     l.atmosphere && `Atmosphere (sensory detail to lean on): ${l.atmosphere}`,
     l.currentState && `Current state: ${l.currentState}`,
     locationHardRules(l)
@@ -258,12 +101,13 @@ function locationAtmosphereSheet(l: Location): string {
 }
 
 /** Director path: HARD RULES first (uncut), then lore clipped into remaining budget. */
-function locationSheetClipped(l: Location, clipChars: number): string {
+function locationSheetClipped(l: Location, clipChars: number, characters?: Character[]): string {
   const header = `### ${l.name}`;
   const rules = locationHardRules(l);
   const priority = [header, rules].filter(Boolean).join('\n');
   const lore = [
     l.tagline && `Tagline: ${l.tagline}`,
+    ...locationSituationLines(l, characters),
     l.summary && `Overview: ${l.summary}`,
     l.atmosphere && `Atmosphere (sensory detail to lean on): ${l.atmosphere}`,
     l.features && `Notable features: ${l.features}`,
@@ -279,7 +123,8 @@ function locationSheetClipped(l: Location, clipChars: number): string {
 }
 
 function locationBrief(l: Location): string {
-  return `- ${l.name}${l.tagline ? ` (${l.tagline})` : ''}: ${l.summary.slice(0, 160) || 'no notes'}`;
+  const area = l.area?.trim() ? ` · ${l.area.trim()}` : '';
+  return `- ${l.name}${area}${l.tagline ? ` (${l.tagline})` : ''}: ${l.summary.slice(0, 160) || 'no notes'}`;
 }
 
 export interface PromptContext {
@@ -321,29 +166,6 @@ export function resolveSpeakerName(
   return 'Someone';
 }
 
-/** One-line leftover director beat for the Continue plan banner (final string clipped). */
-export function pendingBeatLabel(
-  beat: DirectorBeat,
-  characters: Character[],
-  guests: EpisodeGuest[] = [],
-  clipChars = 80
-): string {
-  const brief = beat.brief.trim();
-  let label: string;
-  if (beat.type === 'narration') {
-    label = brief || 'Narration';
-  } else if (beat.type === 'speak' && 'guestId' in beat) {
-    const name = guests.find((g) => g.id === beat.guestId)?.name?.trim() || 'Someone';
-    label = brief ? `${name}: ${brief}` : name;
-  } else if (beat.type === 'speak' && 'characterId' in beat) {
-    const name = characters.find((c) => c.id === beat.characterId)?.name?.trim() || 'Someone';
-    label = brief ? `${name}: ${brief}` : name;
-  } else {
-    label = brief || 'Narration';
-  }
-  return clipText(label, clipChars);
-}
-
 function proseDensityLine(ai: World['ai']): string {
   return ai.proseDensity < 34 ? 'Restrained, concrete prose. Few adverbs, no ornament for its own sake.'
     : ai.proseDensity < 67 ? 'Balanced literary prose. Texture where it earns its place.'
@@ -365,11 +187,6 @@ export const DIRECTOR_FACT_CAP = 16;
 export const DIRECTOR_THREAD_CAP = 10;
 /** How many recent packed turns the director sees (after history packing). */
 export const DIRECTOR_TRANSCRIPT_TURNS = 8;
-/**
- * Completion budget for plan_turn.
- * Must stay under the hosted utility ceiling (900) so a plan is 1 credit, not a beat.
- */
-export const DIRECTOR_PLAN_TOKENS = 800;
 /** How many prior wrapped episodes to surface in prompts. */
 const PRIOR_EPISODE_DIGEST_COUNT = 3;
 
@@ -682,78 +499,6 @@ export function episodeSceneDay(episode: Episode, cal: ReturnType<typeof worldCa
   return cal.currentDay;
 }
 
-/** Custom clock schema — default Gregorian week/months do not need a dump. */
-function calendarSchemaIsCustom(world: World): boolean {
-  const c = world.calendar;
-  if (c?.system?.trim()) return true;
-  if ((c?.weekdays ?? []).some((w) => w.trim())) return true;
-  if ((c?.months ?? []).some((m) => m.trim())) return true;
-  return false;
-}
-
-/**
- * Unified calendar / "now" lines.
- * - full: narrator calendar section (owns all dates)
- * - compact: speak-agent current episode + today
- * - directorLine: one-line header dates for the planner
- */
-function calendarBlock(
-  world: World,
-  episode: Episode,
-  mode: 'full' | 'compact' | 'directorLine'
-): string {
-  const cal = worldCalendar(world);
-  const scene = episodeSceneDay(episode, cal);
-  const dateLine = formatEpisodeDateRange(cal, episode.storyDay, episode.storyDayEnd);
-  const note = episode.dateNote?.trim();
-  if (mode === 'full') {
-    const worldClock = cal.currentDay !== scene
-      ? `\nWorld clock (world clock): ${formatStoryDate(cal, cal.currentDay)}.`
-      : '';
-    const custom = calendarSchemaIsCustom(world);
-    const schema = custom
-      ? `Week cycle: ${cal.weekdays.join(', ')} (day 1 of the story was a ${cal.weekdays[cal.dayOneWeekday]}).\n` +
-        `Months: ${cal.months.join(', ')}.\n`
-      : '';
-    return (
-      `## Calendar\n` +
-      (cal.system ? `${cal.system}\n` : '') +
-      schema +
-      `Today is ${formatStoryDate(cal, scene)}.\n` +
-      `This chapter's date: ${dateLine}.` +
-      worldClock +
-      (note ? `\nDate note: ${note}` : '') +
-      `\nOver the course of a scene, let the weekday, season, or time of day hang in the prose so a reader can tell what day it is. Do not repeat it every paragraph, and do not paste a day-number stamp or a calendar header.`
-    );
-  }
-  if (mode === 'directorLine') {
-    return (
-      `Episode ${episode.number}${episode.location ? ` @ ${episode.location}` : ''} · ${dateLine}` +
-      (note ? ` · ${note}` : '') + `\n` +
-      `Today: ${formatStoryDate(cal, scene)}` +
-      (cal.currentDay !== scene ? ` · World clock: ${formatStoryDate(cal, cal.currentDay)}` : '')
-    );
-  }
-  // compact
-  const worldClock = cal.currentDay !== scene
-    ? ` World clock: ${formatStoryDate(cal, cal.currentDay)}.`
-    : '';
-  return (
-    `## Current chapter\nChapter ${episode.number}${episode.title ? ` — ${episode.title}` : ''}.` +
-    `${episode.location ? ` Location: ${episode.location}.` : ''} Date: ${dateLine}.` +
-    ` Today: ${formatStoryDate(cal, scene)}.` +
-    worldClock +
-    (note ? ` Note: ${note}.` : '')
-  );
-}
-
-/** Episode title + location only (dates live in calendarBlock). */
-function episodeHeader(episode: Episode): string {
-  return (
-    `## Current chapter\nChapter ${episode.number}${episode.title ? ` — ${episode.title}` : ''}.` +
-    `${episode.location ? ` Location: ${episode.location}.` : ''}`
-  );
-}
 
 function cappedThreadLines(
   threads: OpenThread[],
@@ -775,14 +520,6 @@ function cappedContinuityLines(
     .map((f) => `- ${f.text}`);
 }
 
-function worldBibleCap(episode: Episode, tight: boolean): number {
-  if (tight) return 1800;
-  return episode.runningSummary?.trim() ? WORLD_BIBLE_AFTER_SUMMARY_CAP : WORLD_BIBLE_CAP;
-}
-
-function worldBibleSection(world: World, cap = WORLD_BIBLE_CAP): string {
-  return `## The world\n${clipText(world.bible || world.line, cap)}`;
-}
 
 /**
  * Physical facts the prose has already put in the room this episode.
@@ -813,15 +550,6 @@ function runningSummaryFor(episode: Episode, cap: number): string | null {
   );
 }
 
-function priorMemoryFor(ctx: PromptContext, agent: PromptAgent): string | null {
-  const caps = PRIOR_CAPS[agent];
-  return formatPriorEpisodesSection(ctx, {
-    beatCapImmediate: caps.beatCapImmediate,
-    beatCapDigest: caps.beatCapDigest,
-    recapDigestChars: caps.recapDigestChars,
-    recapImmediateChars: caps.recapImmediateChars
-  });
-}
 
 function continuityBlock(
   ctx: PromptContext,
@@ -886,10 +614,10 @@ function currentLocationBlock(
   const out: string[] = [];
   if (current.length > 0) {
     const sheet = opts?.atmosphereOnly
-      ? current.map(locationAtmosphereSheet).join('\n\n')
+      ? current.map((l) => locationAtmosphereSheet(l, ctx.characters)).join('\n\n')
       : opts?.clipChars
-        ? current.map((l) => locationSheetClipped(l, Math.floor(opts.clipChars! / current.length))).join('\n\n')
-        : current.map(locationSheet).join('\n\n');
+        ? current.map((l) => locationSheetClipped(l, Math.floor(opts.clipChars! / current.length), ctx.characters)).join('\n\n')
+        : current.map((l) => locationSheet(l, ctx.characters)).join('\n\n');
     out.push(
       opts?.clipChars
         ? `## Current location (honour HARD RULES when planning)\n${sheet}`
@@ -971,23 +699,6 @@ function formatPriorEpisodesSection(
   return `## Earlier chapters\n${blocks.join('\n\n')}`;
 }
 
-function seasonBibleSection(season: Season, recapCap = SEASON_BIBLE_RECAP_CAP): string | null {
-  if (!season.bible) return null;
-  const beats = season.bible.carriedBeats
-    .filter((b) => b.disposition !== 'drop')
-    .slice(0, 8)
-    .map((b) => `- [${b.disposition.toUpperCase()}] ${clipText(b.text, 200)} → ${clipText(b.consequence, 160)}`)
-    .join('\n');
-  return (
-    `## Previously\n${clipText(season.bible.recap, recapCap)}` +
-    (beats
-      ? `\n\nCarried forward — ambient situation from before (RAISE = hot background, KEEP = alive, SOFTEN = distant echo; not the author hit-list):\n${beats}`
-      : '') +
-    (season.bible.offscreenChanges
-      ? `\n\nWhat changed during the gap:\n${clipText(season.bible.offscreenChanges, 800)}`
-      : '')
-  );
-}
 
 function plotTargetsSection(episode: Episode, season: Season): string | null {
   const ep = (episode.plotTargets ?? [])
@@ -1007,81 +718,6 @@ function plotTargetsSection(episode: Episode, season: Season): string | null {
   return parts.join('\n');
 }
 
-function formatCalendarEventLine(ev: CalendarEvent, opts: { includeSummary: boolean }): string {
-  const scaleNote = ev.scale !== 'small' ? ` · ${ev.scale}` : '';
-  const policyNote = ev.promptPolicy === 'hard' ? ' · address while due' : '';
-  const head = `- [${ev.kind}${scaleNote}${policyNote}] ${ev.title.trim() || '(untitled)'}`;
-  if (!opts.includeSummary || !ev.summary.trim()) return head;
-  return `${head} — ${clipText(ev.summary.trim(), 180)}`;
-}
-
-/** Due / upcoming calendar texture for narrator (full) or director (compact). */
-function calendarEventsSection(
-  ctx: PromptContext,
-  mode: 'full' | 'compact',
-  opts?: { includeUpcoming?: boolean }
-): string | null {
-  if (!worldCalendarEventPrefs(ctx.world).enabled) return null;
-  const events = ctx.calendarEvents ?? [];
-  if (events.length === 0) return null;
-  const cal = worldCalendar(ctx.world);
-  const scene = episodeSceneDay(ctx.episode, cal);
-  const { due, upcoming } = selectCalendarEventsForPrompt(events, { sceneDay: scene });
-  const showUpcoming = (opts?.includeUpcoming ?? true) && upcoming.length > 0;
-  if (due.length === 0 && !showUpcoming) return null;
-
-  if (mode === 'compact') {
-    const lines: string[] = [];
-    if (due.length > 0) {
-      lines.push(
-        'Calendar due now (texture / situation — hard+large should land; soft+small only if natural):'
-      );
-      for (const ev of due) lines.push(formatCalendarEventLine(ev, { includeSummary: true }));
-    }
-    if (showUpcoming) {
-      lines.push('Calendar upcoming (~7 days):');
-      for (const ev of upcoming) lines.push(formatCalendarEventLine(ev, { includeSummary: false }));
-    }
-    return lines.join('\n') + '\n';
-  }
-
-  const parts: string[] = [
-    '## Calendar events — dated season texture (not plot targets)',
-    'Due events may color the scene; hard + large should be felt. Soft + small = ambient only — do not force every item.'
-  ];
-  if (due.length > 0) {
-    parts.push(`Due now:\n${due.map((ev) => formatCalendarEventLine(ev, { includeSummary: true })).join('\n')}`);
-  }
-  if (showUpcoming) {
-    parts.push(
-      `Upcoming (next week of story days — foreshadow lightly if at all):\n` +
-      upcoming.map((ev) => formatCalendarEventLine(ev, { includeSummary: false })).join('\n')
-    );
-  }
-  return parts.join('\n');
-}
-
-/** Date clock plus due/upcoming events under a single Calendar heading. */
-function calendarSpineSection(
-  ctx: PromptContext,
-  agent: Exclude<PromptAgent, 'director'>,
-  tight: boolean
-): string | null {
-  const events = calendarEventsSection(ctx, agent === 'narrator' ? 'full' : 'compact', {
-    includeUpcoming: !tight
-  });
-  if (agent === 'narrator') {
-    const dates = calendarBlock(ctx.world, ctx.episode, 'full');
-    if (!events) return dates;
-    const eventBody = events.replace(/^##[^\n]*\n/, '');
-    return `${dates}\n${eventBody}`;
-  }
-  const cal = worldCalendar(ctx.world);
-  const scene = episodeSceneDay(ctx.episode, cal);
-  const dateLine = `Today: ${formatStoryDate(cal, scene)}.`;
-  if (!events) return `## Calendar\n${dateLine}`;
-  return `## Calendar\n${dateLine}\n${events}`;
-}
 
 function resolveCurrentLocations(episode: Episode, locations: Location[]): Location[] {
   if (locations.length === 0) return [];
@@ -1095,207 +731,6 @@ function resolveCurrentLocations(episode: Episode, locations: Location[]): Locat
   return byId.length > 0 ? byId : byName;
 }
 
-/**
- * Byte-stable prefix for one episode/cast snapshot.
- * Narrator and speak use different caps (speak is leaner); same agent + pack
- * stays stable across beats so later calls can hit implicit cache.
- */
-export function storyCachePrefix(ctx: PromptContext, opts: PromptBuildOpts = {}): string {
-  return storyCacheSections(ctx, opts).join('\n\n');
-}
-
-function storyCacheSections(ctx: PromptContext, opts: PromptBuildOpts = {}): string[] {
-  const { world, season, episode, characters } = ctx;
-  const tight = opts.pack === 'tight';
-  const inScene = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
-  const player = characters.find((c) => c.isPlayer);
-  const sections: string[] = [];
-
-  sections.push(worldBibleSection(world, worldBibleCap(episode, tight)));
-  const bible = seasonBibleSection(season, tight ? 600 : SEASON_BIBLE_RECAP_CAP);
-  if (bible) sections.push(bible);
-  sections.push(situationPremise(ctx, { includeSeasonMeta: true }));
-  sections.push(episodeHeader(episode));
-
-  sections.push(...currentLocationBlock(ctx, {
-    includeOthers: false,
-    atmosphereOnly: tight
-  }));
-
-  const sensoryBits = [
-    episode.atmosphereNote,
-    !episode.atmosphereNote?.trim()
-      ? resolveCurrentLocations(episode, ctx.locations)[0]?.atmosphere
-      : undefined
-  ].filter((s) => s && s.trim());
-  if (sensoryBits.length > 0) {
-    sections.push(
-      `## Sensory contract for this place\n` +
-      `Hold the place in the body of the prose. From the notes below, keep returning to one or two concrete sensory anchors (sight, sound, smell, temperature, or touch) — never all at once, never as a tourist catalogue:\n` +
-      sensoryBits.map((s) => `- ${s!.trim()}`).join('\n')
-    );
-  }
-
-  if (player) {
-    sections.push(`## The player\n${presenceSheet(player, characters)}`);
-  }
-  if (inScene.length > 0) {
-    sections.push(
-      `## People here\n` +
-      inScene.map((c) => presenceSheet(c, characters)).join('\n\n')
-    );
-  }
-
-  const guests = activeGuests(episode);
-  if (guests.length > 0) {
-    sections.push(
-      `## Walk-ons in this chapter (not cast cards — temporary)\n` +
-      guests.map((g) => `- ${g.name}: ${g.brief}${g.voice ? ` Voice: ${g.voice}` : ''}`).join('\n')
-    );
-  }
-
-  return sections;
-}
-
-/**
- * Room packet for a spoken line. Same world, season, and place the narrator just used.
- */
-function speakScenePrefix(ctx: PromptContext, opts: PromptBuildOpts = {}): string {
-  const { episode, characters, season } = ctx;
-  const tight = opts.pack === 'tight';
-  const sections: string[] = [];
-  sections.push(worldBibleSection(ctx.world, worldBibleCap(episode, tight)));
-  const seasonBible = seasonBibleSection(season, tight ? 600 : SEASON_BIBLE_RECAP_CAP);
-  if (seasonBible) sections.push(seasonBible);
-  sections.push(situationPremise(ctx, { includeSeasonMeta: true }));
-  sections.push(episodeHeader(episode));
-  sections.push(...currentLocationBlock(ctx, { includeOthers: false, atmosphereOnly: tight }));
-
-  const player = characters.find((c) => c.isPlayer);
-  const inScene = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
-  if (player) sections.push(`## The player\n${presenceSheet(player, characters)}`);
-  if (inScene.length > 0) {
-    sections.push(
-      `## People here\n` +
-      inScene.map((c) => presenceSheet(c, characters)).join('\n\n')
-    );
-  }
-  const guests = activeGuests(episode);
-  if (guests.length > 0) {
-    sections.push(
-      `## Walk-ons in this chapter (not cast cards — temporary)\n` +
-      guests.map((g) => `- ${g.name}: ${g.brief}${g.voice ? ` Voice: ${g.voice}` : ''}`).join('\n')
-    );
-  }
-  return sections.join('\n\n');
-}
-
-function worldSpineSections(
-  ctx: PromptContext,
-  agent: Exclude<PromptAgent, 'director'>,
-  opts: PromptBuildOpts = {}
-): string[] {
-  const tight = opts.pack === 'tight';
-  const sections: string[] = [];
-  if (agent === 'narrator') {
-    const targets = plotTargetsSection(ctx.episode, ctx.season);
-    if (targets) sections.push(targets);
-  }
-
-  const priorEps = tight
-    ? formatPriorEpisodesSection(ctx, {
-      beatCapImmediate: 3, beatCapDigest: 1,
-      recapDigestChars: 160, recapImmediateChars: 700
-    })
-    : priorMemoryFor(ctx, agent);
-  if (priorEps) sections.push(priorEps);
-
-  const factCap = tight ? 8 : FACT_CAPS[agent].facts;
-  const threadCap = tight ? 4 : FACT_CAPS[agent].threads;
-  const tone = 'hard';
-  const threadKind = agent === 'narrator' ? 'narrator' : 'speak';
-  const query = opts.memoryQuery ?? '';
-  const cont = continuityBlock(ctx, agent, tone, factCap, query);
-  const threads = threadsBlock(ctx, agent, threadKind, threadCap, query);
-  if (cont) sections.push(cont);
-  if (threads) sections.push(threads);
-
-  const calendar = calendarSpineSection(ctx, agent, tight);
-  if (calendar) sections.push(calendar);
-
-  const ledger = sceneLedgerSection(ctx.episode, tight ? 4 : agent === 'narrator' ? 8 : 5);
-  if (ledger) sections.push(ledger);
-  return sections;
-}
-
-function worldGlueSection(ctx: PromptContext, agent: PromptAgent): string | null {
-  return runningSummaryFor(ctx.episode, PRIOR_CAPS[agent].runningCap);
-}
-
-function narratorFocusTail(ctx: PromptContext, opts: PromptBuildOpts = {}): string[] {
-  const focus = new Set(opts.focusIds ?? []);
-  if (focus.size === 0) return [];
-  const { characters, episode } = ctx;
-  const sections: string[] = [];
-  const focusedInScene = characters.filter(
-    (c) => !c.isPlayer && episode.castIds.includes(c.id) && focus.has(c.id)
-  );
-  if (focusedInScene.length > 0) {
-    const deeper = focusedInScene
-      .map((c) => {
-        const extras = psycheExtras(c);
-        return extras ? `### ${c.name}\n${extras}` : '';
-      })
-      .filter(Boolean);
-    if (deeper.length > 0) {
-      sections.push(`## Who is here\n${deeper.join('\n\n')}`);
-    }
-  }
-  const offSceneFocused = characters.filter(
-    (c) => !episode.castIds.includes(c.id) && !c.isPlayer && focus.has(c.id)
-  );
-  if (offSceneFocused.length > 0) {
-    sections.push(
-      `## Not in this chapter\n` +
-      offSceneFocused.map((c) => presenceSheet(c, characters)).join('\n\n')
-    );
-  }
-  return sections;
-}
-
-/**
- * Soft situation pressure for speak agents — due calendar + aimed beats without a
- * narrator-style checklist. Characters react if it touches them; they do not force it.
- */
-function speakSituationPressure(ctx: PromptContext): string | null {
-  const pending = [
-    ...(ctx.episode.plotTargets ?? []),
-    ...(ctx.season.plotTargets ?? [])
-  ].filter((t) => t.status === 'pending' && t.text.trim()).slice(0, 4);
-  if (pending.length === 0) return null;
-  return (
-    `## Situation (ambient — react if it touches you; do not force or checklist)\n` +
-    pending.map((t) => `- Aimed beat: ${clipText(t.text.trim(), 160)}`).join('\n')
-  );
-}
-
-/**
- * Shared lean frame for character / guest speak agents (no plot-target checklist).
- * Role sheets go between this and continuity/threads (callers append those next).
- */
-function leanAgentFrame(
-  ctx: PromptContext,
-  agent: 'character' | 'guest',
-  opts: PromptBuildOpts = {}
-): string[] {
-  const sections: string[] = [];
-  const pressure = speakSituationPressure(ctx);
-  if (pressure) sections.push(pressure);
-  sections.push(...worldSpineSections(ctx, agent, opts));
-  const running = worldGlueSection(ctx, agent);
-  if (running) sections.push(running);
-  return sections;
-}
 
 function contentSection(ai: World['ai']): string {
   return (
@@ -1303,154 +738,6 @@ function contentSection(ai: World['ai']): string {
       ? 'This is a private adult world. Mature themes, violence, and explicit content are permitted where the story calls for them; write them with craft, not gratuitously.'
       : 'Keep content at a general-audience level. Imply rather than depict.'}${ai.contentNotes ? `\nWorld-specific boundaries: ${ai.contentNotes}` : ''}`
   );
-}
-
-/**
- * Narrator writes atmosphere, physical action, and sensory detail only.
- * NPC dialogue is produced by separate character agents.
- */
-export function buildNarratorSystemPrompt(ctx: PromptContext, opts: PromptBuildOpts = {}): string {
-  const { world } = ctx;
-  const ai = world.ai;
-  const sections: string[] = [];
-
-  sections.push(storyCachePrefix(ctx, { ...opts, agent: 'narrator' }));
-  sections.push(stancePlaybook(storyStanceOf(world)));
-
-  sections.push(
-    `You are the narrator of "${world.title}", a longform interactive story written in collaboration with one player. ` +
-    `You write narration only: setting, atmosphere, physical action, and what can be seen or felt. ` +
-    `You never write spoken dialogue for any character. Named characters speak through their own voices in separate turns.`
-  );
-
-  sections.push(...narratorFocusTail(ctx, opts));
-  sections.push(...worldSpineSections(ctx, 'narrator', opts));
-  const running = worldGlueSection(ctx, 'narrator');
-  if (running) sections.push(running);
-
-  sections.push(
-    `## Character conduct (for what you show, not what they say)\n` +
-    `- NPCs are proactive in body and situation. They pursue desires, remember slights, and can refuse or surprise through action.\n` +
-    `- Prefer one named mannerism or physical tic over abstract mood adverbs when you describe someone.\n` +
-    `- Never soften a character to be agreeable. Behaviour anchors are absolute.\n` +
-    `- Characters only know what they could plausibly know. Honour every MUST NOT KNOW instruction silently.\n` +
-    `- Trust moves slowly. Relationships shift in small, earned steps.`
-  );
-
-  sections.push(ANTI_SLOP_PROSE);
-
-  const rules = ai.narratorRules.filter((r) => r.trim());
-  sections.push(
-    `## Narration rules\n` +
-    `- Point of view: ${ai.pov} person, ${ai.tense} tense, addressed to the player.\n` +
-    `- ${proseDensityLine(ai)}\n` +
-    `- ${pacingLine(ai)}\n` +
-    `- Never write the player's dialogue, decisions, or inner monologue. Leave space for them to act.\n` +
-    `- NEVER write spoken dialogue, quoted speech, or lines in the form CharacterName: "…". Named characters speak in their own turns. Write the consequence through to the length asked on this turn. Do not stop after the first physical beat, and do not write the player's next move.\n` +
-    `- Let the weekday, season, or time of day hang in the prose over the course of a scene so a reader can tell what day it is. Do not repeat it every paragraph, and do not paste a day-number stamp or a calendar header.\n` +
-    `- ${narratorCloseGuidance(storyStanceOf(world))}` +
-    (rules.length > 0 ? `\n${rules.map((r) => `- ${r}`).join('\n')}` : '')
-  );
-
-  sections.push(contentSection(ai));
-
-  if (ai.customInstructions.trim()) {
-    sections.push(`## Author's instructions (follow verbatim)\n${ai.customInstructions}`);
-  }
-
-  return sections.join('\n\n');
-}
-
-/**
- * Character agent: first-person as this NPC. Speaks as themselves.
- */
-export function buildCharacterSystemPrompt(
-  ctx: PromptContext,
-  character: Character,
-  opts: PromptBuildOpts = {}
-): string {
-  const { world, characters } = ctx;
-  const ai = world.ai;
-  const frameOpts: PromptBuildOpts = { ...opts, agent: 'character' };
-  const sections: string[] = [];
-
-  sections.push(speakScenePrefix(ctx, frameOpts));
-  sections.push(stancePlaybook(storyStanceOf(world)));
-
-  sections.push(
-    `You ARE ${character.name} in the story "${world.title}". You speak and act only as yourself. ` +
-    `You are not the narrator. You do not write other characters' dialogue or the player's lines. ` +
-    `Reply in your own voice — looks/mannerisms plus what you say aloud. ` +
-    `Blocks marked [Narrator] or another person's name are the scene, not lines you already said.`
-  );
-
-  sections.push(...leanAgentFrame(ctx, 'character', frameOpts));
-
-  const self = speakSelfSheet(character, characters);
-  if (self) sections.push(`## You\n${self}`);
-
-  // Speak format and the knowledge wall live on the user message, next to the brief.
-  sections.push(
-    `## How you respond\n` +
-    `- Honour behaviour anchors and MUST NOT KNOW.\n` +
-    `- Talk, do not write. A short line is enough. Do not decorate every reply with a gesture.\n` +
-    `- Take a turn from what you want right now. Say only what you would say out loud. Do not comfort, clarify, agree, or explain yourself in order to be helpful.\n` +
-    `- If the player just answered you (or the room), take the answer as heard this beat. You may doubt it or act on it — you must not ask the same question again as if they said nothing.\n` +
-    `- You know what day it is. You may mention the weekday or the date when a person would. Do not announce it on every line.\n` +
-    `- Never prefix your reply with your name or "Name:". History may show "[Name]" then the line — your output must be only *action* and "speech".`
-  );
-
-  sections.push(ANTI_SLOP_PROSE);
-
-  sections.push(contentSection(ai));
-
-  if (ai.customInstructions.trim()) {
-    sections.push(`## Author's world instructions\n${ai.customInstructions}`);
-  }
-
-  return sections.join('\n\n');
-}
-
-/** Guest walk-on agent — short sheet, same speak format. */
-export function buildGuestSystemPrompt(
-  ctx: PromptContext,
-  guest: EpisodeGuest,
-  opts: PromptBuildOpts = {}
-): string {
-  const { world } = ctx;
-  const ai = world.ai;
-  const frameOpts: PromptBuildOpts = { ...opts, agent: 'guest' };
-  const sections: string[] = [];
-
-  sections.push(speakScenePrefix(ctx, frameOpts));
-  sections.push(stancePlaybook(storyStanceOf(world)));
-
-  sections.push(
-    `You ARE ${guest.name}, a temporary walk-on in "${world.title}" (not a permanent cast member). ` +
-    `You speak and act only as yourself in this chapter. ` +
-    `Blocks marked [Narrator] or another person's name are the scene, not lines you already said.`
-  );
-
-  sections.push(...leanAgentFrame(ctx, 'guest', frameOpts));
-
-  sections.push(`## Who you are here\n${guest.brief}`);
-
-  sections.push(
-    `## How you respond\n` +
-    (guest.voice ? `- Voice guide — match this exactly; it is your whole identity here: ${guest.voice}\n` : '') +
-    `- Talk, do not write. A short line is enough. Do not decorate every reply with a gesture.\n` +
-    `- Take a turn from what you want right now. Say only what you would say out loud. Do not comfort, clarify, agree, or explain yourself in order to be helpful.\n` +
-    `- If the player just answered a question, take the answer as heard — do not ask it again.\n` +
-    `- You know what day it is. You may mention the weekday or the date when a person would. Do not announce it on every line.\n` +
-    `- Never prefix your reply with your name or "Name:" — only *action* and "speech".\n` +
-    `- Do not steal the scene from the main cast; add texture.`
-  );
-  sections.push(ANTI_SLOP_PROSE);
-  sections.push(contentSection(ai));
-  if (ai.customInstructions.trim()) {
-    sections.push(`## Author's world instructions\n${ai.customInstructions}`);
-  }
-  return sections.join('\n\n');
 }
 
 export const MODE_PREFIX: Record<ComposeMode, (input: string) => string> = {
@@ -1562,11 +849,6 @@ export const TOTAL_PROMPT_CHAR_SOFT_CAP = 110_000;
 /** Minimum turns kept even when over budget. */
 const PACK_MIN_TURNS = 4;
 
-/** Cap world bible / season bible slices in agent frames. */
-const WORLD_BIBLE_CAP = 6000;
-/** After a running summary exists the cold-open bible can shrink. */
-const WORLD_BIBLE_AFTER_SUMMARY_CAP = 3000;
-const SEASON_BIBLE_RECAP_CAP = 1600;
 /**
  * Omitted chapter text sent whole when it fits. Longer chapters are sampled
  * in even slices so the middle is not one 600-character window.
@@ -1810,663 +1092,6 @@ export function sceneDateContextLine(sceneDate: string): string {
   return `The scene is on ${date}. This is context for the writer, not an order to print the date on this turn.`;
 }
 
-function latestUserTurn(turns: Turn[]): Turn | undefined {
-  for (let i = turns.length - 1; i >= 0; i--) {
-    if (turns[i].role === 'user') return turns[i];
-  }
-  return undefined;
-}
-
-function steerDirectionText(turns: Turn[], mode?: ComposeMode): string {
-  if (mode !== 'steer') return '';
-  const latest = latestUserTurn(turns);
-  if (!latest || latest.asCharacterId) return '';
-  return latest.text.trim();
-}
-
-/** Turn instruction: the author direction outranks character resistance for this write. */
-export function authorDirectionCue(direction: string, who: 'narrator' | 'speaker'): string {
-  const text = direction.trim();
-  if (!text) return '';
-  const rank =
-    `Author direction for this turn (it wins — it outranks "do not write their actions", "take a turn from what you want", behaviour anchors, and knowledge walls): ${text}\n`;
-  if (who === 'narrator') {
-    return (
-      rank +
-      'Stage every event this direction names. Quoted speech still belongs to the character who was given the line. ' +
-      'Do not soften, refuse, or change the outcome. Do not mention the instruction. The world\'s content setting still applies.\n'
-    );
-  }
-  return (
-    rank +
-    'If this direction gives you words or an action, do that. Do not refuse it or change the outcome. ' +
-    'Do not mention the instruction. The world\'s content setting still applies.\n'
-  );
-}
-
-function finishedWriteAs(
-  turns: Turn[],
-  characters: Character[],
-  mode?: ComposeMode
-): { name: string; body: string } | null {
-  if (mode !== 'play' && mode !== 'act') return null;
-  const latest = latestUserTurn(turns);
-  if (!latest?.asCharacterId) return null;
-  const name = characters.find((c) => c.id === latest.asCharacterId)?.name?.trim() || 'They';
-  const { body } = parseDeliveryTone(latest.text);
-  if (!body.trim()) return null;
-  return { name, body };
-}
-
-/** History + a narration-beat instruction. */
-export function buildNarrationBeatMessages(
-  turns: Turn[],
-  characters: Character[],
-  brief: string,
-  length: TurnLength,
-  guests: EpisodeGuest[] = [],
-  episode?: Episode,
-  systemChars = 0,
-  pack?: Pick<PromptBuildOpts, 'totalCap' | 'skipOmittedDigest' | 'historyTailChars' | 'historyTailMaxTurns'>,
-  sceneDate = '',
-  composeMode?: ComposeMode
-): ChatMessage[] {
-  const messages = historyMessages(turns, characters, guests, episode, systemChars, pack);
-  const dateLine = sceneDateContextLine(sceneDate);
-  const direction = authorDirectionCue(steerDirectionText(turns, composeMode), 'narrator');
-  const finished = finishedWriteAs(turns, characters, composeMode);
-  const moveJob = direction
-    ? direction
-    : finished
-      ? `${finished.name} already said or did this exact line: ${finished.body}. It already counts as ${finished.name}'s line. Describe what they said or did in narration. Do not quote a new speaker. Do not hand the line to anyone else.\n`
-      : (
-        `First job: show the consequence of the player's last move on named bodies in this room. ` +
-        `Atmosphere only serves that consequence — no weather catalogue. Do not recap earlier beats.\n` +
-        `Do not write the player's actions, speech, or thoughts. Do not repeat their line. Leave them room to answer.\n`
-      );
-  const userContent =
-    `(Narration only — no spoken dialogue, no CharacterName: "…" lines.)\n` +
-    moveJob +
-    (dateLine ? `${dateLine}\n` : '') +
-    `Write this: ${brief}\n` +
-    `Only the people already in this room, and walk-ons already here, may appear. Do not invent a named person. Do not have anyone walk in.\n` +
-    (finished
-      ? `Lines marked [Name] were already spoken by that person. Describe that moment; do not add another quoted line.\n\n`
-      : `Lines marked [Name] were spoken by that person. Do not continue them as narration.\n\n`) +
-    `${narrationSizeHint(length)}`;
-  return mergeMessages([...messages, { role: 'user', content: userContent }]);
-}
-
-/** Hard rule on every character/guest speak turn. */
-export const SPEAK_QUESTION_RULE =
-  'Questions are rare. Prefer act, refuse, bargain, deflect, or reveal. ' +
-  'If the player just answered you, register that answer and advance the stake — do not rephrase the same question. ' +
-  'At most one new question, and only when they introduced a new unknown.';
-
-/** Extra rule when the player just spoke (Speak/Play) — Act may stay silent. */
-export const SPEAK_MUST_DIALOGUE =
-  'If you speak, one sentence in "double quotes" is enough. Do not expand it into a speech.';
-
-export type SpeakMessageOpts = {
-  requireDialogue?: boolean;
-  episode?: Episode;
-  systemChars?: number;
-  length?: TurnLength;
-  totalCap?: number;
-  skipOmittedDigest?: boolean;
-  historyTailChars?: number;
-  historyTailMaxTurns?: number;
-  /** The write that produced this beat. Steer and Write-as change the turn instruction. */
-  composeMode?: ComposeMode;
-};
-
-/** Clip helper for speak cues (mirrors clipText; kept local so this stays near callers). */
-function cueClip(text: string, max: number): string {
-  const t = text.trim();
-  if (t.length <= max) return t;
-  return `${t.slice(0, max - 1).trimEnd()}…`;
-}
-
-/**
- * When the director skips a speak beat, inject a brief that still carries this speaker's voice/want.
- * Avoids every NPC answering with the same generic "stay in character" line.
- */
-export function injectedSpeakBrief(opts: {
-  name: string;
-  speechStyle?: string;
-  mannerisms?: string;
-  emotion?: string;
-  goal?: string;
-  anchor?: string;
-  /** one-line "who you are here" for walk-ons with no cast card */
-  role?: string;
-  /** where they stand in the room's turn-taking right now */
-  situation?: string;
-}): string {
-  const bits: string[] = [`A turn in the room as ${opts.name.trim() || 'Someone'}`];
-  const role = (opts.role ?? '').trim();
-  if (role) bits.push(`who you are here: ${cueClip(role, 64)}`);
-  const voice = (opts.speechStyle ?? '').trim();
-  if (voice) bits.push(`voice: ${cueClip(voice, 56)}`);
-  const feel = (opts.emotion ?? '').trim();
-  if (feel) bits.push(`mood: ${cueClip(feel, 36)}`);
-  const goal = (opts.goal ?? '').trim();
-  if (goal) bits.push(`pushing: ${cueClip(goal, 48)}`);
-  const tic = (opts.mannerisms ?? '').split(/[.;\n]/)[0]?.trim() ?? '';
-  if (tic) bits.push(`one tic: ${cueClip(tic, 40)}`);
-  const hold = (opts.anchor ?? '').trim();
-  if (hold) bits.push(`hold: ${cueClip(hold, 44)}`);
-  const situation = (opts.situation ?? '').trim();
-  if (situation) bits.push(cueClip(situation, 88));
-  bits.push('from what you want now; say only what you would say out loud');
-  return `${bits.join('; ')}.`;
-}
-
-export function injectedSpeakBriefForCharacter(c: Character, situation?: string): string {
-  return injectedSpeakBrief({
-    name: c.name,
-    speechStyle: c.speechStyle,
-    mannerisms: c.mannerisms,
-    emotion: c.state?.emotion,
-    goal: c.state?.goal,
-    anchor: c.anchors.find((a) => a.trim()),
-    situation
-  });
-}
-
-export function injectedSpeakBriefForGuest(g: EpisodeGuest, situation?: string): string {
-  return injectedSpeakBrief({
-    name: g.name,
-    speechStyle: g.voice,
-    role: g.brief,
-    situation
-  });
-}
-
-function speakVoiceReminder(speaking: Character): string {
-  const parts: string[] = [];
-  if (speaking.speechStyle.trim()) {
-    parts.push(`Voice: ${cueClip(speaking.speechStyle, 100)}`);
-  }
-  const samples = speaking.exampleLines.map((l) => l.trim()).filter(Boolean).slice(0, 2);
-  if (samples.length > 0) {
-    const lines = samples.map((sample) => `"${cueClip(sample, 80)}"`).join('\n');
-    parts.push(`Rhythm samples (match the rhythm, do not copy):\n${lines}`);
-  }
-  return parts.length > 0 ? `${parts.join('\n')}\n\n` : '';
-}
-
-function knowledgeWallCue(wall: string | undefined): string {
-  const text = wall?.trim();
-  if (!text) return '';
-  return `You must not know, hint at, or act on this: ${text}\n\n`;
-}
-
-/** When the last NPC line was a question, remind the speaker the player already answered. */
-function heardAnswerCue(turns: Turn[], characters: Character[], guests: EpisodeGuest[]): string {
-  const asked = lastOpenQuestion(
-    turns,
-    speakerCandidates(characters.filter((c) => !c.isPlayer), guests)
-  );
-  if (!asked) return '';
-  return (
-    `${asked.name} asked a question that the player's last line answers. ` +
-    `Take the answer as heard this beat — do not ask it again.\n\n`
-  );
-}
-
-/** History + a character-speak instruction. */
-export function buildCharacterSpeakMessages(
-  turns: Turn[],
-  characters: Character[],
-  speaking: Character,
-  brief: string,
-  guests: EpisodeGuest[] = [],
-  opts?: SpeakMessageOpts
-): ChatMessage[] {
-  const messages = historyMessages(
-    turns, characters, guests, opts?.episode, opts?.systemChars ?? 0,
-    {
-      totalCap: opts?.totalCap,
-      skipOmittedDigest: opts?.skipOmittedDigest,
-      historyTailChars: opts?.historyTailChars ?? SPEAK_HISTORY_TAIL_CHAR_BUDGET,
-      historyTailMaxTurns: opts?.historyTailMaxTurns ?? SPEAK_HISTORY_TAIL_MAX_TURNS
-    },
-    { kind: 'speaker', speakerId: speaking.id }
-  );
-  const length = opts?.length ?? 'scene';
-  const direction = authorDirectionCue(steerDirectionText(turns, opts?.composeMode), 'speaker');
-  const finished = finishedWriteAs(turns, characters, opts?.composeMode);
-  const sameVoice = !!finished && finished.name.toLowerCase() === speaking.name.trim().toLowerCase();
-  const ownership = sameVoice
-    ? `Your latest line is already in the chapter. Do not say it again or replace it.\n`
-    : finished
-      ? `Only [${speaking.name}] lines are yours. ${finished.name} already spoke; answer that line. [Narrator] is the scene.\n`
-      : `Only [${speaking.name}] lines are yours. [Narrator] and other names are the scene — do not repeat them or treat them as something you already said.\n`;
-  const finishedCue = !finished
-    ? ''
-    : sameVoice
-      ? `${speaking.name} already said or did this exact line. Do not speak again this turn.\n`
-      : `${finished.name} already said or did this exact line: ${finished.body}. Answer it. Do not repeat it or speak as ${finished.name}.\n`;
-  const takeTurn = direction
-    ? `This turn the author direction outranks what you want, your anchors, and what you must not know. If the direction gives you words or an action, do that.\n`
-    : `Take a turn as ${speaking.name} from what you want right now: a fragment, a deflection, a task, or a gesture. You do not owe a complete reply.\n`;
-  const userContent =
-    `(You are ${speaking.name}. Respond now in character.)\n` +
-    ownership +
-    speakVoiceReminder(speaking) +
-    (direction || finished ? '' : heardAnswerCue(turns, characters, guests)) +
-    direction +
-    finishedCue +
-    `Intent for this line: ${brief}\n\n` +
-    (opts?.composeMode === 'steer' ? '' : knowledgeWallCue(speaking.mustNotKnow)) +
-    takeTurn +
-    `Say only what you would say out loud. Do not comfort, clarify, agree, or explain yourself in order to be helpful. Do not restage the room. Do not speak for anyone else.\n` +
-    `${SPEAK_QUESTION_RULE}\n` +
-    `Use the required *action* "dialogue" format. No other speakers.\n` +
-    `${speakSizeHint(length)}\n\n` +
-    SPEAK_FORMAT_RULES +
-    `\n\n${SPOKEN_VOICE_RULES}` +
-    (opts?.requireDialogue ? `\n\n${SPEAK_MUST_DIALOGUE}` : '');
-  return mergeMessages([...messages, { role: 'user', content: userContent }]);
-}
-
-/** History + a guest-speak instruction. */
-export function buildGuestSpeakMessages(
-  turns: Turn[],
-  characters: Character[],
-  guest: EpisodeGuest,
-  brief: string,
-  guests: EpisodeGuest[] = [],
-  opts?: SpeakMessageOpts
-): ChatMessage[] {
-  const messages = historyMessages(
-    turns, characters, guests, opts?.episode, opts?.systemChars ?? 0,
-    {
-      totalCap: opts?.totalCap,
-      skipOmittedDigest: opts?.skipOmittedDigest,
-      historyTailChars: opts?.historyTailChars ?? SPEAK_HISTORY_TAIL_CHAR_BUDGET,
-      historyTailMaxTurns: opts?.historyTailMaxTurns ?? SPEAK_HISTORY_TAIL_MAX_TURNS
-    },
-    { kind: 'speaker', speakerId: guest.id }
-  );
-  const length = opts?.length ?? 'scene';
-  const guestVoice = (guest.voice ?? '').trim();
-  const voiceLine = guestVoice
-    ? `Voice: ${cueClip(guestVoice, 100)}\n\n`
-    : '';
-  const direction = authorDirectionCue(steerDirectionText(turns, opts?.composeMode), 'speaker');
-  const finished = finishedWriteAs(turns, characters, opts?.composeMode);
-  const finishedCue = finished
-    ? `${finished.name} already said or did this exact line: ${finished.body}. Answer it. Do not repeat it or speak as ${finished.name}.\n`
-    : '';
-  const ownership = finished
-    ? `Only [${guest.name}] lines are yours. ${finished.name} already spoke; answer that line. [Narrator] is the scene.\n`
-    : `Only [${guest.name}] lines are yours. [Narrator] and other names are the scene — do not repeat them or treat them as something you already said.\n`;
-  const takeTurn = direction
-    ? `This turn the author direction outranks what you want and what you must not know. If the direction gives you words or an action, do that.\n`
-    : `Take a turn as ${guest.name} from what you want right now: a fragment, a deflection, a task, or a gesture. You do not owe a complete reply.\n`;
-  const userContent =
-    `(You are ${guest.name}, a walk-on. Respond now.)\n` +
-    ownership +
-    voiceLine +
-    (direction || finished ? '' : heardAnswerCue(turns, characters, guests)) +
-    direction +
-    finishedCue +
-    `Intent for this line: ${brief}\n\n` +
-    takeTurn +
-    `Say only what you would say out loud. Do not comfort, clarify, agree, or explain yourself in order to be helpful. Do not restage the room. Do not speak for anyone else.\n` +
-    `${SPEAK_QUESTION_RULE}\n` +
-    `${speakSizeHint(length)}\n\n` +
-    SPEAK_FORMAT_RULES +
-    `\n\n${SPOKEN_VOICE_RULES}` +
-    (opts?.requireDialogue ? `\n\n${SPEAK_MUST_DIALOGUE}` : '');
-  return mergeMessages([...messages, { role: 'user', content: userContent }]);
-}
-
-export type DirectorBeat =
-  | { type: 'narration'; brief: string }
-  | { type: 'speak'; characterId: string; brief: string }
-  | { type: 'speak'; guestId: string; brief: string };
-
-/** People this beat is about — speaker, enters, names in the brief. */
-export function focusFromBeat(
-  beat: DirectorBeat,
-  characters: Character[],
-  guests: EpisodeGuest[],
-  enterIds: string[] = []
-): { characterIds: string[]; guestIds: string[] } {
-  const lower = beat.brief.toLowerCase();
-  const characterIds = new Set<string>(enterIds);
-  const guestIds = new Set<string>();
-  if (beat.type === 'speak' && 'characterId' in beat) characterIds.add(beat.characterId);
-  if (beat.type === 'speak' && 'guestId' in beat) guestIds.add(beat.guestId);
-  for (const c of characters) {
-    const name = c.name.trim();
-    if (name && lower.includes(name.toLowerCase())) characterIds.add(c.id);
-  }
-  for (const g of guests) {
-    const name = g.name.trim();
-    if (name && lower.includes(name.toLowerCase())) guestIds.add(g.id);
-  }
-  return { characterIds: [...characterIds], guestIds: [...guestIds] };
-}
-
-/** Hard caps on director plan shape by reply-size chip. */
-export function planCapsForLength(length: TurnLength): { maxSpeak: number; maxTotal: number } {
-  if (length === 'beat') return { maxSpeak: 1, maxTotal: 2 };
-  if (length === 'scene') return { maxSpeak: 2, maxTotal: 4 };
-  return { maxSpeak: 3, maxTotal: 5 };
-}
-
-export function directorSystemPrompt(
-  mode: ComposeMode,
-  hasSpeakers: boolean,
-  length: TurnLength = 'scene',
-  stance: StoryStance = 'longform'
-): string {
-  const { maxSpeak, maxTotal } = planCapsForLength(length);
-  const sizeLabel = length === 'beat' ? 'Short' : length === 'scene' ? 'Medium' : 'Long';
-  const engageReply =
-    hasSpeakers && isPlayerAgencyMode(mode)
-      ? 'CRITICAL: The player just spoke or acted with at least one NPC/walk-on present. ' +
-        'You MUST include at least one speak beat that responds directly to that move. ' +
-        'Narration-only plans are forbidden in this case. ' +
-        'If the last NPC line asked a question and the player answered, the speak brief must take that answer as heard ' +
-        '(use it, doubt it with a new angle, or act). Never brief the same question again as if they stayed silent. '
-      : 'Not everyone must speak on every turn. ';
-
-  const sizeGuidance =
-    length === 'beat'
-      ? 'Reply size is Short: prefer 1 narration + 1 speak (or speak-only if an immediate reply is natural). No multi-character pile-on. '
-      : length === 'scene'
-        ? 'Reply size is Medium: a tight exchange — typically 1–2 narration and at most 2 speak beats. '
-        : 'Reply size is Long: room for a fuller beat sequence, still sharp — do not fill the cap without reason. ';
-
-  const steerRule = mode === 'steer'
-    ? 'AUTHOR DIRECTION overrides this turn. The latest direction is the plot. ' +
-      'Plan beats that carry out every concrete event. Speech the direction assigns becomes that person\'s speak brief and includes the required words. ' +
-      'Physical outcomes go in the narration brief. Do not plan a contradicting reaction. ' +
-      'Personality, anchors, goals, knowledge walls, stance, and standing custom instructions yield. The world\'s content setting still applies. '
-    : '';
-  const continueRule = mode === 'continue'
-    ? 'No new player line. Move the scene forward from the last beat: new action or speech. Do not recap. Do not wait for the player. '
-    : '';
-
-  return (
-    'You are the scene director for an interactive story. ' +
-    stancePlaybook(stance) + ' ' +
-    'Call plan_turn. Do not write story prose. ' +
-    'Fallback shape if tools are unavailable: ' +
-    '{"castDelta":{' +
-    '"enter":["<characterId>",...],' +
-    '"leave":["<characterIdOrGuestId>",...],' +
-    '"introduce":[{"name":"<walk-on name>","brief":"<one sentence who they are>","voice":"<optional speech note>"}]' +
-    '},' +
-    '"beats":[' +
-    '{"type":"narration","brief":"..."}|' +
-    '{"type":"speak","characterId":"<id-or-exact-name>","brief":"..."}|' +
-    '{"type":"speak","guestId":"<id-or-NEW-or-name>","brief":"..."}' +
-    ']}' +
-    '\n' +
-    'castDelta.enter: only someone listed under Also fits, or whom this line brought in — character id OR exact name. ' +
-    'castDelta.leave: Cast ids/names or guest ids who exit the scene. ' +
-    (mode === 'steer'
-      ? 'Continuity facts hold unless the author direction changes this scene. Knowledge walls yield to that direction. '
-      : 'Never contradict Continuity facts or Knowledge walls below. ') +
-    'castDelta.introduce: optional walk-ons who are NOT Cast cards — temporary for this episode only. At most 2 per plan. ' +
-    'For a newly introduced guest\'s speak beat, set guestId to the exact name string from introduce (the app will bind ids). ' +
-    'For an existing guest already listed, use their guest id or exact name. ' +
-    'Speak characterId may be the cast id OR the exact character name (never the player). ' +
-    'Narration briefs name who moves in the room and one sensory job (sight, sound, smell, temperature, or touch) — never a weather catalogue, never finished dialogue. ' +
-    (mode === 'steer'
-      ? 'Speak briefs carry the words or outcome the direction assigns, including those words. '
-      : 'Speak briefs name want or friction (answer, refuse, deflect, bargain, stall) plus tone — a single intent, never the finished line, never "give a speech" or a multi-point monologue. ') +
-    'The intent is something a person would say in a sentence or two, not a rhetorical flourish. ' +
-    'If a speak beat asks the player a question, it must be the last speak in the plan — do not pile another voice on after an unanswered question. ' +
-    'The room is not a queue. One speak beat: the person addressed. If several people were each addressed, one beat each. If nobody was addressed, the person who just asked, otherwise the last voice. Bystanders stay in the narration. ' +
-    'Do not give the floor to someone because they have been quiet. ' +
-    'Story weight is how often they belong. Leads carry the chapter. Regulars belong when the place fits. ' +
-    'Occasionals enter only when this moment needs them. Background stays in narration unless this line brought them or addressed them. ' +
-    'Do not give a background character the floor just to fill a beat. ' +
-    engageReply +
-    steerRule +
-    continueRule +
-    sizeGuidance +
-    `Hard cap for ${sizeLabel}: at most ${maxSpeak} speak beat${maxSpeak === 1 ? '' : 's'} and at most ${maxTotal} beats total. ` +
-    'Prefer fewer, sharper speak beats over several characters holding the floor. ' +
-    'Always include at least one narration beat unless the player just spoke and an immediate reply is natural — then you may open with speak. ' +
-    directorCloseGuidance(stance)
-  );
-}
-
-/**
- * Relationship edges between NPCs who are both on stage.
- * The speak agents already see their own ties; the director needs them to plan
- * cross-talk — a rival cutting in, an ally covering for someone.
- */
-export function inSceneDyadLines(inScene: Character[], cap: number): string[] {
-  const byId = new Map(inScene.map((c) => [c.id, c]));
-  const lines: string[] = [];
-  const seen = new Set<string>();
-  for (const c of inScene) {
-    for (const r of c.relationships) {
-      const target = byId.get(r.targetId);
-      if (!target || target.id === c.id) continue;
-      const key = `${c.id}>${target.id}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const note = (r.note ?? '').trim();
-      lines.push(
-        `- ${c.name} → ${target.name}: ${r.kind || 'linked'}` +
-        (note ? ` — ${clipText(note, 72)}` : '')
-      );
-      if (lines.length >= cap) return lines;
-    }
-  }
-  return lines;
-}
-
-export function directorUserPrompt(
-  ctx: PromptContext,
-  mode: ComposeMode,
-  input: string,
-  opts?: {
-    preferCharacterId?: string;
-    preferGuestId?: string;
-    pack?: PromptPack;
-    totalCap?: number;
-    enterIds?: string[];
-    systemChars?: number;
-    historyTailChars?: number;
-    historyTailMaxTurns?: number;
-    /** People who fit this place and are not in the room. Omit to compute. */
-    alsoFitIds?: string[];
-  }
-): string {
-  const tight = opts?.pack === 'tight';
-  const stance = storyStanceOf(ctx.world);
-  const inScene = ctx.characters.filter((c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer);
-  const offScene = ctx.characters.filter((c) => !ctx.episode.castIds.includes(c.id) && !c.isPlayer);
-  const guests = activeGuests(ctx.episode);
-  const placeLoc = resolveCurrentLocations(ctx.episode, ctx.locations)[0];
-  const place = {
-    name: (placeLoc?.name || ctx.episode.location || '').trim(),
-    inhabitants: placeLoc?.inhabitants ?? ''
-  };
-  const fittingOff = (opts?.alsoFitIds
-    ? offScene.filter((c) => opts.alsoFitIds!.includes(c.id))
-    : offScene.filter((c) => characterFitsPlace(c, place))
-  ).filter((c) => characterImportance(c) !== 'background');
-  const fits = fittingOff.slice(0, 4);
-  const brought = offScene.find((c) => lineBringsCharacter(input, c) && !fits.some((f) => f.id === c.id));
-  const alsoShown = brought ? [...fits, brought] : fits;
-  const alsoList = alsoShown.length > 0
-    ? alsoShown.map((c) => directorCastLine(c)).join('\n')
-    : '(none)';
-  const castList = inScene.length > 0
-    ? inScene.map((c) => {
-      const emotion = c.state?.emotion?.trim();
-      const goal = c.state?.goal?.trim();
-      const anchor = (c.anchors ?? []).map((a) => a.trim()).filter(Boolean)[0];
-      const bits = [
-        emotion ? `feeling ${clipText(emotion, 40)}` : '',
-        goal ? `wants ${clipText(goal, 48)}` : '',
-        anchor ? `anchor: ${clipText(anchor, 56)}` : ''
-      ].filter(Boolean);
-      const detail = bits.length ? ` — ${bits.join('; ')}` : '';
-      return directorCastLine(c, detail);
-    }).join('\n')
-    : '(no NPCs in scene yet)';
-  const guestList = guests.length > 0
-    ? guests.map((g) => `- ${g.id} · ${g.name}: ${g.brief}`).join('\n')
-    : '(none yet — you may introduce walk-ons via castDelta.introduce)';
-
-  const dyads = inSceneDyadLines(inScene, tight ? 3 : 6);
-  const dyadBlock = dyads.length > 0
-    ? `Ties inside the room (play NPCs off each other, not only off the player):\n${dyads.join('\n')}\n\n`
-    : '';
-
-  const dynamics = roomDynamicsLines({
-    candidates: speakerCandidates(inScene, guests),
-    playerText: input,
-    turns: ctx.turns
-  });
-  const dynamicsBlock = dynamics.length > 0
-    ? `Room dynamics:\n${dynamics.map((l) => `- ${l}`).join('\n')}\n\n`
-    : '';
-
-  const preferCast = opts?.preferCharacterId
-    ? inScene.find((c) => c.id === opts.preferCharacterId)
-    : undefined;
-  const preferGuest = opts?.preferGuestId
-    ? guests.find((g) => g.id === opts.preferGuestId)
-    : undefined;
-  const preferLine = preferCast
-    ? `Player preference: the speak reply should be from ${preferCast.name} (${preferCast.id}) unless they have left the scene.\n`
-    : preferGuest
-      ? `Player preference: the speak reply should be from walk-on ${preferGuest.name} (${preferGuest.id}) unless they have left.\n`
-      : '';
-
-  const directorTurns = opts?.historyTailMaxTurns ?? DIRECTOR_TRANSCRIPT_TURNS;
-  const recentPacked = packTurnsDetailed(
-    ctx.turns,
-    opts?.systemChars ?? 0,
-    Math.max(4000, (opts?.totalCap ?? 80_000) - 24_000),
-    {
-      charBudget: opts?.historyTailChars,
-      maxTurns: directorTurns
-    }
-  ).kept;
-  const allGuests = ctx.episode.guests ?? [];
-  const latestUser = latestUserTurnId(ctx.turns);
-  const transcript = recentPacked.map((t) => {
-    if (t.role === 'user') {
-      const injected = injectedNpcHistory(t, ctx.characters);
-      if (injected) return injected;
-      const mode = t.mode ?? 'steer';
-      return t.id === latestUser ? MODE_PREFIX[mode](t.text) : shortPlayerHistory(t, ctx.characters);
-    }
-    if (t.role === 'character') {
-      const name = resolveSpeakerName(t, ctx.characters, allGuests);
-      return `[${name}]: ${t.text}`;
-    }
-    return `[narrator]: ${t.text}`;
-  }).join('\n\n');
-
-  const prefer = preferEpisodeBuckets(ctx);
-  const factCap = tight ? 8 : DIRECTOR_FACT_CAP;
-  const memoryQuery = memoryFocusQuery([
-    input,
-    inScene.map((c) => c.name).join(' '),
-    guests.map((g) => g.name).join(' '),
-    ctx.episode.location
-  ]);
-  const factLines = selectFactsPinnedFirst(ctx.continuity, prefer, factCap, memoryQuery)
-    .map((f) => `- ${f.text}`)
-    .join('\n');
-  const threadSec = threadsBlock(ctx, 'director', 'director', tight ? 4 : DIRECTOR_THREAD_CAP, memoryQuery);
-  const wallCast = ctx.characters.filter((c) => {
-    if (c.isPlayer || !c.mustNotKnow.trim()) return false;
-    if (ctx.episode.castIds.includes(c.id)) return true;
-    if ((opts?.enterIds ?? []).includes(c.id)) return true;
-    return false;
-  });
-  const extraWalls = tight
-    ? []
-    : ctx.characters.filter((c) =>
-      !c.isPlayer &&
-      !!c.mustNotKnow.trim() &&
-      !ctx.episode.castIds.includes(c.id) &&
-      !(opts?.enterIds ?? []).includes(c.id)
-    ).slice(0, 8);
-  const knowledgeWalls = [...wallCast, ...extraWalls]
-    .map((c) => `- ${c.name}: must not know — ${c.mustNotKnow.trim()}`)
-    .join('\n');
-
-  const running = runningSummaryFor(ctx.episode, PRIOR_CAPS.director.runningCap);
-  const runningLine = running
-    ? running.replace(
-      '## Earlier in this chapter (running summary)\n' +
-      'Glue only — what just happened after early turns dropped. Continuity facts and the room ledger outrank this if they conflict.\n',
-      'Earlier in this chapter (summary — glue only; Continuity facts outrank this): '
-    )
-    : '';
-  const targets = (stance === 'wander' || stance === 'sandbox')
-    ? null
-    : plotTargetsSection(ctx.episode, ctx.season);
-  const targetsCompact = targets
-    ? targets
-      .replace(
-        '## Plot targets — work toward these when natural; do not force every target in one turn; prefer story-driven progress over checklist completion\n',
-        'Plot targets (work toward when natural; do not force all at once):\n'
-      ) + '\n'
-    : '';
-  const calEventsCompact = calendarEventsSection(ctx, 'compact', { includeUpcoming: !tight }) ?? '';
-  const locBlocks = currentLocationBlock(ctx, { atmosphereOnly: true });
-  const locLine = locBlocks.length > 0
-    ? locBlocks[0].replace(/^## /, '') + '\n'
-    : '';
-
-  const finished = finishedWriteAs(ctx.turns, ctx.characters, mode);
-  const finishedBlock = finished
-    ? `${finished.name} already said or did exactly this: ${finished.body}\n` +
-      `Do not give ${finished.name} another speak beat this turn. Narration shows what changes and does not reprint the line. Other people may answer it.\n\n`
-    : '';
-  const steerBlock = mode === 'steer' && input.trim()
-    ? `Author direction (mandatory — carry it out exactly):\n${input.trim()}\n\n`
-    : '';
-  const continueBlock = mode === 'continue'
-    ? 'No new player line. Move the scene forward from the last beat: new action or speech. Do not recap. Do not wait for the player.\n\n'
-    : '';
-
-  return (
-    `World: ${ctx.world.title}\n` +
-    `${calendarBlock(ctx.world, ctx.episode, 'directorLine')}\n` +
-    `What's live: ${ctx.season.premise || '(unwritten)'}\n` +
-    targetsCompact +
-    calEventsCompact +
-    `Continuity (do not contradict — these outrank any running summary):\n${factLines || '(none)'}\n\n` +
-    `${threadSec ?? 'Open threads (draw on sparingly; soft tensions, not the plot-target hit-list):\n(none)'}\n\n` +
-    (runningLine ? `${runningLine}\n` : '') +
-    (locLine ? `\n${locLine}` : '') +
-    `\n` +
-    `In-scene cast:\n${castList}\n\n` +
-    `Also fits this place (not in the room yet):\n${alsoList}\n` +
-    `Vary who is present only inside the room and this list. Leave anyone else out.\n\n` +
-    `Active walk-ons (guest ids):\n${guestList}\n\n` +
-    dyadBlock +
-    dynamicsBlock +
-    preferLine +
-    `Knowledge walls:\n${knowledgeWalls || '(none)'}\n\n` +
-    `Recent transcript:\n${transcript || '(episode just opened)'}\n\n` +
-    finishedBlock +
-    steerBlock +
-    continueBlock +
-    `Plan castDelta and beats as JSON.`
-  );
-}
-
 /** One reply for the whole beat: narration and the lines of the people who may speak. */
 const SCENE_REPLY_TOKENS: Record<TurnLength, number> = {
   beat: 900,
@@ -2491,6 +1116,12 @@ export interface SceneVoice {
   role?: string;
   voice?: string;
   want?: string;
+  /** Live feeling. Empty and clear-words are omitted. */
+  emotion?: string;
+  /** Live physical or social condition. */
+  condition?: string;
+  /** Ties to other people in this room, already resolved to names. */
+  ties?: string;
   example?: string;
   mustNotKnow?: string;
   anchor?: string;
@@ -2517,6 +1148,8 @@ export interface SceneReplyInput {
   totalCap?: number;
   /** Write-as: narration of a move that already happened, with no new quoted speaker. */
   narrationOnly?: boolean;
+  /** The person this line is said to, by name. */
+  saidTo?: string;
   /** Re-roll of one existing line, or of a whole scene when the name is the narrator. */
   rewrite?: { speakerName: string; prior: string };
 }
@@ -2529,6 +1162,9 @@ function sceneSpeakerCard(voice: SceneVoice): string {
     voice.brief && `Who they are here: ${clipText(voice.brief, 180)}`,
     voice.voice && `Voice: ${clipText(voice.voice, 240)}`,
     voice.want && `Wants: ${clipText(voice.want, 160)}`,
+    voice.emotion && `Now: ${clipText(voice.emotion, 120)}`,
+    voice.condition && `Condition: ${clipText(voice.condition, 120)}`,
+    voice.ties && `With the people here: ${clipText(voice.ties, 240)}`,
     example && `Example line (rhythm only, do not reuse it): "${clipText(example, 160)}"`,
     voice.anchor && `Anchor: ${clipText(voice.anchor, 160)}`,
     voice.mustNotKnow && `Must not know or say: ${clipText(voice.mustNotKnow, 240)}`
@@ -2560,9 +1196,11 @@ export function sceneTurnCue(opts: {
   speakers: Array<{ name: string }>;
   answerers?: Array<{ name: string }>;
   narrationOnly?: boolean;
+  saidTo?: string;
   rewrite?: { speakerName: string; prior: string };
 }): string {
   const names = (opts.answerers ?? opts.speakers).map((s) => s.name.trim()).filter(Boolean);
+  const saidTo = opts.saidTo?.trim() ?? '';
   const who = opts.rewrite
     ? opts.narrationOnly
       ? 'Nobody new speaks. Write narration only. No quoted dialogue.'
@@ -2572,8 +1210,17 @@ export function sceneTurnCue(opts: {
     : opts.narrationOnly
       ? 'Nobody new speaks. Write narration only. No quoted dialogue.'
       : answerLine(names);
-  const move = opts.narrationOnly && opts.playerText.trim()
-    ? `This already happened, as them, not as the player. Describe it. Do not quote a new speaker and do not hand the line to anyone else:\n${opts.playerText.trim()}`
+  const said = !opts.narrationOnly && saidTo ? `This is said to ${saidTo}.` : '';
+  const move = opts.rewrite
+    ? ''
+    : opts.narrationOnly && opts.playerText.trim()
+    ? `${[
+        'This already happened, as them, not as the player.',
+        saidTo ? `It is said to ${saidTo}.` : '',
+        saidTo
+          ? `Describe it. Do not quote a new speaker, do not write ${saidTo}'s reply, and do not hand the line to anyone else.`
+          : 'Describe it. Do not quote a new speaker and do not hand the line to anyone else.'
+      ].filter(Boolean).join(' ')}\n${opts.playerText.trim()}`
     : opts.mode === 'continue' && !opts.playerText.trim()
       ? 'No new player line. Continue the scene from the last beat. Do not recap. Do not wait for the player.'
       : MODE_PREFIX[opts.mode](opts.playerText);
@@ -2582,7 +1229,7 @@ export function sceneTurnCue(opts: {
     : opts.rewrite.speakerName === 'the narrator'
       ? `Rewrite the previous scene in fresh wording. Keep the same events and who spoke. Do not copy it.\nPrevious scene:\n${opts.rewrite.prior.trim()}`
       : `Rewrite only ${opts.rewrite.speakerName}'s previous line with fresh wording and the same job. Do not copy it.\nPrevious line:\n${opts.rewrite.prior.trim()}`;
-  return [who, sceneLengthHint(opts.length), rewrite, move].filter(Boolean).join('\n\n');
+  return [said, who, sceneLengthHint(opts.length), rewrite, move].filter(Boolean).join('\n\n');
 }
 
 /**
@@ -2604,8 +1251,10 @@ export function buildSceneReply(opts: SceneReplyInput): { system: string; messag
   sections.push(
     [
       `You write the next stretch of "${ctx.world.title}" in ${ai.pov} person, ${ai.tense} tense.`,
-      'Write narration and spoken dialogue as one continuous scene.',
-      'Put each spoken line in double quotes, and name the speaker in that same sentence.',
+      'Write narration and spoken beats in one reply.',
+      'Narration has no quoted dialogue.',
+      'When someone speaks, their beat is its own line: Name: *action* "dialogue".',
+      'The gesture belongs on that line. Do not narrate it again.',
       'Never write the player\'s dialogue, decisions, or inner thoughts. Do not repeat their line.',
       'Do not recap the transcript. Do not bring in anyone who is not already here.',
       proseDensityLine(ai),
@@ -2613,20 +1262,37 @@ export function buildSceneReply(opts: SceneReplyInput): { system: string; messag
       rules.length > 0 ? rules.map((r) => `- ${r}`).join('\n') : ''
     ].filter(Boolean).join('\n')
   );
+  sections.push(stancePlaybook(storyStanceOf(ctx.world)));
   sections.push(ANTI_SLOP_PROSE);
   sections.push(contentSection(ai));
   if (ai.customInstructions.trim()) {
     sections.push(`## Author's instructions (follow verbatim)\n${ai.customInstructions.trim()}`);
   }
   sections.push(situationPremise(ctx));
+  const prior = formatPriorEpisodesSection(ctx, {
+    beatCapImmediate: tight ? 2 : 3,
+    beatCapDigest: 1,
+    recapDigestChars: 160,
+    recapImmediateChars: tight ? 400 : 700
+  });
+  if (prior) sections.push(prior);
+  const targets = plotTargetsSection(ctx.episode, ctx.season);
+  if (targets) sections.push(targets);
   const threads = threadsBlock(ctx, 'narrator', 'narrator', tight ? 4 : 8, query);
   if (threads) sections.push(threads);
+  const ledger = sceneLedgerSection(ctx.episode, tight ? 4 : 8);
+  if (ledger) sections.push(ledger);
+  const running = runningSummaryFor(ctx.episode, tight ? 700 : PRIOR_CAPS.narrator.runningCap);
+  if (running) sections.push(running);
   const answererNames = new Set((opts.answerers ?? []).map((a) => a.name.trim().toLowerCase()));
   const ordered = [...opts.speakers].sort((a, b) => {
     const ar = answererNames.has(a.name.trim().toLowerCase()) ? 0 : 1;
     const br = answererNames.has(b.name.trim().toLowerCase()) ? 0 : 1;
     return ar - br;
   });
+  const player = ctx.characters.find((c) => c.isPlayer);
+  const playerName = player?.name.trim() ?? '';
+  const playerKey = playerName.toLowerCase();
   const cardVoices = ordered.slice(0, FULL_SCENE_CARDS);
   const cards = cardVoices.map(sceneSpeakerCard).filter(Boolean);
   const listed = new Set(cardVoices.map((s) => s.name.trim().toLowerCase()));
@@ -2634,23 +1300,27 @@ export function buildSceneReply(opts: SceneReplyInput): { system: string; messag
   const seen = new Set<string>();
   const pushAlso = (name: string, role?: string) => {
     const key = name.trim().toLowerCase();
-    if (!key || listed.has(key) || seen.has(key)) return;
+    if (!key || key === playerKey || listed.has(key) || seen.has(key)) return;
     seen.add(key);
     also.push({ name: name.trim(), role });
   };
   for (const voice of ordered.slice(FULL_SCENE_CARDS)) pushAlso(voice.name, voice.role ?? voice.brief);
   for (const person of opts.present) pushAlso(person.name, person.role);
-  const alsoText = also
+  const alsoShown = also
     .map((p) => p.role?.trim() ? `${p.name} (${p.role.trim()})` : p.name)
     .join(', ');
   const inviteOthers = !opts.narrationOnly && (!opts.rewrite || opts.rewrite.speakerName === 'the narrator');
+  const playerLine = playerName
+    ? `The player is ${playerName}. Do not write their dialogue, decisions, or inner thoughts.`
+    : 'The player is here. Do not write their dialogue, decisions, or inner thoughts.';
   const here = [
     '## Here',
+    playerLine,
     cards.length > 0 ? cards.join('\n\n') : 'Nobody has a speaking part on this turn.',
-    alsoText
+    alsoShown
       ? inviteOthers
-        ? `Also here, and they may speak if the moment needs them: ${alsoText}.`
-        : `Also here: ${alsoText}.`
+        ? `Also here, and they may speak if the moment needs them: ${alsoShown}.`
+        : `Also here: ${alsoShown}.`
       : ''
   ].filter(Boolean).join('\n\n');
   sections.push(here);

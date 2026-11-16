@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
-  matchPlotTargets, mergeStateField, mergeLiveRelationshipPatch, normalizeBeats, capSceneLedger, capSoftWrapExtract,
-  dedupeSoftWrapExtract, directorFallbackNarrationBrief, chapterNarrationBrief, softWrapAlreadyFiled, SCENE_LEDGER_CAP,
-  endStoryWrite, isBlankWorldBrief, isEmptyRosterProposal, pendingBeatsToKeep, tryBeginStoryWrite, nextSceneCast,
-  rememberedExtract, isThinNarrationBrief, strengthenNarrationBrief, chapterMemoryClearPatch
+  mergeStateField, mergeLiveRelationshipPatch, capSceneLedger, capSoftWrapExtract,
+  dedupeSoftWrapExtract, softWrapAlreadyFiled, SCENE_LEDGER_CAP,
+  endStoryWrite, isEmptyRosterProposal, tryBeginStoryWrite,
+  rememberedExtract, chapterMemoryClearPatch,
+  chapterCloseDigest
 } from './engine';
 import {
   episodeContextPressure,
@@ -15,22 +16,15 @@ import {
   SPEAK_HISTORY_TAIL_MAX_TURNS,
   chooseHistoryTail,
   omittedTurnsForNarratorTail,
-  injectedSpeakBrief,
-  injectedSpeakBriefForCharacter,
-  buildCharacterSpeakMessages,
   packTurnsDetailed,
-  pendingBeatLabel,
   selectDirectorFacts,
   selectDirectorThreads,
   selectFactsPinnedFirst,
-  selectThreadsPinnedFirst,
-  directorSystemPrompt,
-  presenceSheet
+  selectThreadsPinnedFirst
 } from './prompts';
-import { SPEAK_FORMAT_RULES, SPOKEN_VOICE_RULES } from './dialogueFormat';
 import { filterCastDelta, namedNewcomer, openingFittingIds, rosterChangeNotice, stageSceneCast } from './sceneFit';
 import { LIVE_MEMORY_TOOL } from './utilityCall';
-import type { Character, CharacterImportance, ContinuityFact, EpisodeGuest, OpenThread, PlotTarget, Turn } from '../types';
+import type { Character, CharacterImportance, ContinuityFact, OpenThread, Turn } from '../types';
 
 const npc = (id: string, name: string): Character => ({
   id, worldId: 'w', name, role: '', age: '', appearance: '', mannerisms: '', summary: '',
@@ -38,443 +32,6 @@ const npc = (id: string, name: string): Character => ({
   secrets: '', mustNotKnow: '', anchors: [], relationships: [],
   state: { goal: '', emotion: '', location: '', condition: '' },
   customInstructions: '', hue: 0, isPlayer: false, selfTag: false, createdAt: 0, updatedAt: 0
-});
-
-describe('normalizeBeats', () => {
-  const cast = [npc('c1', 'Ada'), npc('c2', 'Ben')];
-  const guests: EpisodeGuest[] = [{ id: 'g1', name: 'Clerk', brief: 'tired', voice: '' }];
-
-  it('keeps narration and speak under caps', () => {
-    const beats = normalizeBeats(
-      {
-        beats: [
-          { type: 'narration', brief: 'Rain on glass.' },
-          { type: 'speak', characterId: 'Ada', brief: 'greet coldly' },
-          { type: 'speak', characterId: 'missing', brief: 'skip me' },
-          { type: 'speak', guestId: 'g1', brief: 'interrupt' },
-          { type: 'narration', brief: '' },
-          { type: 'narration', brief: 'Door opens.' }
-        ]
-      },
-      cast,
-      guests,
-      new Map(),
-      'continue',
-      '',
-      'episode'
-    );
-    expect(beats.map((b) => b.type)).toEqual(['narration', 'speak', 'speak', 'narration']);
-    expect(beats[1]).toMatchObject({ type: 'speak', characterId: 'c1' });
-    expect(beats[2]).toMatchObject({ type: 'speak', guestId: 'g1' });
-  });
-
-  it('injects a speak reply when player spoke and plan has none', () => {
-    const beats = normalizeBeats(
-      { beats: [{ type: 'narration', brief: 'She stares.' }] },
-      cast,
-      guests,
-      new Map(),
-      'speak',
-      'Hello?'
-    );
-    expect(beats.some((b) => b.type === 'speak')).toBe(true);
-    expect(beats[0].type).toBe('speak');
-    if (beats[0].type === 'speak' && 'characterId' in beats[0]) {
-      expect(beats[0].brief).toMatch(/A turn in the room as Ada/i);
-      expect(beats[0].brief).not.toMatch(/Answer the player's last/i);
-    }
-  });
-
-  it('injects a speak reply when player used play (speak+act)', () => {
-    const beats = normalizeBeats(
-      { beats: [{ type: 'narration', brief: 'She stares.' }] },
-      cast,
-      guests,
-      new Map(),
-      'play',
-      '*leans in* "Hello?"'
-    );
-    expect(beats.some((b) => b.type === 'speak')).toBe(true);
-    expect(beats[0].type).toBe('speak');
-  });
-
-  it('caps Short reply size to at most one speak and two total', () => {
-    const beats = normalizeBeats(
-      {
-        beats: [
-          { type: 'narration', brief: 'Rain.' },
-          { type: 'speak', characterId: 'Ada', brief: 'a' },
-          { type: 'speak', characterId: 'Ben', brief: 'b' },
-          { type: 'narration', brief: 'More.' }
-        ]
-      },
-      cast,
-      guests,
-      new Map(),
-      'continue',
-      '',
-      'beat'
-    );
-    expect(beats.length).toBeLessThanOrEqual(2);
-    expect(beats.filter((b) => b.type === 'speak').length).toBeLessThanOrEqual(1);
-  });
-
-  it('honours preferred speaker when injecting a reply', () => {
-    const beats = normalizeBeats(
-      { beats: [{ type: 'narration', brief: 'Silence.' }] },
-      cast,
-      guests,
-      new Map(),
-      'speak',
-      'Hey',
-      'scene',
-      { characterId: 'c2' }
-    );
-    expect(beats[0]).toMatchObject({ type: 'speak', characterId: 'c2' });
-  });
-
-  it('hard-pins preferred speaker and drops other speak beats', () => {
-    const beats = normalizeBeats(
-      {
-        beats: [
-          { type: 'speak', characterId: 'Ada', brief: 'not her' },
-          { type: 'speak', characterId: 'Ben', brief: 'him' },
-          { type: 'narration', brief: 'Rain.' }
-        ]
-      },
-      cast,
-      guests,
-      new Map(),
-      'speak',
-      'Hello',
-      'episode',
-      { characterId: 'c2' }
-    );
-    const speak = beats.filter((b) => b.type === 'speak');
-    expect(speak).toHaveLength(1);
-    expect(speak[0]).toMatchObject({ type: 'speak', characterId: 'c2' });
-    expect(beats.some((b) => b.type === 'narration')).toBe(true);
-  });
-
-  it('keeps the last voice when nobody was named', () => {
-    const spoke = (i: number): Turn => ({
-      id: `t${i}`, episodeId: 'e', worldId: 'w', role: 'character' as const, mode: null,
-      characterId: 'c1', text: 'Ada again.', createdAt: i
-    });
-    const beats = normalizeBeats(
-      { beats: [{ type: 'narration', brief: 'She stares.' }] },
-      cast,
-      guests,
-      new Map(),
-      'speak',
-      'Well?',
-      'scene',
-      undefined,
-      [spoke(1), spoke(2), spoke(3)]
-    );
-    expect(beats[0]).toMatchObject({ type: 'speak', characterId: 'c1' });
-    expect(beats.filter((b) => b.type === 'speak')).toHaveLength(1);
-  });
-
-  it('still routes to the NPC the player addressed by name', () => {
-    const spoke: Turn = {
-      id: 't1', episodeId: 'e', worldId: 'w', role: 'character', mode: null,
-      characterId: 'c1', text: 'Ada holds the floor.', createdAt: 1
-    };
-    const beats = normalizeBeats(
-      { beats: [{ type: 'narration', brief: 'She stares.' }] },
-      cast,
-      guests,
-      new Map(),
-      'speak',
-      'Ada, answer me.',
-      'scene',
-      undefined,
-      [spoke]
-    );
-    expect(beats[0]).toMatchObject({ type: 'speak', characterId: 'c1' });
-    if (beats[0].type === 'speak') {
-      expect(beats[0].brief).toMatch(/speaking straight at you/i);
-    }
-  });
-
-  it('keeps one speak per speaker when the plan repeats Ada', () => {
-    const beats = normalizeBeats(
-      {
-        beats: [
-          { type: 'speak', characterId: 'Ada', brief: 'first' },
-          { type: 'speak', characterId: 'Ada', brief: 'again' },
-          { type: 'narration', brief: 'Rain.' }
-        ]
-      },
-      cast,
-      guests,
-      new Map(),
-      'continue',
-      ''
-    );
-    const speak = beats.filter((b) => b.type === 'speak');
-    expect(speak).toHaveLength(1);
-    expect(speak[0]).toMatchObject({ type: 'speak', characterId: 'c1', brief: 'first' });
-  });
-
-  it('puts the named addressee first when the plan had Ada then Ben', () => {
-    const beats = normalizeBeats(
-      {
-        beats: [
-          { type: 'speak', characterId: 'Ada', brief: 'not her' },
-          { type: 'speak', characterId: 'Ben', brief: 'him' },
-          { type: 'narration', brief: 'Rain.' }
-        ]
-      },
-      cast,
-      guests,
-      new Map(),
-      'speak',
-      'Ben, look at me.'
-    );
-    expect(beats[0]).toMatchObject({ type: 'speak', characterId: 'c2' });
-    expect(beats.filter((b) => b.type === 'speak')).toHaveLength(1);
-  });
-
-  it('still injects a speak reply when the player used Act', () => {
-    const beats = normalizeBeats(
-      { beats: [{ type: 'narration', brief: 'She stares.' }] },
-      cast,
-      guests,
-      new Map(),
-      'act',
-      '*walks to the desk*'
-    );
-    expect(beats.some((b) => b.type === 'speak')).toBe(true);
-    expect(beats[0].type).toBe('speak');
-  });
-
-  it('puts the hard addressee first even when the director briefed someone else first', () => {
-    const beats = normalizeBeats(
-      {
-        beats: [
-          { type: 'speak', characterId: 'Ben', brief: 'wrong voice' },
-          { type: 'narration', brief: 'Rain hits the glass while Ada reaches for the stamp.' }
-        ]
-      },
-      cast,
-      guests,
-      new Map(),
-      'speak',
-      'Ada, look at me.'
-    );
-    expect(beats[0]).toMatchObject({ type: 'speak', characterId: 'c1' });
-    if (beats[0].type === 'speak') {
-      expect(beats[0].brief).toMatch(/speaking straight at you/i);
-    }
-  });
-
-  it('does not let a bare mention steal the floor from the directed person', () => {
-    const beats = normalizeBeats(
-      {
-        beats: [
-          { type: 'speak', characterId: 'Ben', brief: 'topic only' },
-          { type: 'speak', characterId: 'Ada', brief: 'addressed' },
-          { type: 'narration', brief: 'Ada turns toward Ben with the ledger open between them.' }
-        ]
-      },
-      cast,
-      guests,
-      new Map(),
-      'speak',
-      'Ada, tell Ben what you saw.'
-    );
-    expect(beats[0]).toMatchObject({ type: 'speak', characterId: 'c1' });
-    expect(beats.filter((b) => b.type === 'speak')).toHaveLength(1);
-  });
-
-  it('gives the unanswered asker the first speak when the player did not name anyone', () => {
-    const asked: Turn = {
-      id: 't1', episodeId: 'e', worldId: 'w', role: 'character', mode: null,
-      characterId: 'c2', text: '"Where were you?"', createdAt: 1
-    };
-    const answered: Turn = {
-      id: 't2', episodeId: 'e', worldId: 'w', role: 'user', mode: 'speak',
-      text: '"At the quay."', createdAt: 2
-    };
-    const beats = normalizeBeats(
-      {
-        beats: [
-          { type: 'speak', characterId: 'Ada', brief: 'ask where again' },
-          { type: 'narration', brief: 'Ben watches the player over the blotter.' }
-        ]
-      },
-      cast,
-      guests,
-      new Map(),
-      'speak',
-      'At the quay.',
-      'scene',
-      undefined,
-      [asked, answered]
-    );
-    expect(beats[0]).toMatchObject({ type: 'speak', characterId: 'c2' });
-    if (beats[0].type === 'speak') {
-      expect(beats[0].brief).toMatch(/register|answered|do not ask/i);
-    }
-  });
-
-  it('replaces a thin narration brief with place, move, and named bodies', () => {
-    const beats = normalizeBeats(
-      { beats: [{ type: 'narration', brief: 'Rain.' }] },
-      cast,
-      guests,
-      new Map(),
-      'continue',
-      'I wait by the desk.',
-      'scene',
-      undefined,
-      undefined,
-      'Harbour office'
-    );
-    const narr = beats.find((b) => b.type === 'narration');
-    expect(narr?.type).toBe('narration');
-    if (narr?.type === 'narration') {
-      expect(narr.brief).toMatch(/Harbour office|Ada|wait by the desk/i);
-      expect(isThinNarrationBrief(narr.brief, 'I wait by the desk.', cast)).toBe(false);
-    }
-  });
-
-  it('pins the author direction onto every steer brief', () => {
-    const beats = normalizeBeats(
-      {
-        beats: [
-          { type: 'narration', brief: 'Ada stamps the page while the door stays shut.' },
-          { type: 'speak', characterId: 'Ada', brief: 'ask about the weather' }
-        ]
-      },
-      cast,
-      guests,
-      new Map(),
-      'steer',
-      'The cartwright leaves.'
-    );
-    expect(beats.length).toBeGreaterThan(0);
-    for (const beat of beats) {
-      expect(beat.brief).toContain('The cartwright leaves.');
-      expect(beat.brief).toMatch(/it outranks/i);
-    }
-  });
-
-  it('gives a character named in the direction their own speak beat', () => {
-    const beats = normalizeBeats(
-      { beats: [{ type: 'narration', brief: 'Ada stamps the page while the door stays shut.' }] },
-      cast,
-      [],
-      new Map(),
-      'steer',
-      'Ada says the ledger is forged and leaves.'
-    );
-    const speak = beats.find((b) => b.type === 'speak' && 'characterId' in b && b.characterId === 'c1');
-    expect(speak?.type).toBe('speak');
-    if (speak?.type === 'speak') {
-      expect(speak.brief).toContain('Ada says the ledger is forged and leaves.');
-    }
-    expect(beats.some((b) => b.type === 'speak' && 'characterId' in b && b.characterId === 'c2')).toBe(false);
-  });
-
-  it('gives a named character the short speak slot instead of someone else', () => {
-    const beats = normalizeBeats(
-      {
-        beats: [
-          { type: 'narration', brief: 'Ada stamps the page while the door stays shut.' },
-          { type: 'speak', characterId: 'Ben', brief: 'talk about the weather instead of leaving' }
-        ]
-      },
-      cast,
-      [],
-      new Map(),
-      'steer',
-      'Ada says the ledger is forged.',
-      'beat'
-    );
-    const speak = beats.filter((b) => b.type === 'speak');
-    expect(speak).toHaveLength(1);
-    expect(speak[0]).toMatchObject({ type: 'speak', characterId: 'c1' });
-    if (speak[0].type === 'speak') {
-      expect(speak[0].brief).toContain('Ada says the ledger is forged.');
-    }
-  });
-
-  it('does not give the Write-as character another speak beat', () => {
-    const beats = normalizeBeats(
-      {
-        beats: [
-          { type: 'speak', characterId: 'Ada', brief: 'say something else about the books' },
-          { type: 'speak', characterId: 'Ben', brief: 'answer the ledger accusation in the room' },
-          { type: 'narration', brief: 'The office holds the confession between them.' }
-        ]
-      },
-      cast,
-      [],
-      new Map(),
-      'play',
-      'Ada already said this.',
-      'scene',
-      undefined,
-      undefined,
-      'Harbour office',
-      'Ben, the ledger is forged.',
-      'c1'
-    );
-    expect(beats.some((b) => b.type === 'speak' && 'characterId' in b && b.characterId === 'c1')).toBe(false);
-    expect(beats.some((b) => b.type === 'speak' && 'characterId' in b && b.characterId === 'c2')).toBe(true);
-  });
-
-  it('stays narration when the Write-as character is the only one on stage', () => {
-    const beats = normalizeBeats(
-      {
-        beats: [
-          { type: 'speak', characterId: 'Ada', brief: 'say it again in the office' },
-          { type: 'narration', brief: 'The office holds the confession she already made.' }
-        ]
-      },
-      [npc('c1', 'Ada')],
-      [],
-      new Map(),
-      'play',
-      '"The ledger is forged."',
-      'scene',
-      undefined,
-      undefined,
-      '',
-      '"The ledger is forged."',
-      'c1'
-    );
-    expect(beats.some((b) => b.type === 'speak')).toBe(false);
-    expect(beats.some((b) => b.type === 'narration')).toBe(true);
-  });
-});
-
-describe('strengthenNarrationBrief', () => {
-  it('keeps a brief that already names a body', () => {
-    const brief = 'Ada stamps the page while rain hits the glass.';
-    expect(strengthenNarrationBrief({
-      brief,
-      mode: 'speak',
-      playerText: 'Hello',
-      location: 'Office',
-      inScene: [npc('c1', 'Ada')]
-    })).toBe(brief);
-  });
-
-  it('replaces weather-only mush', () => {
-    expect(isThinNarrationBrief('Rain on glass.', '', [npc('c1', 'Ada')])).toBe(true);
-    const next = strengthenNarrationBrief({
-      brief: 'Rain on glass.',
-      mode: 'speak',
-      playerText: 'I set the ledger down.',
-      location: 'Harbour office',
-      inScene: [npc('c1', 'Ada')]
-    });
-    expect(next).toMatch(/Harbour office|Ada|ledger/i);
-  });
 });
 
 describe('mergeLiveRelationshipPatch', () => {
@@ -485,6 +42,22 @@ describe('mergeLiveRelationshipPatch', () => {
     expect(first).toEqual([{ targetId: 'c2', kind: 'rival', note: 'after the ledger' }]);
     ada.relationships = first!;
     expect(mergeLiveRelationshipPatch(ada, ben, { kind: 'rival', note: 'after the ledger' }, ['c1', 'c2'])).toBeNull();
+  });
+
+  it('keeps a tie to someone who is not in the room', () => {
+    const ada = npc('c1', 'Ada');
+    const ben = npc('c2', 'Ben');
+    ada.relationships = [{ targetId: 'c3', kind: 'family', note: 'sister' }];
+    const next = mergeLiveRelationshipPatch(
+      ada,
+      ben,
+      { kind: 'rival', note: 'after the ledger' },
+      ['c1', 'c2', 'c3']
+    );
+    expect(next).toEqual([
+      { targetId: 'c3', kind: 'family', note: 'sister' },
+      { targetId: 'c2', kind: 'rival', note: 'after the ledger' }
+    ]);
   });
 });
 
@@ -608,29 +181,6 @@ describe('packTurnsDetailed / pressure', () => {
   });
 });
 
-describe('matchPlotTargets', () => {
-  const targets: PlotTarget[] = [
-    { id: 'a', text: 'Find the key', status: 'pending', source: 'manual' },
-    { id: 'b', text: 'Confront Mira', status: 'pending', source: 'manual' },
-    { id: 'c', text: 'Old debt', status: 'hit', source: 'manual' },
-    { id: 'd', text: 'Recover the stolen harbour ledger before dawn', status: 'pending', source: 'manual' }
-  ];
-
-  it('matches exact and loose contains', () => {
-    const hits = matchPlotTargets(targets, ['find the key', 'confront mira about the past']);
-    expect(hits.map((t) => t.id)).toEqual(['a', 'b']);
-  });
-
-  it('matches paraphrases via token overlap', () => {
-    const hits = matchPlotTargets(targets, ['recover stolen harbour ledger']);
-    expect(hits.map((t) => t.id)).toEqual(['d']);
-  });
-
-  it('ignores already-hit targets', () => {
-    expect(matchPlotTargets(targets, ['Old debt'])).toEqual([]);
-  });
-});
-
 describe('selectDirectorFacts / Threads pin', () => {
   it('includes pinned facts before soft cap picks', () => {
     const facts: ContinuityFact[] = Array.from({ length: 20 }, (_, i) => ({
@@ -698,45 +248,6 @@ describe('selectDirectorFacts / Threads pin', () => {
   });
 });
 
-describe('directorFallbackNarrationBrief', () => {
-  it('names the player move, location, and an on-stage want', () => {
-    const brief = directorFallbackNarrationBrief({
-      mode: 'speak',
-      playerText: 'Where is the ledger?',
-      location: 'Harbour office',
-      inScene: [npc('c1', 'Ada')]
-    });
-    expect(brief).toContain('Where is the ledger?');
-    expect(brief).toContain('Harbour office');
-    expect(brief).toContain('Ada');
-    expect(brief).toMatch(/sensory job/i);
-  });
-
-  it('does not tell the narrator to stop', () => {
-    const brief = chapterNarrationBrief({
-      mode: 'play',
-      playerText: 'I set the cup down.',
-      location: 'the long room'
-    });
-    expect(brief).toContain('the long room');
-    expect(brief).toContain('I set the cup down.');
-    expect(brief).not.toMatch(/Stop while/);
-    expect(brief).not.toMatch(/\bbeat\b/i);
-  });
-
-  it('gives the narrator the scene date as context, not a line to print', () => {
-    const brief = chapterNarrationBrief({
-      mode: 'play',
-      playerText: 'I set the cup down.',
-      location: 'the long room',
-      sceneDate: 'Thursday, 12 March, Year 3'
-    });
-    expect(brief).toMatch(/The scene is on Thursday, 12 March, Year 3/);
-    expect(brief).toMatch(/not an order to print the date/i);
-    expect(brief).toContain('the long room');
-  });
-});
-
 describe('capSoftWrapExtract', () => {
   it('keeps in-scene facts and drops off-scene updates', () => {
     const capped = capSoftWrapExtract({
@@ -788,63 +299,6 @@ describe('dedupeSoftWrapExtract', () => {
   });
 });
 
-describe('injectedSpeakBrief', () => {
-  it('carries voice, mood, want, and a mannerism tic', () => {
-    const brief = injectedSpeakBrief({
-      name: 'Ada',
-      speechStyle: 'Clipped harbour clerk cadence',
-      mannerisms: 'Taps the ledger twice. Never sits fully.',
-      emotion: 'tight',
-      goal: 'Hide the forged entry',
-      anchor: 'Never lies in writing'
-    });
-    expect(brief).toContain('Ada');
-    expect(brief).toMatch(/voice:.*Clipped harbour/i);
-    expect(brief).toMatch(/mood:.*tight/i);
-    expect(brief).toMatch(/pushing:.*Hide the forged/i);
-    expect(brief).toMatch(/one tic:.*Taps the ledger/i);
-    expect(brief).toMatch(/hold:.*Never lies/i);
-    expect(brief).toMatch(/from what you want now/i);
-    expect(brief).not.toMatch(/Answer the player's last/i);
-  });
-
-  it('includes character live state via helper', () => {
-    const ada = npc('c1', 'Ada');
-    ada.speechStyle = 'Dry';
-    ada.state = { goal: 'Keep the books', emotion: 'cold', location: 'Quay', condition: '' };
-    ada.anchors = ['Never smiles for free'];
-    expect(injectedSpeakBriefForCharacter(ada)).toMatch(/Keep the books/);
-    expect(injectedSpeakBriefForCharacter(ada)).toMatch(/Never smiles/);
-  });
-
-  it('asks for a turn from what they want, not a helpful answer', () => {
-    const ada = npc('c1', 'Ada');
-    const brief = injectedSpeakBriefForCharacter(ada);
-    expect(brief).toMatch(/A turn in the room as Ada/i);
-    expect(brief).toMatch(/from what you want now/i);
-    expect(brief).not.toMatch(/Answer the player's last line/i);
-    const messages = buildCharacterSpeakMessages([], [ada], ada, 'refuse the ledger');
-    const last = messages.at(-1)?.content ?? '';
-    expect(last).toMatch(/from what you want right now/i);
-    expect(last).not.toMatch(/Answer the player's last line/i);
-    expect(SPEAK_FORMAT_RULES).toMatch(/one spoken sentence is enough/i);
-    expect(last).toContain(SPOKEN_VOICE_RULES);
-    expect(last).toMatch(/do not pad/i);
-    expect(last).toMatch(/first quoted sentence answers/i);
-  });
-});
-
-describe('SPEAK_FORMAT_RULES immersion', () => {
-  it('does not train a shy-dimples default register', () => {
-    expect(SPEAK_FORMAT_RULES).not.toMatch(/dimples/i);
-    expect(SPEAK_FORMAT_RULES).not.toMatch(/smiled shyly/i);
-    expect(SPEAK_FORMAT_RULES).toMatch(/ledger/i);
-    expect(SPEAK_FORMAT_RULES).toMatch(/one spoken sentence is enough/i);
-    expect(SPEAK_FORMAT_RULES).not.toMatch(/more than one sentence/i);
-    expect(SPEAK_FORMAT_RULES).not.toMatch(/leaves the rest unsaid/i);
-  });
-});
-
 describe('LIVE_MEMORY_TOOL', () => {
   it('accepts live state and canon keys in one schema', () => {
     const props = LIVE_MEMORY_TOOL.parameters.properties as Record<string, unknown>;
@@ -865,58 +319,26 @@ describe('softWrapAlreadyFiled', () => {
   });
 });
 
-describe('pendingBeatLabel', () => {
-  const cast = [npc('c1', 'Ada')];
-  const guests: EpisodeGuest[] = [{ id: 'g1', name: 'Clerk', brief: 'tired', voice: '' }];
-
-  it('uses the narration brief and resolves speak names', () => {
-    expect(pendingBeatLabel({ type: 'narration', brief: 'Rain on glass.' }, cast, guests))
-      .toBe('Rain on glass.');
-    expect(pendingBeatLabel({ type: 'speak', characterId: 'c1', brief: 'greet coldly' }, cast, guests))
-      .toBe('Ada: greet coldly');
-    expect(pendingBeatLabel({ type: 'speak', guestId: 'g1', brief: 'interrupt' }, cast, guests))
-      .toBe('Clerk: interrupt');
-  });
-
-  it('falls back when ids are missing and clips the final label', () => {
-    expect(pendingBeatLabel({ type: 'speak', characterId: 'gone', brief: 'hello' }, cast, guests))
-      .toBe('Someone: hello');
-    expect(pendingBeatLabel({ type: 'speak', guestId: 'gone', brief: 'hello' }, cast, guests))
-      .toBe('Someone: hello');
-    const long = 'x'.repeat(90);
-    const narration = pendingBeatLabel({ type: 'narration', brief: long }, cast, guests);
-    expect(narration.endsWith('…')).toBe(true);
-    expect(narration.length).toBe(80);
-    const speak = pendingBeatLabel(
-      { type: 'speak', characterId: 'c1', brief: 'y'.repeat(90) },
-      cast,
-      guests
-    );
-    expect(speak.startsWith('Ada:')).toBe(true);
-    expect(speak.endsWith('…')).toBe(true);
-    expect(speak.length).toBe(80);
+describe('chapterCloseDigest', () => {
+  it('keeps the last turns after a long chapter', () => {
+    const turns: Turn[] = Array.from({ length: 8 }, (_, i) => ({
+      id: `t${i}`,
+      episodeId: 'e',
+      worldId: 'w',
+      role: 'narrator',
+      mode: null,
+      text: `Beat ${i}.`,
+      createdAt: i
+    }));
+    turns[7] = { ...turns[7], text: 'The lamp finally goes out.' };
+    const digest = chapterCloseDigest(turns, []);
+    expect(digest).toContain('End of the chapter');
+    expect(digest).toContain('The lamp finally goes out.');
+    expect(digest.indexOf('The lamp finally goes out.')).toBeGreaterThan(digest.indexOf('End of the chapter'));
   });
 });
 
-describe('isBlankWorldBrief / isEmptyRosterProposal', () => {
-  const idea = 'A harbour where every debt is public.';
-
-  it('flags an untitled brief that is still the raw idea', () => {
-    expect(isBlankWorldBrief({
-      title: 'Untitled world',
-      bible: idea,
-      premise: ''
-    }, idea)).toBe(true);
-  });
-
-  it('passes a drafted brief', () => {
-    expect(isBlankWorldBrief({
-      title: 'Public Ledger',
-      bible: 'The quay keeps names in wet ink. You owe a debt under a false hand.',
-      premise: 'The registrar has asked to see you before the tide turns.'
-    }, idea)).toBe(false);
-  });
-
+describe('isEmptyRosterProposal', () => {
   it('flags an empty roster when counts were requested', () => {
     expect(isEmptyRosterProposal({ characters: [], locations: [] }, { characters: 4, locations: 3 })).toBe(true);
     expect(isEmptyRosterProposal(
@@ -924,21 +346,6 @@ describe('isBlankWorldBrief / isEmptyRosterProposal', () => {
       { characters: 4, locations: 3 }
     )).toBe(false);
     expect(isEmptyRosterProposal({ characters: [], locations: [] }, { characters: 0, locations: 0 })).toBe(false);
-  });
-});
-
-describe('pendingBeatsToKeep', () => {
-  const leftover = [
-    { type: 'narration' as const, brief: 'Rain on glass.' },
-    { type: 'speak' as const, characterId: 'c1', brief: 'greet coldly' }
-  ];
-
-  it('keeps leftover beats when nothing has saved yet', () => {
-    expect(pendingBeatsToKeep(leftover)).toEqual(leftover);
-  });
-
-  it('clears when nothing remains', () => {
-    expect(pendingBeatsToKeep([])).toEqual([]);
   });
 });
 
@@ -952,42 +359,6 @@ describe('chapterMemoryClearPatch', () => {
       pendingPlan: null,
       sceneLedger: []
     });
-  });
-});
-
-describe('nextSceneCast', () => {
-  const cast = [npc('c1', 'Ada'), npc('c2', 'Ben')];
-
-  it('brings an off-stage character in and introduces one walk-on', () => {
-    let n = 0;
-    const scene = nextSceneCast({
-      castIds: ['c1'],
-      guests: [],
-      characters: cast,
-      delta: {
-        enter: ['Ben'],
-        introduce: [{ name: 'Clerk', brief: 'tired', voice: 'dry' }]
-      },
-      newId: () => `g${++n}`
-    });
-    expect(scene.castIds).toEqual(['c1', 'c2']);
-    expect(scene.enterIds).toEqual(['c2']);
-    expect(scene.guests.map((g) => g.name)).toEqual(['Clerk']);
-    expect(scene.introduceNameToId.get('clerk')).toBe('g1');
-    expect(scene.activeGuestIds).toEqual(['g1']);
-    expect(scene.changed).toBe(true);
-  });
-
-  it('takes a guest off the floor without deleting them', () => {
-    const scene = nextSceneCast({
-      castIds: ['c1'],
-      guests: [{ id: 'g1', name: 'Clerk', brief: 'tired' }],
-      characters: cast,
-      delta: { leave: ['Clerk'] },
-      newId: () => 'unused'
-    });
-    expect(scene.guests).toHaveLength(1);
-    expect(scene.activeGuestIds).toEqual([]);
   });
 });
 
@@ -1304,20 +675,3 @@ describe('openingFittingIds', () => {
   });
 });
 
-describe('story weight in prompts', () => {
-  it('tells the director what the four weights mean', () => {
-    expect(directorSystemPrompt('speak', true, 'scene')).toMatch(/Background stays in narration/);
-    expect(directorSystemPrompt('speak', true, 'scene')).toMatch(/Do not give a background character the floor/);
-  });
-
-  it('labels a lead and a background body, and leaves regular unlabeled', () => {
-    const lead = npc('l', 'Ada');
-    lead.importance = 'lead';
-    const regular = npc('r', 'Ben');
-    const background = npc('g', 'Gus');
-    background.importance = 'background';
-    expect(presenceSheet(lead, [lead])).toMatch(/Weight: lead/);
-    expect(presenceSheet(regular, [regular])).not.toMatch(/Weight:/);
-    expect(presenceSheet(background, [background])).toMatch(/Weight: background/);
-  });
-});

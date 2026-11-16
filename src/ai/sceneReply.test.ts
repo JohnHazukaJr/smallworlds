@@ -105,8 +105,59 @@ describe('buildSceneReply', () => {
     expect(built.system).toContain('### Ada');
     expect(built.system).toContain('Also here, and they may speak if the moment needs them: Ben (clerk).');
     expect(built.system).not.toContain('do not get a line');
+    expect(built.system).toContain('Narration has no quoted dialogue.');
+    expect(built.system).toContain('Name: *action* "dialogue"');
+    expect(built.system).not.toContain('name the speaker in that same sentence');
     const blob = `${built.system}\n${built.messages.map((m) => m.content).join('\n')}`;
     expect(blob).not.toMatch(/plan_turn|castDelta/);
+  });
+
+  it('tells a pinned answerer the line is said to them', () => {
+    const built = buildSceneReply({
+      ctx: ctx(),
+      mode: 'speak',
+      playerText: 'Where were you?',
+      length: 'beat',
+      speakers: [
+        { id: 'c1', name: 'Ada', kind: 'cast', role: 'registrar', voice: 'clipped' },
+        { id: 'c2', name: 'Ben', kind: 'cast', role: 'clerk', voice: 'quiet' }
+      ],
+      answerers: [{ name: 'Ada' }],
+      saidTo: 'Ada',
+      present: [
+        { name: 'Ada', role: 'registrar' },
+        { name: 'Ben', role: 'clerk' }
+      ]
+    });
+    const cue = built.messages[built.messages.length - 1]?.content ?? '';
+    expect(cue).toContain('This is said to Ada.');
+    expect(cue).toContain('Ada answers in their own voice');
+    expect(cue.indexOf('This is said to Ada.')).toBeLessThan(cue.indexOf('Ada answers'));
+    expect(cue).toContain('Where were you?');
+    expect(cue.lastIndexOf('Where were you?')).toBeGreaterThan(cue.indexOf('Ada answers'));
+  });
+
+  it('keeps an injected line said to the player as narration', () => {
+    const built = buildSceneReply({
+      ctx: ctx(),
+      mode: 'play',
+      playerText: 'Ada: "You should have been honest."',
+      length: 'beat',
+      speakers: [],
+      narrationOnly: true,
+      saidTo: 'Sam',
+      present: [
+        { name: 'Ada', role: 'registrar' },
+        { name: 'Sam', role: 'the player' }
+      ]
+    });
+    const cue = built.messages[built.messages.length - 1]?.content ?? '';
+    expect(cue).toContain('Nobody new speaks');
+    expect(cue).toContain('It is said to Sam.');
+    expect(cue).toContain('Do not quote a new speaker');
+    expect(cue).toContain("do not write Sam's reply");
+    expect(cue).not.toContain('Sam answers');
+    expect(cue).toContain('Ada: "You should have been honest."');
   });
 
   it('cards the rest of the room and still names only the answerer', () => {
@@ -138,6 +189,79 @@ describe('buildSceneReply', () => {
     expect(built.system).toContain('### Ben');
     expect(built.system.indexOf('### Ada')).toBeLessThan(built.system.indexOf('### Ben'));
     expect(built.system).not.toContain('do not get a line');
+  });
+
+  it('gives the writer the memory, the player, and the live room', () => {
+    const prior = episode();
+    prior.id = 'e0';
+    prior.number = 1;
+    prior.status = 'ended';
+    prior.wrap = { recap: 'Ada hid the real ledger under the desk.', beats: [], guestEffects: [] };
+    const live = episode();
+    live.sceneLedger = ['Rain is already on the window.'];
+    live.runningSummary = 'They argued about the missing page.';
+    live.plotTargets = [{ id: 't1', text: 'Find who forged the page', status: 'pending', source: 'manual' }];
+    const player = npc('you', 'Sam');
+    player.isPlayer = true;
+    player.role = 'the player';
+    const built = buildSceneReply({
+      ctx: {
+        ...ctx(),
+        world: { ...world(), storyStance: 'wander' },
+        season: {
+          ...season(),
+          plotTargets: [{ id: 's1', text: 'The harbour still owes Ada', status: 'pending', source: 'season-raise' }]
+        },
+        episode: live,
+        priorEpisodes: [prior],
+        characters: [player, npc('c1', 'Ada'), npc('c2', 'Ben')]
+      },
+      mode: 'speak',
+      playerText: 'Where is the ledger?',
+      length: 'beat',
+      speakers: [{
+        id: 'c1',
+        name: 'Ada',
+        kind: 'cast',
+        role: 'registrar',
+        voice: 'clipped',
+        want: 'Close the books',
+        emotion: 'wary',
+        condition: 'ink on her cuff',
+        ties: 'Ben, rival: she will not share the desk'
+      }],
+      present: [
+        { name: 'Ada', role: 'registrar' },
+        { name: 'Sam', role: 'the player' }
+      ]
+    });
+    expect(built.system).toContain('Story stance: wander.');
+    expect(built.system).toContain('Rain is already on the window.');
+    expect(built.system).toContain('They argued about the missing page.');
+    expect(built.system).toContain('Ada hid the real ledger under the desk.');
+    expect(built.system).toContain('Find who forged the page');
+    expect(built.system).toContain('The harbour still owes Ada');
+    expect(built.system).toContain('The player is Sam.');
+    expect(built.system).toContain('Now: wary');
+    expect(built.system).toContain('Condition: ink on her cuff');
+    expect(built.system).toContain('With the people here: Ben, rival: she will not share the desk');
+    expect(built.system).not.toContain('Sam (the player)');
+    expect(built.system).not.toContain('they may speak if the moment needs them: Sam');
+  });
+
+  it('asks for a rewrite without also asking to continue', () => {
+    const built = buildSceneReply({
+      ctx: ctx(),
+      mode: 'continue',
+      playerText: '',
+      length: 'beat',
+      speakers: [{ id: 'c1', name: 'Ada', kind: 'cast' }],
+      present: [{ name: 'Ada', role: 'registrar' }],
+      rewrite: { speakerName: 'the narrator', prior: 'Rain on the glass.' }
+    });
+    const cue = built.messages[built.messages.length - 1]?.content ?? '';
+    expect(cue).toContain('Rewrite the previous scene');
+    expect(cue).not.toContain('Continue the scene from the last beat');
   });
 });
 
@@ -202,6 +326,34 @@ describe('splitSceneReply', () => {
     expect(bare).toEqual([expect.objectContaining({
       role: 'character', speakerId: 'ada', text: '"Closed."'
     })]);
+
+    const gesture = splitSceneReply('Ada: *nods*', [ada]);
+    expect(gesture).toEqual([expect.objectContaining({
+      role: 'character', speakerId: 'ada', text: '*nods*'
+    })]);
+  });
+
+  it('keeps a screenplay gesture with the spoken line', () => {
+    const pieces = splitSceneReply('The lamp ticks.\nAda: *takes a sip* "Closed."', [ada, ben]);
+    const spoken = pieces.find((piece) => piece.role === 'character');
+    expect(spoken).toMatchObject({ speakerId: 'ada' });
+    expect(spoken?.text).toContain('takes a sip');
+    expect(spoken?.text).toContain('Closed');
+    const narration = pieces.filter((piece) => piece.role === 'narrator').map((piece) => piece.text).join(' ');
+    expect(narration).toContain('lamp');
+    expect(narration).not.toContain('Closed');
+    expect(narration).not.toContain('sip');
+
+    const peeled = splitSceneReply('Ada: *takes a sip* "Closed," she said.', [ada]);
+    expect(peeled.find((piece) => piece.role === 'character')?.text).toContain('takes a sip');
+    expect(peeled.find((piece) => piece.role === 'character')?.text).toContain('Closed');
+    const left = peeled.filter((piece) => piece.role === 'narrator').map((piece) => piece.text).join(' ');
+    expect(left).not.toContain('Closed');
+    expect(left).not.toContain('sip');
+
+    const stranger = splitSceneReply('The lamp ticks.\nBob: *takes a sip* "Leave."', [ada]);
+    expect(stranger.every((piece) => piece.role === 'narrator')).toBe(true);
+    expect(stranger.map((piece) => piece.text).join(' ')).toContain('Leave');
   });
 
   it('leaves an unnamed quote in the narration, even when only one person is here', () => {

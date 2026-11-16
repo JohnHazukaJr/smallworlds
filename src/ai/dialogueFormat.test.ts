@@ -8,39 +8,11 @@ import {
   parseSpeakSegments,
   previewSpeakText,
   settleSpeakText,
-  SPEAK_FORMAT_RULES,
-  SPOKEN_VOICE_RULES,
   speakHoldsForPlayer,
   speakLineCutOff,
   stitchSpeakRetry,
   stripNarratorEmbeddedDialogue
 } from './dialogueFormat';
-
-describe('SPEAK_FORMAT_RULES', () => {
-  it('uses a short concrete example instead of soft RP stock', () => {
-    expect(SPEAK_FORMAT_RULES).not.toMatch(/dimples|shyly/i);
-    expect(SPEAK_FORMAT_RULES).toMatch(/ledger/i);
-    expect(SPEAK_FORMAT_RULES).not.toMatch(/leaves the rest unsaid/i);
-    expect(SPEAK_FORMAT_RULES).not.toMatch(/more than one sentence/i);
-  });
-
-  it('tells the speaker to stop after one question', () => {
-    expect(SPEAK_FORMAT_RULES).toMatch(/at most one question/i);
-    expect(SPEAK_FORMAT_RULES).toMatch(/stop there/i);
-    expect(SPEAK_FORMAT_RULES).toMatch(/one spoken sentence is enough/i);
-    expect(SPEAK_FORMAT_RULES).not.toMatch(/do not stop after a single spoken line/i);
-    expect(SPEAK_FORMAT_RULES).toMatch(/do not write the player/i);
-    expect(SPEAK_FORMAT_RULES).not.toMatch(/prefer one tight reply/i);
-  });
-});
-
-describe('SPOKEN_VOICE_RULES', () => {
-  it('answers first and does not pad', () => {
-    expect(SPOKEN_VOICE_RULES).toMatch(/first quoted sentence answers/i);
-    expect(SPOKEN_VOICE_RULES).toMatch(/do not pad/i);
-    expect(SPOKEN_VOICE_RULES).toMatch(/single short line is a complete reply/i);
-  });
-});
 
 describe('speakHoldsForPlayer', () => {
   it('holds when quoted speech asks a question', () => {
@@ -180,6 +152,27 @@ describe('stripNarratorEmbeddedDialogue', () => {
     expect(out).toContain('The lamp ticks.');
     expect(out).not.toMatch(/Ada:/);
     expect(out).not.toMatch(/ledger is closed/);
+  });
+
+  it('drops a gesture that shares the spoken line, and keeps a stranger', () => {
+    const out = stripNarratorEmbeddedDialogue(
+      'Rain on the glass.\nAda: *takes a sip* "The ledger is closed."\nThe lamp ticks.'
+    );
+    expect(out).toContain('Rain on the glass.');
+    expect(out).toContain('The lamp ticks.');
+    expect(out).not.toMatch(/Ada:/);
+    expect(out).not.toMatch(/sip/);
+    expect(out).not.toMatch(/ledger is closed/);
+
+    const kept = stripNarratorEmbeddedDialogue(
+      'Rain on the glass.\nBob: *takes a sip* "Leave."\nAda: *nods* "Closed."',
+      ['Ada']
+    );
+    expect(kept).toContain('Bob:');
+    expect(kept).toContain('Leave');
+    expect(kept).toContain('sip');
+    expect(kept).not.toMatch(/Ada:/);
+    expect(kept).not.toMatch(/Closed/);
   });
 });
 

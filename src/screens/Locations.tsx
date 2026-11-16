@@ -1,7 +1,9 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef, useState } from 'react';
-import { draftLocation, fleshOutLocation } from '../ai/engine';
+import { draftLocation, fleshOutLocation, seedBlankResidentLocations } from '../ai/engine';
+import { groupLocationsByArea } from '../ai/placeDraft';
 import { PlacePhotoTools } from '../components/PlacePhotoTools';
+import { PlaceSettingFields } from '../components/PlaceSettingFields';
 import { db, recordTombstones, safeWrite } from '../db';
 import { formatUserError } from '../errors';
 import { useApp } from '../store/app';
@@ -84,6 +86,11 @@ export function Locations() {
   const [fleshError, setFleshError] = useState('');
   const [undoSnapshot, setUndoSnapshot] = useState<Location | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [newArea, setNewArea] = useState('');
+  const [newNear, setNewNear] = useState('');
+  const [newResidentIds, setNewResidentIds] = useState<string[]>([]);
+  const [newDismissed, setNewDismissed] = useState<string[]>([]);
+  const dismissedByPlace = useRef(new Map<string, string[]>());
 
   const world = useLiveQuery(
     async () => {
@@ -108,6 +115,15 @@ export function Locations() {
     [world?.id]
   );
   const places = placeRows ?? [];
+  const castRows = useLiveQuery(
+    async () => (world ? db.characters.where('worldId').equals(world.id).toArray() : []),
+    [world?.id]
+  ) ?? [];
+  const areaNames = [...new Set(places.map((place) => place.area?.trim() ?? '').filter(Boolean))];
+  const placeRefs = places.map((place) => ({ id: place.id, name: place.name }));
+  const castChips = castRows.map((person) => ({
+    id: person.id, name: person.name, aliases: person.aliases, hue: person.hue
+  }));
 
   const selected = places.find((l) => l.id === selectedId)
     ?? (pendingLocationId ? places.find((l) => l.id === pendingLocationId) : undefined)
@@ -147,9 +163,16 @@ export function Locations() {
     setFleshBusy(true);
     setFleshError('');
     try {
-      const result = await fleshOutLocation(world ?? null, draft);
+      const result = await fleshOutLocation(world ?? null, draft, {
+        cast: castRows,
+        areas: areaNames,
+        places: placeRefs,
+        selectedIds: draft.residentIds,
+        dismissedIds: dismissedByPlace.current.get(draft.id) ?? []
+      });
       setUndoSnapshot(draft);
       patch(result);
+      await seedBlankResidentLocations(result.residentIds, (result.name || draft.name).trim());
     } catch (e) {
       setFleshError(formatUserError(e));
     } finally {
@@ -183,8 +206,20 @@ export function Locations() {
     setAiBusy(true);
     setError('');
     try {
-      const result = await draftLocation(world, aiDesc.trim());
+      const brief = [aiDesc.trim(), newArea.trim() && `in ${newArea.trim()}`, newNear.trim()].filter(Boolean).join('. ');
+      const result = await draftLocation(world, brief, {
+        cast: castRows,
+        areas: areaNames,
+        places: placeRefs,
+        selectedIds: newResidentIds,
+        dismissedIds: newDismissed
+      });
       await addLocation(result);
+      await seedBlankResidentLocations(result.residentIds, (result.name || '').trim());
+      setNewArea('');
+      setNewNear('');
+      setNewResidentIds([]);
+      setNewDismissed([]);
     } catch (e) {
       setError(formatUserError(e));
     } finally {
@@ -242,9 +277,21 @@ export function Locations() {
         {narrow && (
           <button className="btn-ghost" style={{ padding: '5px 11px', fontSize: 11, flexShrink: 0 }} onClick={() => setCreating(true)}>+ new</button>
         )}
-        {places.map((l) => {
+        {groupLocationsByArea(places).map((group) => (
+          <div key={group.area || 'loose'} style={{ display: 'flex', flexDirection: stacked ? 'row' : 'column', gap: stacked ? 8 : 4, minWidth: 0 }}>
+            {group.area && (
+              <div style={{
+                fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.08em',
+                color: 'var(--ink-muted)', padding: stacked ? '0 4px' : '8px 8px 0', flexShrink: 0
+              }}>{group.area}</div>
+            )}
+            {group.places.map((l) => {
           const active = selected?.id === l.id;
           const inScene = episode?.locationId === l.id;
+          const residentLine = (l.residentIds ?? [])
+            .map((id) => castRows.find((person) => person.id === id)?.name.trim())
+            .filter(Boolean)
+            .join(', ');
           return (
             <div
               key={l.id}
@@ -262,7 +309,7 @@ export function Locations() {
                 <div style={{ fontSize: stacked ? 12.5 : 13.5, fontWeight: 600, color: 'var(--ink-heading)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{l.name || 'unnamed'}</div>
                 {!narrow && (
                   <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {inScene ? "this chapter's place" : (l.tagline || 'no tagline yet')}
+                    {inScene ? "this chapter's place" : (residentLine || l.tagline || 'no tagline yet')}
                   </div>
                 )}
               </div>
@@ -287,6 +334,8 @@ export function Locations() {
             </div>
           );
         })}
+          </div>
+        ))}
       </div>
 
       {/* editor */}
@@ -302,7 +351,21 @@ export function Locations() {
             </div>
             <textarea
               rows={2} value={aiDesc} onChange={(e) => setAiDesc(e.target.value)}
-              placeholder="e.g. A harbour registry where every debt in the city is written under a false name"
+              placeholder="e.g. James Mansion in Briar Park, home of Ada James, about 15 minutes from the school"
+            />
+            <PlaceSettingFields
+              placeKey="new"
+              cast={castChips}
+              areas={areaNames}
+              area={newArea}
+              near={newNear}
+              residentIds={newResidentIds}
+              dismissedIds={newDismissed}
+              authorText={[aiDesc, newArea && `in ${newArea}`, newNear].filter(Boolean).join('\n')}
+              onArea={setNewArea}
+              onNear={setNewNear}
+              onResidentIds={setNewResidentIds}
+              onDismissedIds={setNewDismissed}
             />
             {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
             <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -426,7 +489,10 @@ export function Locations() {
                 <div>
                   <Mono style={{ letterSpacing: '0.16em', marginBottom: 8 }}>location</Mono>
                   <input
-                    value={d.name} onChange={(e) => patch({ name: e.target.value })} placeholder="Name"
+                    value={d.name}
+                    onChange={(e) => patch({ name: e.target.value })}
+                    onBlur={() => { void seedBlankResidentLocations(d.residentIds, d.name); }}
+                    placeholder="Name"
                     className="serif"
                     style={{ fontWeight: 300, fontSize: narrow ? 28 : 38, color: 'var(--ink-heading)', lineHeight: 1.08, background: 'transparent', border: 0, padding: 0, borderRadius: 0 }}
                   />
@@ -450,6 +516,23 @@ export function Locations() {
                     </div>
                   ))}
                 </div>
+                <PlaceSettingFields
+                  placeKey={d.id}
+                  cast={castChips}
+                  areas={areaNames}
+                  area={d.area ?? ''}
+                  near={d.near ?? ''}
+                  residentIds={d.residentIds ?? []}
+                  dismissedIds={dismissedByPlace.current.get(d.id) ?? []}
+                  authorText={[d.name, d.summary, d.inhabitants, d.area ?? '', d.near ?? ''].join('\n')}
+                  onArea={(area) => patch({ area })}
+                  onNear={(near) => patch({ near })}
+                  onResidentIds={(residentIds) => {
+                    patch({ residentIds });
+                    void seedBlankResidentLocations(residentIds, d.name);
+                  }}
+                  onDismissedIds={(ids) => { dismissedByPlace.current.set(d.id, ids); }}
+                />
               </div>
             </div>
 

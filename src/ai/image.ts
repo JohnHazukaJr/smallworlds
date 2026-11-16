@@ -35,7 +35,8 @@ export function sceneImagePrompt(
   world: World,
   location: Location,
   atmosphereNote?: string,
-  refs?: SceneImageRef[]
+  refs?: SceneImageRef[],
+  style?: PortraitStyle
 ): string {
   const faces = (refs ?? []).filter((r) => r.kind === 'face');
   const places = (refs ?? []).filter((r) => r.kind === 'place');
@@ -47,7 +48,9 @@ export function sceneImagePrompt(
     : '';
   const peopleLine = faces.length > 0
     ? 'People in frame must match the named reference faces. No extra invented faces.'
-    : 'cinematic lighting, no people, no text, no watermark, painterly environment art';
+    : style === 'comic'
+      ? `${portraitStyleLine('comic')}. No people, no text, no watermark`
+      : 'cinematic lighting, no people, no text, no watermark, painterly environment art';
   const bits = [
     `Atmospheric wide establishing shot of "${location.name}"`,
     location.tagline,
@@ -305,6 +308,7 @@ export async function generateSceneImage(opts: {
   atmosphereNote?: string;
   matchCast?: boolean;
   refs?: SceneImageRef[];
+  style?: PortraitStyle;
   signal?: AbortSignal;
 }): Promise<SceneImageResult> {
   if (opts.provider.kind !== 'openai') {
@@ -313,7 +317,7 @@ export async function generateSceneImage(opts: {
   const wantedRefs = opts.matchCast ? await prepareSceneImageRefs(opts.refs ?? []) : [];
   const canRef = wantedRefs.length > 0 && imageModelAcceptsRefs(opts.provider, opts.model);
   const refs = canRef ? wantedRefs : [];
-  const prompt = sceneImagePrompt(opts.world, opts.location, opts.atmosphereNote, refs);
+  const prompt = sceneImagePrompt(opts.world, opts.location, opts.atmosphereNote, refs, opts.style);
   const url = await requestImage({
     provider: opts.provider,
     model: opts.model,
@@ -336,6 +340,7 @@ export async function generateSceneImage(opts: {
 export async function generateLocationPhoto(opts: {
   world: World;
   location: Location;
+  style?: PortraitStyle;
   signal?: AbortSignal;
 }): Promise<string> {
   const resolved = configuredImageModel(opts.world);
@@ -350,6 +355,7 @@ export async function generateLocationPhoto(opts: {
     model: resolved.model,
     world: opts.world,
     location: opts.location,
+    style: opts.style,
     signal: opts.signal
   });
   return result.dataUrl;
