@@ -59,6 +59,26 @@ describe('mergeLiveRelationshipPatch', () => {
       { targetId: 'c2', kind: 'rival', note: 'after the ledger' }
     ]);
   });
+
+  it('updates an untracked tie without giving it a score', () => {
+    const ada = npc('c1', 'Ada');
+    const ben = npc('c2', 'Ben');
+    const next = mergeLiveRelationshipPatch(ada, ben, { kind: 'rival', note: 'after the ledger' }, ['c1', 'c2']);
+    expect(next?.[0].track).toBeUndefined();
+    expect(next?.[0].score).toBeUndefined();
+  });
+
+  it('ignores a kind rewrite on a tracked tie', () => {
+    const ada = npc('c1', 'Ada');
+    const ben = npc('c2', 'Ben');
+    ada.relationships = [{
+      targetId: 'c2', kind: 'wary', note: 'quiet', track: true, score: 22,
+      marks: [{ at: 40, text: 'she shares the ledger' }]
+    }];
+    expect(mergeLiveRelationshipPatch(ada, ben, { kind: 'lover', note: 'suddenly' }, ['c1', 'c2'])).toBeNull();
+    expect(ada.relationships[0].kind).toBe('wary');
+    expect(ada.relationships[0].score).toBe(22);
+  });
 });
 
 describe('capSceneLedger', () => {
@@ -303,7 +323,7 @@ describe('LIVE_MEMORY_TOOL', () => {
   it('accepts live state and canon keys in one schema', () => {
     const props = LIVE_MEMORY_TOOL.parameters.properties as Record<string, unknown>;
     expect(LIVE_MEMORY_TOOL.name).toBe('update_live_memory');
-    for (const key of ['updates', 'scene', 'ties', 'facts', 'threads', 'place', 'knowledge']) {
+    for (const key of ['updates', 'scene', 'ties', 'facts', 'threads', 'place', 'knowledge', 'bonds', 'goals']) {
       expect(props[key]).toBeTruthy();
     }
   });

@@ -6,13 +6,18 @@ import { GAP_DAYS, GAP_LABELS } from '../ui/theme';
 import type {
   CalendarEvent, CalendarEventKind, CalendarEventPromptPolicy, CalendarEventScale,
   Character, CharacterState, ComposeMode,   Episode, EpisodeGuest, EpisodeWrap, Location,
-  OpenThread, Relationship, Season, SeasonWrap, SeasonWrapPlotArc, SeasonWrapRelationshipUpdate,
+  OpenThread, PlayerGoal, Relationship, ScoreMark, Season, SeasonWrap, SeasonWrapPlotArc, SeasonWrapRelationshipUpdate,
   Turn, TurnLength, TurnRole, World, WrapBeat, WrapCharacterOutcome
 } from '../types';
 import {
   CALENDAR_EVENT_CAP, defaultVisibilityForKind, isPlayerAgencyMode, worldCalendarEventPrefs
 } from '../types';
 import { normalizeRelationships } from '../relationships';
+import {
+  applyTrackedShifts, authoredMarks, bondCue, FALLBACK_BOND_MARKS, FALLBACK_GOAL_MARKS,
+  goalsToKeep, keptBond, marksToKeep, meaningWords, PLAYER_GOAL_CAP,
+  shouldDraftBondMeanings, shouldDraftGoalMeanings, worldBondPace
+} from '../bonds';
 import {
   buildNextSeasonPlotTargets, calendarPatch, emptyCharacter, emptyLocation,
   formatStoryDate, inferStanceFromInstructions, pendingPlotTargets,
@@ -322,21 +327,38 @@ function liveCardNote(value: string | undefined): string | undefined {
 }
 
 /** Ties this person has with others who are in the room, named for the prompt. */
-function tiesInRoom(c: Character, room: Character[]): string | undefined {
+export function tiesInRoom(c: Character, room: Character[]): string | undefined {
   const names = new Map(
     room.filter((p) => p.id !== c.id && p.name.trim()).map((p) => [p.id, p.name.trim()])
   );
+  const player = room.find((p) => p.isPlayer);
   const bits: string[] = [];
   for (const rel of c.relationships ?? []) {
     const name = names.get(rel.targetId);
     if (!name) continue;
     const kind = rel.kind?.trim();
     const note = rel.note?.trim();
-    if (!kind && !note) continue;
-    bits.push(note ? `${name}, ${kind || 'linked'}: ${note}` : `${name}, ${kind}`);
+    const cue = player && rel.targetId === player.id ? bondCue(rel) : undefined;
+    if (!kind && !note && !cue) continue;
+    const shownNote = note ? (cue ? note.slice(0, 80) : note) : '';
+    const base = shownNote
+      ? `${name}, ${kind || 'linked'}: ${shownNote}`
+      : kind
+        ? `${name}, ${kind}`
+        : '';
+    bits.push(cue ? `${base ? `${base}. ` : ''}Toward ${name}: ${cue}` : base);
     if (bits.length >= 4) break;
   }
   return bits.length > 0 ? bits.join('; ') : undefined;
+}
+
+/** The player is in the room for bond lines even though they are not a speaker. */
+function withPlayer(speakers: Character[], everyone: Character[]): Character[] {
+  const ids = new Set(speakers.map((person) => person.id));
+  const room = everyone.filter((person) => ids.has(person.id));
+  const player = everyone.find((person) => person.isPlayer);
+  if (player && !ids.has(player.id)) room.push(player);
+  return room;
 }
 
 function sceneVoiceFromCharacter(c: Character, room: Character[]): SceneVoice {
@@ -386,10 +408,11 @@ function roomSceneSpeakers(characters: Character[], guests: EpisodeGuest[]): Sce
 function orderedRoomVoices(
   characters: Character[],
   guests: EpisodeGuest[],
-  firstIds: string[]
+  firstIds: string[],
+  tieWith: Character[] = characters
 ): SceneVoice[] {
   const voices: SceneVoice[] = [
-    ...characters.flatMap((c) => (c.name.trim() && !c.isPlayer ? [sceneVoiceFromCharacter(c, characters)] : [])),
+    ...characters.flatMap((c) => (c.name.trim() && !c.isPlayer ? [sceneVoiceFromCharacter(c, tieWith)] : [])),
     ...guests.flatMap((g) => {
       const name = g.name.trim();
       if (!name) return [];
@@ -600,7 +623,12 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
 
   const voices: SceneVoice[] = injectionReply
     ? []
-    : orderedRoomVoices(inScene, sceneGuests(), picked.map((speaker) => speaker.id));
+    : orderedRoomVoices(
+      inScene,
+      sceneGuests(),
+      picked.map((speaker) => speaker.id),
+      withPlayer(inScene, ctx.characters)
+    );
   const roomSpeakers = injectionReply
     ? (hands && !hands.isPlayer ? roomSceneSpeakers([hands], []) : [])
     : roomSceneSpeakers(inScene, sceneGuests());
@@ -874,11 +902,12 @@ async function regenerateBeatInner(opts: {
   const name = guest?.name ?? speaking?.name ?? 'the narrator';
   const inScene = ctx.characters.filter((c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer);
   const guestsHere = activeGuests(ctx.episode);
+  const tieRoom = withPlayer(inScene, ctx.characters);
   const voices: SceneVoice[] = characterReroll
     ? guest
       ? [{ id: guest.id, name: guest.name, kind: 'guest', brief: guest.brief, voice: guest.voice }]
-      : [sceneVoiceFromCharacter(speaking!, inScene)]
-    : orderedRoomVoices(inScene, guestsHere, []);
+      : [sceneVoiceFromCharacter(speaking!, tieRoom)]
+    : orderedRoomVoices(inScene, guestsHere, [], tieRoom);
   const sceneSpeakers: SceneSpeaker[] = characterReroll
     ? voices.map((voice) => ({
       id: voice.id,
@@ -1188,6 +1217,34 @@ async function maybeRefreshLiveMemory(
     .slice(0, 8)
     .join('\n');
 
+  const playerHere = scenePeople.find((c) => c.isPlayer);
+  const trackedBonds = playerHere
+    ? scenePeople.flatMap((c) => (
+      c.isPlayer
+        ? []
+        : c.relationships
+          .filter((r) => r.track && r.targetId === playerHere.id)
+          .map((r) => ({ name: c.name.trim(), rel: r }))
+    )).filter((row) => row.name).slice(0, 4)
+    : [];
+  const trackedGoals = (playerHere?.goals ?? []).filter((g) => g.text.trim()).slice(0, 4);
+  // fileCanon is false on a "just this moment" turn, which must not move a score.
+  const askShifts = fileCanon && (trackedBonds.length > 0 || trackedGoals.length > 0);
+  const bondList = trackedBonds.map((row, index) => {
+    const words = meaningWords(row.rel.score ?? 0, row.rel.marks, FALLBACK_BOND_MARKS);
+    return `${index + 1}. ${row.name}. Now: ${words.current}.${words.next ? ` Next: ${words.next}.` : ''}`;
+  }).join('\n');
+  const goalList = trackedGoals.map((goal, index) => {
+    const words = meaningWords(goal.score, goal.marks, FALLBACK_GOAL_MARKS);
+    return `${index + 1}. ${goal.text.trim()}. Now: ${words.current}.${words.next ? ` Next: ${words.next}.` : ''}`;
+  }).join('\n');
+  const shiftRules = askShifts
+    ? 'bonds: one row per listed tracked bond. shift is an integer from -2 to 2, and 0 if this beat did not move it. ' +
+      'reason is one short clause, or omit. Do not pick a new score or a new kind.\n' +
+      'goals: one row per listed player goal. index is that goal\'s number. The same shift scale. 0 if this beat did not move it.\n' +
+      'Do not put a tracked bond in ties.\n'
+    : '';
+
   const inSceneNames = new Set(inScene.map((c) => c.name.trim().toLowerCase()).filter(Boolean));
   const existingFactTexts = ctx.continuity.map((f) => f.text);
   const existingThreadTexts = ctx.threads.map((t) => t.text);
@@ -1217,6 +1274,8 @@ async function maybeRefreshLiveMemory(
       threads?: string[];
       place?: { name?: string; currentState?: string; atmosphere?: string };
       knowledge?: Array<{ name?: string; nowKnows?: string }>;
+      bonds?: Array<{ name?: string; shift?: number; reason?: string }>;
+      goals?: Array<{ index?: number; text?: string; shift?: number; reason?: string }>;
     }>(
       world,
       'You update live room state and file hard canon WHILE the episode is still open. ' +
@@ -1231,17 +1290,19 @@ async function maybeRefreshLiveMemory(
         `threads: 0–${LIVE_CANON_THREAD_CAP} NEW open tensions not already listed.\n` +
         'place: lasting room condition and optional weather/light; omit if unchanged.\n' +
         'knowledge: only in-scene named cast who clearly learned something; omit if none.\n' +
+        shiftRules +
         'Omit any key that has nothing new. Each canon line under 220 characters.',
       `World: ${world.title}. Episode ${ctx.episode.number}.\n` +
         `Place: ${placeLine}${loc?.currentState ? ` (now: ${loc.currentState})` : ''}\n` +
         `In-scene cast (current state):\n${castLines || '(nobody on stage)'}\n\n` +
         `Already established in this scene (do not refile as facts):\n${priorLedger || '(nothing yet)'}\n\n` +
         `Ties in the room:\n${tieLines || '(none filed)'}\n\n` +
+        (askShifts ? `Tracked bonds:\n${bondList || '(none)'}\n\nPlayer goals:\n${goalList || '(none)'}\n\n` : '') +
         `Known facts (do not repeat):\n${knownBlock || '(none)'}\n\n` +
         `Open threads (do not repeat):\n${threadBlock || '(none)'}\n\n` +
         `Recent beats:\n${digest.slice(0, 10000)}\n\n` +
         `Call update_live_memory.`,
-      1100,
+      askShifts ? 1400 : 1100,
       signal,
       25_000,
       'utility',
@@ -1257,6 +1318,28 @@ async function maybeRefreshLiveMemory(
       result.ties ?? [],
       ctx.characters.map((c) => c.id)
     );
+    let shiftsApplied = 0;
+    if (askShifts) {
+      const changes = applyTrackedShifts({
+        people: scenePeople,
+        bonds: result.bonds ?? [],
+        goals: result.goals ?? [],
+        worldPace: worldBondPace(world.ai),
+        stance: storyStanceOf(world),
+        moment: false
+      });
+      const shiftedAt = Date.now();
+      for (const change of changes) {
+        const patch: Partial<Character> = { updatedAt: shiftedAt };
+        if (change.relationships) patch.relationships = change.relationships;
+        if (change.goals) patch.goals = change.goals;
+        await db.characters.update(change.id, patch);
+        const person = scenePeople.find((c) => c.id === change.id);
+        if (person && change.relationships) person.relationships = change.relationships;
+        if (person && change.goals) person.goals = change.goals;
+        shiftsApplied += 1;
+      }
+    }
     const sceneLedger = capSceneLedger(result.scene);
 
     const extract = rememberedExtract(normalizeLiveCanonExtract(result, {
@@ -1330,7 +1413,7 @@ async function maybeRefreshLiveMemory(
     }
     await db.episodes.update(ctx.episode.id, epPatch);
     ctx.episode = { ...ctx.episode, ...epPatch };
-    if (applied > 0 || tiesApplied > 0) {
+    if (applied > 0 || tiesApplied > 0 || shiftsApplied > 0) {
       const refreshed = await db.characters.where('worldId').equals(world.id).toArray();
       ctx.characters = refreshed;
     }
@@ -1437,10 +1520,12 @@ export function mergeLiveRelationshipPatch(
   castIds: string[]
 ): Relationship[] | null {
   if (from.id === to.id) return null;
+  const existing = from.relationships.find((r) => r.targetId === to.id);
+  // A tracked bond moves by score. The model's kind cannot jump it.
+  if (existing?.track) return null;
   const kind = (patch.kind ?? '').trim();
   const note = (patch.note ?? '').trim();
   if (!kind && !note) return null;
-  const existing = from.relationships.find((r) => r.targetId === to.id);
   const nextKind = kind || existing?.kind || 'linked';
   const nextNote = note || existing?.note || '';
   if (existing && existing.kind === nextKind && existing.note === nextNote) return null;
@@ -2289,10 +2374,12 @@ export function applySeasonRelationshipUpdates(
     const from = byName(r.from);
     const to = byName(r.to);
     if (!from || !to || from.id === to.id) continue;
+    const prev = from.relationships.find((edge) => edge.targetId === to.id);
     from.relationships = normalizeRelationships(
       [
         ...from.relationships.filter((edge) => edge.targetId !== to.id),
         {
+          ...keptBond(prev),
           targetId: to.id,
           kind: (r.kind ?? '').trim() || 'linked',
           note: (r.note ?? '').trim()
@@ -2965,10 +3052,16 @@ export function mergeRelationships(
   for (const r of incoming) {
     const cur = map.get(r.targetId);
     if (!cur) {
-      map.set(r.targetId, { ...r });
+      map.set(r.targetId, {
+        targetId: r.targetId,
+        kind: (r.kind ?? '').trim() || 'linked',
+        note: r.note ?? ''
+      });
       continue;
     }
+    if (cur.locked) continue;
     map.set(r.targetId, {
+      ...cur,
       targetId: r.targetId,
       kind: cur.kind.trim() ? cur.kind : r.kind,
       note: cur.note.trim() ? (r.note.trim() && r.note.length > cur.note.length ? r.note : cur.note) : r.note
@@ -3117,6 +3210,90 @@ export async function fleshOutRelationships(
     castIds,
     character.id
   );
+}
+
+function parsedMarks(rows: Array<{ at?: number; text?: string }> | undefined): ScoreMark[] {
+  return (rows ?? []).map((row) => ({ at: Number(row.at), text: row.text ?? '' }));
+}
+
+/**
+ * Meanings for a bond whose tracking is already on.
+ * An author-written list is left alone unless replace is set. An untracked tie is not enrolled.
+ */
+export async function draftBondMeanings(
+  world: World | null,
+  from: Character,
+  player: Character,
+  rel: Relationship,
+  opts?: { replace?: boolean }
+): Promise<ScoreMark[]> {
+  const replace = !!opts?.replace;
+  if (!shouldDraftBondMeanings(rel, replace)) return authoredMarks(rel.marks);
+  const result = await utilityJson<{ marks?: Array<{ at?: number; text?: string }> }>(
+    world,
+    'You write what a bond\'s points mean between two people in a story. ' +
+      'Call return_json with {"marks":[{"at":0,"text":"..."}]}. ' +
+      'Three or four steps, rising from a low at to a high at between 0 and 100. ' +
+      'Each text is one concrete sentence about what is now true. No digits in the sentence.',
+    `From ${from.name || 'them'} toward ${player.name || 'the player'}. ` +
+      `Kind: ${rel.kind || 'linked'}. Note: ${rel.note || '(none)'}.`
+  );
+  return marksToKeep(rel.marks, parsedMarks(result.marks), true);
+}
+
+/**
+ * Player goals, only when the list is still empty. A goal the author already wrote is left alone.
+ */
+export async function draftPlayerGoals(
+  world: World | null,
+  player: Character,
+  cast: Character[]
+): Promise<PlayerGoal[]> {
+  const existing = player.goals ?? [];
+  if (existing.some((goal) => goal.text.trim())) return existing.slice(0, PLAYER_GOAL_CAP);
+  const names = cast
+    .filter((person) => !person.isPlayer && person.name.trim())
+    .map((person) => person.name.trim())
+    .slice(0, 8);
+  const result = await utilityJson<{
+    goals?: Array<{ text?: string; marks?: Array<{ at?: number; text?: string }> }>;
+  }>(
+    world,
+    'You draft the player\'s longer aims for a story. ' +
+      'Call return_json with {"goals":[{"text":"...","marks":[{"at":0,"text":"..."}]}]}. ' +
+      `At most ${PLAYER_GOAL_CAP} aims. Each text is one concrete aim, not a scene want. ` +
+      'Each goal has three or four rising marks between 0 and 100. ' +
+      'A mark\'s text is one sentence about what is now true. No digits in that sentence.',
+    `Player: ${player.name || 'the protagonist'}. Who they are: ${player.summary.slice(0, 400)}. ` +
+      `What they want: ${player.desires.slice(0, 240)}. ` +
+      `Cast: ${names.join(', ') || '(none yet)'}.`
+  );
+  const incoming: PlayerGoal[] = (result.goals ?? []).slice(0, PLAYER_GOAL_CAP).map((goal) => ({
+    id: uid(),
+    text: (goal.text ?? '').trim(),
+    score: 0,
+    marks: authoredMarks(parsedMarks(goal.marks))
+  }));
+  return goalsToKeep(existing, incoming, true);
+}
+
+/** Meanings for one player goal. An author-written list is left alone unless replace is set. */
+export async function draftGoalMeanings(
+  world: World | null,
+  goal: PlayerGoal,
+  opts?: { replace?: boolean }
+): Promise<ScoreMark[]> {
+  const replace = !!opts?.replace;
+  if (!shouldDraftGoalMeanings(goal, replace)) return authoredMarks(goal.marks);
+  const result = await utilityJson<{ marks?: Array<{ at?: number; text?: string }> }>(
+    world,
+    'You write what a player goal\'s points mean. ' +
+      'Call return_json with {"marks":[{"at":0,"text":"..."}]}. ' +
+      'Three or four steps, rising from a low at to a high at between 0 and 100. ' +
+      'Each text is one concrete sentence about what is now true. No digits in the sentence.',
+    `Goal: ${goal.text.trim()}.`
+  );
+  return marksToKeep(goal.marks, parsedMarks(result.marks), true);
 }
 
 /** AI-assisted flesh-out of an existing location sheet: fills blanks, enriches filled fields, never removes detail. */

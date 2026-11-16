@@ -1,3 +1,4 @@
+import { keptBond } from './bonds';
 import type { Character, Relationship } from './types';
 
 /** Common kind chips in the Relations editor. */
@@ -31,11 +32,14 @@ export function normalizeRelationships(
     const note = r.note ?? '';
     const prev = byTarget.get(targetId);
     if (!prev) {
-      byTarget.set(targetId, { targetId, kind, note });
+      byTarget.set(targetId, { ...keptBond(r), targetId, kind, note });
       continue;
     }
     // Keep earlier kind if non-empty; prefer longer note when both set.
+    // A tracked row keeps its score. An untracked row stays kind and note.
+    const bondSource = prev.track ? prev : r.track ? r : undefined;
     byTarget.set(targetId, {
+      ...(bondSource ? keptBond(bondSource) : {}),
       targetId,
       kind: prev.kind.trim() ? prev.kind : kind,
       note: prev.note.trim()
@@ -104,6 +108,7 @@ export function upsertLink(rels: Relationship[], link: Relationship): Relationsh
   const i = next.findIndex((r) => r.targetId === link.targetId);
   const kindRaw = link.kind ?? '';
   const row: Relationship = {
+    ...keptBond(link),
     targetId: link.targetId,
     kind: kindRaw.trim().length > 0 ? kindRaw : 'linked',
     note: link.note ?? ''

@@ -11,6 +11,7 @@ import { useApp } from '../store/app';
 import type {
   Character, ContinuityFact, Episode, Location, OpenThread, Season, StoryStance, World, WorldAISettings
 } from '../types';
+import { TrackedScoreSection, WorldBondPaceChips } from './BondScores';
 import { StoryDateFields } from './StoryDateFields';
 import { PlacePhotoTools } from './PlacePhotoTools';
 import { Bar, Chip, ErrorNote, Field, Mono, Sheet, Spinner, Toggle } from '../ui/bits';
@@ -160,6 +161,11 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
       {saveError && <ErrorNote error={saveError} onDismiss={() => setSaveError('')} />}
 
       <div style={{ flex: 1, minHeight: 0, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 16, paddingRight: 2 }}>
+        <TrackedScoreSection
+          characters={characters}
+          castIds={episode.castIds}
+          onPatch={patchChar}
+        />
         {tab === 'context' && (
           <ContextPreview
             world={world} season={season} episode={episode}
@@ -453,6 +459,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               onChange={(v) => patchAI({ pacing: v })}
               valueLabel={world.ai.pacing < 34 ? 'slow-burn' : world.ai.pacing < 67 ? 'measured' : 'propulsive'}
             />
+            <WorldBondPaceChips value={world.ai.bondPace} onChange={(bondPace) => patchAI({ bondPace })} />
 
             <div style={{ borderTop: '1px solid var(--rule)', paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
               <Field label="Prose model for this world" note="unset = global default">

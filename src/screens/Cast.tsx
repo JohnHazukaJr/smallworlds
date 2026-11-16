@@ -1,20 +1,23 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef, useState } from 'react';
 import { characterImportance } from '../ai/characterWeight';
-import { draftCharacter, fleshOutCharacter, fleshOutRelationships } from '../ai/engine';
+import { draftBondMeanings, draftCharacter, draftGoalMeanings, draftPlayerGoals, fleshOutCharacter, fleshOutRelationships } from '../ai/engine';
+import { BondTrackBlock, PlayerGoalsEditor } from '../components/BondScores';
 import { StoryWeightPicker } from '../components/StoryWeightPicker';
 import { CharacterPortraitTools } from '../components/CharacterPortraitTools';
 import { RelationshipMap, type RelationshipMapMode } from '../components/RelationshipMap';
 import { db, recordTombstones, safeWrite } from '../db';
 import { formatUserError } from '../errors';
+import { authoredMarks, withBondTracked } from '../bonds';
 import {
   hasLink, inboundFor, KIND_PRESETS, normalizeRelationships, pruneRelationshipsToCast,
   removeLink, suggestInverseKind, trimRelationships, unlinkedOthers, upsertLink
 } from '../relationships';
 import { useApp } from '../store/app';
-import type { Character, Relationship } from '../types';
+import { resolveModel, useSettings } from '../store/settings';
+import type { Character, Relationship, World } from '../types';
 import { characterAvatarStyle } from '../ui/avatar';
-import { Chip, ConfirmBar, ErrorNote, Field, Mono, Spinner, editorsStacked, phoneChrome, useViewport } from '../ui/bits';
+import { Chip, ConfirmBar, ErrorNote, Field, Mono, Spinner, Toggle, editorsStacked, phoneChrome, useViewport } from '../ui/bits';
 import { ACCENT, ACCENT_RGBA } from '../ui/theme';
 import { characterPortraits, emptyCharacter, nextSceneCastIds, pruneDeletedCharacterFromEpisodes } from '../worldOps';
 import { shouldFlushAutosave } from '../ui/autosave';
@@ -581,6 +584,15 @@ export function Cast() {
 
               {tab === 'psyche' && (
                 <>
+                  {d.isPlayer && (
+                    <PlayerGoalsEditor
+                      goals={d.goals}
+                      canDraft={!!world}
+                      onChange={(goals) => patch({ goals })}
+                      onDraftGoals={world ? () => draftPlayerGoals(world, d, cast) : undefined}
+                      onDraftMeanings={world ? (goal, replace) => draftGoalMeanings(world, goal, { replace }) : undefined}
+                    />
+                  )}
                   <Field label="Traits"><textarea rows={2} value={d.traits} onChange={(e) => patch({ traits: e.target.value })} placeholder="Precise, unhurried, quietly territorial." /></Field>
                   <Field label="Desires" note="what they pursue — this is what makes them proactive">
                     <textarea rows={2} value={d.desires} onChange={(e) => patch({ desires: e.target.value })} />
@@ -613,6 +625,7 @@ export function Cast() {
                 <RelationsEditor
                   character={d}
                   cast={cast}
+                  world={world ?? null}
                   narrow={narrow}
                   onChange={(relationships) => {
                     const ids = cast.map((c) => c.id);
@@ -690,10 +703,11 @@ export function Cast() {
 }
 
 function RelationsEditor({
-  character, cast, narrow, onChange, onSelectCharacter, onFleshOut, fleshBusy
+  character, cast, world, narrow, onChange, onSelectCharacter, onFleshOut, fleshBusy
 }: {
   character: Character;
   cast: Character[];
+  world: World | null;
   narrow: boolean;
   onChange: (r: Relationship[]) => void;
   onSelectCharacter: (id: string) => void;
@@ -703,6 +717,12 @@ function RelationsEditor({
   const [mode, setMode] = useState<RelationshipMapMode | 'list'>('map');
   const [focusTargetId, setFocusTargetId] = useState<string | null>(null);
   const [notice, setNotice] = useState('');
+  const [draftingId, setDraftingId] = useState<string | null>(null);
+  const utilityModel = useSettings((s) => s.utilityModel);
+  const proseModel = useSettings((s) => s.proseModel);
+  const hasModel = !!resolveModel(utilityModel ?? proseModel);
+  const characterRef = useRef(character);
+  characterRef.current = character;
   const cardRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const others = cast.filter((c) => c.id !== character.id);
   const available = unlinkedOthers(character, cast);
@@ -715,6 +735,35 @@ function RelationsEditor({
   }, [focusTargetId, character.relationships]);
 
   const setRels = (rels: Relationship[]) => onChange(rels);
+
+  const draftMarks = async (rel: Relationship, replace: boolean) => {
+    if (!world) return authoredMarks(rel.marks);
+    const player = cast.find((person) => person.isPlayer);
+    if (!player) return authoredMarks(rel.marks);
+    setDraftingId(rel.targetId);
+    try {
+      return await draftBondMeanings(world, characterRef.current, player, { ...rel, track: true }, { replace });
+    } finally {
+      setDraftingId(null);
+    }
+  };
+
+  const toggleTrack = (rel: Relationship) => {
+    const next = withBondTracked(rel, !rel.track);
+    onChange(upsertLink(character.relationships, next));
+    if (!hasModel || rel.track || authoredMarks(rel.marks).length > 0) return;
+    void (async () => {
+      try {
+        const marks = await draftMarks(next, false);
+        const current = characterRef.current;
+        const row = current.relationships.find((edge) => edge.targetId === rel.targetId);
+        if (!row?.track || authoredMarks(row.marks).length > 0 || marks.length === 0) return;
+        onChange(upsertLink(current.relationships, { ...row, marks }));
+      } catch (e) {
+        setNotice(formatUserError(e));
+      }
+    })();
+  };
 
   const updateByTarget = (targetId: string, p: Partial<Relationship>) => {
     const cur = character.relationships.find((r) => r.targetId === targetId);
@@ -862,10 +911,12 @@ function RelationsEditor({
                       const nextId = e.target.value;
                       if (nextId === r.targetId) return;
                       if (hasLink(character.relationships, nextId)) return;
+                      const nextTarget = cast.find((person) => person.id === nextId);
+                      const moved = { ...r, targetId: nextId };
                       setRels(
                         upsertLink(
                           removeLink(character.relationships, r.targetId),
-                          { ...r, targetId: nextId }
+                          nextTarget?.isPlayer ? moved : withBondTracked(moved, false)
                         )
                       );
                       setFocusTargetId(nextId);
@@ -912,6 +963,22 @@ function RelationsEditor({
                   placeholder="the history between them, one line"
                   style={{ minHeight: 44 }}
                 />
+                {target?.isPlayer && !character.isPlayer && (
+                  <>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <Toggle on={!!r.track} label="Track this bond" onClick={() => toggleTrack(r)} />
+                      <span style={{ fontSize: 12.5, color: 'var(--ink-muted)' }}>Track this bond</span>
+                    </div>
+                    {r.track && (
+                      <BondTrackBlock
+                        rel={r}
+                        canDraft={!!world && hasModel && draftingId !== r.targetId}
+                        onChange={(next) => onChange(upsertLink(character.relationships, next))}
+                        onDraft={(replace) => draftMarks(r, replace)}
+                      />
+                    )}
+                  </>
+                )}
                 {target && (
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                     <button className="btn-quiet" style={{ fontSize: 12, minHeight: 44 }} onClick={() => onSelectCharacter(target.id)}>

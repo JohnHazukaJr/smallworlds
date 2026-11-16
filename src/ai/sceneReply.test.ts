@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_AI } from '../worldOps';
 import type { Character, Episode, Location, Season, World } from '../types';
+import { tiesInRoom } from './engine';
 import { buildSceneReply, type PromptContext } from './prompts';
 import { splitSceneReply, type SceneSpeaker } from './sceneReply';
 
@@ -394,5 +395,51 @@ describe('splitSceneReply', () => {
     expect(walkOn.find((piece) => piece.role === 'character')).toMatchObject({
       speakerId: 'g1', kind: 'guest'
     });
+  });
+});
+
+describe('bond meanings in the scene prompt', () => {
+  it('names the current meaning and leaves the score out', () => {
+    const player = npc('you', 'Sam');
+    player.isPlayer = true;
+    player.goals = [{
+      id: 'g1',
+      text: 'prove the forgery',
+      score: 73,
+      marks: [
+        { at: 30, text: 'you know the office has a second book' },
+        { at: 80, text: 'you can name the forger' }
+      ]
+    }];
+    const ada = npc('c1', 'Ada');
+    ada.relationships = [{
+      targetId: 'you',
+      kind: 'wary',
+      note: 'she keeps the desk',
+      track: true,
+      score: 73,
+      marks: [
+        { at: 20, text: 'she will share the ledger' },
+        { at: 80, text: 'she names who signed it' }
+      ]
+    }];
+    const base = ctx();
+    base.characters = [player, ada, npc('c2', 'Ben')];
+    const ties = tiesInRoom(ada, base.characters);
+    const built = buildSceneReply({
+      ctx: base,
+      mode: 'speak',
+      playerText: 'Where is the ledger?',
+      length: 'beat',
+      speakers: [{ id: 'c1', name: 'Ada', kind: 'cast', ties }],
+      present: [{ name: 'Ada', role: 'registrar' }, { name: 'Sam', role: 'the player' }]
+    });
+    expect(ties).toContain('she will share the ledger');
+    expect(ties).toContain('Do not skip to the next meaning in this scene.');
+    expect(ties).not.toMatch(/\b73\b/);
+    expect(built.system).toContain('she will share the ledger');
+    expect(built.system).toContain('you know the office has a second book');
+    expect(built.system).toContain('Do not skip to the next meaning in this scene.');
+    expect(built.system).not.toMatch(/\b73\b/);
   });
 });

@@ -4,6 +4,7 @@
  */
 import { activeCalendarEvents, emptyCalendarEvent } from '../calendarEvents';
 import { db, exportWorld, guardStorage, uid, type WorldExport } from '../db';
+import { keptBond } from '../bonds';
 import { normalizeRelationships } from '../relationships';
 import type {
   CalendarEvent, Character, CharacterImportance, CharacterState, ContinuityFact, Episode, EpisodeGuest,
@@ -226,7 +227,12 @@ export function remapRelationships(
   for (const r of rels) {
     const targetId = idMap.get(r.targetId);
     if (!targetId) continue;
-    out.push({ targetId, kind: r.kind, note: r.note });
+    out.push({
+      ...keptBond(r),
+      targetId,
+      kind: r.kind,
+      note: r.note
+    });
   }
   return out;
 }
@@ -561,9 +567,18 @@ export function assembleCompactedWorld(
         note: r.note ?? ''
       });
     }
+    const remapped = remapRelationships(c.relationships, charIdMap);
     const rels = incoming.length > 0
-      ? incoming
-      : remapRelationships(c.relationships, charIdMap);
+      ? incoming.map((r) => {
+        const prev = remapped.find((edge) => edge.targetId === r.targetId);
+        return {
+          ...keptBond(prev),
+          targetId: r.targetId,
+          kind: r.kind,
+          note: r.note
+        };
+      })
+      : remapped;
     return {
       ...c,
       relationships: normalizeRelationships(rels, draftedChars.map((x) => x.id), c.id)

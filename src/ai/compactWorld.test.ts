@@ -40,10 +40,15 @@ const npc = (id: string, name: string, extras: Partial<Character> = {}): Charact
 
 function sourceExport(): WorldExport {
   const player = npc('you', 'you', {
-    isPlayer: true, role: 'protagonist', hue: 60, customInstructions: ''
+    isPlayer: true, role: 'protagonist', hue: 60, customInstructions: '',
+    goals: [{ id: 'g1', text: 'prove the forgery', score: 44 }]
   });
   const ada = npc('ada', 'Ada', {
-    relationships: [{ targetId: 'ben', kind: 'ally', note: 'Shares the desk' }]
+    relationships: [{
+      targetId: 'ben', kind: 'ally', note: 'Shares the desk',
+      track: true, score: 44, pace: 'slow',
+      marks: [{ at: 70, text: 'she tells you who signed the ledger' }]
+    }]
   });
   const ben = npc('ben', 'Ben');
   const loc: Location = {
@@ -212,7 +217,14 @@ describe('assembleCompactedWorld', () => {
     expect(ada.backstory).toContain('UNIQUE_BACKSTORY');
     expect(ada.customInstructions).toBe('keep voice');
     expect(ada.anchors).toEqual(['Ada never kneels']);
-    expect(ada.relationships.some((r) => r.targetId === ben.id)).toBe(true);
+    const kept = ada.relationships.find((r) => r.targetId === ben.id);
+    expect(kept?.track).toBe(true);
+    expect(kept?.score).toBe(44);
+    expect(kept?.pace).toBe('slow');
+    expect(kept?.marks?.[0]?.text).toContain('signed the ledger');
+    const you = graph.characters.find((c) => c.isPlayer);
+    expect(you?.goals?.[0]?.text).toBe('prove the forgery');
+    expect(you?.goals?.[0]?.score).toBe(44);
     expect(ben.backstory).toBe('Ben old backstory');
     const loc = graph.locations[0];
     expect(loc.currentState).toMatch(/Quieter/);

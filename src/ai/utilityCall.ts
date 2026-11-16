@@ -207,6 +207,29 @@ export const LIVE_MEMORY_TOOL: ToolSpec = {
             nowKnows: { type: 'string' }
           }
         }
+      },
+      bonds: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            shift: { type: 'integer' },
+            reason: { type: 'string' }
+          }
+        }
+      },
+      goals: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            index: { type: 'integer' },
+            text: { type: 'string' },
+            shift: { type: 'integer' },
+            reason: { type: 'string' }
+          }
+        }
       }
     }
   }

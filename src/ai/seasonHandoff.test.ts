@@ -132,6 +132,32 @@ describe('applySeasonRelationshipUpdates', () => {
     expect(ada.relationships).toEqual([{ targetId: 'c2', kind: 'rival', note: 'after the theft' }]);
     expect(ben.relationships).toEqual([]);
   });
+
+  it('keeps a tracked score when the kind and note are rewritten', () => {
+    const cast = [
+      npc('c1', 'Ada', {
+        relationships: [{
+          targetId: 'c2', kind: 'ally', note: 'old',
+          track: true, score: 37, pace: 'slow', locked: true,
+          marks: [{ at: 70, text: 'she names who signed it' }]
+        }]
+      }),
+      npc('c2', 'Ben')
+    ];
+    const next = applySeasonRelationshipUpdates(cast, [
+      { from: 'Ada', to: 'Ben', kind: 'rival', note: 'after the theft', keep: true }
+    ]);
+    expect(next.find((c) => c.id === 'c1')?.relationships).toEqual([{
+      targetId: 'c2',
+      kind: 'rival',
+      note: 'after the theft',
+      track: true,
+      score: 37,
+      pace: 'slow',
+      locked: true,
+      marks: [{ at: 70, text: 'she names who signed it' }]
+    }]);
+  });
 });
 
 describe('buildNextSeasonPlotTargets', () => {

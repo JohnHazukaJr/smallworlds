@@ -1,6 +1,7 @@
 import type {
   CalendarEvent, Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, Location, OpenThread, Season, Turn, TurnLength, World
 } from '../types';
+import { playerGoalBlock } from '../bonds';
 import { PLOT_TARGET_CAP, storyStanceOf, worldCalendar } from '../worldOps';
 import type { ChatMessage } from './client';
 import { inferContextWindowTokens } from './contextBudget';
@@ -1164,7 +1165,7 @@ function sceneSpeakerCard(voice: SceneVoice): string {
     voice.want && `Wants: ${clipText(voice.want, 160)}`,
     voice.emotion && `Now: ${clipText(voice.emotion, 120)}`,
     voice.condition && `Condition: ${clipText(voice.condition, 120)}`,
-    voice.ties && `With the people here: ${clipText(voice.ties, 240)}`,
+    voice.ties && `With the people here: ${clipText(voice.ties, 720)}`,
     example && `Example line (rhythm only, do not reuse it): "${clipText(example, 160)}"`,
     voice.anchor && `Anchor: ${clipText(voice.anchor, 160)}`,
     voice.mustNotKnow && `Must not know or say: ${clipText(voice.mustNotKnow, 240)}`
@@ -1313,9 +1314,11 @@ export function buildSceneReply(opts: SceneReplyInput): { system: string; messag
   const playerLine = playerName
     ? `The player is ${playerName}. Do not write their dialogue, decisions, or inner thoughts.`
     : 'The player is here. Do not write their dialogue, decisions, or inner thoughts.';
+  const goalBlock = playerGoalBlock(player?.goals);
   const here = [
     '## Here',
     playerLine,
+    goalBlock,
     cards.length > 0 ? cards.join('\n\n') : 'Nobody has a speaking part on this turn.',
     alsoShown
       ? inviteOthers

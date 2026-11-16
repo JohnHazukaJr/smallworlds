@@ -1,11 +1,12 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ChangeEvent, type MutableRefObject } from 'react';
 import {
-  draftColdOpenNarration, fleshOutCharacter, fleshOutLocation,
+  draftColdOpenNarration, draftGoalMeanings, draftPlayerGoals, fleshOutCharacter, fleshOutLocation,
   fleshOutNarratorRules, fleshOutPremise, fleshOutRelationships, fleshOutWorldEverything,
   fleshOutWorldLore, fleshSectionsToRun, seedBlankResidentLocations, seedOpeningMemory
 } from '../ai/engine';
 import { characterImportance } from '../ai/characterWeight';
+import { PlayerGoalsEditor, WorldBondPaceChips } from '../components/BondScores';
 import { CharacterPortraitTools } from '../components/CharacterPortraitTools';
 import { StoryWeightPicker } from '../components/StoryWeightPicker';
 import { PlacePhotoTools } from '../components/PlacePhotoTools';
@@ -922,6 +923,7 @@ export function Onboard() {
                   valueLabel={ai.pacing < 34 ? 'slow-burn' : ai.pacing < 67 ? 'measured' : 'propulsive'}
                 />
               </div>
+              <WorldBondPaceChips value={ai.bondPace} onChange={(bondPace) => patchAI({ bondPace })} />
 
               <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap' }}>
                 <Toggle on={ai.mature} onClick={() => patchAI({ mature: !ai.mature })} />
@@ -1048,6 +1050,13 @@ export function Onboard() {
               <Field label="Appearance">
                 <SheetText rows={2} value={player.appearance} onCommit={(appearance) => patchPlayer({ appearance })} />
               </Field>
+              <PlayerGoalsEditor
+                goals={player.goals}
+                canDraft={hasAI}
+                onChange={(goals) => { void patchPlayer({ goals }); }}
+                onDraftGoals={() => draftPlayerGoals(worldContext(), player, characters)}
+                onDraftMeanings={(goal, replace) => draftGoalMeanings(worldContext(), goal, { replace })}
+              />
               <CharacterPortraitTools
                 key={player.id}
                 character={player}

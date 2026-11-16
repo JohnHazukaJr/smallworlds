@@ -13,6 +13,11 @@ export interface WorldAISettings {
   proseDensity: number;
   /** 0..100 — slow-burn to propulsive */
   pacing: number;
+  /**
+   * How fast a tracked bond or player goal moves.
+   * Missing means measured. Prose pacing is separate.
+   */
+  bondPace?: BondPace;
   /** free text describing what is/isn't allowed in this world */
   contentNotes: string;
   /** hard rules the narrator must never break */
@@ -308,11 +313,44 @@ export interface Turn {
 /** How often this person belongs in the story. Missing on older cards means regular. */
 export type CharacterImportance = 'lead' | 'regular' | 'occasional' | 'background';
 
+/** World default for how fast a tracked score moves. */
+export type BondPace = 'slow' | 'measured' | 'quick';
+
+/** A track can follow the world, pick its own speed, or stay put until edited. */
+export type TrackPace = BondPace | 'manual';
+
+/** What a score means once it reaches `at`. */
+export interface ScoreMark {
+  at: number;
+  text: string;
+}
+
+/** A longer aim on the player card. Separate from the scene goal and from plot targets. */
+export interface PlayerGoal {
+  id: string;
+  text: string;
+  /** 0–100. Missing on an old row is treated as 0. */
+  score: number;
+  pace?: TrackPace;
+  marks?: ScoreMark[];
+}
+
 export interface Relationship {
   targetId: string;
   /** ally, rival, lover, debt, family, ... */
   kind: string;
   note: string;
+  /**
+   * Opt-in score on this person's tie toward the player.
+   * Absent means the tie stays kind and note only.
+   */
+  track?: true;
+  /** 0–100. Present only while tracking is on. */
+  score?: number;
+  pace?: TrackPace;
+  /** Play may move the score, and kind and note stay as written. */
+  locked?: true;
+  marks?: ScoreMark[];
 }
 
 export interface CharacterState {
@@ -368,6 +406,11 @@ export interface Character {
   /** things this character must NOT know yet — the AI must not leak these */
   mustNotKnow: string;
   relationships: Relationship[];
+  /**
+   * Longer aims, each with its own score. Empty until the author adds one.
+   * Not `state.goal`, and not the chapter's plot targets.
+   */
+  goals?: PlayerGoal[];
   /** hard behavioural rules, never broken */
   anchors: string[];
   /** free-text per-character AI directives, passed verbatim */
