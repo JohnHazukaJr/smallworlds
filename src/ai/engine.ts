@@ -172,10 +172,6 @@ export interface StreamMeta {
   role: TurnRole;
   characterId?: string;
   guestId?: string;
-  /** People in the room. Set on a scene reply so the live tail can credit quotes. */
-  speakers?: SceneSpeaker[];
-  /** The one person allowed to speak, when this reply has a single voice. */
-  fallbackSpeakerId?: string;
 }
 
 export interface WriteOptions {
@@ -1021,13 +1017,30 @@ function roomSceneSpeakers(characters: Character[], guests: EpisodeGuest[]): Sce
   ];
 }
 
+/** People already here, answerers first, so their cards lead the prompt. */
+function orderedRoomVoices(
+  characters: Character[],
+  guests: EpisodeGuest[],
+  firstIds: string[]
+): SceneVoice[] {
+  const voices: SceneVoice[] = [
+    ...characters.flatMap((c) => (c.name.trim() && !c.isPlayer ? [sceneVoiceFromCharacter(c)] : [])),
+    ...guests.flatMap((g) => {
+      const name = g.name.trim();
+      if (!name) return [];
+      return [{ id: g.id, name, kind: 'guest' as const, brief: g.brief, voice: g.voice }];
+    })
+  ];
+  const rank = new Map(firstIds.map((id, index) => [id, index]));
+  return voices.sort((a, b) => (rank.get(a.id) ?? firstIds.length) - (rank.get(b.id) ?? firstIds.length));
+}
+
 function sceneWallLeak(
   text: string,
   speakers: SceneSpeaker[],
-  characters: Character[],
-  fallbackSpeakerId?: string
+  characters: Character[]
 ): { name: string; wall: string } | null {
-  for (const piece of splitSceneReply(text, speakers, { fallbackSpeakerId })) {
+  for (const piece of splitSceneReply(text, speakers)) {
     if (piece.role !== 'character' || piece.kind !== 'cast' || !piece.speakerId) continue;
     const character = characters.find((c) => c.id === piece.speakerId);
     const wall = character?.mustNotKnow?.trim() ?? '';
@@ -1039,8 +1052,8 @@ function sceneWallLeak(
 }
 
 /**
- * One reply: stage the room, then one prose call writes narration and dialogue.
- * Quoted lines that belong to someone here become that person's turn.
+ * One reply: stage the room, then one prose call writes the scene.
+ * That text is stored as one turn. Faces are read from the prose later.
  */
 async function writeTurnInner(opts: WriteOptions): Promise<string> {
   throwIfAborted(opts.signal, 0);
@@ -1181,26 +1194,10 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
       preferId: opts.preferCharacterId || opts.preferGuestId
     }).slice(0, sceneReplySpeakerCap(opts.length, addressed));
 
-  const voices: SceneVoice[] = [];
-  for (const speaker of picked) {
-    if (speaker.kind === 'guest') {
-      const guest = sceneGuests().find((g) => g.id === speaker.id);
-      if (!guest) continue;
-      voices.push({
-        id: guest.id,
-        name: guest.name,
-        kind: 'guest',
-        brief: guest.brief,
-        voice: guest.voice
-      });
-    } else {
-      const character = ctx.characters.find((c) => c.id === speaker.id);
-      if (!character) continue;
-      voices.push(sceneVoiceFromCharacter(character));
-    }
-  }
+  const voices: SceneVoice[] = injectionReply
+    ? []
+    : orderedRoomVoices(inScene, sceneGuests(), picked.map((speaker) => speaker.id));
   const roomSpeakers = injectionReply ? [] : roomSceneSpeakers(inScene, sceneGuests());
-  const fallbackSpeakerId = voices.length === 1 ? voices[0].id : undefined;
   const present = [
     ...inScene.map((c) => ({ name: c.name, role: c.role })),
     ...sceneGuests().map((g) => ({ name: g.name, role: g.brief }))
@@ -1216,42 +1213,30 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
   let safeText = '';
   const rememberSafe = (raw: string) => {
     const next = raw.trim();
-    if (next && !sceneWallLeak(next, roomSpeakers, ctx.characters, fallbackSpeakerId)) safeText = next;
+    if (next && !sceneWallLeak(next, roomSpeakers, ctx.characters)) safeText = next;
   };
-  const meta: StreamMeta = {
-    role: 'narrator',
-    ...(roomSpeakers.length > 0 ? {
-      speakers: roomSpeakers,
-      ...(fallbackSpeakerId ? { fallbackSpeakerId } : {})
-    } : {})
-  };
+  const meta: StreamMeta = { role: 'narrator' };
   progress('Writing…');
   opts.onDelta('', meta);
 
   const persistScene = async (raw: string): Promise<number> => {
-    const pieces = splitSceneReply(raw, roomSpeakers, { fallbackSpeakerId }).filter((piece) => piece.text.trim());
-    if (pieces.length === 0) return 0;
-    const base = Date.now();
-    for (let i = 0; i < pieces.length; i++) {
-      const piece = pieces[i];
-      const turn: Turn = {
-        id: uid(),
-        episodeId: opts.episode.id,
-        worldId: opts.world.id,
-        role: piece.role === 'character' ? 'character' : 'narrator',
-        mode: null,
-        text: piece.text,
-        createdAt: base + i,
-        ...(piece.role === 'character' && piece.kind === 'guest' ? { guestId: piece.speakerId } : {}),
-        ...(piece.role === 'character' && piece.kind === 'cast' ? { characterId: piece.speakerId } : {})
-      };
-      await guardStorage(() => db.turns.add(turn));
-      filedText.set(turn.id, turn.text);
-      ctx.turns.push(turn);
-      lastId = turn.id;
-      beatsCompleted++;
-    }
-    return pieces.length;
+    const text = raw.trim();
+    if (!text) return 0;
+    const turn: Turn = {
+      id: uid(),
+      episodeId: opts.episode.id,
+      worldId: opts.world.id,
+      role: 'narrator',
+      mode: null,
+      text,
+      createdAt: Date.now()
+    };
+    await guardStorage(() => db.turns.add(turn));
+    filedText.set(turn.id, turn.text);
+    ctx.turns.push(turn);
+    lastId = turn.id;
+    beatsCompleted += 1;
+    return 1;
   };
 
   const streamScene = async (pack: PromptBuildOpts, extra: ChatMessage[] = []): Promise<string> => {
@@ -1264,6 +1249,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
       playerText: cueText,
       length: replyLength,
       speakers: voices,
+      answerers: injectionReply ? undefined : picked.map((speaker) => ({ name: speaker.name })),
       present,
       pack: pack.pack,
       historyTailChars: tail.charBudget,
@@ -1297,7 +1283,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
   try {
     throwIfAborted(opts.signal, 0);
     text = await withOverflowRetry((pack) => streamScene(pack), opts.onNotice);
-    const leak = sceneWallLeak(text, roomSpeakers, ctx.characters, fallbackSpeakerId);
+    const leak = sceneWallLeak(text, roomSpeakers, ctx.characters);
     if (leak) {
       progress('honouring what they must not know…');
       const rewritten = await withOverflowRetry(
@@ -1312,7 +1298,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
         ]),
         opts.onNotice
       );
-      if (!rewritten.trim() || sceneWallLeak(rewritten, roomSpeakers, ctx.characters, fallbackSpeakerId)) {
+      if (!rewritten.trim() || sceneWallLeak(rewritten, roomSpeakers, ctx.characters)) {
         opts.onDelta('', meta);
         throw new AIError('That line still says something they must not know. Try the beat again.');
       }
@@ -1322,7 +1308,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
     }
   } catch (e) {
     const keep = (safeText || acc).trim();
-    const keepable = !!keep && !sceneWallLeak(keep, roomSpeakers, ctx.characters, fallbackSpeakerId);
+    const keepable = !!keep && !sceneWallLeak(keep, roomSpeakers, ctx.characters);
     if (isAbortError(e)) {
       if (keepable) {
         await persistScene(keep);
@@ -1443,35 +1429,36 @@ async function regenerateBeatInner(opts: {
     throw new AIError('Could not find the speaker for this turn.');
   }
 
-  const narrationOnly = opts.turn.role === 'narrator';
+  const characterReroll = opts.turn.role === 'character';
   const name = guest?.name ?? speaking?.name ?? 'the narrator';
-  const voices: SceneVoice[] = narrationOnly
-    ? []
-    : guest
+  const inScene = ctx.characters.filter((c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer);
+  const guestsHere = activeGuests(ctx.episode);
+  const voices: SceneVoice[] = characterReroll
+    ? guest
       ? [{ id: guest.id, name: guest.name, kind: 'guest', brief: guest.brief, voice: guest.voice }]
-      : [sceneVoiceFromCharacter(speaking!)];
-  const sceneSpeakers: SceneSpeaker[] = voices.map((voice) => ({
-    id: voice.id,
-    name: voice.name,
-    kind: voice.kind,
-    aliases: voice.kind === 'cast'
-      ? ctx.characters.find((c) => c.id === voice.id)?.aliases
-      : undefined,
-    role: voice.kind === 'cast' ? speaking?.role : undefined
-  }));
+      : [sceneVoiceFromCharacter(speaking!)]
+    : orderedRoomVoices(inScene, guestsHere, []);
+  const sceneSpeakers: SceneSpeaker[] = characterReroll
+    ? voices.map((voice) => ({
+      id: voice.id,
+      name: voice.name,
+      kind: voice.kind,
+      aliases: voice.kind === 'cast'
+        ? ctx.characters.find((c) => c.id === voice.id)?.aliases
+        : undefined,
+      role: voice.role
+    }))
+    : [];
   const present = [
-    ...ctx.characters.filter((c) => ctx.episode.castIds.includes(c.id) && !c.isPlayer).map((c) => ({
-      name: c.name,
-      role: c.role
-    })),
-    ...activeGuests(ctx.episode).map((g) => ({ name: g.name, role: g.brief }))
+    ...inScene.map((c) => ({ name: c.name, role: c.role })),
+    ...guestsHere.map((g) => ({ name: g.name, role: g.brief }))
   ];
-  const meta: StreamMeta = narrationOnly
-    ? { role: 'narrator' }
-    : guest
+  const meta: StreamMeta = characterReroll
+    ? guest
       ? { role: 'character', guestId: guest.id }
-      : { role: 'character', characterId: speaking!.id };
-  progress(narrationOnly ? 're-rolling narration…' : `${name} re-rolling…`);
+      : { role: 'character', characterId: speaking!.id }
+    : { role: 'narrator' };
+  progress(characterReroll ? `${name} re-rolling…` : 're-rolling the scene…');
   opts.onDelta('', meta);
 
   let acc = '';
@@ -1490,7 +1477,6 @@ async function regenerateBeatInner(opts: {
       historyTailChars: tail.charBudget,
       historyTailMaxTurns: tail.maxTurns,
       totalCap: budget,
-      narrationOnly,
       rewrite: { speakerName: name, prior: opts.turn.text.slice(0, 900) }
     });
     const result = await streamChat({
@@ -1510,7 +1496,7 @@ async function regenerateBeatInner(opts: {
   });
 
   let saved = text.trim();
-  if (!narrationOnly && voices[0]) {
+  if (characterReroll && voices[0]) {
     const own = splitSceneReply(saved, sceneSpeakers).filter((piece) =>
       piece.role === 'character' && piece.speakerId === voices[0].id
     );
@@ -1518,12 +1504,17 @@ async function regenerateBeatInner(opts: {
   }
   if (!saved) {
     throw new AIError(
-      narrationOnly ? 'Re-roll produced no narration. Try again.' : 'Re-roll produced no dialogue. Try again.'
+      characterReroll ? 'Re-roll produced no dialogue. Try again.' : 'Re-roll produced no narration. Try again.'
     );
   }
-  const wall = speaking?.mustNotKnow?.trim() ?? '';
-  if (wall && speakLeaksMustNotKnow(saved, wall)) {
-    throw new AIError('That line still says something they must not know. Try the beat again.');
+  if (characterReroll) {
+    const wall = speaking?.mustNotKnow?.trim() ?? '';
+    if (wall && speakLeaksMustNotKnow(saved, wall)) {
+      throw new AIError('That line still says something they must not know. Try the beat again.');
+    }
+  } else {
+    const leak = sceneWallLeak(saved, roomSceneSpeakers(inScene, guestsHere), ctx.characters);
+    if (leak) throw new AIError('That line still says something they must not know. Try the beat again.');
   }
   await guardStorage(() => db.turns.update(opts.turn.id, { text: saved, updatedAt: Date.now() }));
   await finalizeChapterMemory(opts.episode.id);

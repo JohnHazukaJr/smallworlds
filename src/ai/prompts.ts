@@ -2497,21 +2497,27 @@ export interface SceneVoice {
   brief?: string;
 }
 
+/** Full cards for the people who should answer, then the rest of a small room. */
+const FULL_SCENE_CARDS = 6;
+
 export interface SceneReplyInput {
   ctx: PromptContext;
   mode: ComposeMode;
   playerText: string;
   length: TurnLength;
+  /** Everyone who gets a card. Answerers first when the caller ordered them. */
   speakers: SceneVoice[];
-  /** Everyone physically here, including people who do not get a line. */
+  /** Who should answer. Everyone else here may still speak. */
+  answerers?: Array<{ name: string }>;
+  /** Everyone physically here. */
   present: Array<{ name: string; role?: string }>;
   pack?: PromptPack;
   historyTailChars?: number;
   historyTailMaxTurns?: number;
   totalCap?: number;
-  /** Write-as, or a narration re-roll: no new quoted speaker. */
+  /** Write-as: narration of a move that already happened, with no new quoted speaker. */
   narrationOnly?: boolean;
-  /** Re-roll of one existing line. */
+  /** Re-roll of one existing line, or of a whole scene when the name is the narrator. */
   rewrite?: { speakerName: string; prior: string };
 }
 
@@ -2530,31 +2536,52 @@ function sceneSpeakerCard(voice: SceneVoice): string {
   return lines.filter(Boolean).join('\n');
 }
 
-/** The last instruction: who may speak, how long, then the player's line. */
+function answerLine(names: string[]): string {
+  if (names.length === 0) {
+    return 'Nobody is here to speak. Write the consequence in narration. No quoted dialogue.';
+  }
+  const lead = names.length === 1
+    ? `${names[0]} answers in their own voice.`
+    : names.length === 2
+      ? `${names[0]} and ${names[1]} answer in their own voices.`
+      : `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]} answer in their own voices.`;
+  return [
+    lead,
+    'Anyone else already here may speak or act when the moment needs them.',
+    'Do not write the player\'s next line, and do not bring in anyone who is not here.'
+  ].join(' ');
+}
+
+/** The last instruction: who should answer, how long, then the player's line. */
 export function sceneTurnCue(opts: {
   mode: ComposeMode;
   playerText: string;
   length: TurnLength;
   speakers: Array<{ name: string }>;
+  answerers?: Array<{ name: string }>;
   narrationOnly?: boolean;
   rewrite?: { speakerName: string; prior: string };
 }): string {
-  const names = opts.speakers.map((s) => s.name.trim()).filter(Boolean);
-  const who = opts.narrationOnly
-    ? 'Nobody new speaks. Write narration only. No quoted dialogue.'
-    : names.length === 0
-      ? 'Nobody is here to speak. Write the consequence in narration. No quoted dialogue.'
-      : names.length === 1
-        ? `Only ${names[0]} may speak. Everyone else stays in the narration without a line.`
-        : `Only ${names.slice(0, -1).join(', ')} and ${names[names.length - 1]} may speak. Everyone else stays in the narration without a line.`;
+  const names = (opts.answerers ?? opts.speakers).map((s) => s.name.trim()).filter(Boolean);
+  const who = opts.rewrite
+    ? opts.narrationOnly
+      ? 'Nobody new speaks. Write narration only. No quoted dialogue.'
+      : opts.rewrite.speakerName === 'the narrator'
+        ? 'Rewrite this as one continuous scene. Anyone already here may speak or act when the moment needs them. Do not write the player\'s next line, and do not bring in anyone who is not here.'
+        : `Stay with ${opts.rewrite.speakerName}. Do not hand the line to anyone else.`
+    : opts.narrationOnly
+      ? 'Nobody new speaks. Write narration only. No quoted dialogue.'
+      : answerLine(names);
   const move = opts.narrationOnly && opts.playerText.trim()
     ? `This already happened, as them, not as the player. Describe it. Do not quote a new speaker and do not hand the line to anyone else:\n${opts.playerText.trim()}`
     : opts.mode === 'continue' && !opts.playerText.trim()
       ? 'No new player line. Continue the scene from the last beat. Do not recap. Do not wait for the player.'
       : MODE_PREFIX[opts.mode](opts.playerText);
-  const rewrite = opts.rewrite
-    ? `Rewrite only ${opts.rewrite.speakerName}'s previous line with fresh wording and the same job. Do not copy it.\nPrevious line:\n${opts.rewrite.prior.trim()}`
-    : '';
+  const rewrite = !opts.rewrite
+    ? ''
+    : opts.rewrite.speakerName === 'the narrator'
+      ? `Rewrite the previous scene in fresh wording. Keep the same events and who spoke. Do not copy it.\nPrevious scene:\n${opts.rewrite.prior.trim()}`
+      : `Rewrite only ${opts.rewrite.speakerName}'s previous line with fresh wording and the same job. Do not copy it.\nPrevious line:\n${opts.rewrite.prior.trim()}`;
   return [who, sceneLengthHint(opts.length), rewrite, move].filter(Boolean).join('\n\n');
 }
 
@@ -2594,14 +2621,36 @@ export function buildSceneReply(opts: SceneReplyInput): { system: string; messag
   sections.push(situationPremise(ctx));
   const threads = threadsBlock(ctx, 'narrator', 'narrator', tight ? 4 : 8, query);
   if (threads) sections.push(threads);
-  const cards = opts.speakers.map(sceneSpeakerCard).filter(Boolean);
-  const speakerNames = new Set(opts.speakers.map((s) => s.name.trim().toLowerCase()));
-  const quiet = opts.present.filter((p) => p.name.trim() && !speakerNames.has(p.name.trim().toLowerCase()));
+  const answererNames = new Set((opts.answerers ?? []).map((a) => a.name.trim().toLowerCase()));
+  const ordered = [...opts.speakers].sort((a, b) => {
+    const ar = answererNames.has(a.name.trim().toLowerCase()) ? 0 : 1;
+    const br = answererNames.has(b.name.trim().toLowerCase()) ? 0 : 1;
+    return ar - br;
+  });
+  const cardVoices = ordered.slice(0, FULL_SCENE_CARDS);
+  const cards = cardVoices.map(sceneSpeakerCard).filter(Boolean);
+  const listed = new Set(cardVoices.map((s) => s.name.trim().toLowerCase()));
+  const also: Array<{ name: string; role?: string }> = [];
+  const seen = new Set<string>();
+  const pushAlso = (name: string, role?: string) => {
+    const key = name.trim().toLowerCase();
+    if (!key || listed.has(key) || seen.has(key)) return;
+    seen.add(key);
+    also.push({ name: name.trim(), role });
+  };
+  for (const voice of ordered.slice(FULL_SCENE_CARDS)) pushAlso(voice.name, voice.role ?? voice.brief);
+  for (const person of opts.present) pushAlso(person.name, person.role);
+  const alsoText = also
+    .map((p) => p.role?.trim() ? `${p.name} (${p.role.trim()})` : p.name)
+    .join(', ');
+  const inviteOthers = !opts.narrationOnly && (!opts.rewrite || opts.rewrite.speakerName === 'the narrator');
   const here = [
     '## Here',
     cards.length > 0 ? cards.join('\n\n') : 'Nobody has a speaking part on this turn.',
-    quiet.length > 0
-      ? `Also here, and they do not get a line: ${quiet.map((p) => p.role?.trim() ? `${p.name} (${p.role.trim()})` : p.name).join(', ')}.`
+    alsoText
+      ? inviteOthers
+        ? `Also here, and they may speak if the moment needs them: ${alsoText}.`
+        : `Also here: ${alsoText}.`
       : ''
   ].filter(Boolean).join('\n\n');
   sections.push(here);

@@ -72,7 +72,7 @@ function ctx(): PromptContext {
 const mara: SceneSpeaker = { id: 'mara', name: 'Mara', kind: 'cast' };
 
 describe('buildSceneReply', () => {
-  it('puts the allowed speaker and the player line at the end, with no director call', () => {
+  it('names who should answer, cards the room, and keeps the player line last', () => {
     const built = buildSceneReply({
       ctx: ctx(),
       mode: 'speak',
@@ -96,14 +96,48 @@ describe('buildSceneReply', () => {
     const last = built.messages[built.messages.length - 1];
     expect(last?.role).toBe('user');
     const cue = last?.content ?? '';
-    expect(cue).toContain('Only Ada may speak');
+    expect(cue).toContain('Ada answers in their own voice');
+    expect(cue).toContain('Anyone else already here may speak');
     expect(cue).toContain('Where is the ledger?');
-    expect(cue.lastIndexOf('Where is the ledger?')).toBeGreaterThan(cue.indexOf('Only Ada'));
+    expect(cue.lastIndexOf('Where is the ledger?')).toBeGreaterThan(cue.indexOf('Ada answers'));
+    expect(cue).not.toContain('Only Ada may speak');
     expect(built.system).toContain('## Here');
-    expect(built.system).toContain('Also here, and they do not get a line: Ben (clerk).');
-    expect(built.system.indexOf('## Here')).toBeLessThan(built.system.length);
+    expect(built.system).toContain('### Ada');
+    expect(built.system).toContain('Also here, and they may speak if the moment needs them: Ben (clerk).');
+    expect(built.system).not.toContain('do not get a line');
     const blob = `${built.system}\n${built.messages.map((m) => m.content).join('\n')}`;
     expect(blob).not.toMatch(/plan_turn|castDelta/);
+  });
+
+  it('cards the rest of the room and still names only the answerer', () => {
+    const built = buildSceneReply({
+      ctx: ctx(),
+      mode: 'speak',
+      playerText: 'Where is the ledger?',
+      length: 'scene',
+      speakers: [
+        {
+          id: 'c1', name: 'Ada', kind: 'cast', role: 'registrar', voice: 'clipped'
+        },
+        {
+          id: 'c2', name: 'Ben', kind: 'cast', role: 'clerk', voice: 'quiet'
+        }
+      ],
+      answerers: [{ name: 'Ada' }],
+      present: [
+        { name: 'Ada', role: 'registrar' },
+        { name: 'Ben', role: 'clerk' }
+      ]
+    });
+    const cue = built.messages[built.messages.length - 1]?.content ?? '';
+    expect(cue).toContain('Ada answers in their own voice');
+    expect(cue).toContain('Anyone else already here may speak');
+    expect(cue).not.toContain('Only Ada');
+    expect(cue).not.toContain('do not get a line');
+    expect(built.system).toContain('### Ada');
+    expect(built.system).toContain('### Ben');
+    expect(built.system.indexOf('### Ada')).toBeLessThan(built.system.indexOf('### Ben'));
+    expect(built.system).not.toContain('do not get a line');
   });
 });
 
@@ -170,32 +204,30 @@ describe('splitSceneReply', () => {
     })]);
   });
 
-  it('gives an unnamed quote to the one allowed speaker, and keeps a mutter in narration', () => {
-    const hers = splitSceneReply('The stamp came down. "Closed."', [ada, ben], {
-      fallbackSpeakerId: 'ada'
-    });
-    expect(hers.find((piece) => piece.role === 'character')).toMatchObject({ speakerId: 'ada' });
+  it('leaves an unnamed quote in the narration, even when only one person is here', () => {
+    const hers = splitSceneReply('The stamp came down. "Closed."', [ada]);
+    expect(hers.every((piece) => piece.role === 'narrator')).toBe(true);
+    expect(hers.map((piece) => piece.text).join(' ')).toContain('Closed');
 
-    const namedOther = splitSceneReply('Ben said, "I heard you."', [ada, ben], {
-      fallbackSpeakerId: 'ada'
-    });
+    const namedOther = splitSceneReply('Ben said, "I heard you."', [ada, ben]);
     expect(namedOther.find((piece) => piece.role === 'character')?.speakerId).toBe('ben');
 
-    const mutter = splitSceneReply('Someone muttered "maybe."', [ada], { fallbackSpeakerId: 'ada' });
+    const mutter = splitSceneReply('Someone muttered "maybe."', [ada]);
     expect(mutter).toHaveLength(1);
     expect(mutter[0]?.role).toBe('narrator');
     expect(mutter[0]?.text).toContain('maybe');
 
-    const stranger = splitSceneReply('Bob said, "Leave."', [ada], { fallbackSpeakerId: 'ada' });
+    const stranger = splitSceneReply('Bob said, "Leave."', [ada]);
     expect(stranger.every((piece) => piece.role === 'narrator')).toBe(true);
 
     const unnamed = splitSceneReply('The stamp came down. "Closed."', [ada, ben]);
     expect(unnamed).toHaveLength(1);
     expect(unnamed[0]?.role).toBe('narrator');
+    expect(unnamed[0]?.text).toContain('Closed');
   });
 
   it('keeps an open quote in the narration and credits an alias or a guest', () => {
-    const open = splitSceneReply('Ada said, "Clos', [ada], { fallbackSpeakerId: 'ada' });
+    const open = splitSceneReply('Ada said, "Clos', [ada]);
     expect(open).toHaveLength(1);
     expect(open[0]?.role).toBe('narrator');
 

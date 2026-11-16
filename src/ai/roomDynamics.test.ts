@@ -119,6 +119,23 @@ describe('turnsSinceSpoke', () => {
     expect(lastSpeaker(turns, trio)?.id).toBe('c2');
     expect(lastSpeaker([], trio)).toBeNull();
   });
+
+  it('counts a quoted line inside a scene reply', () => {
+    const turns = [
+      narrator('Ada said, "First."'),
+      player('hm'),
+      narrator('"Second," Ben said.')
+    ];
+    const since = turnsSinceSpoke(turns, trio);
+    expect(since.get('c2')).toBe(0);
+    expect(since.get('c1')).toBe(1);
+    expect(lastSpeaker(turns, trio)?.id).toBe('c2');
+  });
+
+  it('does not treat a bare name in narration as a speaker', () => {
+    const turns = [said('c2', 'second'), narrator('The Clerk looks up from the ledger.')];
+    expect(lastSpeaker(turns, trio)?.id).toBe('c2');
+  });
 });
 
 describe('rankReplySpeakers', () => {
@@ -252,6 +269,22 @@ describe('lastOpenQuestion', () => {
     const turns = [player('Hello.'), said('c1', '"Where were you?"')];
     expect(lastOpenQuestion(turns, trio)).toBeNull();
   });
+
+  it('reads an open question from the scene prose', () => {
+    const turns = [
+      narrator('Ada looked up. "Where were you?" she said.'),
+      player('At the quay.')
+    ];
+    expect(lastOpenQuestion(turns, trio)?.id).toBe('c1');
+  });
+
+  it('clears the question when a later voice in the same scene moved on', () => {
+    const turns = [
+      narrator('Ada looked up. "Where were you?" she said. Ben shrugged. "We already knew that," he said.'),
+      player('So what now?')
+    ];
+    expect(lastOpenQuestion(turns, trio)).toBeNull();
+  });
 });
 
 describe('story weight', () => {
@@ -376,5 +409,15 @@ describe('priorOpenQuestionText', () => {
     const open = priorOpenQuestionText(turns, trio);
     expect(open?.asker.id).toBe('c1');
     expect(open?.text).toMatch(/Where is the key/);
+  });
+
+  it('reads the quoted question out of a scene reply', () => {
+    const turns = [
+      narrator('Ada looked up. "Where were you?" she said.'),
+      player('At the quay.')
+    ];
+    const open = priorOpenQuestionText(turns, trio);
+    expect(open?.asker.id).toBe('c1');
+    expect(open?.text).toMatch(/Where were you/);
   });
 });

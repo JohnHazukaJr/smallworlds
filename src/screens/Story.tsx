@@ -42,7 +42,7 @@ import {
 } from '../store/app';
 import { generateChapterPicture } from '../ai/image';
 import { rememberedPortraitStyle } from '../ai/portrait';
-import { splitSceneReply } from '../ai/sceneReply';
+import { splitSceneReply, type SceneSpeaker } from '../ai/sceneReply';
 import { hasWritingModel } from '../ai/models';
 import { useSettings } from '../store/settings';
 import type {
@@ -144,6 +144,28 @@ function SceneCastStrip({
   );
 }
 
+function speakersOnPage(characters: Character[], guests: EpisodeGuest[]): SceneSpeaker[] {
+  return [
+    ...characters.flatMap((c) => {
+      const name = c.name.trim();
+      if (!name || c.isPlayer) return [];
+      const aliases = (c.aliases ?? []).map((alias) => alias.trim()).filter(Boolean);
+      return [{
+        id: c.id,
+        name,
+        kind: 'cast' as const,
+        ...(aliases.length > 0 ? { aliases } : {}),
+        ...(c.role?.trim() ? { role: c.role } : {})
+      }];
+    }),
+    ...guests.flatMap((g) => {
+      const name = g.name.trim();
+      if (!name) return [];
+      return [{ id: g.id, name, kind: 'guest' as const }];
+    })
+  ];
+}
+
 function parseTurn(turn: Turn, characters: Character[], guests: EpisodeGuest[] = []): ProseBlock[] {
   if (turn.role === 'user' && turn.asCharacterId) {
     const who = characters.find((c) => c.id === turn.asCharacterId);
@@ -202,8 +224,34 @@ function parseTurn(turn: Turn, characters: Character[], guests: EpisodeGuest[] =
       segments: parseSpeakSegments(turn.text)
     }];
   }
-  const text = stripNarratorEmbeddedDialogue(turn.text) || turn.text;
-  return [{ text, kind: 'narration' }];
+  const speakers = speakersOnPage(characters, guests);
+  const pieces = speakers.length > 0 ? splitSceneReply(turn.text, speakers) : [];
+  if (!pieces.some((piece) => piece.role === 'character' && piece.speakerId)) {
+    const text = stripNarratorEmbeddedDialogue(turn.text) || turn.text;
+    return [{ text, kind: 'narration' }];
+  }
+  const blocks: ProseBlock[] = [];
+  for (const piece of pieces) {
+    const text = piece.text.trim();
+    if (!text) continue;
+    if (piece.role === 'character' && piece.speakerId) {
+      const who = piece.kind === 'guest' ? undefined : characters.find((c) => c.id === piece.speakerId);
+      const guest = piece.kind === 'guest' ? guests.find((g) => g.id === piece.speakerId) : undefined;
+      blocks.push({
+        text,
+        speaker: who?.name ?? guest?.name ?? 'Someone',
+        hue: who?.hue ?? (guest ? guestHue(guest.id) : 200),
+        portrait: who ? characterPortraits(who)[0] : null,
+        kind: 'speak',
+        segments: parseSpeakSegments(text)
+      });
+      continue;
+    }
+    const narration = stripNarratorEmbeddedDialogue(text) || text;
+    if (!narration.trim()) continue;
+    blocks.push({ text: narration, kind: 'narration' });
+  }
+  return blocks.length > 0 ? blocks : [{ text: turn.text, kind: 'narration' }];
 }
 
 function EmphasizedText({ text }: { text: string }) {
@@ -546,7 +594,7 @@ type StreamSink = (text: string, meta: StreamMeta) => void;
 /** Identity for parsed blocks. Speaker name, hue, and portrait change the markup. */
 function castParseKey(characters: Character[], guests: EpisodeGuest[]): string {
   const cast = characters.map((c) =>
-    `${c.id}\t${c.isPlayer ? 1 : 0}\t${c.name}\t${c.hue}\t${c.portrait ?? ''}\t${(c.portraits ?? []).length}`
+    `${c.id}\t${c.isPlayer ? 1 : 0}\t${c.name}\t${c.role ?? ''}\t${(c.aliases ?? []).join('|')}\t${c.hue}\t${c.portrait ?? ''}\t${(c.portraits ?? []).length}`
   ).join('\n');
   const guest = guests.map((g) => `${g.id}\t${g.name}`).join('\n');
   return `${cast}\n--\n${guest}`;
@@ -578,33 +626,17 @@ function sceneStreamBlocks(
   episodeId: string,
   worldId: string
 ): ProseBlock[] {
-  const speakers = meta.speakers ?? [];
-  if (meta.role !== 'narrator' || speakers.length === 0) {
-    return parseTurn({
-      id: 'partial',
-      episodeId,
-      worldId,
-      role: meta.role,
-      mode: null,
-      characterId: meta.characterId,
-      guestId: meta.guestId,
-      text: meta.role === 'character' ? previewSpeakText(partial) : partial,
-      createdAt: 0
-    }, characters, guests);
-  }
-  return splitSceneReply(partial, speakers, { fallbackSpeakerId: meta.fallbackSpeakerId })
-    .filter((piece) => piece.text.trim())
-    .flatMap((piece) => parseTurn({
-      id: 'partial',
-      episodeId,
-      worldId,
-      role: piece.role === 'character' ? 'character' : 'narrator',
-      mode: null,
-      text: piece.role === 'character' ? previewSpeakText(piece.text) : piece.text,
-      createdAt: 0,
-      ...(piece.role === 'character' && piece.kind === 'guest' ? { guestId: piece.speakerId } : {}),
-      ...(piece.role === 'character' && piece.kind === 'cast' ? { characterId: piece.speakerId } : {})
-    }, characters, guests));
+  return parseTurn({
+    id: 'partial',
+    episodeId,
+    worldId,
+    role: meta.role,
+    mode: null,
+    characterId: meta.characterId,
+    guestId: meta.guestId,
+    text: meta.role === 'character' ? previewSpeakText(partial) : partial,
+    createdAt: 0
+  }, characters, guests);
 }
 
 function StreamTail({
@@ -1345,7 +1377,8 @@ export function Story() {
       const guestList = entry.episode.guests ?? [];
       seen.add(t.id);
       const hit = cache.get(t.id);
-      const textKey = `${t.text}\t${t.asCharacterId ?? ''}`;
+      const guestKey = guestList.map((g) => `${g.id}\t${g.name}`).join('\n');
+      const textKey = `${t.text}\t${t.asCharacterId ?? ''}\t${guestKey}`;
       if (hit && hit.text === textKey) {
         out.push({ episode: entry.episode, turn: t, blocks: hit.blocks });
         continue;

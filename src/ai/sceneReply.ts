@@ -1,11 +1,10 @@
 /**
- * Split one scene reply into narrator prose and lines that belong to
- * someone who is here. A speech tag, a unique role, or a screenplay label
- * credits the quote. An unnamed quote belongs to the one allowed speaker.
- * "Someone muttered" stays narration even then.
+ * Credit quotes inside one scene reply. A speech tag, a pronoun that continues
+ * the last named subject, a unique role, or a screenplay label marks the line.
+ * An unnamed quote, "someone muttered", and an open quote stay narration.
  */
 
-import { distinctiveTokens, isCommonLabel, tokensLooselyMatch } from './roomDynamics';
+import { distinctiveTokens, isCommonLabel, tokensLooselyMatch } from './nameMatch';
 
 export interface SceneSpeaker {
   id: string;
@@ -21,11 +20,6 @@ export interface ScenePiece {
   text: string;
   speakerId?: string;
   kind?: 'cast' | 'guest';
-}
-
-export interface SplitSceneOptions {
-  /** When this reply allows exactly one speaker, an unnamed quote is theirs. */
-  fallbackSpeakerId?: string;
 }
 
 const QUOTE_RE = /[“"]([^“”"]+)[”"]/g;
@@ -279,11 +273,10 @@ function mergeTags(before: Tag, after: Tag): Tag {
   return { kind: 'none' };
 }
 
-function resolveTag(tag: Tag, lastSubject: SceneSpeaker | undefined, fallback: SceneSpeaker | undefined): SceneSpeaker | undefined {
+function resolveTag(tag: Tag, lastSubject: SceneSpeaker | undefined): SceneSpeaker | undefined {
   if (tag.kind === 'speaker') return tag.speaker;
-  if (tag.kind === 'pronoun') return lastSubject ?? fallback;
-  if (tag.kind === 'indefinite' || tag.kind === 'unknown') return undefined;
-  return fallback;
+  if (tag.kind === 'pronoun') return lastSubject;
+  return undefined;
 }
 
 function sentencesOf(text: string): string[] {
@@ -333,8 +326,7 @@ function screenplayLead(before: string, speaker: SceneSpeaker, speakers: SceneSp
 function quoteHits(
   source: string,
   speakers: SceneSpeaker[],
-  entries: LabelEntry[],
-  fallback: SceneSpeaker | undefined
+  entries: LabelEntry[]
 ): Hit[] {
   const matches = [...source.matchAll(QUOTE_RE)];
   const hits: Hit[] = [];
@@ -351,7 +343,7 @@ function quoteHits(
     lastSubject = noteSubjects(before, entries, lastSubject);
     const beforeTag = tagBefore(before, speakers, entries);
     const tag = mergeTags(beforeTag, tagAfter(after, speakers, entries));
-    const speaker = resolveTag(tag, lastSubject, fallback);
+    const speaker = resolveTag(tag, lastSubject);
     if (speaker) lastSubject = speaker;
     let start = qStart;
     if (speaker && beforeTag.screenplay && beforeTag.speaker?.id === speaker.id) {
@@ -425,16 +417,11 @@ function piecesFrom(source: string, hits: Hit[]): ScenePiece[] {
 }
 
 /** Narration stays narration. A credited quote becomes that person's line. */
-export function splitSceneReply(
-  text: string,
-  speakers: SceneSpeaker[],
-  options?: SplitSceneOptions
-): ScenePiece[] {
+export function splitSceneReply(text: string, speakers: SceneSpeaker[]): ScenePiece[] {
   const source = text.replace(/\r\n/g, '\n').trim();
   if (!source) return [];
   const entries = labelEntries(speakers);
-  const fallback = speakers.find((speaker) => speaker.id === options?.fallbackSpeakerId);
-  const hits = quoteHits(source, speakers, entries, fallback);
+  const hits = quoteHits(source, speakers, entries);
   addScreenplayHits(source, speakers, entries, hits);
   if (hits.length === 0) return [{ role: 'narrator', text: source }];
   return piecesFrom(source, hits);

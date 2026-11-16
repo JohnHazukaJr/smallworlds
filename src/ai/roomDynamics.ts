@@ -8,6 +8,10 @@
 
 import type { Character, CharacterImportance, EpisodeGuest, Turn, TurnLength } from '../types';
 import { characterImportance, importanceSpeakScore } from './characterWeight';
+import { distinctiveTokens, isCommonLabel, tokensLooselyMatch } from './nameMatch';
+import { splitSceneReply, type SceneSpeaker } from './sceneReply';
+
+export { distinctiveTokens, isCommonLabel, tokensLooselyMatch };
 
 export type SpeakerKind = 'cast' | 'guest';
 
@@ -37,25 +41,6 @@ export interface RankedSpeaker extends SpeakerCandidate {
 const LAST_VOICE_PULL = 24;
 
 const RE_SPECIALS = /[.*+?^${}()|[\]\\]/g;
-
-/**
- * Whole labels that are also ordinary words. A mention of "will" is not the
- * person Will. "Will," and "tell Will" still count.
- */
-const COMMON_LABELS = new Set([
-  'will', 'may', 'can', 'art', 'hope', 'mark', 'bill', 'pat', 'don', 'guy', 'rose', 'joy',
-  'faith', 'grace', 'frank', 'amber', 'chase', 'summer', 'april', 'june', 'august', 'just',
-  'like', 'well', 'come', 'look', 'tell', 'said', 'want', 'need', 'have', 'that', 'this',
-  'with', 'from', 'your', 'what', 'when', 'then', 'than', 'them', 'they', 'were', 'been',
-  'into', 'over', 'back', 'down', 'here', 'there', 'about', 'after', 'before', 'would',
-  'could', 'should', 'shall', 'must', 'adult', 'person', 'people', 'their', 'which',
-  'where', 'while', 'still', 'never', 'every'
-]);
-
-/** A name that is also an ordinary word. "will you" is not the person Will. */
-export function isCommonLabel(label: string): boolean {
-  return COMMON_LABELS.has(label.trim().toLowerCase());
-}
 
 function escapeRe(text: string): string {
   return text.replace(RE_SPECIALS, '\\$&');
@@ -96,30 +81,8 @@ export function addressStrength(text: string, rawName: string): AddressStrength 
   else if (new RegExp(`\\b(?:${ADDRESS_VERBS})\\b(?:\\s+(?:${ADDRESS_CONNECTORS}))*\\s+${n}\\b`, 'iu').test(line)) {
     strength = 'directed';
   } else if (new RegExp(`\\bto\\s+${n}\\b`, 'iu').test(line)) strength = 'directed';
-  if (strength === 'mention' && COMMON_LABELS.has(name.toLowerCase())) return null;
+  if (strength === 'mention' && isCommonLabel(name)) return null;
   return strength;
-}
-
-/** Words long enough to tell people apart. Short and ordinary words are skipped. */
-export function distinctiveTokens(text: string): string[] {
-  const out: string[] = [];
-  for (const raw of text.toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
-    if (raw.length < 5 || COMMON_LABELS.has(raw) || out.includes(raw)) continue;
-    out.push(raw);
-  }
-  return out;
-}
-
-/** "student" matches "students". "keeper" matches "innkeeper". */
-export function tokensLooselyMatch(a: string, b: string): boolean {
-  if (a === b) return true;
-  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
-  if (short.length < 5) return false;
-  if (long.startsWith(short)) {
-    const extra = long.slice(short.length);
-    return extra === 's' || extra === 'es';
-  }
-  return long.endsWith(short);
 }
 
 function uniqueRoleLabels(candidate: SpeakerCandidate, all: SpeakerCandidate[]): string[] {
@@ -169,22 +132,62 @@ export function speakerCandidates(
   ].filter((c) => c.name.length > 0);
 }
 
+function sceneSpeakersOf(candidates: SpeakerCandidate[]): SceneSpeaker[] {
+  return candidates.flatMap((c) => {
+    const name = c.name.trim();
+    if (!name) return [];
+    return [{
+      id: c.id,
+      name,
+      kind: c.kind,
+      ...(c.aliases?.length ? { aliases: c.aliases } : {}),
+      ...(c.role ? { role: c.role } : {})
+    }];
+  });
+}
+
+interface CreditedVoice {
+  id: string;
+  kind: SpeakerKind;
+  text: string;
+}
+
+/** A stored character row, or a quote the scene prose itself credits. */
+function creditedVoices(turn: Turn, speakers: SceneSpeaker[]): CreditedVoice[] {
+  if (turn.role === 'character') {
+    const id = turn.guestId ?? turn.characterId;
+    if (!id) return [];
+    return [{ id, kind: turn.guestId ? 'guest' : 'cast', text: turn.text }];
+  }
+  if (turn.role !== 'narrator') return [];
+  return splitSceneReply(turn.text, speakers).flatMap((piece) => {
+    if (piece.role !== 'character' || !piece.speakerId) return [];
+    return [{
+      id: piece.speakerId,
+      kind: piece.kind === 'guest' ? 'guest' : 'cast',
+      text: piece.text
+    }];
+  });
+}
+
 /**
- * Character turns since each candidate last spoke.
- * 0 = they were the most recent voice; Infinity = they have not spoken this episode.
+ * Spoken lines since each candidate last spoke.
+ * A scene reply counts each credited quote. 0 = most recent voice.
  */
 export function turnsSinceSpoke(
   turns: Turn[],
   candidates: SpeakerCandidate[]
 ): Map<string, number> {
+  const speakers = sceneSpeakersOf(candidates);
   const lastSeen = new Map<string, number>();
   let spoken = 0;
   for (let i = turns.length - 1; i >= 0; i--) {
-    const t = turns[i];
-    if (t.role !== 'character') continue;
-    const id = t.guestId ?? t.characterId;
-    if (id && !lastSeen.has(id)) lastSeen.set(id, spoken);
-    spoken++;
+    const lines = creditedVoices(turns[i], speakers);
+    for (let j = lines.length - 1; j >= 0; j--) {
+      const id = lines[j].id;
+      if (!lastSeen.has(id)) lastSeen.set(id, spoken);
+      spoken++;
+    }
   }
   const out = new Map<string, number>();
   for (const c of candidates) {
@@ -198,25 +201,27 @@ export function lastSpeaker(
   turns: Turn[],
   candidates: SpeakerCandidate[]
 ): SpeakerCandidate | null {
+  const speakers = sceneSpeakersOf(candidates);
   for (let i = turns.length - 1; i >= 0; i--) {
-    const t = turns[i];
-    if (t.role !== 'character') continue;
-    const id = t.guestId ?? t.characterId;
-    const hit = candidates.find((c) => c.id === id);
-    if (hit) return hit;
+    const lines = creditedVoices(turns[i], speakers);
+    for (let j = lines.length - 1; j >= 0; j--) {
+      const hit = candidates.find((c) => c.id === lines[j].id);
+      if (hit) return hit;
+    }
   }
   return null;
 }
 
 /**
  * Who asked the question the player's latest line answers.
- * Later NPC lines in the same Write (Ben speaks after you answered Ada) do not
- * clear this — the asker still has to take the answer as heard.
+ * The asker is the last credited voice before that line, including a quote
+ * inside a scene reply. A later voice that did not ask clears it. Lines after
+ * the player's answer do not — the asker still has to take the answer as heard.
  */
-export function lastOpenQuestion(
+function openQuestionBeforeLastUser(
   turns: Turn[],
   candidates: SpeakerCandidate[]
-): SpeakerCandidate | null {
+): { asker: SpeakerCandidate; text: string } | null {
   let userIdx = -1;
   for (let i = turns.length - 1; i >= 0; i--) {
     if (turns[i].role === 'user') {
@@ -225,18 +230,27 @@ export function lastOpenQuestion(
     }
   }
   if (userIdx < 0) return null;
+  const speakers = sceneSpeakersOf(candidates);
+  for (let i = userIdx - 1; i >= 0; i--) {
+    const lines = creditedVoices(turns[i], speakers);
+    if (lines.length === 0) continue;
+    const last = lines[lines.length - 1];
+    if (!/\?/.test(last.text)) return null;
+    const asker = candidates.find((c) => c.id === last.id) ?? {
+      id: last.id,
+      name: 'Someone',
+      kind: last.kind
+    };
+    return { asker, text: last.text };
+  }
+  return null;
+}
 
-  let i = userIdx - 1;
-  while (i >= 0 && turns[i].role === 'narrator') i--;
-  if (i < 0 || turns[i].role !== 'character') return null;
-  if (!/\?/.test(turns[i].text)) return null;
-  const id = turns[i].guestId ?? turns[i].characterId;
-  if (!id) return null;
-  return candidates.find((c) => c.id === id) ?? {
-    id,
-    name: 'Someone',
-    kind: turns[i].guestId ? 'guest' : 'cast'
-  };
+export function lastOpenQuestion(
+  turns: Turn[],
+  candidates: SpeakerCandidate[]
+): SpeakerCandidate | null {
+  return openQuestionBeforeLastUser(turns, candidates)?.asker ?? null;
 }
 
 /** Who the player's latest move points at, if anyone (includes bare mention). */
@@ -294,26 +308,7 @@ export function priorOpenQuestionText(
   turns: Turn[],
   candidates: SpeakerCandidate[]
 ): { asker: SpeakerCandidate; text: string } | null {
-  let userIdx = -1;
-  for (let i = turns.length - 1; i >= 0; i--) {
-    if (turns[i].role === 'user') {
-      userIdx = i;
-      break;
-    }
-  }
-  if (userIdx < 0) return null;
-  let i = userIdx - 1;
-  while (i >= 0 && turns[i].role === 'narrator') i--;
-  if (i < 0 || turns[i].role !== 'character') return null;
-  if (!/\?/.test(turns[i].text)) return null;
-  const id = turns[i].guestId ?? turns[i].characterId;
-  if (!id) return null;
-  const asker = candidates.find((c) => c.id === id) ?? {
-    id,
-    name: 'Someone',
-    kind: (turns[i].guestId ? 'guest' : 'cast') as SpeakerKind
-  };
-  return { asker, text: turns[i].text };
+  return openQuestionBeforeLastUser(turns, candidates);
 }
 
 /**
