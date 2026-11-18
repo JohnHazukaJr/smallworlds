@@ -19,6 +19,18 @@ export const ANTI_SLOP_PROSE =
   `- Do not name the feeling when the body can show it. One specific detail beats a mood summary.\n` +
   `- Each speaker keeps their own cadence — never a shared polite chatbot register.`;
 
+/** What makes people in the scene sound like people instead of a helpful assistant. */
+export const HUMAN_DIALOGUE =
+  `## How people talk\n` +
+  `- Everyone speaks to get something, avoid something, or protect themselves. A line serves what that person wants right now, not the plot and not the player.\n` +
+  `- People rarely answer the exact question. They deflect, answer a different one, answer with a question, change the subject, joke, or go quiet.\n` +
+  `- Most lines are short. Fragments, trailing off, interrupting, and restarting a sentence are normal. A long speech only when this person would really hold the floor.\n` +
+  `- Contractions and the words this person would actually use — their age, work, background, and mood. Nobody explains their own feelings aloud ("I feel conflicted") unless that is who they are.\n` +
+  `- Do not echo or paraphrase the player's words back, do not agree with or validate everything, and do not end each line with a question that hands the turn back.\n` +
+  `- Not everyone is warm or helpful. Strangers are guarded, tired people are curt, people who dislike the player show it, and people keep grudges from earlier in the story.\n` +
+  `- People have their own business: they keep doing what they were doing, get distracted, misunderstand, or disagree.\n` +
+  `- Subtext over statement. What someone leaves unsaid, and what their hands do meanwhile, carries the feeling.`;
+
 
 export type PromptPack = 'normal' | 'tight';
 
@@ -1265,6 +1277,7 @@ export function buildSceneReply(opts: SceneReplyInput): { system: string; messag
   );
   sections.push(stancePlaybook(storyStanceOf(ctx.world)));
   sections.push(ANTI_SLOP_PROSE);
+  if (!opts.narrationOnly) sections.push(HUMAN_DIALOGUE);
   sections.push(contentSection(ai));
   if (ai.customInstructions.trim()) {
     sections.push(`## Author's instructions (follow verbatim)\n${ai.customInstructions.trim()}`);

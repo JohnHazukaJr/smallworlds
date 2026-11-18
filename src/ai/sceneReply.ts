@@ -314,6 +314,64 @@ function noteSubjects(narration: string, entries: LabelEntry[], last: SceneSpeak
   return current;
 }
 
+/** Words that may open an action beat before its subject: "Then Mara…", "Still, she…". */
+const BEAT_LEAD = new Set(['then', 'finally', 'still', 'just', 'and', 'but', 'so', 'now', 'again']);
+
+/**
+ * The person an action beat is about, read from the head of the sentence:
+ * `Mara set the cup down.`, `The registrar sighed.`, `She shrugged.`
+ * A name later in the sentence is an object ("You hand Mara the cup") and does not count.
+ */
+function beatSubject(
+  sentence: string,
+  entries: LabelEntry[],
+  lastSubject: SceneSpeaker | undefined
+): SceneSpeaker | undefined {
+  const words = [...sentence.matchAll(/[\p{L}\p{N}'’]+/gu)];
+  let i = 0;
+  while (i < words.length && BEAT_LEAD.has(words[i][0].toLowerCase())) i++;
+  const head = words[i];
+  if (!head) return undefined;
+  const lower = head[0].toLowerCase();
+  if (PRONOUNS.has(lower)) return lastSubject;
+
+  if (lower === 'the') {
+    const next = words[i + 1]?.[0].toLowerCase();
+    if (!next) return undefined;
+    const owners = uniqueSpeakers(entries.filter((entry) => entry.role && entry.text.toLowerCase() === next));
+    return owners.length === 1 ? owners[0] : undefined;
+  }
+
+  if (!/^\p{Lu}/u.test(head[0])) return undefined;
+  const rest = sentence.slice(head.index ?? 0).toLowerCase();
+  let bestLen = 0;
+  let found: SceneSpeaker[] = [];
+  for (const entry of entries) {
+    if (entry.role || isCommonLabel(entry.text)) continue;
+    const label = entry.text.toLowerCase();
+    if (!rest.startsWith(label)) continue;
+    if (/[\p{L}\p{N}]/u.test(rest.charAt(label.length))) continue;
+    if (label.length > bestLen) {
+      bestLen = label.length;
+      found = [entry.speaker];
+    } else if (label.length === bestLen && !found.some((s) => s.id === entry.speaker.id)) {
+      found.push(entry.speaker);
+    }
+  }
+  return found.length === 1 ? found[0] : undefined;
+}
+
+/** The sentence right before a quote, in the same paragraph. */
+function beatBefore(before: string): string | undefined {
+  return before.match(/([^.!?…\n"“”]+)[.!?…,:—–]+[ \t]*$/)?.[1]?.trim() || undefined;
+}
+
+/** The sentence right after a quote that opens its paragraph: `"Late." Mara set the cup down.` */
+function beatAfter(before: string, after: string): string | undefined {
+  if (!/(?:^|\n)[ \t]*$/.test(before)) return undefined;
+  return after.match(/^[ \t]+([^.!?…\n"“”]+)[.!?…]/)?.[1]?.trim() || undefined;
+}
+
 function screenplayLead(before: string, speaker: SceneSpeaker, speakers: SceneSpeaker[], entries: LabelEntry[]): number {
   const match = before.match(/(?:^|\n)[ \t]*([^\n:]{1,48}):[ \t]*$/);
   if (!match || match.index === undefined) return 0;
@@ -343,7 +401,16 @@ function quoteHits(
     lastSubject = noteSubjects(before, entries, lastSubject);
     const beforeTag = tagBefore(before, speakers, entries);
     const tag = mergeTags(beforeTag, tagAfter(after, speakers, entries));
-    const speaker = resolveTag(tag, lastSubject);
+    let speaker = resolveTag(tag, lastSubject);
+    if (!speaker && tag.kind === 'none') {
+      // No speech verb: an action beat beside the quote names who is talking.
+      const lead = beatBefore(before);
+      speaker = lead ? beatSubject(lead, entries, lastSubject) : undefined;
+      if (!speaker) {
+        const trail = beatAfter(before, after);
+        speaker = trail ? beatSubject(trail, entries, lastSubject) : undefined;
+      }
+    }
     if (speaker) lastSubject = speaker;
     let start = qStart;
     if (speaker && beforeTag.screenplay && beforeTag.speaker?.id === speaker.id) {

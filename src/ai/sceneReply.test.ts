@@ -379,6 +379,36 @@ describe('splitSceneReply', () => {
     expect(unnamed[0]?.text).toContain('Closed');
   });
 
+  it('credits an action beat that opens with the speaker', () => {
+    const lead = splitSceneReply('Ada set the stamp down. "Closed."', [ada, ben]);
+    expect(lead.find((piece) => piece.role === 'character')?.speakerId).toBe('ada');
+    expect(lead.find((piece) => piece.role === 'narrator')?.text).toContain('stamp');
+
+    const trail = splitSceneReply('"Closed." Ben pushed the ledger across.', [ada, ben]);
+    expect(trail.find((piece) => piece.role === 'character')?.speakerId).toBe('ben');
+
+    const role = splitSceneReply('The registrar sighed. "Closed."', [ada, ben]);
+    expect(role.find((piece) => piece.role === 'character')?.speakerId).toBe('ada');
+
+    const pronoun = splitSceneReply('Ada looked up. She frowned. "You\'re late."', [ada, ben]);
+    expect(pronoun.find((piece) => piece.role === 'character')?.speakerId).toBe('ada');
+
+    const both = splitSceneReply('"Closed." Ada stamped it. "Come back Monday."', [ada, ben]);
+    expect(both.filter((piece) => piece.role === 'character').map((piece) => piece.speakerId))
+      .toEqual(['ada', 'ada']);
+  });
+
+  it('does not credit a beat whose subject is someone else', () => {
+    const player = splitSceneReply('You hand Ada the form. "Here."', [ada, ben]);
+    expect(player.every((piece) => piece.role === 'narrator')).toBe(true);
+
+    const newParagraph = splitSceneReply('Ada set the stamp down.\n\n"Closed."', [ada, ben]);
+    expect(newParagraph.every((piece) => piece.role === 'narrator')).toBe(true);
+
+    const midParagraph = splitSceneReply('The lamp ticked. "Closed." Ben looked up.', [ada, ben]);
+    expect(midParagraph.every((piece) => piece.role === 'narrator')).toBe(true);
+  });
+
   it('keeps an open quote in the narration and credits an alias or a guest', () => {
     const open = splitSceneReply('Ada said, "Clos', [ada]);
     expect(open).toHaveLength(1);

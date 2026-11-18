@@ -1050,7 +1050,9 @@ export function Story() {
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el || book) return;
+    let lastHeight = el.scrollHeight;
     const pin = () => {
+      lastHeight = el.scrollHeight;
       if (replyAnchor.current === 'await') {
         const anchor = turns[replyFrom.current];
         const node = anchor
@@ -1082,8 +1084,16 @@ export function Story() {
     observer.observe(el);
     if (el.firstElementChild) observer.observe(el.firstElementChild);
     const onScroll = () => {
-      const gap = el.scrollHeight - el.scrollTop - el.clientHeight;
-      if (scrollPin.current > 0) {
+      const height = el.scrollHeight;
+      const shrank = height < lastHeight;
+      lastHeight = height;
+      const gap = height - el.scrollTop - el.clientHeight;
+      // When a reply finishes, the live tail unmounts a render before its saved
+      // turn arrives from the database. The column shrinks, the browser clamps
+      // scrollTop to the new bottom and fires a scroll event. That is not the
+      // reader asking to follow; treating it as one jumps them to the end once
+      // the saved turn lands.
+      if (scrollPin.current > 0 || shrank) {
         if (gap >= 48) followScroll.current = false;
         return;
       }
