@@ -12,6 +12,7 @@ import type { ChatMessage } from './client';
 import { inferContextWindowTokens } from './contextBudget';
 import { deliveryPhrase, parseDeliveryTone } from './deliveryTone';
 import { stancePlaybook } from './storyStance';
+import { placesAround, placeWhereLine, resolveScenePlace } from '../places';
 
 
 /** Shared anti-generic-prose rules for narrator and speak agents. */
@@ -55,94 +56,59 @@ export interface PromptBuildOpts {
 }
 
 
-function locationHardRules(l: Location): string | null {
-  if (l.rules.length === 0) return null;
-  return (
-    `HARD RULES for this place — non-negotiable, never broken:\n` +
-    l.rules.map((r, i) => `  ${String(i + 1).padStart(2, '0')}. ${r}`).join('\n')
-  );
-}
-
 function joinPlaceNames(names: string[]): string {
   if (names.length <= 1) return names[0] ?? '';
   if (names.length === 2) return `${names[0]} and ${names[1]}`;
   return `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`;
 }
 
-/** Area, home, and nearby — only when those fields are set. Omitted fields add no text. */
-function locationSituationLines(l: Location, characters?: Character[]): Array<string | false | undefined> {
+/** Cast who belong to a place, unless the who's-here line already names them all. */
+function placeResidentsLine(l: Location, characters?: Character[]): string {
   const names = (l.residentIds ?? [])
     .map((id) => characters?.find((person) => person.id === id)?.name.trim())
     .filter((name): name is string => !!name);
-  const alreadyNamed = names.length > 0 && names.every((name) => l.inhabitants.toLowerCase().includes(name.toLowerCase()));
-  return [
-    l.area?.trim() && `Area: ${l.area.trim()}`,
-    names.length > 0 && !alreadyNamed && `Home of ${joinPlaceNames(names)}`,
-    l.near?.trim() && `Nearby: ${l.near.trim()}`
-  ];
+  if (names.length === 0) return '';
+  if (names.every((name) => l.inhabitants.toLowerCase().includes(name.toLowerCase()))) return '';
+  return `Belongs to: ${joinPlaceNames(names)}`;
 }
 
-/** Lore body without HARD RULES — used when clipping so rules can be kept first. */
-function locationLoreSheet(l: Location, characters?: Character[]): string {
+/**
+ * The one place sheet the writer gets: everything on the Places sheet, clipped
+ * so a long sheet cannot crowd out the scene.
+ */
+export function whereYouAreBlock(
+  place: Location,
+  all: Location[],
+  opts: { characters?: Character[]; sceneNote?: string; placeNote?: string } = {}
+): string {
+  const where = placeWhereLine(place, all);
+  const now = [place.currentState.trim(), (opts.sceneNote ?? '').trim()].filter(Boolean).join(' ');
+  const rules = place.rules.map((r) => r.trim()).filter(Boolean);
   const lines = [
-    `### ${l.name}`,
-    l.tagline && `Tagline: ${l.tagline}`,
-    ...locationSituationLines(l, characters),
-    l.summary && `Overview: ${l.summary}`,
-    l.atmosphere && `Atmosphere (sensory detail to lean on): ${l.atmosphere}`,
-    l.features && `Notable features: ${l.features}`,
-    l.history && `History (reveal only in earned fragments, never as exposition): ${l.history}`,
-    l.inhabitants && `Typically found here: ${l.inhabitants}`,
-    l.secrets && `Secrets hidden here (may surface, never announced): ${l.secrets}`,
-    l.currentState && `Current state: ${l.currentState}`,
-    l.customInstructions && `Author's directives for this location (follow verbatim): ${l.customInstructions}`
+    `## Where you are\n### ${place.name.trim() || 'Unnamed place'}${where ? ` (in ${where})` : ''}`,
+    opts.placeNote?.trim() && `Exactly where: ${clipText(opts.placeNote.trim(), 160)}`,
+    place.summary.trim() && `What it is: ${clipText(place.summary.trim(), 420)}`,
+    place.atmosphere.trim() && `Feel (sensory detail to lean on): ${clipText(place.atmosphere.trim(), 320)}`,
+    now && `Right now: ${clipText(now, 220)}`,
+    place.inhabitants.trim() && `Who's usually here: ${clipText(place.inhabitants.trim(), 220)}`,
+    placeResidentsLine(place, opts.characters),
+    rules.length > 0 && `Rules here (hold to them):\n${rules.slice(0, 5).map((r) => `- ${clipText(r, 160)}`).join('\n')}`,
+    place.hidden?.trim() && `Hidden (you know it; reveal only when the story earns it, never as exposition): ${clipText(place.hidden.trim(), 360)}`,
+    place.customInstructions.trim() && `Author's notes for this place: ${clipText(place.customInstructions.trim(), 300)}`
   ];
   return lines.filter(Boolean).join('\n');
 }
 
-function locationSheet(l: Location, characters?: Character[]): string {
-  const rules = locationHardRules(l);
-  return [locationLoreSheet(l, characters), rules].filter(Boolean).join('\n');
-}
-
-/** Atmosphere + hard rules only — never-cut location payload for tight packs. */
-function locationAtmosphereSheet(l: Location, characters?: Character[]): string {
-  const lines = [
-    `### ${l.name}`,
-    l.tagline && `Tagline: ${l.tagline}`,
-    ...locationSituationLines(l, characters),
-    l.atmosphere && `Atmosphere (sensory detail to lean on): ${l.atmosphere}`,
-    l.currentState && `Current state: ${l.currentState}`,
-    locationHardRules(l)
-  ];
-  return lines.filter(Boolean).join('\n');
-}
-
-/** Director path: HARD RULES first (uncut), then lore clipped into remaining budget. */
-function locationSheetClipped(l: Location, clipChars: number, characters?: Character[]): string {
-  const header = `### ${l.name}`;
-  const rules = locationHardRules(l);
-  const priority = [header, rules].filter(Boolean).join('\n');
-  const lore = [
-    l.tagline && `Tagline: ${l.tagline}`,
-    ...locationSituationLines(l, characters),
-    l.summary && `Overview: ${l.summary}`,
-    l.atmosphere && `Atmosphere (sensory detail to lean on): ${l.atmosphere}`,
-    l.features && `Notable features: ${l.features}`,
-    l.history && `History (reveal only in earned fragments, never as exposition): ${l.history}`,
-    l.inhabitants && `Typically found here: ${l.inhabitants}`,
-    l.secrets && `Secrets hidden here (may surface, never announced): ${l.secrets}`,
-    l.currentState && `Current state: ${l.currentState}`,
-    l.customInstructions && `Author's directives for this location (follow verbatim): ${l.customInstructions}`
-  ].filter(Boolean).join('\n');
-  const remaining = Math.max(0, clipChars - priority.length - (lore ? 1 : 0));
-  if (!lore || remaining < 40) return priority;
-  return `${priority}\n${clipText(lore, remaining)}`;
-}
-
-function locationBrief(l: Location): string {
-  const area = l.area?.trim() ? ` · ${l.area.trim()}` : '';
-  return `- ${l.name}${area}${l.tagline ? ` (${l.tagline})` : ''}: ${l.summary.slice(0, 160) || 'no notes'}`;
+/** Saved places the scene can go to, one line each, nearest in the tree first. */
+export function otherPlacesBlock(current: Location | undefined, all: Location[], limit = 8): string {
+  const others = placesAround(current, all, limit);
+  if (others.length === 0) return '';
+  const line = (p: Location) => {
+    const where = placeWhereLine(p, all);
+    const what = clipText(p.summary.trim().split(/(?<=[.!?])\s/)[0] ?? '', 110);
+    return `- ${p.name.trim()}${where ? ` (in ${where})` : ''}${what ? `: ${what}` : ''}`;
+  };
+  return `## Other places in this world (the scene can move to one of these)\n${others.map(line).join('\n')}`;
 }
 
 export interface PromptContext {
@@ -624,32 +590,20 @@ function situationPremise(ctx: PromptContext, opts?: { includeSeasonMeta?: boole
   return `## Opening\nWhat's live: ${live}`;
 }
 
-function currentLocationBlock(
-  ctx: PromptContext,
-  opts?: { clipChars?: number; includeOthers?: boolean; atmosphereOnly?: boolean }
-): string[] {
-  const current = resolveCurrentLocations(ctx.episode, ctx.locations);
+function currentLocationBlock(ctx: PromptContext): string[] {
+  const current = resolveScenePlace(ctx.episode, ctx.locations);
   const out: string[] = [];
-  if (current.length > 0) {
-    const sheet = opts?.atmosphereOnly
-      ? current.map((l) => locationAtmosphereSheet(l, ctx.characters)).join('\n\n')
-      : opts?.clipChars
-        ? current.map((l) => locationSheetClipped(l, Math.floor(opts.clipChars! / current.length), ctx.characters)).join('\n\n')
-        : current.map((l) => locationSheet(l, ctx.characters)).join('\n\n');
-    out.push(
-      opts?.clipChars
-        ? `## Current location (honour HARD RULES when planning)\n${sheet}`
-        : `## Current location\n${sheet}`
-    );
+  if (current) {
+    out.push(whereYouAreBlock(current, ctx.locations, {
+      characters: ctx.characters,
+      sceneNote: ctx.episode.atmosphereNote,
+      placeNote: ctx.episode.placeNote
+    }));
+  } else if (ctx.episode.location.trim()) {
+    out.push(`## Where you are\n${clipText(ctx.episode.location.trim(), 200)}`);
   }
-  if (opts?.includeOthers && ctx.locations.length > 0) {
-    const others = ctx.locations.filter((l) => !current.includes(l));
-    if (others.length > 0) {
-      out.push(
-        `## Other established locations (may be referenced or visited)\n${others.map(locationBrief).join('\n')}`
-      );
-    }
-  }
+  const others = otherPlacesBlock(current, ctx.locations);
+  if (others) out.push(others);
   return out;
 }
 
@@ -734,19 +688,6 @@ function plotTargetsSection(episode: Episode, season: Season): string | null {
   if (ep.length > 0) parts.push(`Episode:\n${ep.join('\n')}`);
   if (sea.length > 0) parts.push(`Season arc:\n${sea.join('\n')}`);
   return parts.join('\n');
-}
-
-
-function resolveCurrentLocations(episode: Episode, locations: Location[]): Location[] {
-  if (locations.length === 0) return [];
-  const byId = episode.locationId
-    ? locations.filter((l) => l.id === episode.locationId)
-    : [];
-  const epLoc = episode.location.trim().toLowerCase();
-  const byName = byId.length === 0 && epLoc
-    ? locations.filter((l) => l.name.trim() && (epLoc.includes(l.name.toLowerCase()) || l.name.toLowerCase().includes(epLoc)))
-    : [];
-  return byId.length > 0 ? byId : byName;
 }
 
 
@@ -1437,7 +1378,7 @@ export function buildSceneReply(opts: SceneReplyInput): { system: string; messag
   sections.push(here);
   const facts = continuityBlock(ctx, 'narrator', 'hard', tight ? 6 : 12, query);
   if (facts) sections.push(facts);
-  sections.push(...currentLocationBlock(ctx, { atmosphereOnly: true }));
+  sections.push(...currentLocationBlock(ctx));
 
   const system = sections.join('\n\n');
   // The cue below carries this turn's move. Leaving it in the history too sends it twice.

@@ -106,7 +106,7 @@ export function matchLocationForPatch(
       return n.includes(key) || key.includes(n);
     })
     : undefined;
-  if (fuzzy && (!preferId || fuzzy.id !== preferId)) return fuzzy;
+  // A loose name match must not overwrite some other place; the scene's own place wins.
   if (preferId) {
     const byId = locations.find((l) => l.id === preferId);
     if (byId) return byId;

@@ -47,8 +47,8 @@ export default defineConfig({
         name: 'Small Worlds AI',
         short_name: 'Small Worlds',
         description: 'Longform AI roleplay: worlds, cast that holds a line, and seasons that remember.',
-        theme_color: '#08090c',
-        background_color: '#08090c',
+        theme_color: '#f4f4f5',
+        background_color: '#f4f4f5',
         display: 'standalone',
         icons: [
           { src: 'icon-192.png', sizes: '192x192', type: 'image/png' },

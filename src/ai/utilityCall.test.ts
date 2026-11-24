@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { AIError } from './client';
-import { extractJson, jsonValueIsEmpty, parseToolArguments } from './utilityCall';
+import { extractJson, jsonInstruction, jsonValueIsEmpty, parseToolArguments } from './utilityCall';
 
 describe('extractJson', () => {
   it('parses a bare object', () => {
@@ -30,5 +30,12 @@ describe('jsonValueIsEmpty', () => {
     expect(jsonValueIsEmpty(null)).toBe(true);
     expect(jsonValueIsEmpty({ title: 'Harbour' })).toBe(false);
     expect(jsonValueIsEmpty({ characters: [] })).toBe(false);
+  });
+});
+
+describe('jsonInstruction', () => {
+  it('asks for plain JSON when no return_json tool is sent', () => {
+    expect(jsonInstruction('Call return_json with this shape: {}')).toBe('Reply with only a JSON object, with this shape: {}');
+    expect(jsonInstruction('Call return_json with this shape: {}', 'return_json')).toBe('Call return_json with this shape: {}');
   });
 });

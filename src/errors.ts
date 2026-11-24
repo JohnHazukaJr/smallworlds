@@ -231,6 +231,17 @@ export function classifyError(e: unknown): AppError {
     });
   }
 
+  if ((status === 401 || status === 403) && /sign in required/i.test(msg)) {
+    // The cloud relay (used for Z.ai and Venice) needs a signed-in account.
+    return new AppError({
+      code: 'auth',
+      userMessage: 'This provider goes through the Small Worlds relay, which needs you signed in. Sign in from Profile, then try again.',
+      detail: msg,
+      status,
+      cause: e
+    });
+  }
+
   if (status === 401 || status === 403) {
     return new AppError({
       code: 'auth',

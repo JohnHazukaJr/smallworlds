@@ -44,7 +44,39 @@ function supabaseFnUrl(): string | null {
  * fetch() that optionally relays allowlisted hosts through the Supabase Edge Function.
  * Falls back to a direct browser call if cloud is off or the function is missing.
  */
+/** A provider that has not even answered with headers by now is not going to. */
+const RESPONSE_HEADERS_TIMEOUT_MS = 150_000;
+
+/**
+ * Fetch for model providers, with a ceiling on how long the first response
+ * (headers) may take. Streaming idle limits only start once headers arrive,
+ * so without this a hung request would spin forever. The caller's own signal
+ * still cancels it, and the body is not limited.
+ */
 export async function providerFetch(url: string, init: RequestInit): Promise<Response> {
+  const ctrl = new AbortController();
+  const outer = init.signal ?? undefined;
+  const onOuter = () => ctrl.abort(outer?.reason);
+  if (outer?.aborted) ctrl.abort(outer.reason);
+  outer?.addEventListener('abort', onOuter);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, RESPONSE_HEADERS_TIMEOUT_MS);
+  try {
+    return await providerFetchInner(url, { ...init, signal: ctrl.signal });
+  } catch (e) {
+    if (timedOut && !outer?.aborted) {
+      throw new Error('The provider did not respond (timed out). Try again, or pick a different model in Settings.');
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    // The body may still be streaming; the caller's signal keeps cancelling it.
+    outer?.removeEventListener('abort', onOuter);
+    if (outer) outer.addEventListener('abort', () => ctrl.abort(outer.reason), { once: true });
+  }
+}
+
+async function providerFetchInner(url: string, init: RequestInit): Promise<Response> {
   if (isHostedFunctionUrl(url)) return hostedFetch(url, init);
   if (!isCloudConfigured() || !hostAllowlisted(url)) {
     return fetch(url, init);

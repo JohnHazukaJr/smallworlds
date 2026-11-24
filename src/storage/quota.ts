@@ -93,3 +93,17 @@ export function isQuotaError(e: unknown): boolean {
     /quota/i.test(err.message ?? '')
   );
 }
+
+/**
+ * Ask the browser not to clear this app's storage under pressure (Safari in
+ * particular evicts after a while). Returns whether storage is persistent.
+ */
+export async function requestPersistentStorage(): Promise<boolean | null> {
+  try {
+    if (!navigator.storage?.persist) return null;
+    if (await navigator.storage.persisted?.()) return true;
+    return await navigator.storage.persist();
+  } catch {
+    return null;
+  }
+}

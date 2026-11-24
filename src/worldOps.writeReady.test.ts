@@ -57,7 +57,7 @@ describe('evaluateWorldWriteReady', () => {
     expect(result.warnings).toEqual([]);
   });
 
-  it('flags missing premise, NPC voice, and location rules', () => {
+  it('flags missing premise and NPC voice, but not place rules (they are optional)', () => {
     const player = emptyCharacter('w1', { id: 'p1', isPlayer: true, name: 'you' });
     const npc = emptyCharacter('w1', { id: 'n1', name: 'Ada', summary: 'Someone.' });
     const loc = emptyLocation('w1', { id: 'loc1', name: 'Room', rules: [] });
@@ -73,7 +73,7 @@ describe('evaluateWorldWriteReady', () => {
     expect(result.missing.some((m) => /bible/i.test(m))).toBe(true);
     expect(result.missing.some((m) => /premise/i.test(m))).toBe(true);
     expect(result.missing.some((m) => /NPC/i.test(m))).toBe(true);
-    expect(result.missing.some((m) => /hard rule/i.test(m))).toBe(true);
+    expect(result.missing.some((m) => /rule/i.test(m))).toBe(false);
     expect(result.warnings.some((w) => /continuity/i.test(w))).toBe(true);
   });
 

@@ -182,7 +182,9 @@ export function chapterPicturePrompt(opts: {
   fullBody?: boolean;
 }): string {
   const identity = opts.refs
-    .map((ref, i) => `Image ${i + 1} is ${ref.name}. Keep their face, hair, and coloring from that photo.`)
+    .map((ref, i) => ref.kind === 'place'
+      ? `Image ${i + 1} is ${ref.name}, the setting. Keep its layout, materials, and light.`
+      : `Image ${i + 1} is ${ref.name}. Keep their face, hair, and coloring from that photo.`)
     .join(' ');
   const audience = opts.minor || !opts.mature
     ? 'Fully clothed, non-sexual, no nudity, no suggestive pose'
@@ -251,6 +253,8 @@ export function prepareChapterPicture(opts: {
   model: string | null;
   /** Ask for the whole figure even when the prompt does not say so. */
   fullBody?: boolean;
+  /** The chapter's place. Its photo is sent as the setting when the model takes reference images. */
+  place?: Location | null;
 }): ChapterPicturePlan {
   const userPrompt = opts.userPrompt.trim();
   if (!userPrompt) return { ok: false, error: 'Say what the picture should show.' };
@@ -270,11 +274,15 @@ export function prepareChapterPicture(opts: {
     castIds: opts.castIds,
     prompt: userPrompt
   });
-  if (refs.length > 0 && !imageModelAcceptsRefs(opts.provider, opts.model)) {
+  const takesRefs = imageModelAcceptsRefs(opts.provider, opts.model);
+  if (refs.length > 0 && !takesRefs) {
     return {
       ok: false,
       error: 'This image model can’t use character photos. Choose an image model that accepts reference images.'
     };
+  }
+  if (takesRefs && opts.place?.portrait) {
+    refs.push({ name: opts.place.name.trim() || 'this place', dataUrl: opts.place.portrait, kind: 'place' });
   }
   return {
     ok: true,
@@ -651,6 +659,8 @@ export async function generateChapterPicture(opts: {
   style: PortraitStyle;
   /** Ask for the whole figure even when the prompt does not say so. */
   fullBody?: boolean;
+  /** Where the chapter is. Its photo keeps the setting consistent. */
+  place?: Location | null;
   signal?: AbortSignal;
 }): Promise<string> {
   const fullBody = !!opts.fullBody || wantsFullBody(opts.userPrompt);
@@ -730,7 +740,8 @@ export async function generateChapterPicture(opts: {
     mature: !!opts.world.ai.mature,
     provider: resolved?.provider ?? null,
     model: resolved?.model ?? null,
-    fullBody
+    fullBody,
+    place: opts.place
   });
   if (!plan.ok) throw new AIError(plan.error);
   if (!resolved) throw new AIError('Set an image model in Settings before making a picture.');
@@ -957,9 +968,33 @@ async function readImagePayload(res: Response): Promise<string | null> {
   return null;
 }
 
+/**
+ * The app's content policy only lets <img> load data: and blob: images. A
+ * provider that answers with an https URL is downloaded first (fetch is
+ * allowed), then drawn from a blob.
+ */
+async function localImageSource(src: string): Promise<{ url: string; release: () => void }> {
+  if (!/^https?:/i.test(src)) return { url: src, release: () => {} };
+  let res: Response;
+  try {
+    res = await fetch(src);
+  } catch {
+    throw new AIError('Could not download the generated image. Check your connection and try again.');
+  }
+  if (!res.ok) throw new AIError(`Could not download the generated image (${res.status}).`);
+  const url = URL.createObjectURL(await res.blob());
+  return { url, release: () => URL.revokeObjectURL(url) };
+}
+
 async function urlToJpegDataUrl(src: string, maxDim = 1920, quality = 0.85): Promise<string> {
   if (src.startsWith('data:image/jpeg') && maxDim >= 1920) return src;
-  const img = await loadImage(src);
+  const local = await localImageSource(src);
+  let img: HTMLImageElement;
+  try {
+    img = await loadImage(local.url);
+  } finally {
+    local.release();
+  }
   const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
   const w = Math.max(1, Math.round(img.width * scale));
   const h = Math.max(1, Math.round(img.height * scale));

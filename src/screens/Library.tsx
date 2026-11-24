@@ -15,19 +15,7 @@ import { useApp } from '../store/app';
 import { ErrorNote, phoneChrome, useViewport } from '../ui/bits';
 import { plateStyle, VIS } from '../ui/theme';
 
-function download(data: unknown, filename: string) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-function slug(title: string) {
-  return title.replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').toLowerCase() || 'world';
-}
+import { downloadJson as download, fileSlug as slug } from '../ui/download';
 
 export function Library() {
   const { band } = useViewport();

@@ -11,7 +11,8 @@ export const COST_BEAT = 4;
 export const COST_UTILITY = 1;
 export const COST_IMAGE = 8;
 /** Utility-priced chat must stay under this completion ceiling. */
-export const UTILITY_TOKEN_CEILING = 900;
+/** World building drafts whole sheets (up to ~2k tokens); those stay utility-priced. */
+export const UTILITY_TOKEN_CEILING = 2500;
 /** Input size above which a utility-model call is billed as a beat. */
 export const UTILITY_PROMPT_CHAR_CAP = 32_000;
 

@@ -209,7 +209,7 @@ export function suggestedModelsFor(
 export function modelsListUrl(config: ProviderConfig, kind: ModelCatalogKind = 'text'): string {
   const root = config.baseUrl.replace(/\/$/, '');
   if (config.kind === 'gemini') {
-    return `${root}/models?key=${encodeURIComponent(config.apiKey)}`;
+    return `${root}/models`;
   }
   if (isOpenRouterHost(config.baseUrl) && kind === 'image') {
     return `${root}/models?output_modalities=image`;
@@ -292,7 +292,7 @@ export async function listModels(
       };
     }
     if (config.kind === 'gemini') {
-      const res = await fetch(modelsListUrl(config, kind));
+      const res = await fetch(modelsListUrl(config, kind), { headers: { 'x-goog-api-key': config.apiKey } });
       if (!res.ok) {
         return { models: [], error: `Could not list models (${res.status}). Check the API key.` };
       }

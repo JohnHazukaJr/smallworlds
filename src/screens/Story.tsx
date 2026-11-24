@@ -31,7 +31,9 @@ import {
 } from '../ai/prompts';
 import { StoryDateFields } from '../components/StoryDateFields';
 import { WorldEditorSheet } from '../components/WorldEditorSheet';
-import { db } from '../db';
+import { db, safeWrite } from '../db';
+import { useShallow } from 'zustand/react/shallow';
+import { onSceneMoved, placeTree, placeWhereLine, resolveScenePlace, setScenePlace, type SceneMove } from '../places';
 import {
   AVATAR_MAX, AVATAR_MIN, AVATAR_STEP,
   DEFAULT_DISPLAY, moodFromHue, storyAvatarHeight, useApp,
@@ -898,6 +900,8 @@ function ChapterFigure({ picture }: { picture: ChapterIllustration }) {
   );
 }
 
+const WRITE_BUSY_NOTE = 'The last reply is still finishing its notes — try again in a moment.';
+
 export function Story() {
   const { band, height, keyboardOffset, keyboardOpen } = useViewport();
   const book = bookStageOpen(band, keyboardOpen, height);
@@ -907,7 +911,10 @@ export function Story() {
   const short = shortStoryChrome(band, height);
   const sheetBottom = sheetsFromBottom(band);
   const narrow = phone;
-  const { currentWorldId, layout, setLayout, mood, setMood, go, display, goLocations: openLocations, goCast: openCast, closeWorld } = useApp();
+  const { currentWorldId, layout, setLayout, mood, setMood, go, display, goLocations: openLocations, goCast: openCast, closeWorld } = useApp(useShallow((s) => ({
+    currentWorldId: s.currentWorldId, layout: s.layout, setLayout: s.setLayout, mood: s.mood, setMood: s.setMood,
+    go: s.go, display: s.display, goLocations: s.goLocations, goCast: s.goCast, closeWorld: s.closeWorld
+  })));
   useSettings((s) => s.proseModel);
   const M = MOODS[mood];
   const readMode = layout === 'read';
@@ -1027,6 +1034,17 @@ export function Story() {
   const [pageReveal, setPageReveal] = useState(0);
   const [error, setError] = useState<string | AppError>('');
   const [notice, setNotice] = useState('');
+  const [placeMenuOpen, setPlaceMenuOpen] = useState(false);
+  /** The last automatic move, so it can be undone. */
+  const [sceneMove, setSceneMove] = useState<SceneMove | null>(null);
+  const episodeIdForMoves = episode?.id;
+  useEffect(() => {
+    if (!episodeIdForMoves) return;
+    return onSceneMoved((move) => {
+      if (move.episodeId === episodeIdForMoves) setSceneMove(move);
+    });
+  }, [episodeIdForMoves]);
+  useEffect(() => { setSceneMove(null); setPlaceMenuOpen(false); }, [episodeIdForMoves]);
   /** The last rewind, while Undo can still put it back. */
   const [rewound, setRewound] = useState<RewindUndo | null>(null);
   const [journalOpen, setJournalOpen] = useState(false);
@@ -1051,6 +1069,8 @@ export function Story() {
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [hudTucked, setHudTucked] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  // Leaving Story mid-reply stops the reply, so the write lock is not held by a screen nobody can see.
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
   const scrollRef = useRef<HTMLElement>(null);
   const followScroll = useRef(true);
   const scrollEpisode = useRef<string | undefined>(undefined);
@@ -1064,8 +1084,7 @@ export function Story() {
     try { localStorage.setItem('sw-reply-size', length); } catch { /* ignore */ }
   }, [length]);
 
-  const activeLocation = locations.find((l) => l.id === episode?.locationId)
-    ?? locations.find((l) => episode?.location && l.name && episode.location.toLowerCase().includes(l.name.toLowerCase()));
+  const activeLocation = resolveScenePlace(episode, locations);
 
   useEffect(() => {
     if (!readMode) {
@@ -1246,7 +1265,7 @@ export function Story() {
     }
     if (!input.trim()) return;
     const token = tryBeginStoryWrite();
-    if (!token) return;
+    if (!token) { setNotice(WRITE_BUSY_NOTE); return; }
     const sceneNpcs = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
     const outgoing = composeOutgoingLine({
       direct,
@@ -1297,7 +1316,7 @@ export function Story() {
       return;
     }
     const token = tryBeginStoryWrite();
-    if (!token) return;
+    if (!token) { setNotice(WRITE_BUSY_NOTE); return; }
     try {
       await runNarration('continue', '', undefined, weight, null, token);
     } finally {
@@ -1321,7 +1340,7 @@ export function Story() {
       return;
     }
     const token = tryBeginStoryWrite();
-    if (!token) return;
+    if (!token) { setNotice(WRITE_BUSY_NOTE); return; }
     try {
       await runNarration('continue', '', undefined, weight, null, token, undefined, undefined, true);
     } finally {
@@ -1333,7 +1352,7 @@ export function Story() {
   const rewindHere = async (turn: Turn) => {
     if (!episode || streaming) return;
     const token = tryBeginStoryWrite();
-    if (!token) return;
+    if (!token) { setNotice(WRITE_BUSY_NOTE); return; }
     setError('');
     setNotice('');
     try {
@@ -1351,7 +1370,7 @@ export function Story() {
     const undo = rewound;
     if (!undo || streaming) return;
     const token = tryBeginStoryWrite();
-    if (!token) return;
+    if (!token) { setNotice(WRITE_BUSY_NOTE); return; }
     setRewound(null);
     try {
       await undoRewind(undo);
@@ -1444,6 +1463,7 @@ export function Story() {
         castIds: episode.castIds,
         userPrompt: text,
         style: rememberedPortraitStyle(),
+        place: activeLocation ?? null,
         signal: controller.signal
       });
       if (controller.signal.aborted) return;
@@ -1472,7 +1492,7 @@ export function Story() {
     if (!world || !season || !episode || streaming) return;
     if (turn.role !== 'narrator' && turn.role !== 'character') return;
     const token = tryBeginStoryWrite();
-    if (!token) return;
+    if (!token) { setNotice(WRITE_BUSY_NOTE); return; }
     setError('');
     setNotice('');
     setStreaming(true);
@@ -1515,7 +1535,7 @@ export function Story() {
     const ok = window.confirm('Rewrite everything after this line? This line stays.');
     if (!ok) return;
     const token = tryBeginStoryWrite();
-    if (!token) return;
+    if (!token) { setNotice(WRITE_BUSY_NOTE); return; }
     // The same snapshot as Rewind, so a failed rewrite also gives back what
     // people remembered of the lines it removed.
     let undo: RewindUndo | null = null;
@@ -2174,6 +2194,74 @@ export function Story() {
               )}
                 </div>
               </div>
+              <div style={{ position: 'relative', marginTop: 10, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn-quiet"
+                  aria-haspopup="menu"
+                  aria-expanded={placeMenuOpen}
+                  onClick={() => setPlaceMenuOpen((open) => !open)}
+                  style={{ fontSize: 12, padding: '4px 8px', display: 'inline-flex', gap: 6, alignItems: 'center' }}
+                >
+                  <span aria-hidden>⌖</span>
+                  {activeLocation
+                    ? `${activeLocation.name.trim() || 'Unnamed place'}${placeWhereLine(activeLocation, locations) ? ` · ${placeWhereLine(activeLocation, locations)}` : ''}`
+                    : 'Choose where this happens'}
+                  <span aria-hidden style={{ fontSize: 9 }}>▾</span>
+                </button>
+                {sceneMove && sceneMove.toId === episode.locationId && (
+                  <span style={{ fontSize: 12, color: 'var(--ink-muted)', display: 'inline-flex', gap: 8, alignItems: 'center' }}>
+                    {sceneMove.created ? `New place: ${sceneMove.toName}` : `Moved to ${sceneMove.toName}`}
+                    <button type="button" className="btn-quiet" style={{ fontSize: 11 }} onClick={() => {
+                      const back = sceneMove.fromId;
+                      setSceneMove(null);
+                      void safeWrite(() => setScenePlace(episode.id, back), setError);
+                    }}>undo</button>
+                    <button type="button" className="btn-quiet" style={{ fontSize: 11 }} onClick={() => setSceneMove(null)}>ok</button>
+                  </span>
+                )}
+                {placeMenuOpen && (
+                  <div role="menu" className="glass-clear" style={{
+                    position: 'absolute', top: '100%', left: 0, zIndex: 30, marginTop: 6,
+                    minWidth: 240, maxWidth: 'min(360px, calc(100vw - 48px))', maxHeight: 320, overflowY: 'auto',
+                    padding: 8, borderRadius: 12, border: '1px solid var(--glass-rim)', background: 'var(--page)',
+                    display: 'flex', flexDirection: 'column', gap: 2
+                  }}>
+                    {locations.length === 0 && (
+                      <div style={{ fontSize: 12.5, color: 'var(--ink-muted)', padding: '6px 8px' }}>No places yet.</div>
+                    )}
+                    {placeTree(locations).map(({ place, depth }) => {
+                      const here = place.id === activeLocation?.id;
+                      return (
+                        <button
+                          key={place.id}
+                          type="button"
+                          role="menuitem"
+                          disabled={here}
+                          onClick={() => {
+                            setPlaceMenuOpen(false);
+                            setSceneMove(null);
+                            void safeWrite(() => setScenePlace(episode.id, place.id), setError);
+                          }}
+                          style={{
+                            textAlign: 'left', border: 0, background: here ? 'var(--rule)' : 'transparent',
+                            padding: '7px 8px', paddingLeft: 8 + depth * 14, borderRadius: 8, cursor: here ? 'default' : 'pointer',
+                            fontSize: 13, color: 'var(--ink-heading)'
+                          }}
+                        >
+                          {place.name.trim() || 'Unnamed place'}{here ? ' · here' : ''}
+                        </button>
+                      );
+                    })}
+                    <div style={{ borderTop: '1px solid var(--rule)', marginTop: 4, paddingTop: 4 }}>
+                      <button type="button" role="menuitem" className="btn-quiet" style={{ fontSize: 12 }}
+                        onClick={() => { setPlaceMenuOpen(false); goLocations(); }}>
+                        Add or edit places…
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
               {(stageCast.length > 0 || stageGuests.length > 0) && (
                 <SceneCastStrip
                   cast={stageCast}
@@ -2224,11 +2312,6 @@ export function Story() {
                     Nothing here yet. Write the first turn.
                   </p>
                 ) : null}
-                {!(activeLocation?.name || episode.location) && (
-                  <div className="label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    No place linked yet
-                  </div>
-                )}
                 {writeReady && writeReady.missing.length > 0 && !writeAnyway && (
                   <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', fontSize: 12.5, lineHeight: 1.55, color: 'var(--paper)' }}>
                     <span>Still missing: {writeReady.missing.join(' ')}</span>
@@ -2856,7 +2939,7 @@ function SliderRow({ label, value, min, max, step, unit, onChange }: {
 function DisplaySheet({ open, onClose, narrow }: {
   open: boolean; onClose: () => void; narrow: boolean;
 }) {
-  const { display, setDisplay } = useApp();
+  const { display, setDisplay } = useApp(useShallow((s) => ({ display: s.display, setDisplay: s.setDisplay })));
   return (
     <Sheet open={open} onClose={onClose} narrow={narrow}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>

@@ -161,8 +161,10 @@ export const useVault = create<VaultStore>()((set, get) => ({
     useSettings.setState((s) => ({
       providers: s.providers.map((p) => ({ ...p, apiKey: keyMap[p.id] ?? '' }))
     }));
-    set({ locked: false, sessionKey: key });
+    // Install the story key before unlocking: screens that render on unlock
+    // must read decrypted rows, not sealed ones.
     await installStoryKey(key, data);
+    set({ locked: false, sessionKey: key });
     return true;
   },
 

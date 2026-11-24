@@ -36,7 +36,8 @@ Deno.serve(async (req) => {
     .lt('amount', 0)
     .gte('created_at', since);
   if (recent.error) return json(500, { error: { message: recent.error.message } });
-  if ((recent.count ?? 0) >= 20) {
+  // World building fires a burst of small calls; 40 a minute leaves room for one.
+  if ((recent.count ?? 0) >= 40) {
     return json(429, { error: { message: 'Too many hosted calls. Wait a minute and try again.' } });
   }
   const priced = priceCall(op, body);
@@ -73,22 +74,32 @@ Deno.serve(async (req) => {
     else forwarded.max_tokens = cap;
   }
 
-  const upstream = await fetch(`${base}${priced.path}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(forwarded)
+  const release = () => admin.rpc('apply_credit', {
+    p_user: user.id,
+    p_amount: priced.cost,
+    p_reason: 'release',
+    p_key: `release:${requestId}`
   });
 
-  if (!upstream.ok) {
-    await admin.rpc('apply_credit', {
-      p_user: user.id,
-      p_amount: priced.cost,
-      p_reason: 'release',
-      p_key: `release:${requestId}`
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${base}${priced.path}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(forwarded),
+      signal: AbortSignal.timeout(180_000)
     });
+  } catch {
+    // Network failure or timeout: nothing was delivered, so nothing is charged.
+    await release();
+    return json(502, { error: { message: 'Hosted model could not be reached. Try again.' } });
+  }
+
+  if (!upstream.ok) {
+    await release();
     let detail = '';
     try {
       const errBody = await upstream.json() as { error?: { message?: string }; message?: string };

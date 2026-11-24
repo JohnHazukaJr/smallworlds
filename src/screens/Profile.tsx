@@ -9,7 +9,7 @@ import { replaceImportMessage } from '../importFile';
 import { useVault } from '../security/vault';
 import { useSettings } from '../store/settings';
 import {
-  clearStoragePressure, estimateStorage, hasStoragePressure, type StorageReport
+  clearStoragePressure, estimateStorage, hasStoragePressure, requestPersistentStorage, type StorageReport
 } from '../storage/quota';
 import {
   decryptDeviceExport, deviceHasSecrets, encryptDeviceExport, exportDevice
@@ -22,15 +22,7 @@ import { avatarStyle, plateStyle, VIS } from '../ui/theme';
 import { LegalLinks } from './Legal';
 import type { Visibility } from '../types';
 
-function download(data: unknown, filename: string) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
-}
+import { downloadJson as download, fileSlug } from '../ui/download';
 
 export function Profile() {
   const { band } = useViewport();
@@ -45,6 +37,7 @@ export function Profile() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [storage, setStorage] = useState<StorageReport | null>(null);
+  const [persisted, setPersisted] = useState<boolean | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const worlds = useLiveQuery(() => db.worlds.toArray(), []) ?? [];
@@ -60,6 +53,7 @@ export function Profile() {
 
   useEffect(() => {
     void estimateStorage().then(setStorage);
+    void requestPersistentStorage().then(setPersisted);
   }, [worlds.length]);
 
   const exportDeviceBackup = async (passphrase: string) => {
@@ -166,10 +160,10 @@ export function Profile() {
           ['chapters', String(stats?.chapters ?? '—')],
           ['words written', stats ? `${Math.round(stats.words / 100) / 10}k` : '—'],
           ['cast created', String(stats?.cast ?? '—')],
-          ['storage', storage?.label ?? '—']
+          ['storage', storage ? `${storage.label}${persisted === true ? ' · kept' : persisted === false ? ' · may be cleared by the browser' : ''}` : '—']
         ].map(([k, v]) => (
           <div key={k} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-            <div className="serif" style={{ fontSize: 24, color: '#f4f2ee' }}>{v}</div>
+            <div className="serif" style={{ fontSize: 24, color: 'var(--ink-heading)' }}>{v}</div>
             <Mono style={{ fontSize: 9 }}>{k}</Mono>
           </div>
         ))}
@@ -193,14 +187,11 @@ export function Profile() {
               <button
                 className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }}
                 onClick={async () => {
-                  const data = await exportWorld(w.id);
-                  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement('a');
-                  a.href = url;
-                  a.download = `${w.title.toLowerCase().replace(/\s+/g, '-')}.smallworlds.json`;
-                  a.click();
-                  URL.revokeObjectURL(url);
+                  try {
+                    download(await exportWorld(w.id), `${fileSlug(w.title)}.smallworlds.json`);
+                  } catch (e) {
+                    setError(formatUserError(e));
+                  }
                 }}
               >Export</button>
             </div>
@@ -327,7 +318,7 @@ function AccountSection({
         <div style={{ fontSize: 13.5, lineHeight: 1.6, color: 'var(--ink-muted)' }}>
           Cloud sync is off. Copy <code style={{ fontFamily: 'IBM Plex Mono, monospace', fontSize: 11 }}>.env.example</code> to
           <code style={{ fontFamily: 'IBM Plex Mono, monospace', fontSize: 11 }}> .env.local</code>, add your Supabase URL and anon key,
-          run <code style={{ fontFamily: 'IBM Plex Mono, monospace', fontSize: 11 }}>supabase/migrations/001_initial.sql</code>,
+          run every file in <code style={{ fontFamily: 'IBM Plex Mono, monospace', fontSize: 11 }}>supabase/migrations/</code> in order,
           then restart the dev server. Phone SMS needs Twilio (paid); email and Google are free-tier friendly; TOTP MFA is optional.
         </div>
       </div>
@@ -414,6 +405,25 @@ function AccountSection({
             Continue with Google
           </button>
         )}
+      </div>
+    );
+  }
+
+  if (auth.mfaRequired) {
+    return (
+      <div className="craft-row" style={{ padding: 20, marginBottom: 28, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <Mono style={{ fontSize: 9 }}>two-step sign-in</Mono>
+        <div style={{ fontSize: 13.5, lineHeight: 1.6, color: 'var(--paper)' }}>
+          This account uses an authenticator app. Enter its current code to finish signing in. Sync stays paused until you do.
+        </div>
+        <input autoComplete="one-time-code" inputMode="numeric" placeholder="6-digit code" value={totpCode} onChange={(e) => setTotpCode(e.target.value)} />
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button className="btn-primary" disabled={busy || totpCode.trim().length < 6} onClick={() => void run(async () => {
+            await auth.verifyMfa(totpCode.trim());
+            setTotpCode('');
+          })}>Verify</button>
+          <button className="btn-quiet" disabled={busy} onClick={() => void run(() => auth.signOut())}>Sign out</button>
+        </div>
       </div>
     );
   }

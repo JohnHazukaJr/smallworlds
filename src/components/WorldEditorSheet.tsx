@@ -15,13 +15,12 @@ import { TrackedScoreSection, WorldBondPaceChips } from './BondScores';
 import { StoryDateFields } from './StoryDateFields';
 import { GameRulesSection } from './GameRulesSection';
 import { AppearanceFields } from './AppearanceFields';
-import { PlacePhotoTools } from './PlacePhotoTools';
+import { placeTree, setScenePlace } from '../places';
 import { Bar, Chip, ErrorNote, Field, Mono, Sheet, Spinner, Toggle } from '../ui/bits';
 import { characterAvatarStyle } from '../ui/avatar';
 import { avatarStyle } from '../ui/theme';
 import {
-  applyStanceToAi, calendarPatch, emptyCharacter, emptyLocation,
-  syncSceneLocationName,
+  applyStanceToAi, calendarPatch, emptyCharacter,
   formatEpisodeDateRange, formatStoryDate, formatStoryDateShort, PLOT_TARGET_CAP,
   STORY_STANCES, storyStanceOf, worldCalendar
 } from '../worldOps';
@@ -50,9 +49,7 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
   const goLocations = useApp((s) => s.goLocations);
   const [tab, setTab] = useState<Tab>('context');
   const [charId, setCharId] = useState<string | null>(null);
-  const [locId, setLocId] = useState<string | null>(null);
   const selected = characters.find((c) => c.id === charId) ?? null;
-  const selectedLoc = locations.find((l) => l.id === locId) ?? null;
 
   const [aiVersion, setAiVersion] = useState(0);
   const [flesh, setFlesh] = useState<{ busy: 'lore' | 'plot' | 'rules' | null; error: string; errorFor: 'lore' | 'plot' | 'rules' | null }>(
@@ -102,14 +99,6 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
       await db.characters.update(id, next);
     }, onSaveFail));
   };
-  const patchLoc = (id: string, p: Partial<Location>) =>
-    void safeWrite(async () => {
-      await db.locations.update(id, { ...p, updatedAt: Date.now() });
-      if (typeof p.name === 'string') {
-        await syncSceneLocationName({ id, name: p.name, worldId: world.id });
-      }
-    }, onSaveFail);
-
   const runFlesh = async (kind: 'lore' | 'plot' | 'rules', task: () => Promise<void>) => {
     setFlesh({ busy: kind, error: '', errorFor: null });
     try {
@@ -352,21 +341,9 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <input key={episode.id + '-title'} defaultValue={episode.title}
                 onBlur={(e) => patchEpisode({ title: e.target.value })} />
             </Field>
-            <Field label="This chapter's place note" note="free text · pick a saved place from Places">
-              <textarea key={episode.id + '-loc'} rows={2} defaultValue={episode.location}
-                onBlur={(e) => {
-                  const text = e.target.value;
-                  const linked = episode.locationId
-                    ? locations.find((l) => l.id === episode.locationId)
-                    : null;
-                  const byName = locations.find(
-                    (l) => l.name.trim() && l.name.trim().toLowerCase() === text.trim().toLowerCase()
-                  );
-                  const keepId = linked && linked.name.trim().toLowerCase() === text.trim().toLowerCase()
-                    ? linked.id
-                    : byName?.id ?? null;
-                  patchEpisode({ location: text, locationId: keepId });
-                }} />
+            <Field label="Where in the place" note="optional detail, e.g. the back room — the place itself is set on the Places tab">
+              <input key={episode.id + '-placenote'} defaultValue={episode.placeNote ?? ''}
+                onBlur={(e) => patchEpisode({ placeNote: e.target.value })} />
             </Field>
             {season.bible && (
               <Field label="Previously" note="carried into this story">
@@ -627,95 +604,38 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
           </>
         )}
 
-        {tab === 'locations' && !selectedLoc && (
+        {tab === 'locations' && (
           <>
-            <Mono style={{ fontSize: monoPx }}>pick a location to edit</Mono>
-            {locations.map((l) => (
-              <div key={l.id} onClick={() => setLocId(l.id)} className="hover-bright" style={{
-                display: 'flex', gap: 11, alignItems: 'center', padding: '10px 12px', borderRadius: 13,
-                cursor: 'pointer', border: '1px solid var(--rule)', background: 'transparent'
-              }}>
-                <div style={l.portrait
-                  ? { width: 34, height: 34, borderRadius: '50%', flexShrink: 0, backgroundImage: `url(${l.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center', border: '1px solid var(--rule)' }
-                  : avatarStyle(l.hue, 34)} />
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
-                  <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>
-                    {l.name || 'unnamed'}{episode.locationId === l.id ? " · this chapter's place" : ''}
+            <Mono style={{ fontSize: monoPx }}>places in this world · the story is in the marked one</Mono>
+            {placeTree(locations).map(({ place: l, depth }) => {
+              const here = episode.locationId === l.id;
+              return (
+                <div key={l.id} style={{
+                  display: 'flex', gap: 11, alignItems: 'center', padding: '9px 12px', borderRadius: 13,
+                  marginLeft: depth * 16,
+                  border: `1px solid ${here ? 'var(--accent-strong)' : 'var(--rule)'}`, background: 'transparent'
+                }}>
+                  <div style={l.portrait
+                    ? { width: 32, height: 32, borderRadius: '50%', flexShrink: 0, backgroundImage: `url(${l.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center', border: '1px solid var(--rule)' }
+                    : avatarStyle(l.hue, 32)} />
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>
+                      {l.name || 'Unnamed place'}{here ? ' · the story is here' : ''}
+                    </div>
+                    <div style={{ fontSize: 11.5, color: 'var(--ink-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {clipPreview(l.summary || l.atmosphere || 'No description yet', 90)}
+                    </div>
                   </div>
-                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 9.5, opacity: 0.5, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {l.tagline || 'no tagline'}
-                  </div>
+                  {!here && (
+                    <button className="btn-quiet" style={{ fontSize: 10 }} onClick={() => { void setScenePlace(episode.id, l.id); }}>Go here</button>
+                  )}
+                  <button className="btn-quiet" style={{ fontSize: 10 }} onClick={() => { onClose(); goLocations(l.id); }}>edit</button>
                 </div>
-              </div>
-            ))}
+              );
+            })}
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <Chip onClick={() => {
-                const l = emptyLocation(world.id, { name: 'New location' });
-                void db.locations.add(l).then(() => setLocId(l.id));
-              }}>+ new location</Chip>
-              <Chip onClick={() => { onClose(); goLocations(); }}>full editor → Places</Chip>
+              <Chip onClick={() => { onClose(); goLocations(); }}>Open Places to add or edit</Chip>
             </div>
-          </>
-        )}
-
-        {tab === 'locations' && selectedLoc && (
-          <>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 11 }}>
-              <button className="btn-quiet" style={{ fontSize: 11, padding: '4px 6px' }} onClick={() => setLocId(null)}>← places</button>
-              <div style={selectedLoc.portrait
-                ? { width: 30, height: 30, borderRadius: '50%', flexShrink: 0, backgroundImage: `url(${selectedLoc.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center', border: '1px solid var(--rule)' }
-                : avatarStyle(selectedLoc.hue, 30)} />
-              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink-heading)', flex: 1 }}>
-                {selectedLoc.name || 'unnamed'}
-              </div>
-              <button className="btn-quiet" style={{ fontSize: 10 }} onClick={() => {
-                patchEpisode({
-                  locationId: selectedLoc.id,
-                  location: selectedLoc.name,
-                  ...(selectedLoc.portrait ? { image: selectedLoc.portrait } : {})
-                });
-              }}>set as the place</button>
-              <button className="btn-quiet" style={{ fontSize: 10 }} onClick={() => { onClose(); goLocations(selectedLoc.id); }}>full editor</button>
-            </div>
-            <PlacePhotoTools
-              location={selectedLoc}
-              world={world}
-              onChange={({ portrait }) => patchLoc(selectedLoc.id, { portrait })}
-            />
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 12 }}>
-              <Field label="Name">
-                <input key={selectedLoc.id + '-name'} defaultValue={selectedLoc.name}
-                  onBlur={(e) => patchLoc(selectedLoc.id, { name: e.target.value })} />
-              </Field>
-              <Field label="Tagline">
-                <input key={selectedLoc.id + '-tag'} defaultValue={selectedLoc.tagline}
-                  onBlur={(e) => patchLoc(selectedLoc.id, { tagline: e.target.value })} />
-              </Field>
-            </div>
-            <Field label="Summary" note="what the place is">
-              <textarea key={selectedLoc.id + '-summary'} rows={3} defaultValue={selectedLoc.summary}
-                onBlur={(e) => patchLoc(selectedLoc.id, { summary: e.target.value })} />
-            </Field>
-            <Field label="Atmosphere" note="sensory detail the narrator leans on">
-              <textarea key={selectedLoc.id + '-atm'} rows={3} defaultValue={selectedLoc.atmosphere}
-                onBlur={(e) => patchLoc(selectedLoc.id, { atmosphere: e.target.value })} />
-            </Field>
-            <Field label="Features">
-              <textarea key={selectedLoc.id + '-feat'} rows={2} defaultValue={selectedLoc.features}
-                onBlur={(e) => patchLoc(selectedLoc.id, { features: e.target.value })} />
-            </Field>
-            <Field label="Hard rules" note="one per line — never broken here">
-              <textarea key={selectedLoc.id + '-rules'} rows={3} defaultValue={selectedLoc.rules.join('\n')}
-                onBlur={(e) => patchLoc(selectedLoc.id, { rules: e.target.value.split('\n').filter((x) => x.trim()) })} />
-            </Field>
-            <Field label="Current state">
-              <textarea key={selectedLoc.id + '-state'} rows={2} defaultValue={selectedLoc.currentState}
-                onBlur={(e) => patchLoc(selectedLoc.id, { currentState: e.target.value })} />
-            </Field>
-            <Field label="AI directives for this location" note="verbatim when this is the chapter's place">
-              <textarea key={selectedLoc.id + '-ci'} rows={2} defaultValue={selectedLoc.customInstructions}
-                onBlur={(e) => patchLoc(selectedLoc.id, { customInstructions: e.target.value })} />
-            </Field>
           </>
         )}
       </div>

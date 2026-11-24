@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react';
-import { ambiguousResidentNote, mentionedResidents, reuseArea, type PlaceCastPerson } from '../ai/placeDraft';
+import { ambiguousResidentNote, mentionedResidents, type PlaceCastPerson } from '../ai/placeDraft';
+import { placeTree, wouldCreateLoop } from '../places';
+import type { Location } from '../types';
 import { Chip, Field } from '../ui/bits';
 
 export interface PlaceCastChip extends PlaceCastPerson {
@@ -7,33 +9,38 @@ export interface PlaceCastChip extends PlaceCastPerson {
 }
 
 /**
- * Area, who the place is for, and one nearby line.
- * Names that appear as the author types light up. Turning a chip off stays off for this visit.
+ * Where a place sits (inside another place), who belongs there, and what is
+ * nearby. Names that appear as the author types light up as residents;
+ * turning a chip off stays off for this visit.
  */
 export function PlaceSettingFields({
   placeKey,
+  placeId,
   cast,
-  areas,
-  area,
-  near,
+  places,
+  parentId,
+  nearIds,
   residentIds,
   dismissedIds,
   authorText,
-  onArea,
-  onNear,
+  onParentId,
+  onNearIds,
   onResidentIds,
   onDismissedIds
 }: {
   placeKey: string;
+  /** The place being edited. Missing for a place not saved yet. */
+  placeId?: string;
   cast: PlaceCastChip[];
-  areas: string[];
-  area: string;
-  near: string;
+  /** Every place in the world. */
+  places: Location[];
+  parentId: string | null | undefined;
+  nearIds?: string[];
   residentIds: string[];
   dismissedIds?: string[];
   authorText: string;
-  onArea: (area: string) => void;
-  onNear: (near: string) => void;
+  onParentId: (id: string | null) => void;
+  onNearIds?: (ids: string[]) => void;
   onResidentIds: (ids: string[]) => void;
   onDismissedIds?: (ids: string[]) => void;
 }) {
@@ -43,9 +50,10 @@ export function PlaceSettingFields({
   const prevText = useRef<string | null>(null);
   const castKey = cast.map((person) => `${person.id}:${person.name}`).join('|');
   const named = cast.filter((person) => person.name.trim());
-  const selected = named.filter((person) => residentIds.includes(person.id));
   const ambiguous = ambiguousResidentNote(authorText, named);
-  const listId = `place-areas-${placeKey}`;
+  const others = places.filter((p) => p.id !== placeId);
+  const parentOptions = placeTree(others).filter((row) => !placeId || !wouldCreateLoop(placeId, row.place.id, places));
+  const near = nearIds ?? [];
 
   useEffect(() => {
     prevText.current = authorText;
@@ -79,31 +87,28 @@ export function PlaceSettingFields({
     onResidentIds(on ? residentIds.filter((item) => item !== id) : [...residentIds, id]);
   };
 
-  const home = selected.map((person) => person.name.trim()).filter(Boolean);
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <Field label="Area" note="the neighborhood or district">
-        <input
-          list={listId}
-          value={area}
-          placeholder="Briar Park"
-          onChange={(e) => onArea(e.target.value)}
-          onBlur={() => {
-            const next = reuseArea(area, areas);
-            if (next !== area) onArea(next);
-          }}
-        />
-        <datalist id={listId}>
-          {areas.map((item) => <option key={item} value={item} />)}
-        </datalist>
+      <Field label="Inside" note="the bigger place this one is part of — a room in a building, a shop in a town">
+        <select
+          value={parentId ?? ''}
+          onChange={(e) => onParentId(e.target.value || null)}
+          disabled={parentOptions.length === 0}
+        >
+          <option value="">{parentOptions.length === 0 ? 'No other places yet' : 'Nowhere — top level'}</option>
+          {parentOptions.map(({ place, depth }) => (
+            <option key={place.id} value={place.id}>
+              {`${'  '.repeat(depth)}${place.name.trim() || 'Unnamed place'}`}
+            </option>
+          ))}
+        </select>
       </Field>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-heading)' }}>Who it’s for</div>
+        <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-heading)' }}>Belongs to</div>
         {named.length === 0 ? (
           <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-muted)' }}>
-            Add people on Cast first. Fill in will not invent a resident.
+            Add people on Cast first. Whoever you tap here lives or works here.
           </div>
         ) : (
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -121,25 +126,52 @@ export function PlaceSettingFields({
         {ambiguous && (
           <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-muted)' }}>{ambiguous}</div>
         )}
-        {!ambiguous && named.length > 0 && home.length === 0 && (
-          <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--ink-muted)' }}>
-            Fill in will not invent a resident.
-          </div>
-        )}
-        {home.length > 0 && (
-          <div style={{ fontSize: 12.5, lineHeight: 1.5, color: 'var(--paper)' }}>
-            Home of {home.length === 1 ? home[0] : home.length === 2 ? `${home[0]} and ${home[1]}` : `${home.slice(0, -1).join(', ')}, and ${home[home.length - 1]}`}.
-          </div>
-        )}
       </div>
 
-      <Field label="Nearby" note="one line, optional">
-        <input
-          value={near}
-          placeholder="about 15 minutes from the school"
-          onChange={(e) => onNear(e.target.value)}
-        />
-      </Field>
+      {onNearIds && others.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-heading)' }}>
+            Nearby <span style={{ fontWeight: 400, color: 'var(--ink-muted)', fontSize: 12 }}>· a short walk or ride away</span>
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {others.map((p) => {
+              const on = near.includes(p.id);
+              return (
+                <Chip key={p.id} active={on} onClick={() => onNearIds(on ? near.filter((id) => id !== p.id) : [...near, p.id])}>
+                  {p.name.trim() || 'Unnamed place'}
+                </Chip>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** One rule per row, add and remove. Optional: most places need none. */
+export function PlaceRulesEditor({ rules, onRules }: { rules: string[]; onRules: (rules: string[]) => void }) {
+  const rows = rules.length > 0 ? rules : [];
+  const set = (index: number, value: string) => onRules(rows.map((r, i) => (i === index ? value : r)));
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      {rows.map((rule, index) => (
+        <div key={index} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input
+            value={rule}
+            onChange={(e) => set(index, e.target.value)}
+            onBlur={() => { if (!rule.trim()) onRules(rows.filter((_, i) => i !== index)); }}
+            placeholder="e.g. The causeway floods at high tide — no crossing after the bell."
+            style={{ flex: 1, minWidth: 0 }}
+          />
+          <button type="button" className="btn-quiet" style={{ fontSize: 11 }} onClick={() => onRules(rows.filter((_, i) => i !== index))}>
+            remove
+          </button>
+        </div>
+      ))}
+      <button type="button" className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }} onClick={() => onRules([...rows, ''])}>
+        + add a rule
+      </button>
     </div>
   );
 }

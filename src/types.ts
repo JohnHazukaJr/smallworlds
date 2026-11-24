@@ -222,15 +222,17 @@ export interface Episode {
   worldId: string;
   number: number;
   title: string;
-  /** where the episode takes place — feeds the scene plate + prompt */
+  /** Display copy of the current place's name. Written by setScenePlace; read locationId first. */
   location: string;
-  /** saved Location id when the scene is set from the library; null = free-text / unset */
+  /** The chapter's current place. The one source of truth for where the scene is. */
   locationId?: string | null;
+  /** Optional detail within the place, e.g. "the back room". Does not change the place. */
+  placeNote?: string;
   /** optional scene image (data URL) shown behind the story text */
   image?: string | null;
   /** Pictures made in this chapter. Shown in the prose; not sent back as narration. */
   illustrations?: ChapterIllustration[];
-  /** free-text weather / time of day / sensory note for this scene */
+  /** Weather, light, or time of day right now. The live-state pass writes it; the prompt reads it. */
   atmosphereNote?: string;
   /** when true, location changes won't auto-retarget the global mood */
   moodPinned?: boolean;
@@ -544,38 +546,40 @@ export interface Location {
   id: string;
   worldId: string;
   name: string;
-  /** short tagline, e.g. "harbour district · public square" */
-  tagline: string;
+  /** The place this one sits inside (Saltmere > Harbour > The Long Room). Null or missing = top level. */
+  parentId?: string | null;
+  /** Story tint: the mood colour the Story screen takes while the scene is here. */
   hue: number;
   /** uploaded portrait image, data URL — null/unset shows the placeholder plate */
   portrait?: string | null;
-  /** prose description — what the place is, first impression */
+  /** What it is: first impression and what is here. */
   summary: string;
-  /** sensory detail: sight, sound, smell, feel — what the narrator leans on */
+  /** Feel: sight, sound, smell, texture — what the writer leans on. */
   atmosphere: string;
-  /** notable landmarks, rooms, or features within it */
-  features: string;
-  /** how it came to be / what happened here — revealed only in earned fragments */
-  history: string;
-  /** who or what is typically found here */
+  /** Who's here: who or what is usually found here. */
   inhabitants: string;
   /**
    * Cast who belong here (home or work). Missing on older places means none.
    * Separate from Character.state.location, which play still moves.
    */
   residentIds?: string[];
-  /** Neighborhood or district, e.g. "Briar Park". Places that share this string sit together. */
-  area?: string;
-  /** One short travel note, e.g. "about 15 minutes from the school". Not mirrored. */
-  near?: string;
-  /** hazards, laws, or hard rules specific to this place — never broken */
+  /** Places a short walk or ride away, by id. */
+  nearIds?: string[];
+  /** Optional rules that hold here (laws, hazards). Not required. */
   rules: string[];
-  /** things hidden here, not common knowledge */
-  secrets: string;
-  /** current condition/status, e.g. "burned in the siege, still rebuilding" */
+  /** Hidden: history and secrets the writer knows and reveals only when earned. */
+  hidden?: string;
+  /** Right now: its condition at the moment. Play updates it. */
   currentState: string;
-  /** free-text per-location AI directives, passed verbatim */
+  /** Notes for the AI while the scene is here. */
   customInstructions: string;
+  /** Before the tree. Folded into the fields above on first open; kept so old rows and imports still load. */
+  tagline: string;
+  features: string;
+  history: string;
+  secrets: string;
+  area?: string;
+  near?: string;
   createdAt: number;
   updatedAt: number;
 }

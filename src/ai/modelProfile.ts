@@ -144,7 +144,8 @@ export function modelProfile(model: string): ModelProfile {
     supportsJsonObject: glm || gpt5 || m.includes('gpt-4o') || m.includes('gpt-4.1') || m.includes('deepseek') || isHostedSlug(model),
     supportsTools: glm || gpt5 || m.includes('gpt-4') || m.includes('deepseek') || m.includes('claude') || isHostedSlug(model),
     usesMaxCompletionTokens: gpt5 || oSeries,
-    omitsSampling: omitsSamplingParams(model),
+    // GPT-5 and o-series reject a non-default temperature.
+    omitsSampling: omitsSamplingParams(model) || gpt5 || oSeries,
     isGlm: glm,
     isGlm5: glm5
   };

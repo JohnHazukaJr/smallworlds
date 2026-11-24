@@ -74,13 +74,18 @@ interface RemoteMeta {
   deleted_at: string | null;
 }
 
+/** The Postgres table for a local table. Calendar events use snake_case (migration 004). */
+export function remoteTable(table: SyncTableName): string {
+  return table === 'calendarEvents' ? 'calendar_events' : table;
+}
+
 async function listRemoteMeta(table: SyncTableName, userId: string): Promise<RemoteMeta[]> {
   const sb = getSupabase();
   if (!sb) return [];
   const rows: RemoteMeta[] = [];
   for (let from = 0; ; from += META_PAGE) {
     const { data, error } = await sb
-      .from(table)
+      .from(remoteTable(table))
       .select('id, updated_at, deleted_at')
       .eq('user_id', userId)
       .range(from, from + META_PAGE - 1);
@@ -98,7 +103,7 @@ async function fetchRemoteRows(table: SyncTableName, userId: string, ids: string
   const rows: SyncRow[] = [];
   for (let i = 0; i < ids.length; i += ID_CHUNK) {
     const slice = ids.slice(i, i + ID_CHUNK);
-    const { data, error } = await sb.from(table).select('*').eq('user_id', userId).in('id', slice);
+    const { data, error } = await sb.from(remoteTable(table)).select('*').eq('user_id', userId).in('id', slice);
     if (error) throw error;
     rows.push(...((data ?? []) as SyncRow[]));
   }
@@ -128,7 +133,7 @@ async function pushRows(
   // Upsert in chunks to stay under payload limits.
   const CHUNK = 200;
   for (let i = 0; i < batch.length; i += CHUNK) {
-    const { error } = await sb.from(table).upsert(batch.slice(i, i + CHUNK), { onConflict: 'id' });
+    const { error } = await sb.from(remoteTable(table)).upsert(batch.slice(i, i + CHUNK), { onConflict: 'id' });
     if (error) throw error;
   }
 }
@@ -184,7 +189,7 @@ function tombstonePushRow(t: Tombstone) {
     world_id: t.worldId,
     season_id: t.seasonId,
     episode_id: t.episodeId,
-    payload: t.payload,
+    payload: { id: t.id },
     updated_at: new Date(t.deletedAt).toISOString(),
     deleted_at: new Date(t.deletedAt).toISOString()
   };
@@ -261,6 +266,10 @@ export async function syncNow(): Promise<{ pulled: number; pushed: number }> {
   if (!sb) throw new Error('Cloud sync is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.');
   const { data: { session } } = await sb.auth.getSession();
   if (!session?.user) throw new Error('Sign in to sync.');
+  const { data: aal } = await sb.auth.mfa.getAuthenticatorAssuranceLevel();
+  if (aal && aal.nextLevel === 'aal2' && aal.currentLevel !== 'aal2') {
+    throw new Error('Enter the code from your authenticator in Profile to finish signing in, then sync.');
+  }
 
   const userId = session.user.id;
   useSyncMeta.setState({ busy: true, error: '', lastResult: '' });

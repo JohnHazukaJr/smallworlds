@@ -1,25 +1,19 @@
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useEffect, useRef, useState } from 'react';
 import { draftLocation, fleshOutLocation, seedBlankResidentLocations } from '../ai/engine';
-import { groupLocationsByArea } from '../ai/placeDraft';
 import { PlacePhotoTools } from '../components/PlacePhotoTools';
-import { PlaceSettingFields } from '../components/PlaceSettingFields';
-import { db, recordTombstones, safeWrite } from '../db';
+import { PlaceRulesEditor, PlaceSettingFields } from '../components/PlaceSettingFields';
+import { db, safeWrite } from '../db';
 import { formatUserError } from '../errors';
+import { placeTree, placeWhereLine, removePlace, renamePlace, setScenePlace } from '../places';
 import { useApp } from '../store/app';
 import type { Location } from '../types';
 import { ConfirmBar, ErrorNote, Field, Mono, Spinner, editorsStacked, phoneChrome, useViewport } from '../ui/bits';
-import { avatarStyle, ACCENT } from '../ui/theme';
-import { clearDeletedPlaceFromEpisodes, emptyLocation, syncSceneLocationName } from '../worldOps';
+import { avatarStyle } from '../ui/theme';
+import { emptyLocation } from '../worldOps';
 import { shouldFlushAutosave } from '../ui/autosave';
 
-type Tab = 'overview' | 'atmosphere' | 'history' | 'rules' | 'ai';
-const TABS: Array<[Tab, string]> = [
-  ['overview', 'Overview'], ['atmosphere', 'Atmosphere'], ['history', 'History'],
-  ['rules', 'Rules & secrets'], ['ai', 'AI notes']
-];
-
-/** Debounced autosave of a location draft back to the DB. */
+/** Debounced autosave of a place draft back to the DB. A rename follows to chapters and residents. */
 function useAutosave(draft: Location | null, onError: (msg: string) => void) {
   const timer = useRef<number>(undefined);
   const pending = useRef<Location | null>(null);
@@ -33,8 +27,8 @@ function useAutosave(draft: Location | null, onError: (msg: string) => void) {
       if (!shouldFlushAutosave(d.id, removed.current, true)) return;
       const row = await db.locations.get(d.id);
       if (!shouldFlushAutosave(d.id, removed.current, !!row)) return;
+      if (row && row.name !== d.name) await renamePlace(row, d.name);
       await db.locations.put({ ...d, updatedAt: Date.now() });
-      await syncSceneLocationName({ id: d.id, name: d.name, worldId: d.worldId });
     }, (msg) => onErrorRef.current(msg));
   };
   useEffect(() => {
@@ -69,6 +63,8 @@ function useAutosave(draft: Location | null, onError: (msg: string) => void) {
   };
 }
 
+const monoSmall = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)' } as const;
+
 export function Locations() {
   const { band } = useViewport();
   const stacked = editorsStacked(band);
@@ -76,7 +72,6 @@ export function Locations() {
   const narrow = stacked;
   const { currentWorldId, go, pendingLocationId, clearPendingLocation } = useApp();
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>('overview');
   const [aiDesc, setAiDesc] = useState('');
   const [aiBusy, setAiBusy] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -86,8 +81,8 @@ export function Locations() {
   const [fleshError, setFleshError] = useState('');
   const [undoSnapshot, setUndoSnapshot] = useState<Location | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
-  const [newArea, setNewArea] = useState('');
-  const [newNear, setNewNear] = useState('');
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const [newParentId, setNewParentId] = useState<string | null>(null);
   const [newResidentIds, setNewResidentIds] = useState<string[]>([]);
   const [newDismissed, setNewDismissed] = useState<string[]>([]);
   const dismissedByPlace = useRef(new Map<string, string[]>());
@@ -119,7 +114,6 @@ export function Locations() {
     async () => (world ? db.characters.where('worldId').equals(world.id).toArray() : []),
     [world?.id]
   ) ?? [];
-  const areaNames = [...new Set(places.map((place) => place.area?.trim() ?? '').filter(Boolean))];
   const placeRefs = places.map((place) => ({ id: place.id, name: place.name }));
   const castChips = castRows.map((person) => ({
     id: person.id, name: person.name, aliases: person.aliases, hue: person.hue
@@ -127,9 +121,10 @@ export function Locations() {
 
   const selected = places.find((l) => l.id === selectedId)
     ?? (pendingLocationId ? places.find((l) => l.id === pendingLocationId) : undefined)
+    ?? places.find((l) => l.id === episode?.locationId)
     ?? places[0];
 
-  // Honor one-shot focus from World editor / Director.
+  // Honor one-shot focus from the World editor or Story.
   useEffect(() => {
     if (!pendingLocationId) return;
     if (currentWorldId && world === undefined) return;
@@ -144,7 +139,7 @@ export function Locations() {
     clearPendingLocation();
   }, [pendingLocationId, currentWorldId, world, places, placeRows, clearPendingLocation]);
 
-  // Sync draft when the selected location changes.
+  // Sync draft when the selected place changes.
   useEffect(() => {
     if (selected && selected.id !== draft?.id) setDraft(selected);
     if (!selected) setDraft(null);
@@ -158,6 +153,11 @@ export function Locations() {
 
   const patch = (p: Partial<Location>) => setDraft((d) => (d ? { ...d, ...p } : d));
 
+  const goHere = (placeId: string | null) => {
+    if (!episode) return;
+    void safeWrite(() => setScenePlace(episode.id, placeId), setError);
+  };
+
   const fleshOut = async () => {
     if (!draft) return;
     setFleshBusy(true);
@@ -165,7 +165,6 @@ export function Locations() {
     try {
       const result = await fleshOutLocation(world ?? null, draft, {
         cast: castRows,
-        areas: areaNames,
         places: placeRefs,
         selectedIds: draft.residentIds,
         dismissedIds: dismissedByPlace.current.get(draft.id) ?? []
@@ -187,18 +186,22 @@ export function Locations() {
 
   const addLocation = async (fromAI?: Partial<Location>) => {
     if (!world) return;
-    const l = emptyLocation(world.id, { name: 'New location', ...fromAI });
+    const l = emptyLocation(world.id, {
+      name: 'New place',
+      parentId: newParentId,
+      residentIds: newResidentIds,
+      ...fromAI,
+      ...(newParentId ? { parentId: newParentId } : {})
+    });
     await db.locations.add(l);
-    if (episode && !episode.locationId) {
-      await db.episodes.update(episode.id, {
-        locationId: l.id,
-        location: l.name,
-        updatedAt: Date.now()
-      });
-    }
+    // The first place of a chapter becomes where it happens. A chosen place is never replaced.
+    if (episode && !episode.locationId) await setScenePlace(episode.id, l.id);
     setSelectedId(l.id);
     setCreating(false);
     setAiDesc('');
+    setNewParentId(null);
+    setNewResidentIds([]);
+    setNewDismissed([]);
   };
 
   const aiDraft = async () => {
@@ -206,20 +209,16 @@ export function Locations() {
     setAiBusy(true);
     setError('');
     try {
-      const brief = [aiDesc.trim(), newArea.trim() && `in ${newArea.trim()}`, newNear.trim()].filter(Boolean).join('. ');
+      const parent = places.find((p) => p.id === newParentId);
+      const brief = [aiDesc.trim(), parent && `It is inside ${parent.name.trim()}.`].filter(Boolean).join(' ');
       const result = await draftLocation(world, brief, {
         cast: castRows,
-        areas: areaNames,
         places: placeRefs,
         selectedIds: newResidentIds,
         dismissedIds: newDismissed
       });
       await addLocation(result);
       await seedBlankResidentLocations(result.residentIds, (result.name || '').trim());
-      setNewArea('');
-      setNewNear('');
-      setNewResidentIds([]);
-      setNewDismissed([]);
     } catch (e) {
       setError(formatUserError(e));
     } finally {
@@ -241,14 +240,34 @@ export function Locations() {
   }
 
   const d = draft;
+  const rows = placeTree(places);
+  const hiddenBy = (row: { place: Location }) => {
+    let parentId = row.place.parentId;
+    const seen = new Set<string>();
+    while (parentId && !seen.has(parentId)) {
+      if (collapsed.has(parentId)) return true;
+      seen.add(parentId);
+      parentId = places.find((p) => p.id === parentId)?.parentId;
+    }
+    return false;
+  };
+  const visibleRows = stacked ? rows : rows.filter((row) => !hiddenBy(row));
+  const toggleCollapsed = (id: string) => setCollapsed((cur) => {
+    const next = new Set(cur);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  });
+  const isHere = (id: string) => episode?.locationId === id;
+  const where = d ? placeWhereLine(d, places) : '';
 
   return (
     <div className="fade-in" style={{
       display: 'grid', flex: 1, height: '100%', minHeight: 0, overflow: 'hidden',
-      gridTemplateColumns: stacked ? 'minmax(0, 1fr)' : '264px minmax(0, 1fr)',
+      gridTemplateColumns: stacked ? 'minmax(0, 1fr)' : '280px minmax(0, 1fr)',
       gridTemplateRows: stacked ? 'auto minmax(0, 1fr)' : 'minmax(0, 1fr)'
     }}>
-      {/* location list */}
+      {/* place tree */}
       <div className="glass-clear" style={{
         borderRadius: 0,
         borderTop: 0, borderLeft: 0,
@@ -258,7 +277,7 @@ export function Locations() {
         paddingRight: 16,
         paddingBottom: stacked ? 12 : 26,
         paddingLeft: 16,
-        display: 'flex', flexDirection: stacked ? 'row' : 'column', gap: stacked ? 8 : 16,
+        display: 'flex', flexDirection: stacked ? 'row' : 'column', gap: stacked ? 8 : 4,
         overflowX: stacked ? 'auto' : 'hidden',
         overflowY: stacked ? 'hidden' : 'auto',
         minWidth: 0,
@@ -266,7 +285,7 @@ export function Locations() {
         alignItems: stacked ? 'center' : undefined
       }}>
         {!narrow && (
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
             <div className="label" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span className="seed-mark" />
               Places · {world.title}
@@ -277,65 +296,55 @@ export function Locations() {
         {narrow && (
           <button className="btn-ghost" style={{ padding: '5px 11px', fontSize: 11, flexShrink: 0 }} onClick={() => setCreating(true)}>+ new</button>
         )}
-        {groupLocationsByArea(places).map((group) => (
-          <div key={group.area || 'loose'} style={{ display: 'flex', flexDirection: stacked ? 'row' : 'column', gap: stacked ? 8 : 4, minWidth: 0 }}>
-            {group.area && (
-              <div style={{
-                fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, letterSpacing: '0.08em',
-                color: 'var(--ink-muted)', padding: stacked ? '0 4px' : '8px 8px 0', flexShrink: 0
-              }}>{group.area}</div>
-            )}
-            {group.places.map((l) => {
+        {visibleRows.map(({ place: l, depth, hasChildren }) => {
           const active = selected?.id === l.id;
-          const inScene = episode?.locationId === l.id;
-          const residentLine = (l.residentIds ?? [])
-            .map((id) => castRows.find((person) => person.id === id)?.name.trim())
-            .filter(Boolean)
-            .join(', ');
+          const here = isHere(l.id);
           return (
             <div
               key={l.id}
-              onClick={() => { setSelectedId(l.id); setTab('overview'); }}
+              onClick={() => setSelectedId(l.id)}
               style={{
-              display: 'flex', gap: stacked ? 7 : 10, alignItems: 'center', padding: stacked ? '6px 7px' : 9, borderRadius: 12, cursor: 'pointer',
-              flexShrink: stacked ? 0 : 1,
-              minWidth: 0,
-              maxWidth: stacked ? 220 : undefined,
-              background: active ? 'var(--rule)' : 'transparent',
-              border: `1px solid ${active ? 'var(--glass-rim)' : 'transparent'}`
-            }}>
-              <div style={{ ...avatarStyle(l.hue, stacked ? 28 : 34), flexShrink: 0, ...(l.portrait ? { backgroundImage: `url(${l.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}) }} />
+                display: 'flex', gap: stacked ? 7 : 8, alignItems: 'center',
+                padding: stacked ? '6px 7px' : '7px 8px',
+                paddingLeft: stacked ? 7 : 8 + depth * 16,
+                borderRadius: 12, cursor: 'pointer',
+                flexShrink: stacked ? 0 : 1,
+                minWidth: 0,
+                maxWidth: stacked ? 220 : undefined,
+                background: active ? 'var(--rule)' : 'transparent',
+                border: `1px solid ${active ? 'var(--glass-rim)' : 'transparent'}`
+              }}
+            >
+              {!stacked && (
+                <button
+                  type="button"
+                  aria-label={collapsed.has(l.id) ? `Show places inside ${l.name}` : `Hide places inside ${l.name}`}
+                  onClick={(e) => { e.stopPropagation(); if (hasChildren) toggleCollapsed(l.id); }}
+                  style={{
+                    width: 14, border: 0, background: 'transparent', padding: 0, cursor: hasChildren ? 'pointer' : 'default',
+                    color: 'var(--ink-muted)', fontSize: 10, visibility: hasChildren ? 'visible' : 'hidden'
+                  }}
+                >{collapsed.has(l.id) ? '▸' : '▾'}</button>
+              )}
+              <div style={{ ...avatarStyle(l.hue, stacked ? 28 : 30), flexShrink: 0, ...(l.portrait ? { backgroundImage: `url(${l.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}) }} />
               <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
-                <div style={{ fontSize: stacked ? 12.5 : 13.5, fontWeight: 600, color: 'var(--ink-heading)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{l.name || 'unnamed'}</div>
-                {!narrow && (
-                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    {inScene ? "this chapter's place" : (residentLine || l.tagline || 'no tagline yet')}
-                  </div>
-                )}
+                <div style={{ fontSize: stacked ? 12.5 : 13.5, fontWeight: 600, color: 'var(--ink-heading)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {l.name || 'Unnamed place'}
+                </div>
+                {!narrow && here && <div style={{ ...monoSmall, color: 'var(--accent-strong)' }}>● the story is here</div>}
               </div>
-              {episode && (
+              {episode && !here && (
                 <button
                   type="button"
                   className="btn-quiet"
                   style={{ fontSize: 10, padding: '2px 6px', flexShrink: 0, whiteSpace: 'nowrap' }}
-                  title={inScene ? "Clear this chapter's place" : 'Set as the place'}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void safeWrite(
-                      () => db.episodes.update(episode.id, inScene
-                        ? { locationId: null, location: '', updatedAt: Date.now() }
-                        : { locationId: l.id, location: l.name, updatedAt: Date.now() }
-                      ),
-                      setError
-                    );
-                  }}
-                >{stacked ? (inScene ? 'clear' : 'set') : (inScene ? "this chapter's place — clear" : 'set as the place')}</button>
+                  title="Move this chapter's scene here"
+                  onClick={(e) => { e.stopPropagation(); goHere(l.id); }}
+                >Go here</button>
               )}
             </div>
           );
         })}
-          </div>
-        ))}
       </div>
 
       {/* editor */}
@@ -343,27 +352,25 @@ export function Locations() {
         {creating && (
           <div className="craft-row" style={{ padding: 20, marginBottom: 28, display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink-heading)' }}>New location</div>
+              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--ink-heading)' }}>New place</div>
               <button className="btn-quiet" onClick={() => setCreating(false)}>cancel</button>
             </div>
             <div style={{ fontSize: 12.5, lineHeight: 1.6, color: 'var(--ink-muted)' }}>
-              Describe it in a sentence and the utility model drafts a full sheet you can edit — or start blank.
+              Describe it in a sentence and the AI drafts the sheet for you to edit — or start blank.
             </div>
             <textarea
               rows={2} value={aiDesc} onChange={(e) => setAiDesc(e.target.value)}
-              placeholder="e.g. James Mansion in Briar Park, home of Ada James, about 15 minutes from the school"
+              placeholder="e.g. The James house, a tall cold mansion where Ada James lives"
             />
             <PlaceSettingFields
               placeKey="new"
               cast={castChips}
-              areas={areaNames}
-              area={newArea}
-              near={newNear}
+              places={places}
+              parentId={newParentId}
               residentIds={newResidentIds}
               dismissedIds={newDismissed}
-              authorText={[aiDesc, newArea && `in ${newArea}`, newNear].filter(Boolean).join('\n')}
-              onArea={setNewArea}
-              onNear={setNewNear}
+              authorText={aiDesc}
+              onParentId={setNewParentId}
               onResidentIds={setNewResidentIds}
               onDismissedIds={setNewDismissed}
             />
@@ -372,255 +379,177 @@ export function Locations() {
               <button className="btn-primary" disabled={aiBusy || !aiDesc.trim()} onClick={() => void aiDraft()}>
                 {aiBusy ? 'Drafting…' : 'Draft with AI'}
               </button>
-              <button className="btn-ghost" onClick={() => void addLocation()}>Start blank</button>
-              {aiBusy && <Spinner label="the utility model is writing the sheet" />}
+              <button className="btn-ghost" onClick={() => void addLocation(aiDesc.trim() ? { summary: aiDesc.trim() } : undefined)}>Start blank</button>
+              {aiBusy && <Spinner label="drafting the place" />}
             </div>
           </div>
         )}
 
         {!d && !creating && (
-          <div style={{ opacity: 0.6 }}>
-            <div className="serif" style={{ fontSize: 24, fontWeight: 300 }}>No locations yet.</div>
-            <button className="btn-primary" style={{ marginTop: 14 }} onClick={() => setCreating(true)}>Create the first location</button>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 520 }}>
+            <div className="serif" style={{ fontSize: 24, fontWeight: 300, color: 'var(--ink-heading)' }}>No places yet.</div>
+            <div style={{ fontSize: 13, lineHeight: 1.6, color: 'var(--ink-muted)' }}>
+              Places can sit inside each other — a town, a street in it, a room in a house. The story follows you between them.
+            </div>
+            <div><button className="btn-primary" onClick={() => setCreating(true)}>Add the first place</button></div>
           </div>
         )}
 
         {d && (
-          <>
-            <div style={{ display: 'flex', gap: 26, flexWrap: 'wrap', alignItems: 'flex-start', marginBottom: 32 }}>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 11, width: narrow ? '100%' : 258 }}>
-                <div style={{
-                  height: narrow ? 160 : 306, borderRadius: 16, border: '1px solid var(--rule)',
-                  display: 'flex', alignItems: 'flex-end', padding: 12,
-                  backgroundImage: d.portrait
-                    ? `url(${d.portrait})`
-                    : `linear-gradient(155deg, oklch(0.9 0.04 ${d.hue}), #f7f3ea)`,
-                  backgroundSize: 'cover', backgroundPosition: 'center'
-                }}>
-                  {!d.portrait && (
-                    <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', background: 'transparent',  padding: '5px 8px', borderRadius: 6 }}>
-                      no photo yet
-                    </span>
-                  )}
-                </div>
-                <PlacePhotoTools
-                  location={d}
-                  world={world ?? null}
-                  showPreview={false}
-                  onChange={async ({ portrait }) => {
-                    await db.locations.update(d.id, { portrait, updatedAt: Date.now() });
-                    patch({ portrait });
-                  }}
-                />
+          <div style={{ display: 'flex', gap: 28, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 11, width: narrow ? '100%' : 248 }}>
+              <div style={{
+                height: narrow ? 160 : 260, borderRadius: 16, border: '1px solid var(--rule)',
+                display: 'flex', alignItems: 'flex-end', padding: 12,
+                backgroundImage: d.portrait
+                  ? `url(${d.portrait})`
+                  : `linear-gradient(155deg, oklch(0.9 0.04 ${d.hue}), #f7f3ea)`,
+                backgroundSize: 'cover', backgroundPosition: 'center'
+              }}>
+                {!d.portrait && <span style={{ ...monoSmall, padding: '5px 8px' }}>no photo yet</span>}
+              </div>
+              <PlacePhotoTools
+                location={d}
+                world={world ?? null}
+                showPreview={false}
+                onChange={async ({ portrait }) => {
+                  await db.locations.update(d.id, { portrait, updatedAt: Date.now() });
+                  patch({ portrait });
+                }}
+              />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <Mono style={{ fontSize: 9 }}>color</Mono>
+                  <Mono style={{ fontSize: 9 }}>story tint</Mono>
                   <input
                     type="range" min={0} max={359} value={d.hue}
+                    aria-label="Story tint"
                     onChange={(e) => patch({ hue: Number(e.target.value) })}
                     style={{ padding: 0, height: 4 }}
                   />
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                    <button
-                      className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }}
-                      disabled={fleshBusy} onClick={() => void fleshOut()}
-                    >{fleshBusy ? 'Working…' : 'Fill in with AI'}</button>
-                    {undoSnapshot && (
-                      <button className="btn-quiet" style={{ fontSize: 11 }} onClick={undoFleshOut}>undo</button>
-                    )}
-                  </div>
-                  {fleshBusy && <Spinner label="the utility model is fleshing out the sheet" />}
-                  {fleshError && <ErrorNote error={fleshError} onDismiss={() => setFleshError('')} />}
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {episode && (
-                    <button
-                      className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
-                      onClick={() => {
-                        const inScene = episode.locationId === d.id;
-                        void safeWrite(
-                          () => db.episodes.update(episode.id, inScene
-                            ? { locationId: null, location: '', updatedAt: Date.now() }
-                            : { locationId: d.id, location: d.name, updatedAt: Date.now() }
-                          ),
-                          setError
-                        );
-                      }}
-                    >{episode.locationId === d.id ? "✓ this chapter's place — clear" : 'set as the place'}</button>
-                  )}
-                  <button
-                    className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
-                    onClick={() => setConfirmRemove(true)}
-                  >remove from world</button>
-                  {confirmRemove && (
-                    <ConfirmBar
-                      title={`Remove ${d.name || 'this place'} from the world?`}
-                      body="This cannot be undone."
-                      confirmLabel="Remove"
-                      onCancel={() => setConfirmRemove(false)}
-                      onConfirm={() => {
-                        setConfirmRemove(false);
-                        const removed = d;
-                        discardAutosave(removed.id);
-                        void (async () => {
-                          const saved = await safeWrite(async () => {
-                            await recordTombstones([{ table: 'locations', id: removed.id, worldId: removed.worldId, payload: removed }]);
-                            await db.transaction('rw', db.locations, db.episodes, async () => {
-                              await db.locations.delete(removed.id);
-                              await clearDeletedPlaceFromEpisodes({ id: removed.id, worldId: removed.worldId });
-                            });
-                            return true;
-                          }, setError);
-                          if (!saved) {
-                            releaseAutosave(removed.id);
-                            setDraft((cur) => (cur && cur.id === removed.id ? { ...cur } : cur));
-                            return;
-                          }
-                          setSelectedId(null);
-                        })();
-                      }}
-                    />
-                  )}
-                </div>
+                <div style={{ fontSize: 11.5, color: 'var(--ink-muted)', lineHeight: 1.4 }}>The Story screen takes this colour while the scene is here.</div>
               </div>
-
-              <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 20 }}>
-                <div>
-                  <Mono style={{ letterSpacing: '0.16em', marginBottom: 8 }}>location</Mono>
-                  <input
-                    value={d.name}
-                    onChange={(e) => patch({ name: e.target.value })}
-                    onBlur={() => { void seedBlankResidentLocations(d.residentIds, d.name); }}
-                    placeholder="Name"
-                    className="serif"
-                    style={{ fontWeight: 300, fontSize: narrow ? 28 : 38, color: 'var(--ink-heading)', lineHeight: 1.08, background: 'transparent', border: 0, padding: 0, borderRadius: 0 }}
-                  />
-                  <input
-                    value={d.tagline} onChange={(e) => patch({ tagline: e.target.value })}
-                    placeholder="tagline · e.g. harbour district · public square"
-                    style={{ fontSize: 13.5, color: 'var(--paper)', marginTop: 8, background: 'transparent', border: 0, padding: 0, borderRadius: 0 }}
-                  />
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 11 }}>
-                  {([
-                    ['current state', d.currentState, (v: string) => patch({ currentState: v })],
-                    ['typically found here', d.inhabitants, (v: string) => patch({ inhabitants: v })]
-                  ] as Array<[string, string, (v: string) => void]>).map(([k, v, set]) => (
-                    <div key={k} className="craft-row" style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      <Mono style={{ fontSize: 9, letterSpacing: '0.12em' }}>{k}</Mono>
-                      <input
-                        value={v} onChange={(e) => set(e.target.value)} placeholder="—"
-                        style={{ fontSize: 13, background: 'transparent', border: 0, padding: 0, borderRadius: 0, color: 'var(--ink-heading)' }}
-                      />
-                    </div>
-                  ))}
-                </div>
-                <PlaceSettingFields
-                  placeKey={d.id}
-                  cast={castChips}
-                  areas={areaNames}
-                  area={d.area ?? ''}
-                  near={d.near ?? ''}
-                  residentIds={d.residentIds ?? []}
-                  dismissedIds={dismissedByPlace.current.get(d.id) ?? []}
-                  authorText={[d.name, d.summary, d.inhabitants, d.area ?? '', d.near ?? ''].join('\n')}
-                  onArea={(area) => patch({ area })}
-                  onNear={(near) => patch({ near })}
-                  onResidentIds={(residentIds) => {
-                    patch({ residentIds });
-                    void seedBlankResidentLocations(residentIds, d.name);
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <button
+                  className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }}
+                  disabled={fleshBusy} onClick={() => void fleshOut()}
+                >{fleshBusy ? 'Working…' : 'Fill in with AI'}</button>
+                {undoSnapshot && (
+                  <button className="btn-quiet" style={{ fontSize: 11 }} onClick={undoFleshOut}>undo</button>
+                )}
+              </div>
+              {fleshBusy && <Spinner label="filling in the sheet" />}
+              {fleshError && <ErrorNote error={fleshError} onDismiss={() => setFleshError('')} />}
+              {episode && (
+                isHere(d.id) ? (
+                  <button className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }} onClick={() => goHere(null)}>
+                    ✓ The story is here — unset
+                  </button>
+                ) : (
+                  <button className="btn-primary" style={{ alignSelf: 'flex-start', fontSize: 12, padding: '7px 14px' }} onClick={() => goHere(d.id)}>
+                    Go here
+                  </button>
+                )
+              )}
+              <button
+                className="btn-quiet" style={{ alignSelf: 'flex-start', fontSize: 11 }}
+                onClick={() => setConfirmRemove(true)}
+              >remove from world</button>
+              {confirmRemove && (
+                <ConfirmBar
+                  title={`Remove ${d.name || 'this place'} from the world?`}
+                  body={places.some((p) => p.parentId === d.id)
+                    ? 'Places inside it move up a level. This cannot be undone.'
+                    : 'This cannot be undone.'}
+                  confirmLabel="Remove"
+                  onCancel={() => setConfirmRemove(false)}
+                  onConfirm={() => {
+                    setConfirmRemove(false);
+                    const removed = d;
+                    discardAutosave(removed.id);
+                    void (async () => {
+                      const saved = await safeWrite(async () => {
+                        await removePlace(removed);
+                        return true;
+                      }, setError);
+                      if (!saved) {
+                        releaseAutosave(removed.id);
+                        setDraft((cur) => (cur && cur.id === removed.id ? { ...cur } : cur));
+                        return;
+                      }
+                      setSelectedId(null);
+                    })();
                   }}
-                  onDismissedIds={(ids) => { dismissedByPlace.current.set(d.id, ids); }}
                 />
+              )}
+              {error && !creating && <ErrorNote error={error} onDismiss={() => setError('')} />}
+            </div>
+
+            <div style={{ flex: 1, minWidth: narrow ? 0 : 320, display: 'flex', flexDirection: 'column', gap: 18 }}>
+              <div>
+                <input
+                  value={d.name}
+                  onChange={(e) => patch({ name: e.target.value })}
+                  onBlur={() => { void seedBlankResidentLocations(d.residentIds, d.name); }}
+                  placeholder="Name"
+                  aria-label="Place name"
+                  className="serif"
+                  style={{ fontWeight: 300, fontSize: narrow ? 28 : 38, color: 'var(--ink-heading)', lineHeight: 1.08, background: 'transparent', border: 0, padding: 0, borderRadius: 0, width: '100%' }}
+                />
+                <div style={{ ...monoSmall, fontSize: 11, marginTop: 6 }}>
+                  {where ? `in ${where}` : 'top-level place'}
+                </div>
               </div>
+
+              <Field label="What it is" note="first impression and what is here">
+                <textarea rows={4} value={d.summary} onChange={(e) => patch({ summary: e.target.value })}
+                  className="serif" style={{ fontSize: 15.5, lineHeight: 1.7 }} />
+              </Field>
+              <Field label="Feel" note="sight, sound, smell, texture — what the writer leans on">
+                <textarea rows={3} value={d.atmosphere} onChange={(e) => patch({ atmosphere: e.target.value })}
+                  placeholder="Salt and diesel. Gulls that never quite stop. The boards give underfoot near the tide line." />
+              </Field>
+              <Field label="Right now" note="its condition at the moment — play keeps this up to date">
+                <input value={d.currentState} onChange={(e) => patch({ currentState: e.target.value })}
+                  placeholder="Shuttered for the storm; one lamp still lit." />
+              </Field>
+              <Field label="Who's usually here" note="regulars, staff, or a kind of crowd">
+                <input value={d.inhabitants} onChange={(e) => patch({ inhabitants: e.target.value })}
+                  placeholder="Dock clerks, a night watchman, gulls." />
+              </Field>
+
+              <PlaceSettingFields
+                placeKey={d.id}
+                placeId={d.id}
+                cast={castChips}
+                places={places}
+                parentId={d.parentId}
+                nearIds={d.nearIds ?? []}
+                residentIds={d.residentIds ?? []}
+                dismissedIds={dismissedByPlace.current.get(d.id) ?? []}
+                authorText={[d.name, d.summary, d.inhabitants].join('\n')}
+                onParentId={(parentId) => patch({ parentId })}
+                onNearIds={(nearIds) => patch({ nearIds })}
+                onResidentIds={(residentIds) => {
+                  patch({ residentIds });
+                  void seedBlankResidentLocations(residentIds, d.name);
+                }}
+                onDismissedIds={(ids) => { dismissedByPlace.current.set(d.id, ids); }}
+              />
+
+              <Field label="Rules" note="optional — laws or hazards that always hold here">
+                <PlaceRulesEditor rules={d.rules} onRules={(rules) => patch({ rules })} />
+              </Field>
+              <Field label="Hidden" note="history and secrets — the writer knows them and reveals them only when the story earns it">
+                <textarea rows={3} value={d.hidden ?? ''} onChange={(e) => patch({ hidden: e.target.value })}
+                  placeholder="The cellar floods because someone bricked up the old drain on purpose." />
+              </Field>
+              <Field label="Notes for the AI" note="anything else to keep in mind while the scene is here">
+                <textarea rows={3} value={d.customInstructions} onChange={(e) => patch({ customInstructions: e.target.value })}
+                  placeholder="How the light changes by hour, a sound that always comes before trouble…" />
+              </Field>
             </div>
-
-            <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid var(--rule)', marginBottom: 24, flexWrap: 'wrap', overflowX: 'auto' }}>
-              {TABS.map(([id, label]) => (
-                <button key={id} onClick={() => setTab(id)} style={{
-                  border: 0, background: 'transparent',
-                  color: tab === id ? 'var(--ink-heading)' : 'var(--ink-muted)',
-                  borderBottom: `2px solid ${tab === id ? ACCENT : 'transparent'}`,
-                  padding: '10px 14px', fontSize: 13, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap'
-                }}>{label}</button>
-              ))}
-            </div>
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-              {tab === 'overview' && (
-                <>
-                  <Field label="What it is" note="prose, not bullet points — this is the core of the sheet">
-                    <textarea rows={4} value={d.summary} onChange={(e) => patch({ summary: e.target.value })}
-                      className="serif" style={{ fontSize: 15.5, lineHeight: 1.7 }} />
-                  </Field>
-                  <Field label="Notable features" note="landmarks, rooms, or geography within it">
-                    <textarea rows={3} value={d.features} onChange={(e) => patch({ features: e.target.value })} />
-                  </Field>
-                </>
-              )}
-
-              {tab === 'atmosphere' && (
-                <Field label="Atmosphere" note="sensory detail the narrator leans on — sight, sound, smell, feel">
-                  <textarea rows={4} value={d.atmosphere} onChange={(e) => patch({ atmosphere: e.target.value })}
-                    placeholder="Salt and diesel. Gulls that never quite stop. The boards give underfoot near the tide line." />
-                </Field>
-              )}
-
-              {tab === 'history' && (
-                <Field label="History" note="informs behaviour; the narrator reveals it only in earned fragments">
-                  <textarea rows={5} value={d.history} onChange={(e) => patch({ history: e.target.value })}
-                    placeholder="How it came to be, what happened here, what it cost." />
-                </Field>
-              )}
-
-              {tab === 'rules' && (
-                <>
-                  <div className="craft-row" style={{ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <div style={{ width: 6, height: 6, borderRadius: '50%', background: ACCENT }} />
-                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--ink-heading)' }}>Hard rules</div>
-                      <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', marginLeft: 'auto' }}>
-                        hazards & laws, never broken
-                      </div>
-                    </div>
-                    <textarea
-                      rows={4}
-                      value={d.rules.join('\n')}
-                      onChange={(e) => patch({ rules: e.target.value.split('\n') })}
-                      onBlur={() => patch({
-                        rules: d.rules.map((l) => l.trim()).filter(Boolean)
-                      })}
-                      placeholder={'The causeway floods at high tide — no crossing after the bell.\nNo weapons are drawn inside the registry, on pain of forfeiture.'}
-                    />
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                      {d.rules.filter((r) => r.trim()).map((r, i) => (
-                        <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, lineHeight: 1.5, color: 'var(--ink-heading)' }}>
-                          <span style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: ACCENT, paddingTop: 3 }}>
-                            {String(i + 1).padStart(2, '0')}
-                          </span>
-                          <span>{r}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  <Field label="Secrets hidden here" note="may surface in play; never announced outright">
-                    <textarea rows={3} value={d.secrets} onChange={(e) => patch({ secrets: e.target.value })} />
-                  </Field>
-                </>
-              )}
-
-              {tab === 'ai' && (
-                <Field label="Custom AI instructions" note="verbatim when this place is the chapter's place">
-                  <textarea
-                    rows={5} value={d.customInstructions}
-                    onChange={(e) => patch({ customInstructions: e.target.value })}
-                    placeholder="Anything the structured fields don't cover: how the light changes by hour, a sound that always precedes trouble, who really controls this place…"
-                  />
-                </Field>
-              )}
-            </div>
-          </>
+          </div>
         )}
       </div>
     </div>

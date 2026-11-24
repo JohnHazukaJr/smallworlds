@@ -27,7 +27,7 @@ import { AIError, streamChat, isPromptPackRetryError, type ChatMessage } from '.
 import { contextWindowFor, imageModelFor, proseModelFor, utilityModelFor } from './models';
 import { LIVE_MEMORY_TOOL, utilityCall, type ToolSpec } from './utilityCall';
 import { promptCharBudget } from './contextBudget';
-import { proseCompletionTokens } from './modelProfile';
+import { paddedMaxTokens, proseCompletionTokens } from './modelProfile';
 import { applyDeliveryTone, deliveryPhrase, parseDeliveryTone } from './deliveryTone';
 import { stancePlaybook } from './storyStance';
 import { narrationNeedsContinue, normalizeSpeakText } from './dialogueFormat';
@@ -75,7 +75,10 @@ import {
   activeMechanics, applyInventoryChanges, checkDirective, inventoryLine, needsReferee, type InventoryChange
 } from '../mechanics';
 import { checkFromRuling, ruleMove } from './checks';
-import { mergeLooks } from '../looks';
+import { hasLooks, mergeLooks } from '../looks';
+import {
+  announceSceneMove, ensurePlacesMigrated, placesAround, placeWhereLine, planSceneMove, resolveScenePlace, setScenePlace
+} from '../places';
 import { intimateAllowed } from './portrait';
 import {
   NPC_MEMORY_PER_PASS, addMemories, forgetFiledSince, recallMemories, memoryCardLine, type MemoryDraft
@@ -129,6 +132,7 @@ async function withOverflowRetry<T>(
 }
 
 async function loadContext(world: World, season: Season, episode: Episode) {
+  await ensurePlacesMigrated(world.id).catch(() => undefined);
   const [characters, locations, continuity, threads, turns, seasonEpisodes, calendarEvents] = await Promise.all([
     db.characters.where('worldId').equals(world.id).toArray(),
     db.locations.where('worldId').equals(world.id).toArray(),
@@ -211,7 +215,37 @@ export function shouldFileUserTurn(opts: {
   return !opts.keepExistingUserTurn && opts.mode !== 'continue' && opts.input.trim().length > 0;
 }
 
-const UTILITY_TIMEOUT_MS = 45_000;
+const UTILITY_TIMEOUT_MS = 60_000;
+/** World building: one call drafts a whole sheet. Slow models need the room. */
+const CREATE_TIMEOUT_MS = 120_000;
+
+/** How one world-building call runs: cancel signal, time limit, and the lean bulk shape. */
+export interface CreateCall {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  /** Bulk drafting: leave optional detail (looks) for a later, smaller call. */
+  lean?: boolean;
+}
+
+/** Run tasks with at most `n` in flight. Results keep input order; the first failure stops new starts. */
+export async function runLimited<T, R>(items: T[], n: number, task: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let next = 0;
+  let failed: unknown = null;
+  const worker = async () => {
+    while (failed === null && next < items.length) {
+      const i = next++;
+      try {
+        out[i] = await task(items[i], i);
+      } catch (e) {
+        if (failed === null) failed = e;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(n, items.length)) }, worker));
+  if (failed !== null) throw failed;
+  return out;
+}
 
 function labelTurn(t: Turn, characters: Character[], guests: EpisodeGuest[] = []): string {
   if (t.role === 'user') return `[player ${t.mode ?? 'turn'}]: ${t.text}`;
@@ -617,12 +651,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
     if (check) checkOrder = checkDirective(check);
   }
 
-  const placeLoc = ctx.locations.find((l) => ctx.episode.locationId && l.id === ctx.episode.locationId)
-    ?? ctx.locations.find((l) => {
-      const name = l.name.trim().toLowerCase();
-      const ep = ctx.episode.location.trim().toLowerCase();
-      return !!name && !!ep && (ep.includes(name) || name.includes(ep));
-    });
+  const placeLoc = resolveScenePlace(ctx.episode, ctx.locations);
   const placeName = (placeLoc?.name || ctx.episode.location || '').trim();
   const inhabitants = placeLoc?.inhabitants ?? '';
 
@@ -1447,10 +1476,14 @@ async function maybeRefreshLiveMemory(
   const episodeFactCount = ctx.continuity.filter((f) => f.episodeId === ctx.episode.id).length;
   const knownBlock = existingFactTexts.slice(-24).map((t) => `- ${t}`).join('\n');
   const threadBlock = existingThreadTexts.slice(0, 16).map((t) => `- ${t}`).join('\n');
-  const placeLine = ctx.episode.location || '(unnamed)';
-  const loc = ctx.episode.locationId
-    ? ctx.locations.find((l) => l.id === ctx.episode.locationId)
-    : ctx.locations.find((l) => l.name.toLowerCase() === placeLine.trim().toLowerCase());
+  const loc = resolveScenePlace(ctx.episode, ctx.locations);
+  const placeLine = loc?.name.trim() || ctx.episode.location || '(unnamed)';
+  const placeList = placesAround(loc, ctx.locations, 12)
+    .map((p) => {
+      const where = placeWhereLine(p, ctx.locations);
+      return `- ${p.name.trim()}${where ? ` (in ${where})` : ''}`;
+    })
+    .join('\n');
 
   if (textStillFiled && !(await textStillFiled())) return;
 
@@ -1470,6 +1503,7 @@ async function maybeRefreshLiveMemory(
       facts?: string[];
       threads?: string[];
       place?: { name?: string; currentState?: string; atmosphere?: string };
+      movedTo?: { place?: string; newPlace?: string } | null;
       knowledge?: Array<{ name?: string; nowKnows?: string }>;
       memories?: MemoryDraft[];
       inventory?: InventoryChange[];
@@ -1492,10 +1526,13 @@ async function maybeRefreshLiveMemory(
         inventoryRules +
         suggestRules +
         shiftRules +
+        'movedTo: only when the Newest beats end with the scene in a different place than Place (the player walked, rode, or was taken there). ' +
+        'Use place with the exact name from Saved places when it is one of them, else newPlace with a short name. Omit when they are still in the same place, only talk about going, or step briefly aside.\n' +
         'bonds, goals, memories, and inventory come only from Newest beats. Recent beats are context: never grade or file them again.\n' +
         'Omit any key that has nothing new. Each canon line under 220 characters.',
       `World: ${world.title}. Episode ${ctx.episode.number}.\n` +
         `Place: ${placeLine}${loc?.currentState ? ` (now: ${loc.currentState})` : ''}\n` +
+        `Saved places:\n${placeList || '(none)'}\n` +
         `In-scene cast (current state):\n${castLines || '(nobody on stage)'}\n\n` +
         `Already established in this scene (do not refile as facts):\n${priorLedger || '(nothing yet)'}\n\n` +
         `Ties in the room:\n${tieLines || '(none filed)'}\n\n` +
@@ -1638,6 +1675,7 @@ async function maybeRefreshLiveMemory(
     }
     await db.episodes.update(ctx.episode.id, epPatch);
     ctx.episode = { ...ctx.episode, ...epPatch };
+    await applySceneMove(world, ctx, result.movedTo);
     let packed = 0;
     if (inventoryRules && playerHere && result.inventory?.length) {
       const stored = (await db.characters.get(playerHere.id))?.inventory ?? playerHere.inventory;
@@ -1664,6 +1702,44 @@ async function maybeRefreshLiveMemory(
     // The small per-turn pass fails quietly; the next turn or the wrap catches up.
     if (fileCanonNow) onNotice?.('Couldn’t update the room — sheets and live memory will catch up at wrap.');
   }
+}
+
+/** Follow the scene to where the live-state pass says it went. A new place is made, linked, and filled in later. */
+async function applySceneMove(
+  world: World,
+  ctx: Awaited<ReturnType<typeof loadContext>>,
+  moved: { place?: string; newPlace?: string } | null | undefined
+): Promise<void> {
+  const current = resolveScenePlace(ctx.episode, ctx.locations);
+  const plan = planSceneMove(moved, current, ctx.locations);
+  if (!plan) return;
+  let target: Location;
+  if (plan.kind === 'saved') {
+    target = plan.place;
+  } else {
+    target = emptyLocation(world.id, { name: plan.name, parentId: plan.parentId });
+    await db.locations.add(target);
+    ctx.locations = [...ctx.locations, target];
+    // Fill the new sheet in the background; the scene does not wait for it.
+    void fleshOutLocation(world, target, { cast: ctx.characters, places: ctx.locations })
+      .then(async (sheet) => {
+        const fresh = await db.locations.get(target.id);
+        if (!fresh) return;
+        const { name: _name, parentId: _parent, ...rest } = sheet;
+        await db.locations.update(target.id, { ...rest, updatedAt: Date.now() });
+      })
+      .catch(() => undefined);
+  }
+  const fromId = ctx.episode.locationId ?? null;
+  const next = await setScenePlace(ctx.episode.id, target.id);
+  if (next) ctx.episode = { ...ctx.episode, ...next };
+  announceSceneMove({
+    episodeId: ctx.episode.id,
+    fromId,
+    toId: target.id,
+    toName: target.name.trim(),
+    created: plan.kind === 'new'
+  });
 }
 
 /**
@@ -3159,7 +3235,11 @@ export async function seedSeasonCalendarEvents(
 }
 
 /** AI-assisted character draft from a one-line description. */
-export async function draftCharacter(world: World | null, description: string): Promise<Partial<Character>> {
+export async function draftCharacter(
+  world: World | null,
+  description: string,
+  call: CreateCall = {}
+): Promise<Partial<Character>> {
   const result = await utilityJson<{
     name: string; role: string; age: string; appearance: string; mannerisms: string;
     backstory: string; summary: string;
@@ -3172,9 +3252,10 @@ export async function draftCharacter(world: World | null, description: string): 
     world,
     'You design deep NPC character sheets for longform interactive fiction. Call return_json with this shape:\n' +
     '{"name": string, "role": "<role · relationship to protagonist>", "age": string, "appearance": "<overall impression, one sentence>", ' +
-    '"looks":{"face":"<features and expression>","hair":"<color, length, style>","body":"<build, height, how they move>",' +
-    '"clothing":"<their usual outfit>","details":"<scars, tattoos, jewellery, glasses, or empty>","senses":"<voice timbre and scent, or empty>"' +
-    (world?.ai.mature ? ',"intimate":"<adult physical details, only for an adult, or empty>"' : '') + '}, ' +
+    (call.lean ? '' :
+      '"looks":{"face":"<features and expression>","hair":"<color, length, style>","body":"<build, height, how they move>",' +
+      '"clothing":"<their usual outfit>","details":"<scars, tattoos, jewellery, glasses, or empty>","senses":"<voice timbre and scent, or empty>"' +
+      (world?.ai.mature ? ',"intimate":"<adult physical details, only for an adult, or empty>"' : '') + '}, ') +
     '"mannerisms": "<2-3 recurring physical habits or tics, concrete and observable>", ' +
     '"backstory": "<the history that shaped them, 2-3 sentences>", "summary": "<who they are, 2-4 sentences of prose>", ' +
     '"speechStyle": "<how they sound when heard: sentence length, contractions, what they dodge, 1-2 sentences>", ' +
@@ -3187,7 +3268,10 @@ export async function draftCharacter(world: World | null, description: string): 
     'Make them specific, contradictory in believable ways, never generic. ' +
     'speechStyle is how they sound when heard. exampleLines are lines they would actually say, not narration. ' +
     'importance is how often they belong: lead carries the story, regular when the place fits, occasional when the moment needs them, background unless called on. Default regular.',
-    `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}Character to create: ${description}`
+    `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}Character to create: ${description}`,
+    call.lean ? 1400 : 2000,
+    call.signal,
+    call.timeoutMs ?? CREATE_TIMEOUT_MS
   );
   const state: CharacterState | undefined = result.state
     ? {
@@ -3224,7 +3308,14 @@ export interface PlaceFillContext {
 }
 
 const PLACE_SHEET_SHAPE =
-  '{"name": string, "tagline": "<short tagline, e.g. \'harbour district · public square\'>", "summary": "<what the place is, first impression, 2-4 sentences of prose>", "atmosphere": "<sensory detail — sight, sound, smell, feel — the narrator leans on>", "features": "<notable landmarks, rooms, or geography within it>", "history": "<how it came to be / what happened here, 2-3 sentences>", "inhabitants": "<who belongs here, or an unnamed role>", "rules": [<2-4 hazards, laws, or hard rules specific to this place that are never broken>], "secrets": "<something hidden here, not common knowledge>", "currentState": "<its condition right now, one sentence>", "area": "<neighborhood or district, or empty>", "near": "<one short line such as \'about 15 minutes from the school\', or empty>", "residentNames": [<exact allowed names only>], "belongs": [{"name": "<exact allowed name>", "how": "lives here|works here"}]}';
+  '{"name": string, "inside": "<exact name of an existing place this one sits within, or empty>", ' +
+  '"summary": "<what the place is and what is in it, 2-4 sentences of prose>", ' +
+  '"atmosphere": "<sensory detail — sight, sound, smell, feel — the writer leans on>", ' +
+  '"currentState": "<its condition right now, one sentence>", ' +
+  '"inhabitants": "<who is usually here, or an unnamed role>", ' +
+  '"rules": [<0-2 laws or hazards that truly hold here; empty when nothing special>], ' +
+  '"hidden": "<history or a secret the story may reveal later, 1-3 sentences>", ' +
+  '"residentNames": [<exact allowed names only>], "belongs": [{"name": "<exact allowed name>", "how": "lives here|works here"}]}';
 
 function placePeople(cast: Character[] | undefined): PlaceCastPerson[] {
   return (cast ?? [])
@@ -3247,6 +3338,7 @@ function placeFillParts(authorText: string, fill?: PlaceFillContext, selfId?: st
 
 function sheetFromLocation(location: Location): PlaceDraftSheet {
   return {
+    hidden: location.hidden ?? '',
     name: location.name,
     tagline: location.tagline,
     summary: location.summary,
@@ -3263,22 +3355,20 @@ function sheetFromLocation(location: Location): PlaceDraftSheet {
   };
 }
 
-function partialFromSheet(sheet: PlaceDraftSheet): Partial<Location> {
+function partialFromSheet(sheet: PlaceDraftSheet, places: { id?: string; name: string }[] = []): Partial<Location> {
   const patch: Partial<Location> = {
     name: sheet.name,
-    tagline: sheet.tagline,
     summary: sheet.summary,
     atmosphere: sheet.atmosphere,
-    features: sheet.features,
-    history: sheet.history,
     inhabitants: sheet.inhabitants,
     rules: sheet.rules,
-    secrets: sheet.secrets,
+    hidden: sheet.hidden ?? '',
     currentState: sheet.currentState,
     residentIds: sheet.residentIds
   };
-  if (sheet.area?.trim()) patch.area = sheet.area.trim();
-  if (sheet.near?.trim()) patch.near = sheet.near.trim();
+  const inside = sheet.inside?.trim().toLowerCase();
+  const parent = inside ? places.find((p) => p.id && p.name.trim().toLowerCase() === inside) : undefined;
+  if (parent?.id) patch.parentId = parent.id;
   return patch;
 }
 
@@ -3286,7 +3376,8 @@ function partialFromSheet(sheet: PlaceDraftSheet): Partial<Location> {
 export async function draftLocation(
   world: World | null,
   description: string,
-  fill?: PlaceFillContext
+  fill?: PlaceFillContext,
+  call: CreateCall = {}
 ): Promise<Partial<Location>> {
   const { cast, allowed, areas, places } = placeFillParts(description, fill);
   const guidance = placeFillGuidance({ cast, allowed, areas, places });
@@ -3294,16 +3385,19 @@ export async function draftLocation(
     world,
     'You design deep location sheets for longform interactive fiction. Call return_json with this shape:\n' +
     `${PLACE_SHEET_SHAPE}\nMake it specific and concrete, never generic. ` +
-    'area is the neighborhood, not a travel time. near is one optional travel note to a place that already exists.' +
+    'inside names an existing place this one is within (a room inside a building, a building inside a district), or stays empty.' +
     (world ? ` ${stancePlaybook(storyStanceOf(world))}` : ''),
     `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}` +
-    `${guidance}\n\nLocation to create: ${description}`
+    `${guidance}\n\nLocation to create: ${description}`,
+    1000,
+    call.signal,
+    call.timeoutMs ?? CREATE_TIMEOUT_MS
   );
   const applied = applyPlaceDraft({
     name: '', tagline: '', summary: '', atmosphere: '', features: '', history: '',
-    inhabitants: '', rules: [], secrets: '', currentState: ''
+    inhabitants: '', rules: [], secrets: '', currentState: '', hidden: ''
   }, result, { authorText: description, cast, allowed, areas, places });
-  return partialFromSheet(applied);
+  return partialFromSheet(applied, places);
 }
 
 /** Set a resident's current location when it is still blank. Does not move anyone already placed. */
@@ -3433,7 +3527,8 @@ export function mergeRelationships(
 export async function fleshOutCharacter(
   world: World | null,
   character: Character,
-  cast: Character[] = []
+  cast: Character[] = [],
+  call: CreateCall = {}
 ): Promise<Partial<Character>> {
   const others = cast.filter((c) => c.id !== character.id && c.name.trim());
   const subjectFrame = character.isPlayer
@@ -3478,7 +3573,10 @@ export async function fleshOutCharacter(
     `state is live opening condition (goal/emotion/where/condition), separate from enduring voice fields. ${RELATIONSHIP_POV_RULES}`,
     worldFleshPreamble(world) +
     `Other cast (relationship targets):\n${JSON.stringify(roster, null, 2)}\n\n` +
-    `SUBJECT sheet (JSON, blank strings/arrays mean unset):\n${JSON.stringify(current, null, 2)}`
+    `SUBJECT sheet (JSON, blank strings/arrays mean unset):\n${JSON.stringify(current, null, 2)}`,
+    2000,
+    call.signal,
+    call.timeoutMs ?? CREATE_TIMEOUT_MS
   );
 
   const castIds = cast.map((c) => c.id);
@@ -3529,7 +3627,8 @@ export async function fleshOutCharacter(
 export async function fleshOutRelationships(
   world: World | null,
   character: Character,
-  cast: Character[]
+  cast: Character[],
+  call: CreateCall = {}
 ): Promise<Relationship[]> {
   const others = cast.filter((c) => c.id !== character.id && c.name.trim());
   if (others.length === 0) return character.relationships;
@@ -3568,7 +3667,10 @@ export async function fleshOutRelationships(
     worldFleshPreamble(world) +
     `SUBJECT (the character whose outbound relationships you are writing — not the player unless isPlayer is true):\n` +
     `${JSON.stringify(subject, null, 2)}\n\n` +
-    `Other cast roster:\n${JSON.stringify(roster, null, 2)}`
+    `Other cast roster:\n${JSON.stringify(roster, null, 2)}`,
+    700,
+    call.signal,
+    call.timeoutMs ?? CREATE_TIMEOUT_MS
   );
 
   const castIds = cast.map((c) => c.id);
@@ -3668,7 +3770,8 @@ export async function draftGoalMeanings(
 export async function fleshOutLocation(
   world: World | null,
   location: Location,
-  fill?: PlaceFillContext
+  fill?: PlaceFillContext,
+  call: CreateCall = {}
 ): Promise<Partial<Location>> {
   const authorText = placeAuthorText(location);
   const { cast, allowed, areas, places } = placeFillParts(authorText, {
@@ -3677,26 +3780,32 @@ export async function fleshOutLocation(
   }, location.id);
   const guidance = placeFillGuidance({ cast, allowed, areas, places });
   const current = {
-    name: location.name, tagline: location.tagline, summary: location.summary, atmosphere: location.atmosphere,
-    features: location.features, history: location.history, inhabitants: location.inhabitants,
-    rules: location.rules, secrets: location.secrets, currentState: location.currentState,
-    area: location.area ?? '', near: location.near ?? ''
+    name: location.name,
+    inside: places.find((p) => p.id && p.id === location.parentId)?.name ?? '',
+    summary: location.summary, atmosphere: location.atmosphere, currentState: location.currentState,
+    inhabitants: location.inhabitants, rules: location.rules, hidden: location.hidden ?? ''
   };
   const result = await utilityJson<PlaceDraftModel>(
     world,
     `You flesh out location sheets for longform interactive fiction. ${NON_DESTRUCTIVE_RULE}\n` +
     `Call return_json with this shape: ${PLACE_SHEET_SHAPE}\n` +
-    'area is the neighborhood, not a travel time. near is one optional travel note to a place that already exists.',
+    'inside names an existing place this one is within, or stays empty.',
     `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}` +
-    `${guidance}\n\nCurrent location sheet (JSON, blank strings/arrays mean unset):\n${JSON.stringify(current, null, 2)}`
+    `${guidance}\n\nCurrent location sheet (JSON, blank strings/arrays mean unset):\n${JSON.stringify(current, null, 2)}`,
+    1000,
+    call.signal,
+    call.timeoutMs ?? CREATE_TIMEOUT_MS
   );
-  return partialFromSheet(applyPlaceDraft(sheetFromLocation(location), result, {
+  const filled = partialFromSheet(applyPlaceDraft(sheetFromLocation(location), result, {
     authorText, cast, allowed, areas, places
-  }));
+  }), places);
+  // Filling in never moves a place the author already put somewhere.
+  if (location.parentId) delete filled.parentId;
+  return filled;
 }
 
 /** AI-assisted flesh-out of the world's title/logline/bible. */
-export async function fleshOutWorldLore(world: World): Promise<{
+export async function fleshOutWorldLore(world: World, call: CreateCall = {}): Promise<{
   title: string; line: string; bible: string; calendarSystem?: string;
 }> {
   const result = await utilityJson<{
@@ -3710,7 +3819,10 @@ export async function fleshOutWorldLore(world: World): Promise<{
     `Current world sheet (JSON, blank strings mean unset):\n${JSON.stringify({
       title: world.title, line: world.line, bible: world.bible,
       calendarSystem: world.calendar?.system ?? ''
-    }, null, 2)}`
+    }, null, 2)}`,
+    1400,
+    call.signal,
+    call.timeoutMs ?? CREATE_TIMEOUT_MS
   );
   return {
     title: keepIfBlank(world.title, result.title),
@@ -3721,26 +3833,37 @@ export async function fleshOutWorldLore(world: World): Promise<{
 }
 
 /** AI-assisted flesh-out of the season premise (the plot). */
-export async function fleshOutPremise(world: World, season: Season): Promise<string> {
+export async function fleshOutPremise(world: World, season: Season, call: CreateCall = {}): Promise<string> {
   const { provider, model } = utilityModelFor(world);
+  const timed = withTimeoutSignal(call.signal, call.timeoutMs ?? CREATE_TIMEOUT_MS);
   const { text: premise } = await streamChat({
+    signal: timed.signal,
+    job: 'utility',
     provider, model,
     system: `You flesh out season premises for longform interactive fiction. ${playbookFor(world)} ${NON_DESTRUCTIVE_RULE} If the premise is blank, write one from the world context. One paragraph, 2-5 sentences, present tense, concrete situation. Return only the premise.`,
     messages: [{
       role: 'user',
       content: `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\nSeason ${season.number} current premise (may be blank):\n${season.premise || '(blank)'}`
     }],
-    maxTokens: 500, temperature: 0.7
-  });
+    maxTokens: paddedMaxTokens(model, 500), temperature: 0.7
+  }).catch((e) => {
+    if ((e as Error).name === 'AbortError' && !call.signal?.aborted) {
+      throw new AIError(`Utility model timed out after ${(call.timeoutMs ?? CREATE_TIMEOUT_MS) / 1000}s.`);
+    }
+    throw e;
+  }).finally(timed.cancel);
   return keepIfBlank(season.premise, premise.trim());
 }
 
 /** AI-assisted flesh-out of the narrator's hard rules. */
-export async function fleshOutNarratorRules(world: World): Promise<string[]> {
+export async function fleshOutNarratorRules(world: World, call: CreateCall = {}): Promise<string[]> {
   const result = await utilityJson<{ rules: string[] }>(
     world,
     `You propose hard narrator rules for longform interactive fiction — non-negotiable behavioural constraints the narrator must never break. ${NON_DESTRUCTIVE_RULE} Call return_json with this shape: {"rules": string[]}. Include every existing rule (reworded for clarity if needed) plus 2-5 new ones suited to this world.`,
-    `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\nExisting narrator rules (may be empty):\n${world.ai.narratorRules.join('\n') || '(none)'}`
+    `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\nExisting narrator rules (may be empty):\n${world.ai.narratorRules.join('\n') || '(none)'}`,
+    700,
+    call.signal,
+    call.timeoutMs ?? CREATE_TIMEOUT_MS
   );
   return mergeLines(world.ai.narratorRules, result.rules ?? []);
 }
@@ -3766,7 +3889,8 @@ export interface WorldRosterProposal {
 export async function proposeWorldRoster(
   world: World,
   shape: string,
-  counts: { characters: number; locations: number }
+  counts: { characters: number; locations: number },
+  call: CreateCall = {}
 ): Promise<WorldRosterProposal> {
   const nChars = Math.max(0, Math.min(6, counts.characters));
   const nPlaces = Math.max(0, Math.min(5, counts.locations));
@@ -3781,10 +3905,16 @@ export async function proposeWorldRoster(
       `"locations":[{"description":"<one specific sentence: what the place is and why it matters>"}],` +
       `"openingLocationIndex":<0-based index into locations for where episode 1 opens>}\n` +
       `Return exactly ${nChars} character description(s) and ${nPlaces} location description(s). ` +
+      (nPlaces > 1
+        ? 'Make the first location the broad setting (a town, ship, school, district) and the rest specific places inside or near it. '
+        : '') +
       `Use empty arrays when the count is 0. No player/protagonist. ` +
       `Every description must be concrete and rooted in THIS world's weather, rules, and situation — never generic fantasy filler.`,
       `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1600)}\n` +
-      `Story shape the player wants: ${shape}\n\nPropose the roster.`
+      `Story shape the player wants: ${shape}\n\nPropose the roster.`,
+      800,
+      call.signal,
+      call.timeoutMs ?? CREATE_TIMEOUT_MS
     );
     const characters = (result.characters ?? []).filter((c) => c.description?.trim()).slice(0, nChars);
     const locations = (result.locations ?? []).filter((l) => l.description?.trim()).slice(0, nPlaces);
@@ -3812,7 +3942,12 @@ export interface FleshOutEverythingOpts {
   targetCharacters: number;
   targetLocations: number;
   onProgress?: (label: string) => void;
+  /** Cancels every call still running or waiting. What finished stays saved. */
+  signal?: AbortSignal;
 }
+
+/** Two at a time: enough to be quick, few enough to stay under provider rate limits. */
+const CREATE_PARALLEL = 2;
 
 /**
  * Which opening sections still need a model call.
@@ -3863,7 +3998,8 @@ export async function seedOpeningMemory(
   world: World,
   season: Season,
   episode: Episode,
-  cast: Character[]
+  cast: Character[],
+  call: CreateCall = {}
 ): Promise<{ continuityIds: string[]; threadIds: string[] }> {
   const existingFacts = await db.continuity.where('seasonId').equals(season.id).count();
   if (existingFacts > 0) return { continuityIds: [], threadIds: [] };
@@ -3888,7 +4024,10 @@ export async function seedOpeningMemory(
     `World: ${world.title} — ${world.line}\nBible:\n${world.bible.slice(0, 1600)}\n\n` +
     `Season ${season.number} premise:\n${season.premise || '(blank)'}\n\n` +
     `Opening location: ${episode.location || '(unset)'}\n` +
-    `Cast:\n${JSON.stringify(castBrief, null, 2)}`
+    `Cast:\n${JSON.stringify(castBrief, null, 2)}`,
+    800,
+    call.signal,
+    call.timeoutMs ?? CREATE_TIMEOUT_MS
   );
 
   const now = Date.now();
@@ -3976,6 +4115,10 @@ export async function fleshOutWorldEverything(
   opts: FleshOutEverythingOpts
 ): Promise<FleshOutEverythingResult> {
   const progress = opts.onProgress ?? (() => {});
+  const call: CreateCall = { signal: opts.signal };
+  const stopIfCancelled = () => {
+    if (opts.signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
+  };
   let liveEpisode = episode;
   let live: World = world;
   let liveSeason: Season = season;
@@ -3991,7 +4134,7 @@ export async function fleshOutWorldEverything(
 
   if (opening.lore) {
     progress('Fleshing lore…');
-    const lore = await fleshOutWorldLore(world);
+    const lore = await fleshOutWorldLore(world, call);
     const calPatch =
       lore.calendarSystem && !(world.calendar?.system ?? '').trim()
         ? calendarPatch(world, { system: lore.calendarSystem })
@@ -4036,76 +4179,94 @@ export async function fleshOutWorldEverything(
           : sections.player ? 'Fleshing you…'
             : 'Planning cast & places…'
     );
-    const [premise, rules, playerSheet, proposed] = await Promise.all([
-      sections.premise ? fleshOutPremise(live, liveSeason) : Promise.resolve(liveSeason.premise),
-      sections.rules ? fleshOutNarratorRules(live) : Promise.resolve(live.ai.narratorRules),
-      sections.player && player ? fleshOutCharacter(live, player, allChars) : Promise.resolve(null),
-      needRoster
-        ? proposeWorldRoster(live, opts.shape, { characters: charSlots, locations: placeSlots })
-        : Promise.resolve(null)
-    ]);
-
+    // Each section is saved the moment it lands, so a later failure keeps it.
+    const jobs: Array<() => Promise<void>> = [];
+    if (needRoster) {
+      jobs.push(async () => {
+        roster = await proposeWorldRoster(live, opts.shape, { characters: charSlots, locations: placeSlots }, call);
+      });
+    }
     if (sections.premise) {
-      await db.seasons.update(season.id, { premise });
-      liveSeason = { ...liveSeason, premise };
+      jobs.push(async () => {
+        const premise = await fleshOutPremise(live, liveSeason, call);
+        await db.seasons.update(season.id, { premise });
+        liveSeason = { ...liveSeason, premise };
+      });
     }
     if (sections.rules) {
-      await db.worlds.update(live.id, {
-        ai: { ...live.ai, narratorRules: rules },
-        updatedAt: Date.now()
+      jobs.push(async () => {
+        const rules = await fleshOutNarratorRules(live, call);
+        // Read fresh: the author may have edited AI settings while this ran.
+        const fresh = (await db.worlds.get(live.id)) ?? live;
+        await db.worlds.update(live.id, { ai: { ...fresh.ai, narratorRules: rules }, updatedAt: Date.now() });
+        live = { ...live, ai: { ...fresh.ai, narratorRules: rules } };
       });
-      live = { ...live, ai: { ...live.ai, narratorRules: rules } };
     }
-    if (sections.player && player && playerSheet) {
-      await db.characters.update(player.id, { ...playerSheet, isPlayer: true, updatedAt: Date.now() });
+    if (sections.player && player) {
+      jobs.push(async () => {
+        const sheet = await fleshOutCharacter(live, player, allChars, call);
+        await db.characters.update(player.id, { ...sheet, isPlayer: true, updatedAt: Date.now() });
+      });
     }
-    roster = proposed;
+    await runLimited(jobs, CREATE_PARALLEL, (job) => job());
   }
 
   const createdCharacterIds: string[] = [];
   const createdLocationIds: string[] = [];
 
-  if (roster && (charSlots > 0 || placeSlots > 0)) {
-    const charDescs = roster.characters.slice(0, charSlots);
-    const placeDescs = roster.locations.slice(0, placeSlots);
+  const plan = roster as WorldRosterProposal | null;
+  if (plan && (charSlots > 0 || placeSlots > 0)) {
+    const charDescs = plan.characters.slice(0, charSlots);
+    const placeDescs = plan.locations.slice(0, placeSlots);
 
-    if (charDescs.length > 0 || placeDescs.length > 0) {
-      if (charDescs.length > 0) {
-        progress('Writing cast…');
-        const charDrafts = await Promise.all(charDescs.map(async ({ description }) => ({
-          description,
-          draft: await draftCharacter(live, description)
-        })));
-        for (const { description, draft } of charDrafts) {
-          const c = emptyCharacter(live.id, { ...draft, isPlayer: false, updatedAt: Date.now() });
-          if (!c.name.trim()) c.name = description.slice(0, 40);
-          await db.characters.add(c);
-          createdCharacterIds.push(c.id);
-        }
-      }
+    if (charDescs.length > 0) {
+      let done = 0;
+      progress(`Writing cast 0/${charDescs.length}…`);
+      await runLimited(charDescs, CREATE_PARALLEL, async ({ description }) => {
+        stopIfCancelled();
+        const draft = await draftCharacter(live, description, { ...call, lean: true });
+        const c = emptyCharacter(live.id, { ...draft, isPlayer: false, updatedAt: Date.now() });
+        if (!c.name.trim()) c.name = description.slice(0, 40);
+        await db.characters.add(c);
+        createdCharacterIds.push(c.id);
+        progress(`Writing cast ${++done}/${charDescs.length}…`);
+      });
+    }
 
-      if (placeDescs.length > 0) {
-        progress('Placing the world…');
-        const castForPlaces = await db.characters.where('worldId').equals(live.id).toArray();
-        const knownPlaces = existingPlaces.map((place) => ({ id: place.id, name: place.name }));
-        const knownAreas = [...new Set(existingPlaces.map((place) => place.area?.trim() ?? '').filter(Boolean))];
-        for (const { description } of placeDescs) {
+    if (placeDescs.length > 0) {
+      let done = 0;
+      progress(`Placing the world 0/${placeDescs.length}…`);
+      const castForPlaces = await db.characters.where('worldId').equals(live.id).toArray();
+      const knownPlaces = existingPlaces.map((place) => ({ id: place.id, name: place.name }));
+      const knownAreas = [...new Set(existingPlaces.map((place) => place.area?.trim() ?? '').filter(Boolean))];
+      const placeIds = new Array<string>(placeDescs.length);
+      // The first place is the broad setting; drafting it alone lets the rest sit inside it.
+      let markFirstDone = () => {};
+      const firstDone = new Promise<void>((resolve) => { markFirstDone = resolve; });
+      await runLimited(placeDescs, CREATE_PARALLEL, async ({ description }, index) => {
+        if (index > 0) await firstDone;
+        try {
+          stopIfCancelled();
           const draft = await draftLocation(live, description, {
             cast: castForPlaces,
-            areas: knownAreas,
-            places: knownPlaces
-          });
+            areas: [...knownAreas],
+            places: [...knownPlaces]
+          }, call);
           const l = emptyLocation(live.id, { ...draft, updatedAt: Date.now() });
           if (!l.name.trim()) l.name = description.slice(0, 40);
-          // Leave rules empty if the draft missed them — write-ready gate requires a real rule.
           await db.locations.add(l);
-          createdLocationIds.push(l.id);
+          placeIds[index] = l.id;
           knownPlaces.push({ id: l.id, name: l.name });
           const area = l.area?.trim();
           if (area && !knownAreas.includes(area)) knownAreas.push(area);
           await seedBlankResidentLocations(l.residentIds, l.name);
+          progress(`Placing the world ${++done}/${placeDescs.length}…`);
+        } finally {
+          if (index === 0) markFirstDone();
         }
-      }
+      });
+      // Roster order, so openingLocationIndex still points at the right place.
+      createdLocationIds.push(...placeIds.filter(Boolean));
     }
 
     if (createdCharacterIds.length > 0) {
@@ -4116,7 +4277,7 @@ export async function fleshOutWorldEverything(
     }
 
     if (createdLocationIds.length > 0 && !liveEpisode.locationId && !liveEpisode.location.trim()) {
-      const idx = Math.max(0, Math.min(createdLocationIds.length - 1, roster.openingLocationIndex));
+      const idx = Math.max(0, Math.min(createdLocationIds.length - 1, plan.openingLocationIndex));
       const openId = createdLocationIds[idx] ?? createdLocationIds[0];
       const open = await db.locations.get(openId);
       if (open) {
@@ -4145,15 +4306,26 @@ export async function fleshOutWorldEverything(
     throw new AIError(EMPTY_WORLD_DRAFT);
   }
 
-  progress('Linking relationships…');
-  await Promise.all(npcs.map(async (npc) => {
-    const relationships = await fleshOutRelationships(live, npc, allChars);
-    await db.characters.update(npc.id, { relationships, updatedAt: Date.now() });
-  }));
+  // Only people without links yet, so pressing again after a failure finishes the rest.
+  const unlinked = npcs.filter((npc) => npc.relationships.length === 0);
+  if (unlinked.length > 0) {
+    let done = 0;
+    progress(`Linking relationships 0/${unlinked.length}…`);
+    await runLimited(unlinked, CREATE_PARALLEL, async (npc) => {
+      stopIfCancelled();
+      const relationships = await fleshOutRelationships(live, npc, allChars, call);
+      await db.characters.update(npc.id, { relationships, updatedAt: Date.now() });
+      progress(`Linking relationships ${++done}/${unlinked.length}…`);
+    });
+  }
   allChars = await db.characters.where('worldId').equals(live.id).toArray();
 
+  stopIfCancelled();
   progress('Seeding opening memory…');
-  const memory = await seedOpeningMemory(live, liveSeason, liveEpisode, allChars);
+  const memory = await seedOpeningMemory(live, liveSeason, liveEpisode, allChars, call);
+
+  // Looks were left out of the bulk drafts to keep them fast. Fill them quietly afterwards.
+  void fillMissingLooks(live, createdCharacterIds);
 
   await db.worlds.update(live.id, { updatedAt: Date.now() });
 
@@ -4165,6 +4337,36 @@ export async function fleshOutWorldEverything(
     continuityIds: memory.continuityIds,
     threadIds: memory.threadIds
   };
+}
+
+/**
+ * Appearance sections for characters drafted without them. Runs after the world
+ * is usable; a failure leaves the sheet as it was.
+ */
+export async function fillMissingLooks(world: World, characterIds: string[]): Promise<void> {
+  const rows = (await db.characters.bulkGet(characterIds)).filter((c): c is Character => !!c && !hasLooks(c.looks));
+  await runLimited(rows, CREATE_PARALLEL, async (character) => {
+    try {
+      const result = await utilityJson<{ looks?: Record<string, unknown> }>(
+        world,
+        'You describe how a story character looks. Call return_json with this shape: ' +
+        '{"looks":{"face":"<features and expression>","hair":"<color, length, style>","body":"<build, height, how they move>",' +
+        '"clothing":"<their usual outfit>","details":"<scars, tattoos, jewellery, glasses, or empty>","senses":"<voice timbre and scent, or empty>"' +
+        (intimateAllowed(world, character) ? ',"intimate":"<adult physical details, or empty>"' : '') + '}}. ' +
+        'Stay consistent with the sheet. Concrete and specific.',
+        `World: ${world.title} — ${world.line}\n` +
+        `Character: ${character.name} — ${character.role}. Age: ${character.age || 'unknown'}.\n` +
+        `Appearance: ${character.appearance}\nSummary: ${character.summary.slice(0, 400)}`,
+        600
+      );
+      const fresh = await db.characters.get(character.id);
+      if (!fresh || hasLooks(fresh.looks)) return;
+      const looks = mergeLooks(fresh.looks, result.looks as Character['looks'], intimateAllowed(world, fresh));
+      if (looks) await db.characters.update(fresh.id, { looks, updatedAt: Date.now() });
+    } catch {
+      // Optional detail. The author can fill it from the Cast sheet.
+    }
+  });
 }
 
 /** Fill the three write-ready holes generation often leaves empty. */
@@ -4195,17 +4397,7 @@ async function repairWriteReadyFields(world: World, episode: Episode): Promise<v
     if (patch.title || patch.bible) await db.worlds.update(row.id, patch);
   }
 
-  const places = await db.locations.where('worldId').equals(world.id).toArray();
-  const open = liveEpisode.locationId
-    ? places.find((l) => l.id === liveEpisode.locationId)
-    : places[0];
-  if (open && open.rules.filter((r) => r.trim()).length === 0) {
-    const named = open.name.trim() || 'This place';
-    const rule = open.atmosphere.trim()
-      || (open.tagline.trim() ? `In ${named}, ${open.tagline.trim().replace(/\.$/, '')} is not optional.` : '')
-      || `${named} keeps what is said here — nothing leaves unnamed.`;
-    await db.locations.update(open.id, { rules: [rule], updatedAt: now });
-  }
+  // Places need no rules to be written in. Nothing is invented here.
 
   const npcsAll = (await db.characters.where('worldId').equals(world.id).toArray())
     .filter((c) => !c.isPlayer);

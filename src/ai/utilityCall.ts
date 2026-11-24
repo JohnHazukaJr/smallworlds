@@ -30,7 +30,16 @@ export function parseToolArguments<T>(raw: string): T {
   }
 }
 
-const DEFAULT_UTILITY_TIMEOUT_MS = 45_000;
+const DEFAULT_UTILITY_TIMEOUT_MS = 60_000;
+
+/**
+ * Prompts were written for a return_json tool that is not always sent.
+ * Without it, ask for plain JSON so the model does not try to call a tool.
+ */
+export function jsonInstruction(system: string, toolName?: string): string {
+  if (toolName === 'return_json') return system;
+  return system.replace(/Call return_json with/g, 'Reply with only a JSON object, with');
+}
 
 function withTimeoutSignal(outer: AbortSignal | undefined, ms: number): { signal: AbortSignal; cancel: () => void } {
   const ctrl = new AbortController();
@@ -109,49 +118,50 @@ export async function utilityCall<T>(opts: {
     opts.maxTokens ?? 3000,
     thinkingOnForJob(model, job)
   );
+  // Each attempt gets the full limit; a retry does not inherit what the first one used up.
   const timeoutMs = opts.timeoutMs ?? (job === 'wrap' ? 90_000 : DEFAULT_UTILITY_TIMEOUT_MS);
-  const { signal: timed, cancel } = withTimeoutSignal(opts.signal, timeoutMs);
   const structuredTool = toolHasProperties(opts.tool) ? opts.tool : undefined;
   const canTool = !!(structuredTool && profile.supportsTools && provider.kind === 'openai');
   const bumpTokens = Math.max(maxTokens + 2000, Math.floor(maxTokens * 1.5));
 
   const run = async (useTool: boolean, tokens: number): Promise<T> => {
-    const result = await streamChat({
-      provider,
-      model,
-      system: opts.system,
-      messages: [{ role: 'user', content: opts.user }],
-      maxTokens: tokens,
-      temperature: 0.4,
-      signal: timed,
-      job,
-      jsonMode: !useTool && profile.supportsJsonObject,
-      tools: useTool && structuredTool ? [structuredTool] : undefined,
-      toolChoice: useTool && structuredTool ? { name: structuredTool.name } : undefined
-    });
-    const parsed = parseUtilityResult<T>(result, useTool ? structuredTool : undefined);
-    if (jsonValueIsEmpty(parsed)) {
-      throw new AIError('The model returned an empty reply. Try again or pick a different model in Settings.');
+    const { signal: timed, cancel } = withTimeoutSignal(opts.signal, timeoutMs);
+    try {
+      const result = await streamChat({
+        provider,
+        model,
+        system: jsonInstruction(opts.system, useTool ? structuredTool?.name : undefined),
+        messages: [{ role: 'user', content: opts.user }],
+        maxTokens: tokens,
+        temperature: 0.4,
+        signal: timed,
+        job,
+        jsonMode: !useTool && profile.supportsJsonObject,
+        tools: useTool && structuredTool ? [structuredTool] : undefined,
+        toolChoice: useTool && structuredTool ? { name: structuredTool.name } : undefined
+      });
+      const parsed = parseUtilityResult<T>(result, useTool ? structuredTool : undefined);
+      if (jsonValueIsEmpty(parsed)) {
+        throw new AIError('The model returned an empty reply. Try again or pick a different model in Settings.');
+      }
+      return parsed;
+    } catch (e) {
+      if ((e as Error).name === 'AbortError' && !opts.signal?.aborted) {
+        throw new AIError(`Utility model timed out after ${timeoutMs / 1000}s.`);
+      }
+      throw e;
+    } finally {
+      cancel();
     }
-    return parsed;
   };
 
   try {
-    try {
-      return await run(canTool, maxTokens);
-    } catch (e) {
-      if ((e as Error).name === 'AbortError') throw e;
-      if (!isRetryableUtilityFail(e)) throw e;
-    }
-    return await run(false, bumpTokens);
+    return await run(canTool, maxTokens);
   } catch (e) {
-    if ((e as Error).name === 'AbortError' && !opts.signal?.aborted) {
-      throw new AIError(`Utility model timed out after ${timeoutMs / 1000}s.`);
-    }
-    throw e;
-  } finally {
-    cancel();
+    if ((e as Error).name === 'AbortError') throw e;
+    if (!isRetryableUtilityFail(e)) throw e;
   }
+  return run(false, bumpTokens);
 }
 
 /** Live scene state + canon in one post-write pass. */
@@ -197,6 +207,14 @@ export const LIVE_MEMORY_TOOL: ToolSpec = {
           name: { type: 'string' },
           currentState: { type: 'string' },
           atmosphere: { type: 'string' }
+        }
+      },
+      movedTo: {
+        type: ['object', 'null'],
+        description: 'Only when the scene itself has now moved to a different place.',
+        properties: {
+          place: { type: 'string', description: 'Exact name of a saved place from the list' },
+          newPlace: { type: 'string', description: 'Short name of a place not on the list' }
         }
       },
       knowledge: {

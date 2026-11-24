@@ -18,6 +18,10 @@ export interface PlaceDraftModel {
   rules?: string[];
   secrets?: string;
   currentState?: string;
+  /** Hidden: history and secrets the writer reveals only when earned. */
+  hidden?: string;
+  /** Exact name of an existing place this one sits inside. */
+  inside?: string;
   area?: string;
   near?: string;
   residentNames?: string[];
@@ -35,6 +39,9 @@ export interface PlaceDraftSheet {
   rules: string[];
   secrets: string;
   currentState: string;
+  hidden?: string;
+  /** Name of the existing place this one sits inside, as the model wrote it. */
+  inside?: string;
   area?: string;
   near?: string;
   residentIds?: string[];
@@ -427,6 +434,11 @@ export function applyPlaceDraft(
     rules,
     secrets: scrub(existing.secrets, model.secrets),
     currentState: scrub(existing.currentState, model.currentState),
+    hidden: scrub(existing.hidden ?? '', model.hidden ?? [model.history, model.secrets].filter((x) => x?.trim()).join(' ')),
+    inside: (model.inside ?? '').trim()
+      && ctx.places.some((place) => place.name.trim().toLowerCase() === (model.inside ?? '').trim().toLowerCase())
+      ? (model.inside ?? '').trim()
+      : '',
     area: resolveArea(model.area ?? '', ctx.authorText, ctx.areas, existing.area ?? ''),
     near: resolveNear(model.near ?? '', ctx.authorText, ctx.places, ctx.areas, existing.near ?? ''),
     residentIds: ctx.allowed.map((person) => person.id)
@@ -455,9 +467,8 @@ export function placeFillGuidance(opts: {
       ? `Existing areas, reuse the exact spelling when this place is in one: ${opts.areas.join(', ')}.`
       : 'Name a new area only if the author asked for one.',
     placeNames.length
-      ? `Existing places a nearby line may name, exact names only: ${placeNames.join(', ')}.`
-      : '',
-    'area is the neighborhood or district. near is one short line such as "about 15 minutes from the school", or empty. Do not invent a place in near.',
+      ? `Existing places, exact names only. "inside" may name one of these when this place sits within it: ${placeNames.join(', ')}.`
+      : '"inside" stays empty: there are no other places yet.',
     'residentNames must be a subset of the allowed residents, or empty.'
   ].filter(Boolean).join('\n');
 }

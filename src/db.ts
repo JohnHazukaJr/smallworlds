@@ -5,7 +5,7 @@ import { useApp } from './store/app';
 import { decryptString, deriveKey, encryptString, randomSalt } from './security/crypto';
 import { getStoryKey, setStoryKey, storySealSuspended } from './security/storyKey';
 import {
-  SEALED_IMPORT_MESSAGE, STORY_TABLES, installStorySeal, isSealedRecord, openRecord, sealPayload, sealRecord
+  SEALED_IMPORT_MESSAGE, STORY_TABLES, installStorySeal, isSealedRecord, openRecord, sealRecord
 } from './security/storySeal';
 import { isQuotaError, markStoragePressure } from './storage/quota';
 import type {
@@ -147,7 +147,8 @@ export async function tombstoneAndDeleteTurns(turns: Turn[]): Promise<void> {
     worldId: turn.worldId,
     episodeId: turn.episodeId,
     deletedAt: now,
-    payload: await sealPayload('turns', { ...turn })
+    // Only the id: a deleted turn's text must not linger on disk or in the cloud.
+    payload: { id: turn.id }
   })));
   const ids = turns.map((turn) => turn.id);
   await guardStorage(() => db.transaction('rw', db.turns, db.tombstones, async () => {
@@ -160,22 +161,25 @@ export async function tombstoneAndDeleteTurns(turns: Turn[]): Promise<void> {
 export async function recordTombstones(items: TombstoneInput[]): Promise<void> {
   if (items.length === 0) return;
   const now = Date.now();
-  const rows = await Promise.all(items.map(async (item) => {
-    const payload = item.payload && typeof item.payload === 'object'
-      ? item.payload as Record<string, unknown>
-      : { id: item.id };
-    return {
-      key: `${item.table}:${item.id}`,
-      table: item.table,
-      id: item.id,
-      worldId: item.worldId,
-      seasonId: item.seasonId,
-      episodeId: item.episodeId,
-      deletedAt: now,
-      payload: await sealPayload(item.table, payload)
-    };
+  // A tombstone keeps only what sync needs to delete the row elsewhere: never the deleted content.
+  const rows = items.map((item) => ({
+    key: `${item.table}:${item.id}`,
+    table: item.table,
+    id: item.id,
+    worldId: item.worldId,
+    seasonId: item.seasonId,
+    episodeId: item.episodeId,
+    deletedAt: now,
+    payload: { id: item.id }
   }));
   await guardStorage(() => db.tombstones.bulkPut(rows));
+}
+
+/** Older tombstones kept whole deleted rows. Keep only their ids. */
+export async function stripTombstonePayloads(): Promise<void> {
+  await db.tombstones
+    .filter((t) => !t.payload || typeof t.payload !== 'object' || Object.keys(t.payload as object).length !== 1)
+    .modify((t) => { t.payload = { id: t.id }; });
 }
 
 export async function clearTombstones(keys: string[]): Promise<void> {
@@ -437,7 +441,7 @@ export async function deleteWorld(
           const add = (
             table: SyncTableName,
             id: string,
-            payload: unknown,
+            _payload: unknown,
             extra?: { seasonId?: string; episodeId?: string }
           ) => {
             tombs.push({
@@ -448,9 +452,7 @@ export async function deleteWorld(
               seasonId: extra?.seasonId,
               episodeId: extra?.episodeId,
               deletedAt: now,
-              payload: (payload && typeof payload === 'object'
-                ? payload as Record<string, unknown>
-                : { id })
+              payload: { id }
             });
           };
           if (world) add('worlds', world.id, world);
@@ -463,15 +465,7 @@ export async function deleteWorld(
           for (const t of threads) add('threads', t.id, t, { seasonId: t.seasonId });
           for (const w of wraps) add('wraps', w.id, w, { seasonId: w.seasonId });
           for (const ev of calendarEvents) add('calendarEvents', ev.id, ev, { seasonId: ev.seasonId });
-          if (tombs.length > 0) {
-            const key = getStoryKey();
-            if (key) {
-              for (const t of tombs) {
-                t.payload = await Dexie.waitFor(sealRecord(t.payload, key));
-              }
-            }
-            await db.tombstones.bulkPut(tombs);
-          }
+          if (tombs.length > 0) await db.tombstones.bulkPut(tombs);
         }
 
         await db.worlds.delete(worldId);

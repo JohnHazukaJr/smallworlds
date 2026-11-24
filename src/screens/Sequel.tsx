@@ -34,7 +34,8 @@ export function Sequel() {
   const phone = phoneChrome(band);
   const compact = band === 'compact';
   const narrow = phone;
-  const { currentWorldId, go } = useApp();
+  const currentWorldId = useApp((s) => s.currentWorldId);
+  const go = useApp((s) => s.go);
   const [busy, setBusy] = useState<null | 'analyze' | 'evolve' | 'premise' | 'begin'>(null);
   const [error, setError] = useState('');
   const [draft, setDraft] = useState<SeasonWrap | null>(null);
@@ -543,7 +544,7 @@ export function Sequel() {
                     padding: '8px 0',
                     borderBottom: '1px solid var(--rule)'
                   }}>
-                    <div style={{ flex: 1, minWidth: 160, fontSize: 13, color: '#eceae6' }}>
+                    <div style={{ flex: 1, minWidth: 160, fontSize: 13, color: 'var(--ink-heading)' }}>
                       <strong>{r.from}</strong>
                       <span style={{ opacity: 0.45 }}> → </span>
                       <strong>{r.to}</strong>

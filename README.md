@@ -50,11 +50,15 @@ Set three defaults in Settings (each can be overridden per world):
 
 ## How it works
 
-- **Story** — the writing loop. Four modes: *Continue* (the narrator takes the next beat), *Steer*
-  (direct the scene in your words), *Speak* (your dialogue only), *Act* (your action only). Three
-  lengths: Beat / Scene / Episode. Prose streams in live; rewrite or delete the last turn any time.
-  The *Direct* layout (or the Direct sheet on mobile) shows scene cast, continuity, open threads,
-  and one-tap nudges.
+- **Story** — the writing loop. Type what you say or do: a question or words aimed at someone are
+  spoken, "I draw my sword" is an action, quotes and \*gestures\* are taken exactly as written.
+  *Direct* turns your line into an author instruction; *Continue* lets the scene move on. Three
+  lengths: Beat / Scene / Episode. NPC lines appear under their own name and portrait. Prose
+  streams in live; rewrite or delete the last turn any time. Two layouts: *Write* and *Read*.
+- **Places** — places can sit inside each other (a town, a street, a room). Each has what it is,
+  its feel, its condition right now, who's usually there, optional rules, and hidden history the
+  writer reveals only when earned. The scene follows you: walk somewhere and the chapter moves
+  there (with undo), or pick a place from the Story header.
 - **Cast** — deep NPC sheets: identity, voice with example lines, psychology, secrets (including
   *must-not-know-yet* plot walls), typed relationships, hard behaviour anchors, free-form AI
   directives, and a current-state snapshot that evolves with the story. Only in-scene characters get
@@ -75,7 +79,7 @@ Set three defaults in Settings (each can be overridden per world):
 - **Device backup** (Profile → Back up this device): worlds + settings + encrypted key vault.
   Restore on another browser the same way. World-only export/import still lives on the Worlds screen.
 - **Optional cloud sync** (Profile): set `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` (see
-  `.env.example`), run `supabase/migrations/001_initial.sql` and `002_calendar_events.sql`, then sign
+  `.env.example`), run every file in `supabase/migrations/` in order (001 through 005), then sign
   in with phone, email, or Google. Sync is revisioned pull/push with RLS; API keys sync only as E2E
   ciphertext via a separate secrets passphrase. Deploy `supabase/functions/ai-proxy` if you want the
   browser to reach Z.ai / BigModel through an allowlisted relay (signed-in users only; forwards the
@@ -109,10 +113,13 @@ Local-first by default. Optional Supabase auth is for sync — not required to p
 - **App lock + key encryption** (Settings → Security). Set a passphrase and the app shows a lock
   screen on open, and your API keys are stored encrypted (AES-256-GCM; key derived from your
   passphrase with PBKDF2-SHA256, 600k iterations). Lock always persists ciphertext before blanking
-  memory. Forget the passphrase and keys on this device are wiped — restore from a device backup
-  or re-enter them. Stories stay.
+  memory. While the lock is on, story text in IndexedDB is encrypted too (AES-256-GCM with a story
+  key wrapped by your passphrase). Forget the passphrase and the keys *and* the encrypted worlds on
+  this device can't be read — keep an encrypted device backup.
 - **Encrypted device backups.** Required when API keys are present. Import detects encrypted files.
-- **Optional TOTP MFA** on the account (Supabase free-tier basic MFA). Phone SMS OTP needs Twilio.
+- **Optional TOTP MFA** on the account (Supabase free-tier basic MFA). Once enrolled, every sign-in
+  asks for the authenticator code, and the database refuses synced rows until it is entered
+  (migration 005). Phone SMS OTP needs Twilio.
 - **Content-Security-Policy.** Production builds lock script execution to the app's own bundle.
   `connect-src` stays open on purpose — you can point the app at any AI endpoint, including local
   Ollama over http. Fonts are bundled; the app does not call Google Fonts.
@@ -120,8 +127,10 @@ Local-first by default. Optional Supabase auth is for sync — not required to p
   on this browser. It does not delete a cloud account.
 - **Delete cloud account** removes the Supabase user (synced stories, encrypted secrets, billing)
   and then erases this device.
-- **What this doesn't cover:** story text in IndexedDB is not encrypted at rest (protect it with
-  OS/device encryption). Prompts go to whichever AI provider you configured.
+- **Deleted means deleted.** Removing a world, place, or turn keeps only its id (so sync can delete
+  it elsewhere), never its text.
+- **What this doesn't cover:** without the app lock, story text in IndexedDB is not encrypted at
+  rest (protect it with OS/device encryption). Prompts go to whichever AI provider you configured.
 
 Production builds ship a `public/_headers` file (copied into `dist/`) that Netlify and Cloudflare
 Pages apply automatically: `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,

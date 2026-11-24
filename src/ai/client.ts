@@ -369,6 +369,8 @@ export async function streamChat(req: StreamRequest): Promise<StreamResult> {
   const retryEmpty = async (first: StreamResult): Promise<StreamResult> => {
     if (!resultEmpty(first)) return first;
     if (req.signal?.aborted) throwEmptyResponse(emptyStopHint(first));
+    // Each hosted attempt is billed. One empty reply is reported, not paid for again.
+    if (isHostedProvider(req.provider)) throwEmptyResponse(emptyStopHint(first));
 
     let attempt = req;
     if (resolveThinking(req) && (job === 'prose' || job === 'test')) {
@@ -432,6 +434,8 @@ function proseReadOpts(req: StreamRequest): { signal?: AbortSignal; idleMs?: num
 function partialStream(e: unknown, full: string, extra: Partial<StreamResult> = {}): StreamResult {
   if ((e as Error)?.name === 'AbortError') throw e;
   if (!full.trim()) throw e;
+  // The provider said the reply failed (overloaded, cut off). Report it, do not file half a reply as done.
+  if (e instanceof AIError && (e as AIError & { providerError?: boolean }).providerError) throw e;
   return { text: full, truncated: true, stalled: true, ...extra };
 }
 
@@ -650,7 +654,11 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
         if (reason) finishReason = reason;
         if (isLengthStop(reason)) truncated = true;
       }
-      if (json.type === 'error') throw new AIError(json.error?.message ?? 'Provider error', undefined, providerTagFor(req.provider));
+      if (json.type === 'error') {
+        const err = new AIError(json.error?.message ?? 'Provider error', undefined, providerTagFor(req.provider));
+        (err as AIError & { providerError?: boolean }).providerError = true;
+        throw err;
+      }
     } catch (e) {
       if (e instanceof AIError) throw e;
     }
@@ -663,11 +671,12 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
 }
 
 async function streamGemini(req: StreamRequest): Promise<StreamResult> {
-  const url = `${req.provider.baseUrl.replace(/\/$/, '')}/models/${encodeURIComponent(req.model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(req.provider.apiKey)}`;
+  // The key goes in a header, not the URL, so it stays out of logs and history.
+  const url = `${req.provider.baseUrl.replace(/\/$/, '')}/models/${encodeURIComponent(req.model)}:streamGenerateContent?alt=sse`;
   const res = await providerFetch(url, {
     method: 'POST',
     signal: req.signal,
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': req.provider.apiKey },
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: req.system }] },
       contents: req.messages.map((m) => ({

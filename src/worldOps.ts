@@ -731,14 +731,8 @@ export function evaluateWorldWriteReady(opts: {
   if (!openLoc) {
     missing.push(
       epNum <= 1
-        ? 'Link an opening location to chapter 1'
-        : `Link a location to chapter ${epNum}`
-    );
-  } else if (openLoc.rules.filter((r) => r.trim()).length === 0) {
-    missing.push(
-      epNum <= 1
-        ? 'Give the opening location at least one hard rule'
-        : 'Give this chapter’s location at least one hard rule'
+        ? 'Pick where chapter 1 opens (a place)'
+        : `Pick a place for chapter ${epNum}`
     );
   } else {
     if (!openLoc.atmosphere.trim()) {

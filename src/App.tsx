@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Rail, TabBar } from './components/Nav';
 import { LockScreen } from './components/LockScreen';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { useAuth } from './cloud/authStore';
 import { db } from './db';
+import { ensurePlacesMigrated } from './places';
 import { writesInFlight } from './security/writeGate';
 import { useVault } from './security/vault';
 import { hasStoragePressure, STORAGE_PRESSURE_EVENT } from './storage/quota';
@@ -37,15 +39,20 @@ export default function App() {
   }, [initAuth]);
 
   useEffect(() => {
-    if (!currentWorldId) return;
+    if (!currentWorldId || vaultLocked) return;
     const id = currentWorldId;
     let cancelled = false;
-    void db.worlds.get(id).then((world) => {
-      if (cancelled || world) return;
-      useApp.getState().closeWorldIf(id);
+    void db.worlds.get(id).then(async (world) => {
+      if (cancelled) return;
+      if (!world) {
+        useApp.getState().closeWorldIf(id);
+        return;
+      }
+      // Older worlds: fold flat areas into the place tree, once.
+      await ensurePlacesMigrated(id);
     }).catch(() => undefined);
     return () => { cancelled = true; };
-  }, [currentWorldId]);
+  }, [currentWorldId, vaultLocked]);
 
   useEffect(() => {
     if (!vaultEnabled || vaultLocked) return;
@@ -58,7 +65,8 @@ export default function App() {
         idle = window.setTimeout(lock, 30_000);
         return;
       }
-      void useVault.getState().lock();
+      // A failed lock (storage full) keeps the app open; try again shortly rather than fail silently.
+      useVault.getState().lock().catch(() => { idle = window.setTimeout(lock, 30_000); });
     };
     const bump = () => {
       window.clearTimeout(idle);
@@ -132,6 +140,7 @@ export default function App() {
           minWidth: 0, minHeight: 0, flex: 1, position: 'relative', zIndex: 1,
           display: 'flex', flexDirection: 'column', overflow: 'auto'
         }}>
+          <ErrorBoundary resetKey={screen} onHome={() => go('library')}>
           {screen === 'library' && <Library />}
           {screen === 'story' && <Story />}
           {screen === 'cast' && <Cast />}
@@ -140,6 +149,7 @@ export default function App() {
           {screen === 'profile' && <Profile />}
           {screen === 'settings' && <Settings />}
           {screen === 'onboard' && <Onboard />}
+          </ErrorBoundary>
         </main>
       </div>
 

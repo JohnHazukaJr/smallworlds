@@ -12,6 +12,7 @@ import { AppearanceFields } from '../components/AppearanceFields';
 import { StoryWeightPicker } from '../components/StoryWeightPicker';
 import { PlacePhotoTools } from '../components/PlacePhotoTools';
 import { PlaceSettingFields } from '../components/PlaceSettingFields';
+import { placeWhereLine, removePlace, setScenePlace } from '../places';
 import { db, deleteWorld, recordTombstones, safeWrite } from '../db';
 import { formatUserError } from '../errors';
 import { normalizeRelationships, pruneRelationshipsToCast } from '../relationships';
@@ -103,8 +104,7 @@ export function Onboard() {
   const [expandedCastId, setExpandedCastId] = useState<string | null>(null);
   const [placeName, setPlaceName] = useState('');
   const [placeNotes, setPlaceNotes] = useState('');
-  const [placeArea, setPlaceArea] = useState('');
-  const [placeNear, setPlaceNear] = useState('');
+  const [placeParentId, setPlaceParentId] = useState<string | null>(null);
   const [placeResidentIds, setPlaceResidentIds] = useState<string[]>([]);
   const [placeDismissed, setPlaceDismissed] = useState<string[]>([]);
   const placeDismissedById = useRef(new Map<string, string[]>());
@@ -211,25 +211,45 @@ export function Onboard() {
     });
   };
 
+  // Typing saves after a short pause, and only the fields that changed, onto the
+  // row as it is now. A background fill writing other AI fields is never overwritten.
+  const aiPatchRef = useRef<Partial<WorldAISettings>>({});
+  const aiTimerRef = useRef<number | null>(null);
+  const premiseTimerRef = useRef<number | null>(null);
+  const flushAiPatch = () => {
+    if (aiTimerRef.current != null) window.clearTimeout(aiTimerRef.current);
+    aiTimerRef.current = null;
+    const patch = aiPatchRef.current;
+    aiPatchRef.current = {};
+    if (!worldId || Object.keys(patch).length === 0) return;
+    void safeWrite(async () => {
+      const row = await db.worlds.get(worldId);
+      if (!row) return;
+      await db.worlds.update(worldId, { ai: { ...row.ai, ...patch }, updatedAt: Date.now() });
+    }, setError);
+  };
   const patchAI = (p: Partial<WorldAISettings>) => {
-    setAi((prev) => {
-      const next = { ...prev, ...p };
-      if (worldId) {
-        void safeWrite(
-          () => db.worlds.update(worldId, { ai: next, updatedAt: Date.now() }),
-          setError
-        );
-      }
-      return next;
-    });
+    setAi((prev) => ({ ...prev, ...p }));
+    if (!worldId) return;
+    aiPatchRef.current = { ...aiPatchRef.current, ...p };
+    if (aiTimerRef.current != null) window.clearTimeout(aiTimerRef.current);
+    aiTimerRef.current = window.setTimeout(flushAiPatch, 400);
   };
 
   const setPremiseAndSave = (v: string) => {
     setPremise(v);
-    if (seasonId) {
+    if (!seasonId) return;
+    if (premiseTimerRef.current != null) window.clearTimeout(premiseTimerRef.current);
+    premiseTimerRef.current = window.setTimeout(() => {
+      premiseTimerRef.current = null;
       void safeWrite(() => db.seasons.update(seasonId, { premise: v }), setError);
-    }
+    }, 400);
   };
+
+  /** "Fill in everything" in flight: Cancel aborts it. */
+  const fleshAbortRef = useRef<AbortController | null>(null);
+  /** Next is running: a second click must not create a second world. */
+  const nextRunningRef = useRef(false);
 
   /** Current world state (title/seed/ai + who's already in it) shaped for AI context, live or not. */
   const worldContext = (): World => {
@@ -436,24 +456,18 @@ export function Onboard() {
     const l = emptyLocation(worldId, {
       name: name || notes.slice(0, 40),
       summary: notes,
-      area: placeArea.trim() || undefined,
-      near: placeNear.trim() || undefined,
+      parentId: placeParentId,
       residentIds: placeResidentIds
     });
-    const episodeId = episode?.id;
-    await db.transaction('rw', db.locations, db.episodes, async () => {
+    const saved = await safeWrite(async () => {
       await db.locations.add(l);
-      const ep = episodeId
-        ? await db.episodes.get(episodeId)
-        : await db.episodes.where('worldId').equals(worldId).first();
-      if (ep && !ep.locationId && !ep.location.trim() && l.name) {
-        await db.episodes.update(ep.id, { location: l.name, locationId: l.id, updatedAt: Date.now() });
-      }
-    });
+      await linkFirstPlace(l.id);
+      return true;
+    }, setError);
+    if (!saved) return;
     setPlaceName('');
     setPlaceNotes('');
-    setPlaceArea('');
-    setPlaceNear('');
+    setPlaceParentId(null);
     setPlaceResidentIds([]);
     setPlaceDismissed([]);
     setExpandedPlaceId(l.id);
@@ -471,32 +485,21 @@ export function Onboard() {
       const draft = emptyLocation(worldId, {
         name: name || notes.slice(0, 40),
         summary: notes,
-        area: placeArea.trim() || undefined,
-        near: placeNear.trim() || undefined,
+        parentId: placeParentId,
         residentIds: placeResidentIds
       });
       const sheet = await fleshOutLocation(worldContext(), draft, {
         cast: characters,
-        areas: [...new Set(places.map((place) => place.area?.trim() ?? '').filter(Boolean))],
         places: places.map((place) => ({ id: place.id, name: place.name })),
         selectedIds: placeResidentIds,
         dismissedIds: placeDismissed
       });
       const l: Location = { ...draft, ...sheet, updatedAt: Date.now() };
-      const episodeId = episode?.id;
-      await db.transaction('rw', db.locations, db.episodes, async () => {
-        await db.locations.add(l);
-        const ep = episodeId
-          ? await db.episodes.get(episodeId)
-          : await db.episodes.where('worldId').equals(worldId).first();
-        if (ep && !ep.locationId && !ep.location.trim() && l.name) {
-          await db.episodes.update(ep.id, { location: l.name, locationId: l.id, updatedAt: Date.now() });
-        }
-      });
+      await db.locations.add(l);
+      await linkFirstPlace(l.id);
       setPlaceName('');
       setPlaceNotes('');
-      setPlaceArea('');
-      setPlaceNear('');
+      setPlaceParentId(null);
       setPlaceResidentIds([]);
       setPlaceDismissed([]);
       setExpandedPlaceId(l.id);
@@ -508,37 +511,22 @@ export function Onboard() {
     }
   };
 
-  const removePlaceEntry = async (id: string) => {
+  /** The chapter's first place is where it opens, unless the author already picked one. */
+  const linkFirstPlace = async (placeId: string) => {
     if (!worldId) return;
+    const ep = episode ?? await db.episodes.where('worldId').equals(worldId).first();
+    if (ep && !ep.locationId) await setScenePlace(ep.id, placeId);
+  };
+
+  const removePlaceEntry = async (id: string) => {
     const row = places.find((l) => l.id === id);
-    await recordTombstones([{
-      table: 'locations',
-      id,
-      worldId: row?.worldId ?? worldId,
-      payload: row ?? { id }
-    }]);
-    await db.transaction('rw', db.locations, db.episodes, async () => {
-      await db.locations.delete(id);
-      const episodes = await db.episodes.where('worldId').equals(worldId).toArray();
-      const now = Date.now();
-      for (const ep of episodes) {
-        if (ep.locationId !== id) continue;
-        await db.episodes.update(ep.id, { location: '', locationId: null, updatedAt: now });
-      }
-    });
+    if (!row) return;
+    await safeWrite(() => removePlace(row), setError);
   };
 
   const setOpeningPlace = async (id: string) => {
     if (!episode) return;
-    const loc = places.find((l) => l.id === id);
-    if (!loc) return;
-    await db.transaction('rw', db.episodes, async () => {
-      const ep = await db.episodes.get(episode.id);
-      if (!ep) return;
-      const patch: Partial<Episode> = { location: loc.name, locationId: loc.id, updatedAt: Date.now() };
-      if (!(ep.title ?? '').trim() && loc.name.trim()) patch.title = loc.name.trim();
-      await db.episodes.update(ep.id, patch);
-    });
+    await safeWrite(() => setScenePlace(episode.id, id), setError);
   };
 
   const openFullEditor = async (screen: 'cast' | 'locations') => {
@@ -694,7 +682,14 @@ export function Onboard() {
       setError('Give the world at least one true thing (or a title) first.');
       return;
     }
-    const check = await worldWriteReady(worldId);
+    flushAiPatch();
+    let check: Awaited<ReturnType<typeof worldWriteReady>>;
+    try {
+      check = await worldWriteReady(worldId);
+    } catch (e) {
+      setError(formatUserError(e));
+      return;
+    }
     if (!check.ok) {
       setGateNote(check.missing.join(' · '));
       setError('This world is not write-ready yet. Fix the checklist below.');
@@ -740,6 +735,9 @@ export function Onboard() {
     }
     setError('');
     setBusy('Planning cast & places…');
+    flushAiPatch();
+    const ctrl = new AbortController();
+    fleshAbortRef.current = ctrl;
     try {
       const world = await db.worlds.get(worldId);
       const s = await db.seasons.get(seasonId);
@@ -770,8 +768,25 @@ export function Onboard() {
         shape: shapeTag(shape),
         targetCharacters: targets.characters,
         targetLocations: targets.locations,
-        onProgress: setBusy
+        onProgress: (label) => { if (!ctrl.signal.aborted) setBusy(label); },
+        signal: ctrl.signal
       });
+      setReviewBanner(
+        'Generated from your idea — review You, Cast, Place, and Memory. Edit anything, then Enter when the checklist is green.'
+      );
+      setStep(opts?.jumpToReview === false ? step : 3);
+    } catch (e) {
+      if (ctrl.signal.aborted) {
+        setError('Stopped. Everything that finished was kept — press Fill in everything to continue where it left off.');
+      } else {
+        const message = formatUserError(e);
+        setError(/too long|timed out/i.test(message)
+          ? 'Building the world took too long on one step. Everything that finished was kept — press Fill in everything to continue, or pick a faster utility model in Settings.'
+          : `${message} Everything that finished was kept — press Fill in everything to continue.`);
+      }
+    } finally {
+      fleshAbortRef.current = null;
+      // Show what was saved, even after a failure or cancel, so a later Next cannot write stale text over it.
       const refreshed = await db.worlds.get(worldId);
       if (refreshed) {
         setTitle(refreshed.title);
@@ -780,13 +795,6 @@ export function Onboard() {
       }
       const refreshedSeason = await db.seasons.get(seasonId);
       if (refreshedSeason) setPremise(refreshedSeason.premise);
-      setReviewBanner(
-        'Generated from your idea — review You, Cast, Place, and Memory. Edit anything, then Enter when the checklist is green.'
-      );
-      setStep(opts?.jumpToReview === false ? step : 3);
-    } catch (e) {
-      setError(formatUserError(e));
-    } finally {
       setBusy(null);
     }
   };
@@ -1144,8 +1152,8 @@ export function Onboard() {
     {
       title: 'Where does it begin?',
       body: hasAI
-        ? 'Opening location needs a name and at least one hard rule, linked to chapter 1. Mark which place the story opens in.'
-        : 'Add a location by hand and give it a hard rule. Link it as the opening place.',
+        ? 'Add the places this story moves through and mark where it opens. Places can sit inside each other — a town, a street in it, a room in a house.'
+        : 'Add a place by hand and mark it as where the story opens.',
       cta: 'Next — memory & enter',
       content: (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
@@ -1157,7 +1165,7 @@ export function Onboard() {
                   key={l.id} l={l} expanded={expandedPlaceId === l.id}
                   world={worldContext()}
                   cast={characters}
-                  areas={[...new Set(places.map((place) => place.area?.trim() ?? '').filter(Boolean))]}
+                  places={places}
                   dismissedIds={placeDismissedById.current.get(l.id) ?? []}
                   isOpening={episode?.locationId === l.id}
                   hasAI={hasAI}
@@ -1173,7 +1181,6 @@ export function Onboard() {
                     try {
                       const sheet = await fleshOutLocation(worldContext(), l, {
                         cast: characters,
-                        areas: [...new Set(places.map((place) => place.area?.trim() ?? '').filter(Boolean))],
                         places: places.map((place) => ({ id: place.id, name: place.name })),
                         dismissedIds: placeDismissedById.current.get(l.id) ?? []
                       });
@@ -1197,14 +1204,12 @@ export function Onboard() {
           <PlaceSettingFields
             placeKey="new-onboard"
             cast={characters.map((person) => ({ id: person.id, name: person.name, aliases: person.aliases, hue: person.hue }))}
-            areas={[...new Set(places.map((place) => place.area?.trim() ?? '').filter(Boolean))]}
-            area={placeArea}
-            near={placeNear}
+            places={places}
+            parentId={placeParentId}
             residentIds={placeResidentIds}
             dismissedIds={placeDismissed}
-            authorText={[placeName, placeNotes, placeArea && `in ${placeArea}`, placeNear].filter(Boolean).join('\n')}
-            onArea={setPlaceArea}
-            onNear={setPlaceNear}
+            authorText={[placeName, placeNotes].filter(Boolean).join('\n')}
+            onParentId={setPlaceParentId}
             onResidentIds={setPlaceResidentIds}
             onDismissedIds={setPlaceDismissed}
           />
@@ -1298,7 +1303,18 @@ export function Onboard() {
   const lastStep = steps.length - 1;
 
   const goNext = async () => {
+    if (nextRunningRef.current || busy) return;
+    nextRunningRef.current = true;
+    try {
+      await goNextInner();
+    } finally {
+      nextRunningRef.current = false;
+    }
+  };
+
+  const goNextInner = async () => {
     await commitFocusedField();
+    flushAiPatch();
     if (step === 0) {
       setError('');
       setStep(1);
@@ -1386,17 +1402,24 @@ export function Onboard() {
         {ob.content}
 
         {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
-        {busy && !busy.startsWith('Generating') && <Spinner label={busy} />}
+        {busy && !busy.startsWith('Generating') && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <Spinner label={busy} />
+            {fleshAbortRef.current && (
+              <button className="btn-quiet" onClick={() => fleshAbortRef.current?.abort()}>Cancel</button>
+            )}
+          </div>
+        )}
 
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 'auto', flexWrap: 'wrap' }}>
           {step > 0 && (
-            <button className="btn-ghost" onClick={() => { void commitFocusedField().then(() => setStep(step - 1)); }}>
+            <button className="btn-ghost" disabled={!!busy} onClick={() => { void commitFocusedField().then(() => setStep(step - 1)); }}>
               Back
             </button>
           )}
           <button
             className="btn-primary" style={{ padding: '12px 24px', fontSize: 13.5 }}
-            disabled={step === lastStep && !ready.ok}
+            disabled={!!busy || (step === lastStep && !ready.ok)}
             onClick={() => void goNext()}
           >
             {ob.cta}
@@ -1641,8 +1664,8 @@ function CastCard({ c, expanded, world, hasAI, fleshBusy, onToggle, onRemove, on
   );
 }
 
-function PlaceCard({ l, world, cast, areas, dismissedIds, expanded, isOpening, hasAI, fleshBusy, onToggle, onRemove, onSetOpening, onPatch, onDismissedIds, onFlesh }: {
-  l: Location; world: World; cast: Character[]; areas: string[]; dismissedIds: string[];
+function PlaceCard({ l, world, cast, places, dismissedIds, expanded, isOpening, hasAI, fleshBusy, onToggle, onRemove, onSetOpening, onPatch, onDismissedIds, onFlesh }: {
+  l: Location; world: World; cast: Character[]; places: Location[]; dismissedIds: string[];
   expanded: boolean; isOpening: boolean; hasAI: boolean; fleshBusy: boolean;
   onToggle: () => void; onRemove: () => void;
   onSetOpening: () => void; onPatch: (p: Partial<Location>) => void;
@@ -1655,17 +1678,12 @@ function PlaceCard({ l, world, cast, areas, dismissedIds, expanded, isOpening, h
         <div style={{ ...avatarStyle(l.hue, 34), flexShrink: 0, ...(l.portrait ? { backgroundImage: `url(${l.portrait})`, backgroundSize: 'cover', backgroundPosition: 'center' } : {}) }} />
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
           <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>
-            {l.name || 'unnamed'}{isOpening ? ' · opening' : ''}
+            {l.name || 'unnamed'}{isOpening ? ' · story opens here' : ''}
           </div>
-          {l.tagline && (
-            <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {l.tagline}
-            </div>
-          )}
-          {(l.area?.trim() || (l.residentIds ?? []).length > 0) && (
+          {(placeWhereLine(l, places) || (l.residentIds ?? []).length > 0) && (
             <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: 10, color: 'var(--ink-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
               {[
-                l.area?.trim(),
+                placeWhereLine(l, places) && `in ${placeWhereLine(l, places)}`,
                 (l.residentIds ?? []).map((id) => cast.find((person) => person.id === id)?.name.trim()).filter(Boolean).join(', ')
               ].filter(Boolean).join(' · ')}
             </div>
@@ -1683,7 +1701,7 @@ function PlaceCard({ l, world, cast, areas, dismissedIds, expanded, isOpening, h
           />
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
             {!isOpening && (
-              <button className="btn-quiet" style={{ fontSize: 11 }} onClick={onSetOpening}>set as opening</button>
+              <button className="btn-quiet" style={{ fontSize: 11 }} onClick={onSetOpening}>open the story here</button>
             )}
             {hasAI && (
               <button className="btn-ghost" style={{ fontSize: 11, padding: '6px 12px' }} disabled={fleshBusy} onClick={onFlesh}>
@@ -1697,49 +1715,41 @@ function PlaceCard({ l, world, cast, areas, dismissedIds, expanded, isOpening, h
               void seedBlankResidentLocations(l.residentIds, name);
             }} />
           </Field>
-          <Field label="Tagline">
-            <SheetText value={l.tagline} onCommit={(tagline) => onPatch({ tagline })} />
-          </Field>
           <Field label="What it is">
             <SheetText rows={3} value={l.summary} onCommit={(summary) => onPatch({ summary })} />
           </Field>
-          <Field label="Atmosphere">
+          <Field label="Feel" note="sight, sound, smell, texture">
             <SheetText rows={2} value={l.atmosphere} onCommit={(atmosphere) => onPatch({ atmosphere })} />
           </Field>
-          <Field label="Features">
-            <SheetText rows={2} value={l.features} onCommit={(features) => onPatch({ features })} />
+          <Field label="Right now">
+            <SheetText value={l.currentState} onCommit={(currentState) => onPatch({ currentState })} />
           </Field>
-          <Field label="History">
-            <SheetText rows={2} value={l.history} onCommit={(history) => onPatch({ history })} />
-          </Field>
-          <Field label="Inhabitants">
-            <SheetText rows={2} value={l.inhabitants} onCommit={(inhabitants) => onPatch({ inhabitants })} />
+          <Field label="Who's usually here">
+            <SheetText value={l.inhabitants} onCommit={(inhabitants) => onPatch({ inhabitants })} />
           </Field>
           <PlaceSettingFields
             placeKey={l.id}
+            placeId={l.id}
             cast={cast.map((person) => ({ id: person.id, name: person.name, aliases: person.aliases, hue: person.hue }))}
-            areas={areas}
-            area={l.area ?? ''}
-            near={l.near ?? ''}
+            places={places}
+            parentId={l.parentId}
+            nearIds={l.nearIds ?? []}
             residentIds={l.residentIds ?? []}
             dismissedIds={dismissedIds}
-            authorText={[l.name, l.summary, l.inhabitants, l.area ?? '', l.near ?? ''].join('\n')}
-            onArea={(area) => onPatch({ area })}
-            onNear={(near) => onPatch({ near })}
+            authorText={[l.name, l.summary, l.inhabitants].join('\n')}
+            onParentId={(parentId) => onPatch({ parentId })}
+            onNearIds={(nearIds) => onPatch({ nearIds })}
             onResidentIds={(residentIds) => {
               onPatch({ residentIds });
               void seedBlankResidentLocations(residentIds, l.name);
             }}
             onDismissedIds={onDismissedIds}
           />
-          <Field label="Rules" note="one per line — at least one required">
+          <Field label="Rules" note="optional — one per line">
             <SheetText rows={2} value={l.rules.join('\n')} onCommit={(text) => onPatch({ rules: linesFromField(text) })} />
           </Field>
-          <Field label="Secrets">
-            <SheetText rows={2} value={l.secrets} onCommit={(secrets) => onPatch({ secrets })} />
-          </Field>
-          <Field label="Current state">
-            <SheetText rows={2} value={l.currentState} onCommit={(currentState) => onPatch({ currentState })} />
+          <Field label="Hidden" note="history and secrets, revealed only when earned">
+            <SheetText rows={2} value={l.hidden ?? ''} onCommit={(hidden) => onPatch({ hidden })} />
           </Field>
         </div>
       )}
