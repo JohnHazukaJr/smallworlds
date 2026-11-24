@@ -2,7 +2,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useId, useRef, useState } from 'react';
 import { testConnection } from '../ai/client';
 import {
-  BYOK_PRESETS, hostedBaseUrl, isHostedProvider, listModels, presetFor, suggestedModelsFor, VENICE_ADULT_EDIT_MODEL,
+  BYOK_PRESETS, hostedBaseUrl, isHostedProvider, listModels, presetFor, suggestedModelsFor, VENICE_ADULT_EDIT_MODEL, VENICE_ADULT_GENERATE_MODEL,
   type ModelCatalogKind, type ProviderPreset
 } from '../ai/providers';
 import { COST_BEAT, COST_IMAGE, COST_UTILITY, HOSTED_IMAGE_MODEL, HOSTED_PROSE_MODEL, HOSTED_UTILITY_MODEL } from '../billing/plans';
@@ -187,15 +187,17 @@ function AdultPictures() {
     <Section title="Adult pictures" note="optional">
       <div className="craft-row" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
-          An adult chapter picture keeps the face from a portrait you already generated.
-          Portraits and other pictures keep using the image model above.
+          In an adult world, explicit pictures and portraits of adult characters go through Venice.
+          With a portrait it keeps that face; without one it draws from the character's description.
+          Anyone who reads as under 18 is never sent. Everything else keeps using the image model above.
           {venicePreset?.keyUrl && (
             <> Get a key at <a href={venicePreset.keyUrl} target="_blank" rel="noreferrer">{venicePreset.keyUrl.replace('https://', '')}</a>.</>
           )}
         </div>
         {armed && (
           <div style={{ fontSize: 13, color: 'var(--paper)' }}>
-            Adult chapter pictures use <span className="mono">{VENICE_ADULT_EDIT_MODEL}</span>.
+            Adult pictures use <span className="mono">{VENICE_ADULT_EDIT_MODEL}</span> to keep a face
+            and <span className="mono">{VENICE_ADULT_GENERATE_MODEL}</span> to draw from a description.
           </div>
         )}
         <Field label="Venice API key" note={venice ? 'replaces the saved key' : 'required'}>

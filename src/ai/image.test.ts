@@ -173,7 +173,9 @@ describe('scene image refs', () => {
   it('edits an adult picture that already has a portrait', () => {
     expect(clearAdultAge('34')).toBe(true);
     expect(clearAdultAge('')).toBe(false);
-    expect(clearAdultAge('thirties')).toBe(false);
+    // A decade or a plain adult word is a clear adult age; a blank or vague line is not.
+    expect(clearAdultAge('thirties')).toBe(true);
+    expect(clearAdultAge('unknown')).toBe(false);
     expect(clearAdultAge('16')).toBe(false);
     expect(planAdultFaceEdit({
       mature: true,
@@ -184,15 +186,24 @@ describe('scene image refs', () => {
     })).toEqual({ action: 'edit' });
   });
 
-  it('does not edit when the age is blank, someone is under 18, or there is no portrait', () => {
+  it('treats a blank age as adult unless the description reads under 18, and draws when there is no portrait', () => {
     const sexual = 'Mina, nude, in the long room.';
+    // No age given and nothing reads young: adult route.
     expect(planAdultFaceEdit({
       mature: true,
       userPrompt: sexual,
-      subjects: [{ age: '' }],
+      subjects: [{ age: '', appearance: 'Tall, freckled, looks young for her age.' }],
       faceCount: 1,
       veniceConfigured: true
-    })).toEqual({ action: 'current' });
+    })).toEqual({ action: 'edit' });
+    // No age given but described as a teen: refused.
+    expect(planAdultFaceEdit({
+      mature: true,
+      userPrompt: sexual,
+      subjects: [{ age: '', appearance: 'A teen in a school uniform.' }],
+      faceCount: 1,
+      veniceConfigured: true
+    }).action).toBe('refuse');
     expect(planAdultFaceEdit({
       mature: true,
       userPrompt: sexual,
@@ -200,13 +211,39 @@ describe('scene image refs', () => {
       faceCount: 1,
       veniceConfigured: true
     }).action).toBe('refuse');
+    // A stated adult age wins over a youthful look.
+    expect(planAdultFaceEdit({
+      mature: true,
+      userPrompt: sexual,
+      subjects: [{ age: '18', appearance: 'Looks young for her age.' }],
+      faceCount: 1,
+      veniceConfigured: true
+    })).toEqual({ action: 'edit' });
+    // No portrait: drawn from the description instead of refused.
+    expect(ADULT_PORTRAIT_ERROR).toBeTruthy();
     expect(planAdultFaceEdit({
       mature: true,
       userPrompt: sexual,
       subjects: [{ age: '34' }],
       faceCount: 0,
       veniceConfigured: true
-    })).toEqual({ action: 'refuse', error: ADULT_PORTRAIT_ERROR });
+    })).toEqual({ action: 'generate' });
+    // A neutral prompt about an explicitly described adult still takes the adult route.
+    expect(planAdultFaceEdit({
+      mature: true,
+      userPrompt: 'Mina at the window.',
+      subjects: [{ age: '30', appearance: 'nude, silver hair' }],
+      faceCount: 1,
+      veniceConfigured: true
+    })).toEqual({ action: 'edit' });
+    // A general-audience world never takes it.
+    expect(planAdultFaceEdit({
+      mature: false,
+      userPrompt: sexual,
+      subjects: [{ age: '34' }],
+      faceCount: 1,
+      veniceConfigured: true
+    })).toEqual({ action: 'current' });
     expect(planAdultFaceEdit({
       mature: true,
       userPrompt: sexual,

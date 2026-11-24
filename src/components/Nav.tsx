@@ -123,6 +123,9 @@ export function Rail() {
   );
 }
 
+/** Under 360px six labels do not fit; the long one gets a short name (the full one stays as its aria-label). */
+const SHORT_TAB_LABELS: Record<string, string> = { Characters: 'Cast' };
+
 export function TabBar() {
   const screen = useApp((s) => s.screen);
   const go = useApp((s) => s.go);
@@ -148,7 +151,7 @@ export function TabBar() {
                 go(key);
               }}
             >
-              <span>{label}</span>
+              <span>{showLabels ? label : (SHORT_TAB_LABELS[label] ?? label)}</span>
             </button>
           </span>
         );

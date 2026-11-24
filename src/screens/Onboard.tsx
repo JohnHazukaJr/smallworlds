@@ -8,6 +8,7 @@ import {
 import { characterImportance } from '../ai/characterWeight';
 import { PlayerGoalsEditor, WorldBondPaceChips } from '../components/BondScores';
 import { CharacterPortraitTools } from '../components/CharacterPortraitTools';
+import { AppearanceFields } from '../components/AppearanceFields';
 import { StoryWeightPicker } from '../components/StoryWeightPicker';
 import { PlacePhotoTools } from '../components/PlacePhotoTools';
 import { PlaceSettingFields } from '../components/PlaceSettingFields';
@@ -1047,9 +1048,15 @@ export function Onboard() {
                   <SheetText rows={2} value={player.fears} onCommit={(fears) => patchPlayer({ fears })} />
                 </Field>
               </div>
-              <Field label="Appearance">
-                <SheetText rows={2} value={player.appearance} onCommit={(appearance) => patchPlayer({ appearance })} />
-              </Field>
+              <AppearanceFields
+                key={`${player.id}-looks`}
+                appearance={player.appearance}
+                looks={player.looks}
+                age={player.age}
+                role={player.role}
+                mature={!!ai.mature}
+                onCommit={(next) => patchPlayer(next)}
+              />
               <PlayerGoalsEditor
                 goals={player.goals}
                 canDraft={hasAI}
@@ -1616,14 +1623,18 @@ function CastCard({ c, expanded, world, hasAI, fleshBusy, onToggle, onRemove, on
           <Field label="Must not know">
             <SheetText rows={2} value={c.mustNotKnow} onCommit={(mustNotKnow) => onPatch({ mustNotKnow })} />
           </Field>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 180px), 1fr))', gap: 10 }}>
-            <Field label="Appearance">
-              <SheetText rows={2} value={c.appearance} onCommit={(appearance) => onPatch({ appearance })} />
-            </Field>
-            <Field label="Mannerisms">
-              <SheetText rows={2} value={c.mannerisms} onCommit={(mannerisms) => onPatch({ mannerisms })} />
-            </Field>
-          </div>
+          <AppearanceFields
+            key={`${c.id}-looks`}
+            appearance={c.appearance}
+            looks={c.looks}
+            age={c.age}
+            role={c.role}
+            mature={!!world.ai.mature}
+            onCommit={(next) => onPatch(next)}
+          />
+          <Field label="Mannerisms">
+            <SheetText rows={2} value={c.mannerisms} onCommit={(mannerisms) => onPatch({ mannerisms })} />
+          </Field>
         </div>
       )}
     </div>

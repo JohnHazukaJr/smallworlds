@@ -3,6 +3,11 @@ import type { ProviderConfig, ProviderKind } from '../types';
 
 /** Venice edit model for an adult chapter picture that already has a portrait. */
 export const VENICE_ADULT_EDIT_MODEL = 'qwen-edit-uncensored';
+/**
+ * Venice text-to-image model for adult pictures of people with no portrait yet.
+ * Venice's docs do not label models by content; change this if it refuses.
+ */
+export const VENICE_ADULT_GENERATE_MODEL = 'lustify-sdxl';
 
 export interface ProviderPreset {
   id: string;
@@ -136,7 +141,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://api.venice.ai/api/v1',
     keyUrl: 'https://venice.ai/settings/api',
     suggestedModels: [],
-    note: 'Adult chapter pictures that keep a face from a portrait you already made. This key does not write the story.'
+    note: 'Adult pictures and portraits in adult worlds: keeps the face from an existing portrait, or draws from the description when there is none. This key does not write the story.'
   },
   {
     id: 'ollama',

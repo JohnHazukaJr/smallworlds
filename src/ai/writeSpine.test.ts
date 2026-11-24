@@ -370,13 +370,12 @@ describe('isEmptyRosterProposal', () => {
 });
 
 describe('chapterMemoryClearPatch', () => {
-  it('always clears summary watermarks, pending plan, and scene ledger', () => {
+  it('always clears summary watermarks and scene ledger', () => {
     expect(chapterMemoryClearPatch()).toEqual({
       runningSummary: null,
       runningSummaryAtChars: 0,
       liveStateAtChars: 0,
       liveCanonAtChars: 0,
-      pendingPlan: null,
       sceneLedger: []
     });
   });

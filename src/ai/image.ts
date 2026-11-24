@@ -2,16 +2,22 @@ import type { Character, Location, ProviderConfig, World } from '../types';
 import { PORTRAIT_JPEG_QUALITY, PORTRAIT_MAX_PX } from '../ui/image';
 import { characterPortraits } from '../worldOps';
 import { AIError, providerTagFor } from './client';
+import { allLooksText } from '../looks';
+import { readAge } from './ageRead';
 import { configuredImageModel, configuredMatureImageModel } from './models';
 import {
   buildCharacterPortraitPrompt,
-  characterReadsAsMinor,
+  characterLookLine,
+  minorRefusalMessage,
   portraitStyleLine,
+  subjectAgeReading,
   textLooksSexual,
+  wantsFullBody,
+  type PortraitFraming,
   type PortraitStyle
 } from './portrait';
 import { isZaiProvider, providerFetch } from './providerFetch';
-import { isOpenRouterHost, VENICE_ADULT_EDIT_MODEL } from './providers';
+import { isOpenRouterHost, VENICE_ADULT_EDIT_MODEL, VENICE_ADULT_GENERATE_MODEL } from './providers';
 
 export interface SceneImageRef {
   name: string;
@@ -153,6 +159,16 @@ export function chapterPictureFaces(opts: {
   return faces;
 }
 
+const PICTURE_PROMPT_MAX = 1600;
+/** A look shorter than this says too little to be worth sending. */
+const LOOK_MIN = 60;
+
+/** One subject's written look. `look` is a characterLookLine. */
+export interface PictureLook {
+  name: string;
+  look: string;
+}
+
 export function chapterPicturePrompt(opts: {
   userPrompt: string;
   refs: SceneImageRef[];
@@ -160,6 +176,10 @@ export function chapterPicturePrompt(opts: {
   contentNotes: string;
   mature: boolean;
   minor: boolean;
+  /** How each subject looks. A photo keeps the face; this keeps the body, build, and clothes. */
+  looks?: PictureLook[];
+  /** Ask for the whole figure, head to feet. */
+  fullBody?: boolean;
 }): string {
   const identity = opts.refs
     .map((ref, i) => `Image ${i + 1} is ${ref.name}. Keep their face, hair, and coloring from that photo.`)
@@ -167,21 +187,54 @@ export function chapterPicturePrompt(opts: {
   const audience = opts.minor || !opts.mature
     ? 'Fully clothed, non-sexual, no nudity, no suggestive pose'
     : '';
-  const bits = [
+  const looks = (opts.looks ?? []).filter((l) => l.look.trim());
+  const head = [
     opts.userPrompt.trim(),
-    identity,
-    opts.refs.length > 0 ? 'People in frame must match the named reference photos. No extra invented faces.' : '',
+    opts.fullBody ? 'Show the whole figure, head to feet' : '',
+    identity
+  ];
+  const tail = [
+    looks.length > 0
+      ? 'Everyone named must match their description: no invented outfits, builds, or faces.'
+      : opts.refs.length > 0 ? 'People in frame must match the named reference photos. No extra invented faces.' : '',
     opts.contentNotes.trim() ? `Boundaries: ${opts.contentNotes.trim()}` : '',
     portraitStyleLine(opts.style),
     audience,
     'No text, no watermark'
-  ].filter((part) => part && String(part).trim());
-  return bits.join('. ').slice(0, 1600);
+  ];
+  const join = (parts: string[]) => parts.filter((part) => part && part.trim()).join('. ');
+  const fixed = join([...head, ...tail]);
+  // The written looks give way first, so the user's own words are never cut.
+  const room = PICTURE_PROMPT_MAX - fixed.length - looks.length * 2 - 2;
+  const each = looks.length > 0 ? Math.floor(room / looks.length) : 0;
+  const lookLines = each >= LOOK_MIN
+    ? looks.map((l) => {
+      const hasPhoto = opts.refs.some((ref) => ref.kind === 'face' && ref.name === l.name);
+      const prefix = hasPhoto ? 'Body, build, and clothing — ' : 'Looks — ';
+      const text = `${prefix}${l.look}`;
+      return text.length > each ? `${text.slice(0, each - 1).trimEnd()}…` : text;
+    })
+    : [];
+  return join([...head, ...lookLines, ...tail]).slice(0, PICTURE_PROMPT_MAX);
 }
 
 export type ChapterPicturePlan =
   | { ok: false; error: string }
   | { ok: true; prompt: string; refs: SceneImageRef[] };
+
+/**
+ * Subjects' written looks, in the same order (and cap) as their photos.
+ * The intimate section rides along only for an adult in an adult world.
+ */
+export function chapterPictureLooks(subjects: Character[], mature = false): PictureLook[] {
+  return subjects
+    .slice(0, FACE_REF_CAP)
+    .map((c) => ({
+      name: c.name.trim() || 'someone',
+      look: characterLookLine(c, undefined, { adult: mature && !subjectAgeReading(c).minor })
+    }))
+    .filter((l) => l.look);
+}
 
 /**
  * Decide the prompt and photo refs before any request.
@@ -196,6 +249,8 @@ export function prepareChapterPicture(opts: {
   mature: boolean;
   provider: ProviderConfig | null;
   model: string | null;
+  /** Ask for the whole figure even when the prompt does not say so. */
+  fullBody?: boolean;
 }): ChapterPicturePlan {
   const userPrompt = opts.userPrompt.trim();
   if (!userPrompt) return { ok: false, error: 'Say what the picture should show.' };
@@ -207,11 +262,8 @@ export function prepareChapterPicture(opts: {
     castIds: opts.castIds,
     prompt: userPrompt
   });
-  if (textLooksSexual(userPrompt) && subjects.some((c) => characterReadsAsMinor(c.age))) {
-    return {
-      ok: false,
-      error: 'A character in this picture reads as under 18. A sexual prompt can’t be sent.'
-    };
+  if (textLooksSexual(userPrompt) && subjects.some((c) => subjectAgeReading(c).minor)) {
+    return { ok: false, error: minorRefusalMessage(subjects) };
   }
   const refs = chapterPictureFaces({
     characters: opts.characters,
@@ -233,7 +285,9 @@ export function prepareChapterPicture(opts: {
       style: opts.style,
       contentNotes: opts.contentNotes,
       mature: opts.mature,
-      minor: subjects.some((c) => characterReadsAsMinor(c.age))
+      minor: subjects.some((c) => subjectAgeReading(c).minor),
+      looks: chapterPictureLooks(subjects, opts.mature),
+      fullBody: !!opts.fullBody
     })
   };
 }
@@ -249,11 +303,13 @@ export function imageModelAcceptsRefs(provider: ProviderConfig, model: string): 
   return true;
 }
 
-export type ImageSizeKind = 'portrait' | 'landscape' | 'square';
+export type ImageSizeKind = 'portrait' | 'landscape' | 'square' | 'tall';
 
 /** Conservative sizes most image APIs accept. Unsized `{ model, prompt }` is tried first. */
 export function imageSizeCandidates(kind: ImageSizeKind = 'square'): string[] {
   if (kind === 'portrait') return ['1024x1024', '1024x1536'];
+  // A whole figure needs the height: tall first, square if the model refuses it.
+  if (kind === 'tall') return ['1024x1536', '1024x1024'];
   if (kind === 'landscape') return ['1024x1024', '1792x1024'];
   return ['1024x1024'];
 }
@@ -361,17 +417,45 @@ export async function generateLocationPhoto(opts: {
   return result.dataUrl;
 }
 
-/** Generate a portrait from the character sheet and return a gallery-sized JPEG data URL. */
+/**
+ * A picture of one character from their sheet, as a JPEG data URL.
+ * Head and shoulders by default. A full figure or a typed scene keeps their
+ * main photo's face when the model can take it, and their written look always.
+ */
 export async function generateCharacterPortrait(opts: {
   world: World;
   character: Character;
   style: PortraitStyle;
+  framing?: PortraitFraming;
+  /** A scene or pose to put them in. */
+  scene?: string;
   signal?: AbortSignal;
 }): Promise<string> {
+  const framing = opts.framing ?? 'head';
+  const scene = opts.scene?.trim() ?? '';
+  if (scene) {
+    // A scene is a one-person chapter picture: same face photo, same safety checks.
+    const who = opts.character.name.trim();
+    return generateChapterPicture({
+      world: opts.world,
+      characters: [opts.character],
+      castIds: [opts.character.id],
+      userPrompt: who && !scene.toLowerCase().includes(who.toLowerCase()) ? `${who}, ${scene}` : scene,
+      style: opts.style,
+      fullBody: framing === 'full',
+      signal: opts.signal
+    });
+  }
+  const resolvedFirst = configuredImageModel(opts.world);
+  const face = framing === 'full' ? characterPortraits(opts.character)[0] : undefined;
+  const useFace = !!face && !!resolvedFirst && imageModelAcceptsRefs(resolvedFirst.provider, resolvedFirst.model);
   const built = buildCharacterPortraitPrompt({
+    framing,
+    faceRef: useFace,
     name: opts.character.name,
     age: opts.character.age,
     appearance: opts.character.appearance,
+    looks: opts.character.looks,
     mannerisms: opts.character.mannerisms,
     role: opts.character.role,
     contentNotes: opts.world.ai.contentNotes ?? '',
@@ -379,6 +463,40 @@ export async function generateCharacterPortrait(opts: {
     style: opts.style
   });
   if (!built.ok) throw new AIError(built.error);
+
+  // An adult, explicitly described character in an adult world goes to the adult
+  // image route, the same as a chapter picture would. Anyone under 18 never does.
+  const venice = veniceAdultProvider();
+  const reading = subjectAgeReading(opts.character);
+  const described = [allLooksText(opts.character), opts.character.mannerisms, opts.character.role].join('\n');
+  if (venice && opts.world.ai.mature && reading.adult && !reading.minor && textLooksSexual(described)) {
+    if (framing === 'full' && face) {
+      const kept = buildCharacterPortraitPrompt({
+        framing, faceRef: true,
+        name: opts.character.name, age: opts.character.age, appearance: opts.character.appearance,
+        looks: opts.character.looks,
+        mannerisms: opts.character.mannerisms, role: opts.character.role,
+        contentNotes: opts.world.ai.contentNotes ?? '', mature: true, style: opts.style
+      });
+      if (!kept.ok) throw new AIError(kept.error);
+      const refs = await prepareSceneImageRefs([{ name: opts.character.name.trim() || 'them', dataUrl: face, kind: 'face' }]);
+      const url = await requestVeniceFaceEdit({ provider: venice.provider, prompt: kept.prompt, refs, signal: opts.signal });
+      return urlToJpegDataUrl(url, 1280, 0.8);
+    }
+    const request = veniceGenerateRequest({ baseUrl: venice.provider.baseUrl, prompt: built.prompt, tall: framing === 'full' });
+    const res = await providerFetch(request.url, {
+      method: 'POST',
+      headers: imageHeaders(venice.provider),
+      signal: opts.signal,
+      body: JSON.stringify(request.body)
+    });
+    if (!res.ok) throw await imageHttpError(res, venice.provider);
+    const url = await responseBytesToDataUrl(res);
+    return framing === 'full'
+      ? urlToJpegDataUrl(url, 1280, 0.8)
+      : urlToJpegDataUrl(url, PORTRAIT_MAX_PX, PORTRAIT_JPEG_QUALITY);
+  }
+
   const resolved = configuredImageModel(opts.world);
   if (!resolved) {
     throw new AIError('Set an image model in Settings before generating a portrait.');
@@ -386,58 +504,87 @@ export async function generateCharacterPortrait(opts: {
   if (resolved.provider.kind !== 'openai') {
     throw new AIError('Portrait generation needs an OpenAI-compatible provider (OpenRouter or Z.ai).');
   }
+  const refs = useFace && face
+    ? await prepareSceneImageRefs([{ name: opts.character.name.trim() || 'them', dataUrl: face, kind: 'face' }])
+    : [];
   const url = await requestImage({
     provider: resolved.provider,
     model: resolved.model,
     prompt: built.prompt,
-    refs: [],
+    refs,
     signal: opts.signal,
-    sizes: imageSizeCandidates('portrait')
+    sizes: imageSizeCandidates(framing === 'full' ? 'tall' : 'portrait')
   });
-  return urlToJpegDataUrl(url, PORTRAIT_MAX_PX, PORTRAIT_JPEG_QUALITY);
+  return framing === 'full'
+    ? urlToJpegDataUrl(url, 1280, 0.8)
+    : urlToJpegDataUrl(url, PORTRAIT_MAX_PX, PORTRAIT_JPEG_QUALITY);
 }
 
 export const ADULT_PORTRAIT_ERROR = 'Generate a portrait first. This picture keeps that face.';
 
-/** True when the age line states a number from 18 through 120 and does not read as under 18. */
+/**
+ * True when the age line states an adult age (a number, a decade like
+ * "thirties", or a plain word like "adult") and nothing in it reads as under 18.
+ */
 export function clearAdultAge(age: string): boolean {
-  if (characterReadsAsMinor(age)) return false;
-  const years = [...age.matchAll(/\b(\d{1,3})\b/g)]
-    .map((m) => Number(m[1]))
-    .filter((n) => n >= 1 && n <= 120);
-  return years.some((n) => n >= 18);
+  const reading = readAge(age);
+  return reading.adult && !reading.minor;
 }
 
 export type AdultFaceEditPlan =
   | { action: 'current' }
   | { action: 'refuse'; error: string }
-  | { action: 'edit' };
+  | { action: 'edit' }
+  | { action: 'generate' };
 
 /**
- * Adult chapter pictures with a Venice key edit existing portraits.
- * Anything else stays on the image model already configured.
+ * Adult chapter pictures with a Venice key: edit existing portraits to keep
+ * the faces, or write the picture from text when nobody has a portrait yet.
+ * Anyone who reads as under 18 refuses a sexual prompt. Anything else stays
+ * on the image model already configured.
  */
 export function planAdultFaceEdit(opts: {
   mature: boolean;
   userPrompt: string;
-  subjects: { age: string }[];
+  subjects: { name?: string; age: string; appearance?: string; role?: string; looks?: Character['looks'] }[];
   faceCount: number;
   veniceConfigured: boolean;
 }): AdultFaceEditPlan {
-  if (!opts.mature || !textLooksSexual(opts.userPrompt) || !opts.veniceConfigured) {
+  // Sexual when the prompt says so, or when the people in it are described that way.
+  const sexual = textLooksSexual(opts.userPrompt)
+    || opts.subjects.some((subject) => textLooksSexual([allLooksText(subject), subject.role ?? ''].join('\n')));
+  if (!opts.mature || !sexual || !opts.veniceConfigured) {
     return { action: 'current' };
   }
-  if (opts.subjects.some((subject) => characterReadsAsMinor(subject.age))) {
-    return {
-      action: 'refuse',
-      error: 'A character in this picture reads as under 18. A sexual prompt can’t be sent.'
-    };
+  const readings = opts.subjects.map((subject) => subjectAgeReading(subject));
+  if (readings.some((r) => r.minor)) {
+    return { action: 'refuse', error: minorRefusalMessage(opts.subjects) };
   }
-  if (opts.subjects.length === 0 || opts.subjects.some((subject) => !clearAdultAge(subject.age))) {
+  if (opts.subjects.length === 0 || readings.some((r) => !r.adult)) {
     return { action: 'current' };
   }
-  if (opts.faceCount < 1) return { action: 'refuse', error: ADULT_PORTRAIT_ERROR };
-  return { action: 'edit' };
+  return opts.faceCount < 1 ? { action: 'generate' } : { action: 'edit' };
+}
+
+/** Venice text-to-image body. Explicit size, unblurred, raw JPEG back. */
+export function veniceGenerateRequest(opts: {
+  baseUrl: string;
+  prompt: string;
+  tall: boolean;
+}): { url: string; body: Record<string, unknown> } {
+  const base = opts.baseUrl.replace(/\/$/, '');
+  return {
+    url: `${base}/image/generate`,
+    body: {
+      model: VENICE_ADULT_GENERATE_MODEL,
+      prompt: opts.prompt.slice(0, 7500),
+      width: opts.tall ? 832 : 1024,
+      height: opts.tall ? 1216 : 1024,
+      format: 'jpeg',
+      return_binary: true,
+      safe_mode: false
+    }
+  };
 }
 
 export function stripImageDataUrl(src: string): string {
@@ -497,8 +644,11 @@ export async function generateChapterPicture(opts: {
   castIds: string[];
   userPrompt: string;
   style: PortraitStyle;
+  /** Ask for the whole figure even when the prompt does not say so. */
+  fullBody?: boolean;
   signal?: AbortSignal;
 }): Promise<string> {
+  const fullBody = !!opts.fullBody || wantsFullBody(opts.userPrompt);
   const subjects = chapterPictureSubjects({
     characters: opts.characters,
     castIds: opts.castIds,
@@ -518,6 +668,29 @@ export async function generateChapterPicture(opts: {
     veniceConfigured: !!venice
   });
   if (adult.action === 'refuse') throw new AIError(adult.error);
+  if (adult.action === 'generate' && venice) {
+    const plan = prepareChapterPicture({
+      characters: opts.characters,
+      castIds: opts.castIds,
+      userPrompt: opts.userPrompt,
+      style: opts.style,
+      contentNotes: opts.world.ai.contentNotes ?? '',
+      mature: true,
+      provider: venice.provider,
+      model: VENICE_ADULT_GENERATE_MODEL,
+      fullBody
+    });
+    if (!plan.ok) throw new AIError(plan.error);
+    const request = veniceGenerateRequest({ baseUrl: venice.provider.baseUrl, prompt: plan.prompt, tall: fullBody });
+    const res = await providerFetch(request.url, {
+      method: 'POST',
+      headers: imageHeaders(venice.provider),
+      signal: opts.signal,
+      body: JSON.stringify(request.body)
+    });
+    if (!res.ok) throw await imageHttpError(res, venice.provider);
+    return urlToJpegDataUrl(await responseBytesToDataUrl(res), 1280, 0.8);
+  }
   if (adult.action === 'edit' && venice) {
     const plan = prepareChapterPicture({
       characters: opts.characters,
@@ -527,7 +700,8 @@ export async function generateChapterPicture(opts: {
       contentNotes: opts.world.ai.contentNotes ?? '',
       mature: true,
       provider: venice.provider,
-      model: VENICE_ADULT_EDIT_MODEL
+      model: VENICE_ADULT_EDIT_MODEL,
+      fullBody
     });
     if (!plan.ok) throw new AIError(plan.error);
     const refs = await prepareSceneImageRefs(plan.refs);
@@ -549,7 +723,8 @@ export async function generateChapterPicture(opts: {
     contentNotes: opts.world.ai.contentNotes ?? '',
     mature: !!opts.world.ai.mature,
     provider: resolved?.provider ?? null,
-    model: resolved?.model ?? null
+    model: resolved?.model ?? null,
+    fullBody
   });
   if (!plan.ok) throw new AIError(plan.error);
   if (!resolved) throw new AIError('Set an image model in Settings before making a picture.');
@@ -563,7 +738,7 @@ export async function generateChapterPicture(opts: {
     prompt: plan.prompt,
     refs,
     signal: opts.signal,
-    sizes: imageSizeCandidates('square')
+    sizes: imageSizeCandidates(fullBody ? 'tall' : 'square')
   });
   return urlToJpegDataUrl(url, 1280, 0.8);
 }

@@ -3,14 +3,11 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { flushSync } from 'react-dom';
 import {
   commitSoftEpisodeWrap, draftColdOpenNarration,
-  deleteTurn, deleteTurnsAfter, deleteTurnsFrom,
+  deleteTurn, deleteTurnsFrom, rewindTo, switchTurnAlt, undoRewind, type RewindUndo,
   endStoryWrite,
   canRewriteFromHere,
   finalizeChapterMemory,
   regenerateBeat,
-  rollbackTurnSnapshot,
-  snapshotEpisodeMemory,
-  snapshotTurnsAfter,
   tryBeginStoryWrite, writeTurn,
   WriteAbortedError, type StreamMeta
 } from '../ai/engine';
@@ -42,11 +39,15 @@ import {
 } from '../store/app';
 import { generateChapterPicture } from '../ai/image';
 import { rememberedPortraitStyle } from '../ai/portrait';
-import { splitSceneReply, type SceneSpeaker } from '../ai/sceneReply';
+import type { SceneSpeaker } from '../ai/sceneReply';
+import { checkChipDetail, checkChipText } from '../mechanics';
+import { altPosition, editAltPatch } from '../turnAlts';
+import { JournalSheet } from '../components/JournalSheet';
+import { scenePiecesOf, validBeats } from '../ai/beatProtocol';
 import { hasWritingModel } from '../ai/models';
 import { useSettings } from '../store/settings';
 import type {
-  ChapterIllustration, Character, ComposeMode, Episode, EpisodeGuest,
+  ChapterIllustration, Character, CheckResult, ComposeMode, Episode, EpisodeGuest,
   Location, Turn, TurnLength, ActionWeight
 } from '../types';
 import { AppError, classifyError } from '../errors';
@@ -78,6 +79,8 @@ interface ProseBlock {
   segments?: SpeakSegment[];
   /** Player delivery tag from leading [tone] on the turn */
   deliveryTone?: DeliveryTone | null;
+  /** Hidden check settled for this player move */
+  check?: CheckResult;
 }
 
 function guestHue(guestId: string): number {
@@ -191,7 +194,8 @@ function parseTurn(turn: Turn, characters: Character[], guests: EpisodeGuest[] =
         portrait: player ? characterPortraits(player)[0] : null,
         kind: 'speak',
         segments: parseSpeakSegments(body),
-        deliveryTone: tone
+        deliveryTone: tone,
+        ...(turn.check ? { check: turn.check } : {})
       }];
     }
     if (turn.mode === 'act') {
@@ -202,7 +206,8 @@ function parseTurn(turn: Turn, characters: Character[], guests: EpisodeGuest[] =
         hue: player?.hue ?? 60,
         portrait: player ? characterPortraits(player)[0] : null,
         kind: 'action',
-        deliveryTone: tone
+        deliveryTone: tone,
+        ...(turn.check ? { check: turn.check } : {})
       }];
     }
     return [{ text: turn.text, kind: 'direction' }];
@@ -231,7 +236,7 @@ function parseTurn(turn: Turn, characters: Character[], guests: EpisodeGuest[] =
       : stripNarratorEmbeddedDialogue(text);
     return stripped || text;
   };
-  const pieces = speakers.length > 0 ? splitSceneReply(turn.text, speakers) : [];
+  const pieces = speakers.length > 0 || validBeats(turn) ? scenePiecesOf(turn, speakers) : [];
   if (!pieces.some((piece) => piece.role === 'character' && piece.speakerId)) {
     return [{ text: stripNarration(turn.text), kind: 'narration' }];
   }
@@ -431,7 +436,50 @@ function OpeningNarration({
   );
 }
 
-function ProseBlockView({
+/** The settled outcome of a risky move, under the player's line. */
+function CheckChip({ check, fromPlayer }: { check: CheckResult; fromPlayer?: boolean }) {
+  const tone = check.tier === 'fail' ? 'var(--ink-muted)' : 'var(--ink-heading)';
+  return (
+    <div
+      className="check-chip"
+      title={checkChipDetail(check)}
+      aria-label={`Check: ${checkChipDetail(check)}`}
+      style={{
+        display: 'flex',
+        justifyContent: fromPlayer ? 'flex-end' : 'flex-start',
+        margin: '2px 0 16px'
+      }}
+    >
+      <span style={{
+        fontFamily: "'IBM Plex Mono', monospace",
+        fontSize: 10,
+        letterSpacing: '0.08em',
+        textTransform: 'uppercase',
+        color: tone,
+        border: '1px solid var(--rule)',
+        borderRadius: 999,
+        padding: '3px 9px',
+        opacity: check.tier === 'fail' ? 0.85 : 1
+      }}>
+        {checkChipText(check)}
+      </span>
+    </div>
+  );
+}
+
+type ProseBlockProps = Parameters<typeof ProseBlockBody>[0];
+
+function ProseBlockView(props: ProseBlockProps) {
+  if (!props.b.check) return <ProseBlockBody {...props} />;
+  return (
+    <>
+      <ProseBlockBody {...props} />
+      <CheckChip check={props.b.check} fromPlayer={props.fromPlayer} />
+    </>
+  );
+}
+
+function ProseBlockBody({
   b, accent, prose, fontPx, avatarPx, dialogueStyle, continues, opening, caret, fromPlayer
 }: {
   b: ProseBlock;
@@ -679,6 +727,7 @@ function sceneStreamBlocks(
     characterId: meta.characterId,
     guestId: meta.guestId,
     text: meta.role === 'character' ? previewSpeakText(partial) : partial,
+    ...(meta.role === 'narrator' && meta.beats ? { beats: meta.beats } : {}),
     createdAt: 0
   }, characters, guests);
 }
@@ -844,6 +893,8 @@ export function Story() {
   const { band, height, keyboardOffset, keyboardOpen } = useViewport();
   const book = bookStageOpen(band, keyboardOpen, height);
   const phone = phoneChrome(band);
+  /** Phone width (and a Fold's cover screen): the composer stacks instead of squeezing. */
+  const compactComposer = band === 'compact';
   const short = shortStoryChrome(band, height);
   const sheetBottom = sheetsFromBottom(band);
   const narrow = phone;
@@ -967,13 +1018,16 @@ export function Story() {
   const [pageReveal, setPageReveal] = useState(0);
   const [error, setError] = useState<string | AppError>('');
   const [notice, setNotice] = useState('');
+  /** The last rewind, while Undo can still put it back. */
+  const [rewound, setRewound] = useState<RewindUndo | null>(null);
+  const [journalOpen, setJournalOpen] = useState(false);
   const [writeAnyway, setWriteAnyway] = useState(false);
   const [recoverBusy, setRecoverBusy] = useState(false);
   const recoverBusyRef = useRef(false);
   const wrapBusyRef = useRef(false);
   /** How many turns from the end are mounted — keeps long episodes responsive. */
   const [turnWindow, setTurnWindow] = useState(60);
-  useEffect(() => { setTurnWindow(60); }, [episode?.id]);
+  useEffect(() => { setTurnWindow(60); setRewound(null); }, [episode?.id]);
   useEffect(() => { setWriteAnyway(false); }, [episode?.id, world?.id]);
   useEffect(() => {
     if (!currentWorldId || world === undefined) return;
@@ -1115,11 +1169,14 @@ export function Story() {
     handsId?: string | null,
     writeToken?: symbol,
     keepExistingUserTurn?: boolean,
-    address?: LineAddress
+    address?: LineAddress,
+    worldMove?: boolean
   ): Promise<{ status: 'ok' | 'error' | 'aborted'; beatsCompleted: number; remaining: number }> => {
     if (!world || !season || !episode) return { status: 'error', beatsCompleted: 0, remaining: 0 };
     setError('');
     setNotice('');
+    // Undo would remove whatever is written next, so the offer ends here.
+    setRewound(null);
     setStreaming(true);
     setTailHasText(false);
     setProgressLabel('Writing…');
@@ -1133,6 +1190,7 @@ export function Story() {
         ...(address?.toCharacterId ? { toCharacterId: address.toCharacterId } : {}),
         ...(address?.toGuestId ? { toGuestId: address.toGuestId } : {}),
         ...(address?.toPlayer ? { toPlayer: true } : {}),
+        ...(worldMove ? { worldMove: true } : {}),
         signal: controller.signal,
         writeToken,
         keepExistingUserTurn,
@@ -1238,6 +1296,73 @@ export function Story() {
     }
   };
 
+  const lastTurnId = turns[turns.length - 1]?.id;
+  // Ideas belong to the turn they were written after; a newer turn makes them stale.
+  const nextIdeas = episode?.suggestions && episode.suggestions.afterTurnId === lastTurnId
+    ? episode.suggestions.items
+    : [];
+  const canRewindHere = (turn: Turn) =>
+    !!episode && turn.episodeId === episode.id && turn.id !== lastTurnId;
+
+  /** The world takes a turn: someone here acts on what they want. */
+  const passTime = async () => {
+    if (!world || !season || !episode || streaming) return;
+    if (!hasAI) {
+      setNotice(NOTICE_ADD_MODEL);
+      return;
+    }
+    const token = tryBeginStoryWrite();
+    if (!token) return;
+    try {
+      await runNarration('continue', '', undefined, weight, null, token, undefined, undefined, true);
+    } finally {
+      endStoryWrite(token);
+    }
+  };
+
+  /** Drop everything after this line, with Undo. */
+  const rewindHere = async (turn: Turn) => {
+    if (!episode || streaming) return;
+    const token = tryBeginStoryWrite();
+    if (!token) return;
+    setError('');
+    setNotice('');
+    try {
+      const undo = await rewindTo(turn);
+      setRewound(undo);
+      if (editing && undo?.removed.some((t) => t.id === editing.id)) setEditing(null);
+    } catch (e) {
+      setError(classifyError(e));
+    } finally {
+      endStoryWrite(token);
+    }
+  };
+
+  const undoLastRewind = async () => {
+    const undo = rewound;
+    if (!undo || streaming) return;
+    const token = tryBeginStoryWrite();
+    if (!token) return;
+    setRewound(null);
+    try {
+      await undoRewind(undo);
+    } catch (e) {
+      setError(classifyError(e));
+    } finally {
+      endStoryWrite(token);
+    }
+  };
+
+  /** Show another kept version of a rewritten reply. */
+  const flipAlt = async (turn: Turn, index: number) => {
+    if (streaming) return;
+    try {
+      await switchTurnAlt(turn.id, turn.episodeId, index);
+    } catch (e) {
+      setError(classifyError(e));
+    }
+  };
+
   const beginEdit = (turn: Turn) => {
     flushSync(() => {
       setComposerOpen(true);
@@ -1263,7 +1388,10 @@ export function Story() {
     setEditBusy(true);
     setError('');
     try {
-      await db.turns.update(editing.id, { text, updatedAt: Date.now() });
+      // Tagged beats described the old wording; the prose splitter reads the edit.
+      const now = Date.now();
+      const versioned = current ? editAltPatch(current, text, now) : null;
+      await db.turns.update(editing.id, { text, beats: undefined, ...(versioned ?? {}), updatedAt: now });
       await finalizeChapterMemory(episode.id);
       setEditing(null);
     } catch (e) {
@@ -1379,18 +1507,11 @@ export function Story() {
     if (!ok) return;
     const token = tryBeginStoryWrite();
     if (!token) return;
-    const started = Date.now();
-    let following: Awaited<ReturnType<typeof snapshotTurnsAfter>> = [];
-    let memory: Awaited<ReturnType<typeof snapshotEpisodeMemory>> = null;
-    let removed = false;
+    // The same snapshot as Rewind, so a failed rewrite also gives back what
+    // people remembered of the lines it removed.
+    let undo: RewindUndo | null = null;
     try {
-      [following, memory] = await Promise.all([
-        snapshotTurnsAfter(turn.id, episode.id),
-        snapshotEpisodeMemory(episode.id)
-      ]);
-      await deleteTurnsAfter(turn.id, episode.id);
-      removed = true;
-      await finalizeChapterMemory(episode.id);
+      undo = await rewindTo(turn);
       const result = await runNarration(
         turn.mode && turn.mode !== 'continue' ? turn.mode : 'play',
         turn.text,
@@ -1404,23 +1525,13 @@ export function Story() {
           ...(turn.toGuestId ? { toGuestId: turn.toGuestId } : {})
         }
       );
-      if (result.status !== 'ok' && result.beatsCompleted === 0) {
-        await rollbackTurnSnapshot(episode.id, following, started, memory);
-        await db.episodes.update(episode.id, {
-          pendingPlan: null,
-          updatedAt: Date.now()
-        });
+      if (result.status !== 'ok' && result.beatsCompleted === 0 && undo) {
+        await undoRewind(undo);
         setError('');
         setNotice('The rewrite did not land. The earlier lines are back.');
       }
     } catch (e) {
-      if (removed) {
-        await rollbackTurnSnapshot(episode.id, following, started, memory).catch(() => undefined);
-        await db.episodes.update(episode.id, {
-          pendingPlan: null,
-          updatedAt: Date.now()
-        }).catch(() => undefined);
-      }
+      if (undo) await undoRewind(undo).catch(() => undefined);
       setError(classifyError(e));
     } finally {
       endStoryWrite(token);
@@ -1815,6 +1926,9 @@ export function Story() {
               onRewriteFromHere={fromUser ? () => { void rewriteFromInjection(turn); } : undefined}
               onDeleteLine={canEdit ? () => { void deletePassage(turn, false); } : undefined}
               onDeleteFromHere={canEdit ? () => { void deletePassage(turn, true); } : undefined}
+              alt={canEdit ? altPosition(turn) : null}
+              onAlt={canEdit ? (index) => { void flipAlt(turn, index); } : undefined}
+              onRewindHere={canRewindHere(turn) ? () => { void rewindHere(turn); } : undefined}
             />
           )
         });
@@ -1883,6 +1997,10 @@ export function Story() {
               {composerOpen ? 'Hide' : 'Write'}
             </button>
             <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
+              onClick={() => { setJournalOpen(true); setHudTucked(false); }}>
+              Journal
+            </button>
+            <button className="btn-quiet" style={{ padding: '7px 12px', fontSize: 12 }}
               onClick={() => { setWorldEditOpen(true); setHudTucked(false); }}>
               Edit world
             </button>
@@ -1938,6 +2056,7 @@ export function Story() {
             {!short && (
               <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} disabled={wrapBusy} onClick={() => void skipWrapAndEnd()}>End chapter</button>
             )}
+            <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setJournalOpen(true)}>Journal</button>
             <button className="btn-ghost" style={{ padding: '8px 14px' }} onClick={() => setWorldEditOpen(true)}>Edit world</button>
             {short ? (
               <button className="btn-ghost" style={{ padding: '7px 12px', fontSize: 11, minHeight: 36 }} onClick={() => setMoreSheet(true)}>More</button>
@@ -2155,9 +2274,10 @@ export function Story() {
                     </button>
                   )}
                   {(continuity.length > 0 || threads.length > 0) && (
-                    <span className="label" style={{ opacity: 0.5 }}>
+                    <button type="button" className="btn-quiet label" style={{ opacity: 0.7, fontSize: 11 }}
+                      onClick={() => setJournalOpen(true)} title="Open the journal">
                       {continuity.length} fact{continuity.length === 1 ? '' : 's'} · {threads.length} thread{threads.length === 1 ? '' : 's'}
-                    </span>
+                    </button>
                   )}
                 </div>
               </div>
@@ -2233,6 +2353,8 @@ export function Story() {
                       onDeleteLine={canEdit ? () => { void deletePassage(turn, false); } : undefined}
                       onDeleteFromHere={canEdit ? () => { void deletePassage(turn, true); } : undefined}
                       editing={editing?.id === turn.id}
+                      onAlt={canEdit ? (index) => { void flipAlt(turn, index); } : undefined}
+                      onRewindHere={canRewindHere(turn) ? () => { void rewindHere(turn); } : undefined}
                     />
                     {(picturePlacement.after.get(turn.id) ?? []).map((picture) => (
                       <ChapterFigure key={picture.id} picture={picture} />
@@ -2267,13 +2389,25 @@ export function Story() {
         )}
       </div>
 
-      {(error || notice) && (
+      {(error || notice || rewound) && (
         <div style={{
           position: 'relative', zIndex: 3, flexShrink: 0,
           padding: narrow ? '10px 12px 0' : '12px 24px 0',
           display: 'flex', flexDirection: 'column', gap: 10
         }}>
           {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
+          {rewound && !streaming && (
+            <div className="glass-nudge" role="status" style={{
+              border: `1px solid ${ACCENT_RGBA.a35}`,
+              background: ACCENT_RGBA.a08, display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap'
+            }}>
+              <div style={{ fontSize: 12.5, lineHeight: 1.55, color: 'var(--paper)', flex: 1, minWidth: 0 }}>
+                Rewound {rewound.removed.length} line{rewound.removed.length === 1 ? '' : 's'}.
+              </div>
+              <button className="btn-quiet" style={{ fontSize: 11, minHeight: 28 }} onClick={() => void undoLastRewind()}>Undo</button>
+              <button className="btn-quiet" style={{ padding: '0 2px', fontSize: 14 }} aria-label="Dismiss" onClick={() => setRewound(null)}>×</button>
+            </div>
+          )}
           {notice && (
             <div className="glass-nudge" style={{
               border: `1px solid ${ACCENT_RGBA.a35}`,
@@ -2370,6 +2504,9 @@ export function Story() {
                   background: 'var(--page)', color: 'var(--page-ink)'
                 }}
               />
+              <div className="label" style={{ fontSize: 11 }}>
+                Name characters to keep their face and written look. Add “full body” for head to toe.
+              </div>
               {pictureBusy ? (
                 <button className="btn-quiet" style={{ alignSelf: 'flex-start', minHeight: 36 }}
                   onClick={() => pictureAbortRef.current?.abort()}>Stop</button>
@@ -2529,9 +2666,26 @@ export function Story() {
           }}>
             {composeStatus}
           </div>
+          {!streaming && nextIdeas.length > 0 && (
+            <div role="group" aria-label="Ideas for your next move" className="idea-row" style={{
+              flexShrink: 0, display: 'flex', gap: 6,
+              // On a phone the ideas scroll sideways in one line instead of stacking three rows.
+              flexWrap: compactComposer ? 'nowrap' : 'wrap',
+              overflowX: compactComposer ? 'auto' : undefined,
+              maxWidth: '40rem', margin: '0 auto', width: '100%'
+            }}>
+              {nextIdeas.map((idea) => (
+                <span key={idea} style={{ flexShrink: 0, whiteSpace: compactComposer ? 'nowrap' : undefined }}>
+                  <Chip active={input.trim() === idea} onClick={() => setInput(idea)}>{idea}</Chip>
+                </span>
+              ))}
+            </div>
+          )}
           <div style={{
             flexShrink: 0,
-            display: 'flex', gap: 13, alignItems: 'flex-end',
+            display: 'flex', gap: compactComposer ? 8 : 13, alignItems: 'flex-end',
+            // On a phone the text gets its own full line and the buttons sit beneath it.
+            flexWrap: compactComposer ? 'wrap' : 'nowrap',
             maxWidth: '40rem', margin: '0 auto', width: '100%',
             padding: '4px 0'
           }}>
@@ -2546,7 +2700,7 @@ export function Story() {
               rows={2}
               disabled={streaming}
               style={{
-                flex: 1, border: 0, background: 'transparent', padding: '4px 0',
+                flex: compactComposer ? '1 1 100%' : 1, border: 0, background: 'transparent', padding: '4px 0',
                 fontSize: narrow ? 16 : 18, lineHeight: 1.7,
                 minHeight: 44
               }}
@@ -2557,12 +2711,22 @@ export function Story() {
               <>
                 <button
                   className="btn-quiet"
-                  style={{ alignSelf: 'flex-end', minHeight: 44 }}
+                  style={{ alignSelf: 'flex-end', minHeight: 44, ...(compactComposer ? { marginLeft: 'auto' } : {}) }}
                   title="Continue the story from here"
                   onClick={() => void continueStory()}
                 >
                   Continue
                 </button>
+                {turns.length > 0 && (
+                  <button
+                    className="btn-quiet"
+                    style={{ alignSelf: 'flex-end', minHeight: 44 }}
+                    title="Let time pass: someone here acts on what they want"
+                    onClick={() => void passTime()}
+                  >
+                    Let time pass
+                  </button>
+                )}
                 <button
                   className="btn-primary"
                   style={{ alignSelf: 'flex-end', padding: '10px 19px', minHeight: 44 }}
@@ -2601,6 +2765,9 @@ export function Story() {
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setDisplayOpen(true); }}>
             Display
           </button>
+          <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setJournalOpen(true); }}>
+            Journal
+          </button>
           <button className="btn-ghost" style={{ minHeight: 44, textAlign: 'left' }} onClick={() => { setMoreSheet(false); setWorldEditOpen(true); }}>
             Edit world
           </button>
@@ -2635,6 +2802,15 @@ export function Story() {
         episode={episode}
         characters={characters}
         locations={locations}
+      />
+
+      <JournalSheet
+        open={journalOpen}
+        onClose={() => setJournalOpen(false)}
+        narrow={sheetBottom}
+        season={season}
+        episode={episode}
+        characters={characters}
       />
 
       {/* display settings */}
@@ -2724,7 +2900,8 @@ function DisplaySheet({ open, onClose, narrow }: {
 // ---------- turn row ----------
 
 function TurnTools({
-  streaming, canEdit, editing, onEdit, onRewrite, onRewriteFromHere, onDeleteLine, onDeleteFromHere
+  streaming, canEdit, editing, onEdit, onRewrite, onRewriteFromHere, onDeleteLine, onDeleteFromHere,
+  alt, onAlt, onRewindHere
 }: {
   streaming: boolean;
   canEdit: boolean;
@@ -2734,10 +2911,25 @@ function TurnTools({
   onRewriteFromHere?: () => void;
   onDeleteLine?: () => void;
   onDeleteFromHere?: () => void;
+  /** Kept versions of this reply, when there is more than one. */
+  alt?: { index: number; count: number } | null;
+  onAlt?: (index: number) => void;
+  onRewindHere?: () => void;
 }) {
-  if (!canEdit && !onRewrite && !onRewriteFromHere && !onDeleteLine && !onDeleteFromHere) return null;
+  if (!canEdit && !onRewrite && !onRewriteFromHere && !onDeleteLine && !onDeleteFromHere && !alt && !onRewindHere) return null;
   return (
     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4, marginBottom: 10, flexWrap: 'wrap' }}>
+      {alt && onAlt && (
+        <div role="group" aria-label="Versions of this passage" style={{ display: 'flex', alignItems: 'center', gap: 2, marginRight: 'auto' }}>
+          <button className="btn-quiet" style={{ fontSize: 14, padding: '6px 10px', minHeight: 36 }}
+            aria-label="Previous version" disabled={streaming || alt.index === 0}
+            onClick={() => onAlt(alt.index - 1)}>‹</button>
+          <span className="label" style={{ fontSize: 11, minWidth: 34, textAlign: 'center' }}>{alt.index + 1} / {alt.count}</span>
+          <button className="btn-quiet" style={{ fontSize: 14, padding: '6px 10px', minHeight: 36 }}
+            aria-label="Next version" disabled={streaming || alt.index >= alt.count - 1}
+            onClick={() => onAlt(alt.index + 1)}>›</button>
+        </div>
+      )}
       {canEdit && (
         <button className="btn-quiet" style={{ fontSize: 12, padding: '6px 10px', minHeight: 36 }} disabled={streaming || editing} onClick={onEdit}>
           {editing ? 'Editing' : 'Edit'}
@@ -2758,6 +2950,12 @@ function TurnTools({
           Delete line
         </button>
       )}
+      {onRewindHere && (
+        <button className="btn-quiet" style={{ fontSize: 12, padding: '6px 10px', minHeight: 36 }} disabled={streaming} onClick={onRewindHere}
+          title="Remove everything after this line. You can undo it.">
+          Rewind to here
+        </button>
+      )}
       {onDeleteFromHere && (
         <button className="btn-quiet" style={{ fontSize: 12, padding: '6px 10px', minHeight: 36 }} disabled={streaming} onClick={onDeleteFromHere}>
           Delete from here
@@ -2769,7 +2967,7 @@ function TurnTools({
 
 function TurnRow({
   turn, blocks, accent, prose, fontPx, avatarPx, dialogueStyle, prevSpeaker, streaming, opening,
-  onRewrite, onRewriteFromHere, onEdit, onDeleteLine, onDeleteFromHere, editing
+  onRewrite, onRewriteFromHere, onEdit, onDeleteLine, onDeleteFromHere, editing, onAlt, onRewindHere
 }: {
   turn: Turn;
   blocks: ProseBlock[];
@@ -2787,6 +2985,8 @@ function TurnRow({
   onDeleteLine?: () => void;
   onDeleteFromHere?: () => void;
   editing?: boolean;
+  onAlt?: (index: number) => void;
+  onRewindHere?: () => void;
 }) {
   const continued = attributionRun(blocks, prevSpeaker);
   return (
@@ -2814,6 +3014,9 @@ function TurnRow({
         onRewriteFromHere={onRewriteFromHere}
         onDeleteLine={onDeleteLine}
         onDeleteFromHere={onDeleteFromHere}
+        alt={onAlt ? altPosition(turn) : null}
+        onAlt={onAlt}
+        onRewindHere={onRewindHere}
       />
     </div>
   );

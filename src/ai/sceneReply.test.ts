@@ -107,10 +107,50 @@ describe('buildSceneReply', () => {
     expect(built.system).toContain('Also here, and they may speak if the moment needs them: Ben (clerk).');
     expect(built.system).not.toContain('do not get a line');
     expect(built.system).toContain('Narration has no quoted dialogue.');
-    expect(built.system).toContain('Name: *action* "dialogue"');
+    expect(built.system).toContain('@narration');
+    expect(built.system).toContain('@Name opens that person\'s beat');
     expect(built.system).not.toContain('name the speaker in that same sentence');
     const blob = `${built.system}\n${built.messages.map((m) => m.content).join('\n')}`;
     expect(blob).not.toMatch(/plan_turn|castDelta/);
+  });
+
+  it('puts recalled memories on the speaker card', () => {
+    const built = buildSceneReply({
+      ctx: ctx(),
+      mode: 'speak',
+      playerText: 'Remember the fire?',
+      length: 'beat',
+      speakers: [{
+        id: 'c1', name: 'Ada', kind: 'cast',
+        memories: ['The player pulled her from the warehouse fire (left them grateful)']
+      }],
+      present: [{ name: 'Ada' }]
+    });
+    expect(built.system).toContain('Remembers (let it colour what they do; do not recite it):\n- The player pulled her from the warehouse fire');
+  });
+
+  it('ends the cue with a settled check and lists what the player carries', () => {
+    const base = ctx();
+    const withRules: PromptContext = {
+      ...base,
+      world: { ...base.world, mechanics: { enabled: true, stats: [], difficulty: 'fair' } },
+      characters: [
+        ...base.characters,
+        { ...npc('p1', 'Rowan'), isPlayer: true, inventory: [{ id: 'i', name: 'lantern', qty: 1 }] }
+      ]
+    };
+    const built = buildSceneReply({
+      ctx: withRules,
+      mode: 'act',
+      playerText: 'I climb the wall.',
+      length: 'beat',
+      speakers: [],
+      present: [],
+      checkDirective: 'Partial success: it works, at a cost.'
+    });
+    const cue = built.messages[built.messages.length - 1]?.content ?? '';
+    expect(cue.trim().endsWith('Partial success: it works, at a cost.')).toBe(true);
+    expect(built.system).toContain('Rowan carries: lantern.');
   });
 
   it('tells a pinned answerer the line is said to them', () => {

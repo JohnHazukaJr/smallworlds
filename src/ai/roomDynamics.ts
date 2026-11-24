@@ -9,7 +9,8 @@
 import type { Character, CharacterImportance, EpisodeGuest, Turn, TurnLength } from '../types';
 import { characterImportance, importanceSpeakScore } from './characterWeight';
 import { distinctiveTokens, isCommonLabel, tokensLooselyMatch } from './nameMatch';
-import { splitSceneReply, type SceneSpeaker } from './sceneReply';
+import type { SceneSpeaker } from './sceneReply';
+import { scenePiecesOf } from './beatProtocol';
 
 export { distinctiveTokens, isCommonLabel, tokensLooselyMatch };
 
@@ -160,7 +161,7 @@ function creditedVoices(turn: Turn, speakers: SceneSpeaker[]): CreditedVoice[] {
     return [{ id, kind: turn.guestId ? 'guest' : 'cast', text: turn.text }];
   }
   if (turn.role !== 'narrator') return [];
-  return splitSceneReply(turn.text, speakers).flatMap((piece) => {
+  return scenePiecesOf(turn, speakers).flatMap((piece) => {
     if (piece.role !== 'character' || !piece.speakerId) return [];
     return [{
       id: piece.speakerId,

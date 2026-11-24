@@ -27,6 +27,21 @@ export const FALLBACK_GOAL_MARKS: ScoreMark[] = [
   { at: 67, text: 'close' }
 ];
 
+/**
+ * How the live pass grades a beat. Without a rubric a model either never moves
+ * a score or moves it on every pleasantry; this keeps 0 the honest default.
+ */
+export const BOND_RUBRIC = [
+  'How to grade a shift (bonds are how that person feels toward the player; goals are the player\'s progress):',
+  '0 — the default. Small talk, politeness, routine help, or the person was not directly involved.',
+  '+1 — a real but modest step: kept a small promise, shared something personal, took their side once.',
+  '+2 — a turning point: risked something for them, a confession that lands, saved them, a goal\'s key obstacle falls.',
+  '-1 — friction that will be remembered: a slight, a lie they notice, ignoring a plea, a setback.',
+  '-2 — a rupture: betrayal, cruelty, a broken oath, the goal\'s path blown apart.',
+  'Only what happened in these beats counts, and only between that person and the player. Never shift for mood alone.',
+  'Examples: shares bread with a hungry guard → 0 or +1; lies to a friend and is caught → -1; takes a blade meant for them → +2.'
+].join('\n');
+
 export function clampScore(n: unknown): number {
   const v = typeof n === 'number' ? n : Number(n);
   if (!Number.isFinite(v)) return 0;

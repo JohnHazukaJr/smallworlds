@@ -862,6 +862,21 @@ export function openingScenePresentation(
  * If the season already has another active episode, ends `current` (when still active)
  * and returns that existing row instead of creating a second active episode.
  */
+/** Drop every live outfit in a world, so people are back in their usual clothes. */
+export async function clearWearingForWorld(worldId: string): Promise<number> {
+  const people = await db.characters.where('worldId').equals(worldId).toArray();
+  const now = Date.now();
+  let cleared = 0;
+  for (const person of people) {
+    if (!person.state?.wearing) continue;
+    const { wearing: _gone, ...state } = person.state;
+    void _gone;
+    await db.characters.update(person.id, { state, updatedAt: now });
+    cleared += 1;
+  }
+  return cleared;
+}
+
 export async function nextEpisode(current: Episode, opts: NextEpisodeOpts = {}): Promise<Episode> {
   const world = await db.worlds.get(current.worldId);
   const cal = worldCalendar(world);
@@ -889,7 +904,6 @@ export async function nextEpisode(current: Episode, opts: NextEpisodeOpts = {}):
           status: 'ended',
           storyDay: current.storyDay ?? dayEnd,
           storyDayEnd: dayEnd,
-          pendingPlan: null,
           ...(opts.dateNote != null ? { dateNote: opts.dateNote } : {}),
           updatedAt: Date.now()
         });
@@ -918,7 +932,6 @@ export async function nextEpisode(current: Episode, opts: NextEpisodeOpts = {}):
       storyDayEnd: null,
       dateNote: null,
       plotTargets: opts.plotTargets?.length ? opts.plotTargets : undefined,
-      pendingPlan: null,
       status: 'active',
       createdAt: Date.now(),
       updatedAt: Date.now()
@@ -927,7 +940,6 @@ export async function nextEpisode(current: Episode, opts: NextEpisodeOpts = {}):
       status: 'ended',
       storyDay: current.storyDay ?? dayEnd,
       storyDayEnd: dayEnd,
-      pendingPlan: null,
       ...(opts.dateNote != null ? { dateNote: opts.dateNote } : {}),
       updatedAt: Date.now()
     });
@@ -943,6 +955,9 @@ export async function nextEpisode(current: Episode, opts: NextEpisodeOpts = {}):
   });
 
   if (reused) return reused;
+
+  // A new chapter opens in everyone's usual clothes.
+  await clearWearingForWorld(current.worldId);
 
   // Activate calendar events entered between episode end and next open.
   await evaluateCalendarEvents({

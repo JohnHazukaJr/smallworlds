@@ -4,6 +4,8 @@ import { characterImportance } from '../ai/characterWeight';
 import { draftBondMeanings, draftCharacter, draftGoalMeanings, draftPlayerGoals, fleshOutCharacter, fleshOutRelationships } from '../ai/engine';
 import { BondTrackBlock, PlayerGoalsEditor } from '../components/BondScores';
 import { StoryWeightPicker } from '../components/StoryWeightPicker';
+import { MemoriesEditor } from '../components/MemoriesEditor';
+import { AppearanceFields } from '../components/AppearanceFields';
 import { CharacterPortraitTools } from '../components/CharacterPortraitTools';
 import { RelationshipMap, type RelationshipMapMode } from '../components/RelationshipMap';
 import { db, recordTombstones, safeWrite } from '../db';
@@ -22,10 +24,10 @@ import { ACCENT, ACCENT_RGBA } from '../ui/theme';
 import { characterPortraits, emptyCharacter, nextSceneCastIds, pruneDeletedCharacterFromEpisodes } from '../worldOps';
 import { shouldFlushAutosave } from '../ui/autosave';
 
-type Tab = 'persona' | 'voice' | 'psyche' | 'secrets' | 'relations' | 'anchors' | 'ai';
+type Tab = 'persona' | 'voice' | 'psyche' | 'secrets' | 'relations' | 'anchors' | 'memory' | 'ai';
 const TABS: Array<[Tab, string]> = [
   ['persona', 'Persona'], ['voice', 'Voice'], ['psyche', 'Psyche'], ['secrets', 'Secrets'],
-  ['relations', 'Relations'], ['anchors', 'Anchors'], ['ai', 'AI notes']
+  ['relations', 'Relations'], ['anchors', 'Anchors'], ['memory', 'Remembers'], ['ai', 'AI notes']
 ];
 
 /** Debounced autosave of a character draft back to the DB. */
@@ -42,7 +44,16 @@ function useAutosave(draft: Character | null, onError: (msg: string) => void) {
       if (!shouldFlushAutosave(d.id, removed.current, true)) return;
       const row = await db.characters.get(d.id);
       if (!shouldFlushAutosave(d.id, removed.current, !!row)) return;
-      await db.characters.put({ ...d, updatedAt: Date.now() });
+      // The story files these after every turn and this card never edits them,
+      // so the stored row wins over a draft loaded before the latest turn.
+      await db.characters.put({
+        ...d,
+        memories: row?.memories,
+        inventory: row?.inventory,
+        stats: row?.stats,
+        figures: row?.figures,
+        updatedAt: Date.now()
+      });
     }, (msg) => onErrorRef.current(msg));
   };
   // Mark a freshly loaded card before the save effect runs, so the skip applies
@@ -501,7 +512,8 @@ export function Cast() {
                     ['current goal', d.state.goal, (v: string) => patch({ state: { ...d.state, goal: v } })],
                     ['emotional state', d.state.emotion, (v: string) => patch({ state: { ...d.state, emotion: v } })],
                     ['location', d.state.location, (v: string) => patch({ state: { ...d.state, location: v } })],
-                    ['condition', d.state.condition, (v: string) => patch({ state: { ...d.state, condition: v } })]
+                    ['condition', d.state.condition, (v: string) => patch({ state: { ...d.state, condition: v } })],
+                    ['wearing now', d.state.wearing ?? '', (v: string) => patch({ state: { ...d.state, wearing: v } })]
                   ] as Array<[string, string, (v: string) => void]>).map(([k, v, set]) => (
                     <div key={k} className="craft-row" style={{ padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
                       <Mono style={{ fontSize: 9, letterSpacing: '0.12em' }}>{k}</Mono>
@@ -548,9 +560,15 @@ export function Cast() {
                       placeholder={'Registrar\nRed'}
                     />
                   </Field>
-                  <Field label="Appearance" note="identity the narrator keeps consistent">
-                    <textarea rows={2} value={d.appearance} onChange={(e) => patch({ appearance: e.target.value })} />
-                  </Field>
+                  <AppearanceFields
+                    key={`${d.id}-looks`}
+                    appearance={d.appearance}
+                    looks={d.looks}
+                    age={d.age}
+                    role={d.role}
+                    mature={!!world?.ai.mature}
+                    onCommit={(next) => patch(next)}
+                  />
                   <Field label="Mannerisms" note="recurring physical habits the narrator weaves in — never all at once">
                     <textarea rows={2} value={d.mannerisms ?? ''} onChange={(e) => patch({ mannerisms: e.target.value })}
                       placeholder="Cracks her knuckles one at a time when stalling. Never sits with her back to a door." />
@@ -683,6 +701,10 @@ export function Cast() {
                     ))}
                   </div>
                 </div>
+              )}
+
+              {tab === 'memory' && (
+                <MemoriesEditor character={cast.find((c) => c.id === d.id) ?? d} onError={setError} />
               )}
 
               {tab === 'ai' && (

@@ -604,7 +604,16 @@ input[type="range"] { accent-color: var(--accent); }
   font-weight: 500;
   transition: color 0.15s ease;
 }
-.tabbar.glyphs-only button { padding: 12px 2px; }
+.tabbar.glyphs-only button { padding: 12px 1px; letter-spacing: 0; font-size: 9px; }
+.tabbar.glyphs-only button span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The sideways idea row on phones: scrollable, without a scrollbar eating the height. */
+.idea-row { scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+.idea-row::-webkit-scrollbar { display: none; }
 .tabbar button.active {
   color: var(--paper);
   box-shadow: inset 0 2px 0 var(--accent);

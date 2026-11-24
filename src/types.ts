@@ -18,6 +18,11 @@ export interface WorldAISettings {
    * Missing means measured. Prose pacing is separate.
    */
   bondPace?: BondPace;
+  /**
+   * How often the room, scores, memories, and ideas update after a reply.
+   * Missing means every turn. "few" waits for a few turns' worth of story (one call instead of several).
+   */
+  liveUpdates?: 'turn' | 'few';
   /** free text describing what is/isn't allowed in this world */
   contentNotes: string;
   /** hard rules the narrator must never break */
@@ -85,8 +90,57 @@ export interface World {
    * Omitted on older worlds → defaults via worldCalendarEventPrefs().
    */
   calendarEventPrefs?: WorldCalendarEventPrefs;
+  /** Light game rules: hidden checks and a small inventory. Omitted or off = pure narrative. */
+  mechanics?: WorldMechanics;
   createdAt: number;
   updatedAt: number;
+}
+
+/** How hard the world pushes back on a risky move. */
+export type MechanicsDifficulty = 'forgiving' | 'fair' | 'harsh';
+
+export interface StatDef {
+  /** Stable key stored on characters. */
+  key: string;
+  /** Shown to the player and the referee, e.g. "Might". */
+  name: string;
+  /** What it covers, for the referee. */
+  note?: string;
+}
+
+export interface WorldMechanics {
+  enabled: boolean;
+  /** At most four. */
+  stats: StatDef[];
+  difficulty: MechanicsDifficulty;
+}
+
+/** One thing a character carries. */
+export interface InventoryItem {
+  id: string;
+  name: string;
+  note?: string;
+  qty: number;
+}
+
+export type CheckTier = 'crit' | 'success' | 'partial' | 'fail';
+export type CheckDifficulty = 'easy' | 'normal' | 'hard' | 'dire';
+
+/** A settled risky move. The prose must honour the tier. */
+export interface CheckResult {
+  /** What was attempted, in a few words. */
+  intent: string;
+  /** Stat name used, when one applied. */
+  stat?: string;
+  difficulty: CheckDifficulty;
+  /** The two dice. */
+  dice: [number, number];
+  /** Stat + difficulty + world + item. */
+  modifier: number;
+  total: number;
+  tier: CheckTier;
+  /** An item that helped. */
+  item?: string;
 }
 
 export interface SeasonBible {
@@ -219,19 +273,8 @@ export interface Episode {
   liveCanonAtChars?: number;
   /** Episode plot targets the director should work toward (Aim-from-wrap / manual). */
   plotTargets?: PlotTarget[];
-  /**
-   * Leftover director beats after Stop/error mid-write.
-   * Resume with Continue plan instead of a full re-plan.
-   */
-  pendingPlan?: {
-    beats: Array<
-      | { type: 'narration'; brief: string }
-      | { type: 'speak'; characterId: string; brief: string }
-      | { type: 'speak'; guestId: string; brief: string }
-    >;
-    length: TurnLength;
-    createdAt: number;
-  } | null;
+  /** Next-move ideas for the player, written after the latest turn. Stale once a newer turn lands. */
+  suggestions?: { afterTurnId: string; items: string[] };
   status: 'active' | 'ended';
   createdAt: number;
   /** bumped on mutating writes — used for sync LWW */
@@ -304,8 +347,37 @@ export interface Turn {
   /** set when role === 'character' — ephemeral episode guest spoke (no Cast card) */
   guestId?: string;
   text: string;
+  /**
+   * Scene replies written with beat tags: who said what, exactly. Trusted only
+   * while it still renders to `text` (an edit falls back to the prose splitter).
+   */
+  beats?: TurnBeat[];
+  /** For a player move: the hidden check settled before the reply was written. */
+  check?: CheckResult;
+  /** Kept versions of a rewritten reply, current one included. */
+  alts?: TurnAlt[];
+  /** Which of `alts` is showing. */
+  altIndex?: number;
   createdAt: number;
   updatedAt?: number;
+}
+
+/** One kept version of a reply. */
+export interface TurnAlt {
+  text: string;
+  beats?: TurnBeat[];
+  createdAt: number;
+}
+
+/** One block of a tagged scene reply. */
+export interface TurnBeat {
+  role: 'narrator' | 'character';
+  text: string;
+  /** Cast or walk-on id, for a credited line. */
+  speakerId?: string;
+  kind?: 'cast' | 'guest';
+  /** Name as tagged, so the stored prose survives a rename. */
+  name?: string;
 }
 
 // ---------- Characters ----------
@@ -358,6 +430,23 @@ export interface CharacterState {
   emotion: string;
   location: string;
   condition: string;
+  /** What they have on right now, when it differs from their usual clothing. Cleared at chapter end. */
+  wearing?: string;
+}
+
+/** Appearance broken into parts. The character's `appearance` is the overall impression. */
+export interface CharacterLooks {
+  face?: string;
+  hair?: string;
+  body?: string;
+  /** Their usual outfit. The story's `state.wearing` tracks changes. */
+  clothing?: string;
+  /** Scars, tattoos, piercings, jewellery, glasses. */
+  details?: string;
+  /** Voice and scent: how they sound and smell. */
+  senses?: string;
+  /** Adult worlds and adult characters only. */
+  intimate?: string;
 }
 
 export interface Character {
@@ -384,9 +473,16 @@ export interface Character {
   portrait?: string | null;
   /** All uploaded photos as data URLs; index 0 is the primary face */
   portraits?: string[];
+  /**
+   * Full-body and scene pictures of this person. Kept apart from `portraits`
+   * so they never become the avatar or the face reference.
+   */
+  figures?: string[];
   // identity
   age: string;
   appearance: string;
+  /** Face, hair, body, clothing, and more. Optional; `appearance` stays the overall line. */
+  looks?: CharacterLooks;
   /** recurring physical habits, gestures, tics the narrator weaves in */
   mannerisms: string;
   /** the history that shaped them — informs behaviour, never dumped as exposition */
@@ -416,8 +512,30 @@ export interface Character {
   /** free-text per-character AI directives, passed verbatim */
   customInstructions: string;
   state: CharacterState;
+  /**
+   * What this person lived through on the page, in their own view. Filed after
+   * each turn they were present for; the strongest and most relevant few ride
+   * on their scene card. Capped and pruned by salience and age.
+   */
+  memories?: NpcMemory[];
+  /** Stat modifiers by StatDef key, -1 to 3. Used when the world has mechanics on. */
+  stats?: Record<string, number>;
+  /** What they carry. Used when the world has mechanics on. */
+  inventory?: InventoryItem[];
   createdAt: number;
   updatedAt: number;
+}
+
+/** One remembered moment, from the character's side. */
+export interface NpcMemory {
+  id: string;
+  text: string;
+  /** A word or two: how it left them. */
+  feeling?: string;
+  /** 1 passing, 2 notable, 3 they will never forget. */
+  salience: 1 | 2 | 3;
+  episodeId: string;
+  createdAt: number;
 }
 
 // ---------- Locations ----------

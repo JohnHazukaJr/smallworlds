@@ -171,7 +171,8 @@ export const LIVE_MEMORY_TOOL: ToolSpec = {
             goal: { type: 'string' },
             emotion: { type: 'string' },
             location: { type: 'string' },
-            condition: { type: 'string' }
+            condition: { type: 'string' },
+            wearing: { type: 'string' }
           }
         }
       },
@@ -205,6 +206,31 @@ export const LIVE_MEMORY_TOOL: ToolSpec = {
           properties: {
             name: { type: 'string' },
             nowKnows: { type: 'string' }
+          }
+        }
+      },
+      suggestions: { type: 'array', items: { type: 'string' } },
+      inventory: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            action: { type: 'string', enum: ['add', 'remove'] },
+            name: { type: 'string' },
+            note: { type: 'string' },
+            qty: { type: 'integer' }
+          }
+        }
+      },
+      memories: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            text: { type: 'string' },
+            feeling: { type: 'string' },
+            salience: { type: 'integer' }
           }
         }
       },

@@ -1,3 +1,7 @@
+import { looksText } from '../looks';
+import { intimateAllowed } from './portrait';
+import { activeMechanics, inventoryLine } from '../mechanics';
+import { BEAT_FORMAT_RULES, beatsToTagged, validBeats } from './beatProtocol';
 import type {
   CalendarEvent, Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, Location, OpenThread, Season, Turn, TurnLength, World
 } from '../types';
@@ -940,7 +944,10 @@ function turnToChatContent(
     // Only this speaker's own lines are assistant. Everyone else is context.
     return { role: mine ? 'assistant' : 'user', content: `[${name}]\n${t.text}` };
   }
-  if (voice.kind === 'narrator') return { role: 'assistant', content: t.text };
+  if (voice.kind === 'narrator') {
+    const beats = validBeats(t);
+    return { role: 'assistant', content: beats ? beatsToTagged(beats) : t.text };
+  }
   return { role: 'user', content: `[Narrator]\n${t.text}` };
 }
 
@@ -1139,6 +1146,10 @@ export interface SceneVoice {
   mustNotKnow?: string;
   anchor?: string;
   brief?: string;
+  /** Moments they lived through that bear on this one, oldest first. */
+  memories?: string[];
+  /** How they look right now: overall, face, hair, body, clothes, wearing now. */
+  looks?: string;
 }
 
 /** Full cards for the people who should answer, then the rest of a small room. */
@@ -1165,6 +1176,15 @@ export interface SceneReplyInput {
   saidTo?: string;
   /** Re-roll of one existing line, or of a whole scene when the name is the narrator. */
   rewrite?: { speakerName: string; prior: string };
+  /** The settled outcome of a risky player move. The reply must honour it. */
+  checkDirective?: string;
+  /** "Let time pass": the instruction for a turn the world takes on its own. */
+  worldMove?: string;
+}
+
+/** A character's look for the story, intimate details only for an adult in an adult world. */
+export function characterLooksLine(world: World, c: Character): string {
+  return looksText(c, { adult: intimateAllowed(world, c), wearing: true });
 }
 
 function sceneSpeakerCard(voice: SceneVoice): string {
@@ -1173,6 +1193,7 @@ function sceneSpeakerCard(voice: SceneVoice): string {
     `### ${voice.name}`,
     voice.role && `Role: ${voice.role}`,
     voice.brief && `Who they are here: ${clipText(voice.brief, 180)}`,
+    voice.looks && `Looks (keep consistent; mention only what the moment notices): ${clipText(voice.looks, 420)}`,
     voice.voice && `Voice: ${clipText(voice.voice, 240)}`,
     voice.want && `Wants: ${clipText(voice.want, 160)}`,
     voice.emotion && `Now: ${clipText(voice.emotion, 120)}`,
@@ -1180,6 +1201,9 @@ function sceneSpeakerCard(voice: SceneVoice): string {
     voice.ties && `With the people here: ${clipText(voice.ties, 720)}`,
     example && `Example line (rhythm only, do not reuse it): "${clipText(example, 160)}"`,
     voice.anchor && `Anchor: ${clipText(voice.anchor, 160)}`,
+    voice.memories?.length
+      ? `Remembers (let it colour what they do; do not recite it):\n${voice.memories.map((m) => `- ${clipText(m, 220)}`).join('\n')}`
+      : '',
     voice.mustNotKnow && `Must not know or say: ${clipText(voice.mustNotKnow, 240)}`
   ];
   return lines.filter(Boolean).join('\n');
@@ -1211,6 +1235,8 @@ export function sceneTurnCue(opts: {
   narrationOnly?: boolean;
   saidTo?: string;
   rewrite?: { speakerName: string; prior: string };
+  checkDirective?: string;
+  worldMove?: string;
 }): string {
   const names = (opts.answerers ?? opts.speakers).map((s) => s.name.trim()).filter(Boolean);
   const saidTo = opts.saidTo?.trim() ?? '';
@@ -1235,14 +1261,15 @@ export function sceneTurnCue(opts: {
           : 'Describe it. Do not quote a new speaker and do not hand the line to anyone else.'
       ].filter(Boolean).join(' ')}\n${opts.playerText.trim()}`
     : opts.mode === 'continue' && !opts.playerText.trim()
-      ? 'No new player line. Continue the scene from the last beat. Do not recap. Do not wait for the player.'
+      ? opts.worldMove?.trim() || 'No new player line. Continue the scene from the last beat. Do not recap. Do not wait for the player.'
       : MODE_PREFIX[opts.mode](opts.playerText);
   const rewrite = !opts.rewrite
     ? ''
     : opts.rewrite.speakerName === 'the narrator'
       ? `Rewrite the previous scene in fresh wording. Keep the same events and who spoke. Do not copy it.\nPrevious scene:\n${opts.rewrite.prior.trim()}`
       : `Rewrite only ${opts.rewrite.speakerName}'s previous line with fresh wording and the same job. Do not copy it.\nPrevious line:\n${opts.rewrite.prior.trim()}`;
-  return [said, who, sceneLengthHint(opts.length), rewrite, move].filter(Boolean).join('\n\n');
+  const outcome = opts.checkDirective?.trim() ?? '';
+  return [said, who, sceneLengthHint(opts.length), rewrite, move, outcome].filter(Boolean).join('\n\n');
 }
 
 /**
@@ -1265,9 +1292,7 @@ export function buildSceneReply(opts: SceneReplyInput): { system: string; messag
     [
       `You write the next stretch of "${ctx.world.title}" in ${ai.pov} person, ${ai.tense} tense.`,
       'Write narration and spoken beats in one reply.',
-      'Narration has no quoted dialogue.',
-      'When someone speaks, their beat is its own line: Name: *action* "dialogue".',
-      'The gesture belongs on that line. Do not narrate it again.',
+      BEAT_FORMAT_RULES,
       'Never write the player\'s dialogue, decisions, or inner thoughts. Do not repeat their line.',
       'Do not recap the transcript. Do not bring in anyone who is not already here.',
       proseDensityLine(ai),
@@ -1307,7 +1332,12 @@ export function buildSceneReply(opts: SceneReplyInput): { system: string; messag
   const player = ctx.characters.find((c) => c.isPlayer);
   const playerName = player?.name.trim() ?? '';
   const playerKey = playerName.toLowerCase();
-  const cardVoices = ordered.slice(0, FULL_SCENE_CARDS);
+  const cardVoices = ordered.slice(0, FULL_SCENE_CARDS).map((voice) => {
+    if (voice.looks || voice.kind !== 'cast') return voice;
+    const c = ctx.characters.find((x) => x.id === voice.id);
+    const looks = c ? characterLooksLine(ctx.world, c) : '';
+    return looks ? { ...voice, looks } : voice;
+  });
   const cards = cardVoices.map(sceneSpeakerCard).filter(Boolean);
   const listed = new Set(cardVoices.map((s) => s.name.trim().toLowerCase()));
   const also: Array<{ name: string; role?: string }> = [];
@@ -1324,14 +1354,23 @@ export function buildSceneReply(opts: SceneReplyInput): { system: string; messag
     .map((p) => p.role?.trim() ? `${p.name} (${p.role.trim()})` : p.name)
     .join(', ');
   const inviteOthers = !opts.narrationOnly && (!opts.rewrite || opts.rewrite.speakerName === 'the narrator');
-  const playerLine = playerName
-    ? `The player is ${playerName}. Do not write their dialogue, decisions, or inner thoughts.`
-    : 'The player is here. Do not write their dialogue, decisions, or inner thoughts.';
+  const playerLooks = player ? characterLooksLine(ctx.world, player) : '';
+  const playerLine = [
+    playerName
+      ? `The player is ${playerName}. Do not write their dialogue, decisions, or inner thoughts.`
+      : 'The player is here. Do not write their dialogue, decisions, or inner thoughts.',
+    playerLooks ? `How ${playerName || 'the player'} looks (keep consistent): ${clipText(playerLooks, 420)}` : ''
+  ].filter(Boolean).join('\n');
   const goalBlock = playerGoalBlock(player?.goals);
+  const carried = activeMechanics(ctx.world) ? inventoryLine(player?.inventory) : '';
+  const carriesLine = carried
+    ? `${playerName || 'The player'} carries: ${carried}. They have nothing else unless the story gives it to them.`
+    : '';
   const here = [
     '## Here',
     playerLine,
     goalBlock,
+    carriesLine,
     cards.length > 0 ? cards.join('\n\n') : 'Nobody has a speaking part on this turn.',
     alsoShown
       ? inviteOthers

@@ -7,7 +7,7 @@ import type {
   CalendarEvent, CalendarEventKind, CalendarEventPromptPolicy, CalendarEventScale,
   Character, CharacterState, ComposeMode,   Episode, EpisodeGuest, EpisodeWrap, Location,
   OpenThread, PlayerGoal, Relationship, ScoreMark, Season, SeasonWrap, SeasonWrapPlotArc, SeasonWrapRelationshipUpdate,
-  Turn, TurnLength, TurnRole, World, WrapBeat, WrapCharacterOutcome
+  NpcMemory, Turn, TurnBeat, TurnLength, TurnRole, World, WrapBeat, WrapCharacterOutcome
 } from '../types';
 import {
   CALENDAR_EVENT_CAP, defaultVisibilityForKind, isPlayerAgencyMode, worldCalendarEventPrefs
@@ -16,7 +16,7 @@ import { normalizeRelationships } from '../relationships';
 import {
   applyTrackedShifts, authoredMarks, bondCue, FALLBACK_BOND_MARKS, FALLBACK_GOAL_MARKS,
   goalsToKeep, keptBond, marksToKeep, meaningWords, PLAYER_GOAL_CAP,
-  shouldDraftBondMeanings, shouldDraftGoalMeanings, worldBondPace
+  shouldDraftBondMeanings, shouldDraftGoalMeanings, worldBondPace, BOND_RUBRIC
 } from '../bonds';
 import {
   buildNextSeasonPlotTargets, calendarPatch, emptyCharacter, emptyLocation,
@@ -52,8 +52,11 @@ import {
   detectHardAddressees,
   sceneReplySpeakerCap,
   selectAnswerers,
-  speakerCandidates
+  speakerCandidates,
+  turnsSinceSpoke
 } from './roomDynamics';
+import { addAltPatch, switchAltPatch } from '../turnAlts';
+import { cleanSuggestions, dueEventsLine, pickWorldMover, worldMoveCue } from '../worldMove';
 import { parseCharacterImportance } from './characterWeight';
 import { characterFitsPlace, inferPlaceChanged, namedNewcomer, openingFittingIds, rosterChangeNotice, stageSceneCast } from './sceneFit';
 import {
@@ -66,7 +69,17 @@ import {
   type PlaceDraftModel,
   type PlaceDraftSheet
 } from './placeDraft';
-import { splitSceneReply, type SceneSpeaker } from './sceneReply';
+import type { SceneSpeaker } from './sceneReply';
+import { beatsToProse, beatsToTagged, parseBeats, scenePiecesOf, validBeats } from './beatProtocol';
+import {
+  activeMechanics, applyInventoryChanges, checkDirective, inventoryLine, needsReferee, type InventoryChange
+} from '../mechanics';
+import { checkFromRuling, ruleMove } from './checks';
+import { mergeLooks } from '../looks';
+import { intimateAllowed } from './portrait';
+import {
+  NPC_MEMORY_PER_PASS, addMemories, forgetFiledSince, recallMemories, memoryCardLine, type MemoryDraft
+} from '../npcMemory';
 import {
   knowledgeFactLine,
   LIVE_CANON_FACT_CAP,
@@ -141,6 +154,8 @@ export interface StreamMeta {
   role: TurnRole;
   characterId?: string;
   guestId?: string;
+  /** Exact beats of the streaming scene reply, when the model used beat tags. */
+  beats?: TurnBeat[];
 }
 
 export interface WriteOptions {
@@ -165,6 +180,8 @@ export interface WriteOptions {
   toGuestId?: string;
   /** The speaker is an NPC and the line is said to the player, even with no player card. */
   toPlayer?: boolean;
+  /** "Let time pass": someone here acts on their own goal. Mode should be continue with no input. */
+  worldMove?: boolean;
   /** Partial text of the beat currently streaming. */
   onDelta: (partial: string, meta: StreamMeta) => void;
   /** High-level stage labels for the UI spinner (planning / narrating / Name speaking). */
@@ -262,10 +279,6 @@ function throwIfAborted(signal: AbortSignal | undefined, beatsCompleted: number)
   if (signal?.aborted) throw new WriteAbortedError(beatsCompleted);
 }
 
-async function clearPendingPlan(episodeId: string): Promise<void> {
-  await db.episodes.update(episodeId, { pendingPlan: null, updatedAt: Date.now() }).catch(() => undefined);
-}
-
 /**
  * Post-turn summary and live memory. The reply has already returned.
  * The next line does not wait on this. Closing the chapter does.
@@ -361,10 +374,11 @@ function withPlayer(speakers: Character[], everyone: Character[]): Character[] {
   return room;
 }
 
-function sceneVoiceFromCharacter(c: Character, room: Character[]): SceneVoice {
+function sceneVoiceFromCharacter(c: Character, room: Character[], recallQuery = ''): SceneVoice {
   const emotion = liveCardNote(c.state?.emotion);
   const condition = liveCardNote(c.state?.condition);
   const ties = tiesInRoom(c, room);
+  const memories = recallMemories(c.memories, recallQuery).map(memoryCardLine);
   return {
     id: c.id,
     name: c.name,
@@ -377,7 +391,8 @@ function sceneVoiceFromCharacter(c: Character, room: Character[]): SceneVoice {
     ...(ties ? { ties } : {}),
     example: (c.exampleLines ?? []).find((line) => line.trim()),
     mustNotKnow: c.mustNotKnow,
-    anchor: (c.anchors ?? []).find((line) => line.trim())
+    anchor: (c.anchors ?? []).find((line) => line.trim()),
+    ...(memories.length > 0 ? { memories } : {})
   };
 }
 
@@ -409,10 +424,11 @@ function orderedRoomVoices(
   characters: Character[],
   guests: EpisodeGuest[],
   firstIds: string[],
-  tieWith: Character[] = characters
+  tieWith: Character[] = characters,
+  recallQuery = ''
 ): SceneVoice[] {
   const voices: SceneVoice[] = [
-    ...characters.flatMap((c) => (c.name.trim() && !c.isPlayer ? [sceneVoiceFromCharacter(c, tieWith)] : [])),
+    ...characters.flatMap((c) => (c.name.trim() && !c.isPlayer ? [sceneVoiceFromCharacter(c, tieWith, recallQuery)] : [])),
     ...guests.flatMap((g) => {
       const name = g.name.trim();
       if (!name) return [];
@@ -426,9 +442,10 @@ function orderedRoomVoices(
 function sceneWallLeak(
   text: string,
   speakers: SceneSpeaker[],
-  characters: Character[]
+  characters: Character[],
+  beats?: TurnBeat[]
 ): { name: string; wall: string } | null {
-  for (const piece of splitSceneReply(text, speakers)) {
+  for (const piece of scenePiecesOf({ text, beats }, speakers)) {
     if (piece.role !== 'character' || piece.kind !== 'cast' || !piece.speakerId) continue;
     const character = characters.find((c) => c.id === piece.speakerId);
     const wall = character?.mustNotKnow?.trim() ?? '';
@@ -551,7 +568,43 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
     : undefined;
   const moveText = opts.input.trim();
   const injectionReply = !!opts.asCharacterId;
-  await clearPendingPlan(opts.episode.id);
+
+  // Light rules: a risky player move is settled before a word of prose.
+  let checkOrder = '';
+  const rules = activeMechanics(opts.world);
+  if (rules && !injectionReply && moveText && needsReferee(opts.mode, moveText)) {
+    const moveTurn = userTurnId
+      ? ctx.turns.find((t) => t.id === userTurnId)
+      : opts.keepExistingUserTurn
+        ? [...ctx.turns].reverse().find((t) => t.role === 'user')
+        : undefined;
+    // A rewrite keeps the roll it already made.
+    let check = moveTurn?.check ?? null;
+    if (!check) {
+      progress('weighing the odds…');
+      const player = ctx.characters.find((c) => c.isPlayer);
+      const sceneTail = ctx.turns
+        .filter((t) => t.role !== 'user')
+        .slice(-2)
+        .map((t) => t.text)
+        .join('\n\n');
+      try {
+        const ruling = await ruleMove({ world: opts.world, mechanics: rules, player, moveText, sceneTail, signal: opts.signal });
+        check = checkFromRuling({ ruling, mechanics: rules, player, moveText });
+      } catch (e) {
+        await rollbackSceneIfNeeded();
+        await dropUnansweredPlayer();
+        if (isAbortError(e)) throw new WriteAbortedError(0);
+        throw e;
+      }
+      if (check && moveTurn) {
+        const settled = check;
+        await guardStorage(() => db.turns.update(moveTurn.id, { check: settled, updatedAt: Date.now() }));
+        moveTurn.check = settled;
+      }
+    }
+    if (check) checkOrder = checkDirective(check);
+  }
 
   const placeLoc = ctx.locations.find((l) => ctx.episode.locationId && l.id === ctx.episode.locationId)
     ?? ctx.locations.find((l) => {
@@ -611,6 +664,22 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
     : inScene;
   const candidates = speakerCandidates(stage, sceneGuests());
   const addressed = detectHardAddressees(moveText, candidates).length;
+  let worldCue = '';
+  let moverId: string | undefined;
+  if (opts.worldMove && !injectionReply) {
+    const silence = turnsSinceSpoke(ctx.turns, candidates);
+    const mover = pickWorldMover(stage.map((c) => ({
+      id: c.id,
+      name: c.name.trim(),
+      goal: liveCardNote(c.state?.goal),
+      silence: silence.get(c.id) ?? Number.POSITIVE_INFINITY,
+      importance: c.importance
+    })).filter((c) => c.name));
+    moverId = mover?.id;
+    const day = episodeSceneDay(ctx.episode, worldCalendar(opts.world));
+    worldCue = worldMoveCue({ mover, due: dueEventsLine(ctx.calendarEvents ?? [], day) });
+    progress(mover ? `${mover.name} makes a move…` : 'time passes…');
+  }
   const picked = injectionReply
     ? []
     : selectAnswerers({
@@ -618,7 +687,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
       playerText: moveText,
       candidates,
       turns: ctx.turns,
-      preferId: address.preferId
+      preferId: moverId ?? address.preferId
     }).slice(0, sceneReplySpeakerCap(opts.length, addressed));
 
   const voices: SceneVoice[] = injectionReply
@@ -627,7 +696,9 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
       inScene,
       sceneGuests(),
       picked.map((speaker) => speaker.id),
-      withPlayer(inScene, ctx.characters)
+      withPlayer(inScene, ctx.characters),
+      // Memories are recalled by what is happening now: this move and the last beat.
+      [moveText, ctx.turns.filter((t) => t.role === 'narrator').at(-1)?.text.slice(-600) ?? '', placeName].join(' ')
     );
   const roomSpeakers = injectionReply
     ? (hands && !hands.isPlayer ? roomSceneSpeakers([hands], []) : [])
@@ -647,19 +718,29 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
 
   let lastId = '';
   let acc = '';
+  let accBeats: TurnBeat[] | undefined;
   /** Last snapshot that does not break a knowledge wall. A dead stream keeps this. */
   let safeText = '';
-  const rememberSafe = (raw: string) => {
+  let safeBeats: TurnBeat[] | undefined;
+  const rememberSafe = (raw: string, beats?: TurnBeat[]) => {
     const next = raw.trim();
-    if (next && !sceneWallLeak(next, roomSpeakers, ctx.characters)) safeText = next;
+    if (next && !sceneWallLeak(next, roomSpeakers, ctx.characters, beats)) {
+      safeText = next;
+      safeBeats = beats;
+    }
   };
   const meta: StreamMeta = { role: 'narrator' };
   progress('Writing…');
   opts.onDelta('', meta);
 
-  const persistScene = async (raw: string): Promise<number> => {
+  /** Tagged beats are kept only when they render to exactly the text being filed. */
+  const matchingBeats = (text: string, ...candidates: Array<TurnBeat[] | undefined>) =>
+    candidates.find((beats) => beats && beats.length > 0 && beatsToProse(beats) === text.trim());
+
+  const persistScene = async (raw: string, beats?: TurnBeat[]): Promise<number> => {
     const text = raw.trim();
     if (!text) return 0;
+    const exact = matchingBeats(text, beats);
     const turn: Turn = {
       id: uid(),
       episodeId: opts.episode.id,
@@ -667,6 +748,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
       role: 'narrator',
       mode: null,
       text,
+      ...(exact ? { beats: exact } : {}),
       createdAt: Date.now()
     };
     await guardStorage(() => db.turns.add(turn));
@@ -680,8 +762,8 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
   const streamScene = async (
     pack: PromptBuildOpts,
     extra: ChatMessage[] = [],
-    shownPrefix = ''
-  ): Promise<{ text: string; truncated: boolean; stalled: boolean }> => {
+    prefix: { text: string; beats?: TurnBeat[] } = { text: '' }
+  ): Promise<{ text: string; raw: string; beats?: TurnBeat[]; truncated: boolean; stalled: boolean }> => {
     const maxTokens = proseCompletionTokens(model, sceneReplyTokens(replyLength));
     const budget = proseCharBudget(model, maxTokens);
     const tail = historyTailFor(model, 'narrator', pack.pack, contextWindowFor());
@@ -698,12 +780,25 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
       historyTailChars: tail.charBudget,
       historyTailMaxTurns: tail.maxTurns,
       totalCap: budget,
-      narrationOnly: injectionReply
+      narrationOnly: injectionReply,
+      ...(checkOrder ? { checkDirective: checkOrder } : {}),
+      ...(worldCue ? { worldMove: worldCue } : {})
     });
     let local = '';
-    const show = (chunk: string) => {
-      const next = chunk.trim();
-      return shownPrefix && next ? `${shownPrefix}\n\n${next}` : (next || shownPrefix);
+    const shownPrefix = prefix.text;
+    const carry = prefix.beats?.[prefix.beats.length - 1];
+    /** Tagged output becomes stored prose plus exact beats; untagged output stays as written. */
+    const render = (raw: string, partial: boolean): { prose: string; beats?: TurnBeat[] } => {
+      const parsed = parseBeats(raw, roomSpeakers, { partial, carry });
+      return parsed ?? { prose: raw.trim() };
+    };
+    const show = (part: { prose: string; beats?: TurnBeat[] }) => {
+      const next = part.prose.trim();
+      const text = shownPrefix && next ? `${shownPrefix}\n\n${next}` : (next || shownPrefix);
+      const beats = !shownPrefix
+        ? part.beats
+        : prefix.beats && part.beats ? [...prefix.beats, ...part.beats] : undefined;
+      return { text, beats };
     };
     const result = await streamChat({
       provider,
@@ -715,50 +810,69 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
       job: 'prose',
       onDelta: (delta) => {
         local += delta;
-        const shown = show(local);
-        rememberSafe(shown);
-        acc = shown;
-        opts.onDelta(shown, meta);
+        const shown = show(render(local, true));
+        rememberSafe(shown.text, shown.beats);
+        acc = shown.text;
+        accBeats = shown.beats;
+        opts.onDelta(shown.text, { ...meta, ...(shown.beats ? { beats: shown.beats } : {}) });
       }
     });
-    const text = (result.text || local).trim();
-    const shown = show(text);
-    rememberSafe(shown);
-    acc = shown;
-    return { text, truncated: !!result.truncated, stalled: !!result.stalled };
+    const raw = (result.text || local).trim();
+    const part = render(raw, false);
+    const shown = show(part);
+    rememberSafe(shown.text, shown.beats);
+    acc = shown.text;
+    accBeats = shown.beats;
+    return {
+      text: part.prose.trim(),
+      raw,
+      ...(part.beats ? { beats: part.beats } : {}),
+      truncated: !!result.truncated,
+      stalled: !!result.stalled
+    };
   };
 
-  const stillLeaks = (raw: string) => !!sceneWallLeak(raw, roomSpeakers, ctx.characters);
+  const stillLeaks = (raw: string) =>
+    !!sceneWallLeak(raw, roomSpeakers, ctx.characters, matchingBeats(raw, safeBeats, accBeats));
 
   let text = '';
+  let beats: TurnBeat[] | undefined;
+  /** What the model wrote, in its own tagged form, for follow-up requests. */
+  const asWritten = () => (beats ? beatsToTagged(beats) : text);
   try {
     throwIfAborted(opts.signal, 0);
     const first = await withOverflowRetry((pack) => streamScene(pack), opts.onNotice);
     text = first.text;
+    beats = first.beats;
     if (narrationNeedsContinue(text, first)) {
       progress('finishing the line…');
+      const sofar = { text, beats };
       const rest = await withOverflowRetry(
         (pack) => streamScene(pack, [
-          { role: 'assistant', content: text },
+          { role: 'assistant', content: first.raw },
           {
             role: 'user',
             content:
               'Continue from the exact point you stopped. Do not repeat what you already wrote. Finish the open line, then stop.'
           }
-        ], text),
+        ], sofar),
         opts.onNotice
       );
-      if (rest.text.trim()) text = `${text.trim()}\n\n${rest.text.trim()}`.trim();
+      if (rest.text.trim()) {
+        text = `${text.trim()}\n\n${rest.text.trim()}`.trim();
+        beats = beats && rest.beats ? [...beats, ...rest.beats] : undefined;
+      }
       acc = text;
-      opts.onDelta(text, meta);
+      accBeats = beats;
+      opts.onDelta(text, { ...meta, ...(beats ? { beats } : {}) });
     }
     if (opts.mode !== 'steer') {
-      const leak = sceneWallLeak(text, roomSpeakers, ctx.characters);
+      const leak = sceneWallLeak(text, roomSpeakers, ctx.characters, beats);
       if (leak) {
         progress('honouring what they must not know…');
         const rewritten = await withOverflowRetry(
           (pack) => streamScene(pack, [
-            { role: 'assistant', content: text },
+            { role: 'assistant', content: asWritten() },
             {
               role: 'user',
               content:
@@ -768,13 +882,15 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
           ]),
           opts.onNotice
         );
-        if (!rewritten.text.trim() || sceneWallLeak(rewritten.text, roomSpeakers, ctx.characters)) {
+        if (!rewritten.text.trim() || sceneWallLeak(rewritten.text, roomSpeakers, ctx.characters, rewritten.beats)) {
           opts.onDelta('', meta);
           throw new KnowledgeWallError();
         }
         text = rewritten.text.trim();
+        beats = rewritten.beats;
         acc = text;
-        opts.onDelta(text, meta);
+        accBeats = beats;
+        opts.onDelta(text, { ...meta, ...(beats ? { beats } : {}) });
       }
     }
   } catch (e) {
@@ -791,10 +907,11 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
       throw e;
     }
     if (isAbortError(e)) {
-      await persistScene(keep);
+      await persistScene(keep, matchingBeats(keep, safeBeats, accBeats, beats));
       opts.onDelta('', meta);
       throw new WriteAbortedError(beatsCompleted);
     }
+    beats = matchingBeats(keep, safeBeats, accBeats, beats);
     text = keep;
   }
 
@@ -805,7 +922,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
   }
 
   if (beatsCompleted === 0) {
-    const saved = await persistScene(text);
+    const saved = await persistScene(text, beats);
     if (saved === 0) {
       await rollbackSceneIfNeeded();
       await dropUnansweredPlayer();
@@ -813,7 +930,6 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
     }
   }
   opts.onDelta('', meta);
-  await clearPendingPlan(opts.episode.id);
   await db.worlds.update(opts.world.id, { updatedAt: Date.now() });
 
   if (!opts.signal?.aborted) {
@@ -906,8 +1022,8 @@ async function regenerateBeatInner(opts: {
   const voices: SceneVoice[] = characterReroll
     ? guest
       ? [{ id: guest.id, name: guest.name, kind: 'guest', brief: guest.brief, voice: guest.voice }]
-      : [sceneVoiceFromCharacter(speaking!, tieRoom)]
-    : orderedRoomVoices(inScene, guestsHere, [], tieRoom);
+      : [sceneVoiceFromCharacter(speaking!, tieRoom, opts.turn.text)]
+    : orderedRoomVoices(inScene, guestsHere, [], tieRoom, opts.turn.text);
   const sceneSpeakers: SceneSpeaker[] = characterReroll
     ? voices.map((voice) => ({
       id: voice.id,
@@ -931,7 +1047,15 @@ async function regenerateBeatInner(opts: {
   progress(characterReroll ? `${name} re-rolling…` : 're-rolling the scene…');
   opts.onDelta('', meta);
 
+  const roomSpeakers = roomSceneSpeakers(inScene, guestsHere);
+  const parseSpeakers = characterReroll ? sceneSpeakers : roomSpeakers;
+  // The move this reply answers already rolled; a re-roll of the prose does not re-roll the dice.
+  const answered = answeredMove(ctx.turns, replaceAt);
+  const settled = activeMechanics(opts.world) && answered?.check ? checkDirective(answered.check) : '';
+  const priorBeats = validBeats(opts.turn);
+  const prior = (priorBeats ? beatsToTagged(priorBeats) : opts.turn.text).slice(0, 900);
   let acc = '';
+  let replyBeats: TurnBeat[] | undefined;
   const text = await withOverflowRetry(async (pack) => {
     const maxTokens = proseCompletionTokens(model, sceneReplyTokens(opts.length));
     const budget = proseCharBudget(model, maxTokens);
@@ -947,8 +1071,10 @@ async function regenerateBeatInner(opts: {
       historyTailChars: tail.charBudget,
       historyTailMaxTurns: tail.maxTurns,
       totalCap: budget,
-      rewrite: { speakerName: name, prior: opts.turn.text.slice(0, 900) }
+      rewrite: { speakerName: name, prior },
+      ...(settled ? { checkDirective: settled } : {})
     });
+    acc = '';
     const result = await streamChat({
       provider,
       model,
@@ -959,15 +1085,20 @@ async function regenerateBeatInner(opts: {
       job: 'prose',
       onDelta: (delta) => {
         acc += delta;
-        opts.onDelta(acc, meta);
+        const live = parseBeats(acc, parseSpeakers, { partial: true });
+        if (live && !characterReroll) opts.onDelta(live.prose, { ...meta, beats: live.beats });
+        else opts.onDelta(live?.prose ?? acc, meta);
       }
     });
-    return (result.text || acc).trim();
+    const raw = (result.text || acc).trim();
+    const parsed = parseBeats(raw, parseSpeakers);
+    replyBeats = parsed?.beats;
+    return parsed ? parsed.prose.trim() : raw;
   });
 
   let saved = text.trim();
   if (characterReroll && voices[0]) {
-    const own = splitSceneReply(saved, sceneSpeakers).filter((piece) =>
+    const own = scenePiecesOf({ text: saved, beats: replyBeats }, sceneSpeakers).filter((piece) =>
       piece.role === 'character' && piece.speakerId === voices[0].id
     );
     if (own.length > 0) saved = own.map((piece) => piece.text).join('\n\n');
@@ -983,10 +1114,16 @@ async function regenerateBeatInner(opts: {
       throw new AIError('That line still says something they must not know. Try the beat again.');
     }
   } else {
-    const leak = sceneWallLeak(saved, roomSceneSpeakers(inScene, guestsHere), ctx.characters);
+    const leak = sceneWallLeak(saved, roomSpeakers, ctx.characters, replyBeats);
     if (leak) throw new AIError('That line still says something they must not know. Try the beat again.');
   }
-  await guardStorage(() => db.turns.update(opts.turn.id, { text: saved, updatedAt: Date.now() }));
+  const savedBeats = !characterReroll && replyBeats && beatsToProse(replyBeats) === saved ? replyBeats : undefined;
+  // Dexie drops a key set to undefined, so stale beats from the old text go away.
+  const now = Date.now();
+  // Keep the old version so the reader can flip back to it.
+  const fresh = (await db.turns.get(opts.turn.id)) ?? opts.turn;
+  const versioned = addAltPatch(fresh, saved, savedBeats, now);
+  await guardStorage(() => db.turns.update(opts.turn.id, { ...versioned, updatedAt: now }));
   await finalizeChapterMemory(opts.episode.id);
   opts.onDelta('', meta);
 }
@@ -1158,8 +1295,10 @@ export function rememberedExtract(extract: LiveCanonExtract, fileCanon: boolean)
 }
 
 /**
- * One post-write pass: live cast/ledger/ties plus durable canon.
- * Throttled so it does not run every Write — wrap still reconciles.
+ * One post-write pass after every reply: live cast state, the room ledger,
+ * ties, tracked scores, and what each person present will remember.
+ * Durable canon (facts, threads, place, knowledge) is filed only once enough
+ * new transcript has grown, so the pass stays small on most turns.
  */
 async function maybeRefreshLiveMemory(
   world: World,
@@ -1184,21 +1323,30 @@ async function maybeRefreshLiveMemory(
   const lastCanon = ctx.episode.liveCanonAtChars ?? 0;
   const growthNeeded = Math.round(HISTORY_CHAR_BUDGET * 0.04);
   if (lastState === 0 && ctx.turns.length < 2) return;
-  if (lastState > 0 && chars < lastState + growthNeeded) return;
+  if (lastState > 0 && chars <= lastState) return;
+  // "few": the older cadence, one pass per few turns' worth of new story.
+  if (world.ai.liveUpdates === 'few' && lastState > 0 && chars < lastState + growthNeeded) return;
+  const canonDue = lastCanon === 0 || chars >= lastCanon + growthNeeded;
+  // fileCanon is false on a "just this moment" turn: nothing durable is filed then.
+  const fileCanonNow = fileCanon && canonDue;
 
-  const since = turnsSinceCharMark(ctx.turns, fileCanon ? lastCanon : lastState);
-  const source = since.length > 0 ? since : ctx.turns.slice(-8);
+  const since = turnsSinceCharMark(ctx.turns, fileCanonNow ? lastCanon : lastState);
+  // A per-turn pass still reads a little of what came before, for who and where.
+  const source = since.length >= 2 ? since : ctx.turns.slice(-4);
   const guests = ctx.episode.guests ?? [];
   const digest = compressOmittedTurns(source, ctx.characters, guests);
   if (!digest.trim()) return;
+  const newest = compressOmittedTurns(turnsToGrade(ctx.turns, lastState), ctx.characters, guests);
 
-  const castLines = inScene
+  const castLines = scenePeople
     .map((c) => {
       const s = c.state;
-      return (
-        `- ${c.name}: goal="${s.goal || ''}"; emotion="${s.emotion || ''}"; ` +
-        `location="${s.location || ''}"; condition="${s.condition || ''}"`
-      );
+      const usual = c.looks?.clothing?.trim();
+      const outfit = `wearing="${s.wearing || ''}"${usual ? ` (usually: ${usual.slice(0, 80)})` : ''}`;
+      return c.isPlayer
+        ? `- ${c.name} (player, outfit only): ${outfit}`
+        : `- ${c.name}: goal="${s.goal || ''}"; emotion="${s.emotion || ''}"; ` +
+          `location="${s.location || ''}"; condition="${s.condition || ''}"; ${outfit}`;
     })
     .join('\n');
 
@@ -1242,8 +1390,35 @@ async function maybeRefreshLiveMemory(
     ? 'bonds: one row per listed tracked bond. shift is an integer from -2 to 2, and 0 if this beat did not move it. ' +
       'reason is one short clause, or omit. Do not pick a new score or a new kind.\n' +
       'goals: one row per listed player goal. index is that goal\'s number. The same shift scale. 0 if this beat did not move it.\n' +
-      'Do not put a tracked bond in ties.\n'
+      'Do not put a tracked bond in ties.\n' +
+      `${BOND_RUBRIC}\n`
     : '';
+  const memoryRules = fileCanon && inScene.length > 0
+    ? `memories: for in-scene cast only (exact names), 0–${NPC_MEMORY_PER_PASS} per person, ` +
+      'only for something they would still think about later: what happened, from their side, third person, under 160 characters. ' +
+      'feeling: a word or two for how it left them. salience: 1 passing, 2 notable, 3 they will never forget. ' +
+      'Skip small talk and anything they did not witness. Omit if nothing is memorable.\n'
+    : '';
+  const rulesOn = !!activeMechanics(world);
+  const carried = inventoryLine(playerHere?.inventory);
+  const inventoryRules = rulesOn && fileCanon && playerHere
+    ? 'inventory: only things the player clearly gained, lost, used up, or gave away in these beats. ' +
+      'action is add or remove; name is short (a noun phrase); qty defaults to 1. ' +
+      'When removing, use the exact name from Player carries. Omit if nothing changed hands.\n'
+    : '';
+  const latestTurn = ctx.turns[ctx.turns.length - 1];
+  const suggestRules = playerHere && latestTurn && latestTurn.role !== 'user'
+    ? `suggestions: 3 short, distinct things ${playerHere.name.trim() || 'the player'} could do or say next, ` +
+      'each under 14 words, in their voice. A spoken line goes in "double quotes"; an action is a bare phrase starting with a verb. ' +
+      'Mix one bold, one careful, one curious. Never decide for them.\n'
+    : '';
+  const canonRules = fileCanonNow
+    ? `facts: 0–${LIVE_CANON_FACT_CAP} durable facts (debts, promises, objects, injuries, who saw what). ` +
+      'Not weather, not mood, not a plot recap. Do not repeat Known facts.\n' +
+      `threads: 0–${LIVE_CANON_THREAD_CAP} NEW open tensions not already listed.\n` +
+      'place: lasting room condition and optional weather/light; omit if unchanged.\n' +
+      'knowledge: only in-scene named cast who clearly learned something; omit if none.\n'
+    : 'Omit facts, threads, place, and knowledge on this pass.\n';
 
   const inSceneNames = new Set(inScene.map((c) => c.name.trim().toLowerCase()).filter(Boolean));
   const existingFactTexts = ctx.continuity.map((f) => f.text);
@@ -1267,6 +1442,7 @@ async function maybeRefreshLiveMemory(
         emotion?: string;
         location?: string;
         condition?: string;
+        wearing?: string;
       }>;
       scene?: string[];
       ties?: Array<{ from?: string; to?: string; kind?: string; note?: string }>;
@@ -1274,6 +1450,9 @@ async function maybeRefreshLiveMemory(
       threads?: string[];
       place?: { name?: string; currentState?: string; atmosphere?: string };
       knowledge?: Array<{ name?: string; nowKnows?: string }>;
+      memories?: MemoryDraft[];
+      inventory?: InventoryChange[];
+      suggestions?: string[];
       bonds?: Array<{ name?: string; shift?: number; reason?: string }>;
       goals?: Array<{ index?: number; text?: string; shift?: number; reason?: string }>;
     }>(
@@ -1281,16 +1460,18 @@ async function maybeRefreshLiveMemory(
       'You update live room state and file hard canon WHILE the episode is still open. ' +
         'Call update_live_memory. Do not write story prose. ' +
         'updates: only characters whose state clearly shifted. Omit unchanged fields. ' +
+        'wearing: set only when someone clearly changes, removes, or ruins clothes (a gown for the ball, a soaked coat); "none" when back in their usual clothes. ' +
+        'For the player, only wearing may be set. ' +
         'Use "none" for a field that no longer applies. Keep each field under 120 characters.\n' +
         'ties: at most 3, only when a relationship clearly shifted. Exact roster names. Omit if none.\n' +
         'scene: 3–6 short physical facts now true in this room. Rewrite the whole list: ' +
         'carry forward what still holds, drop what stopped being true. Concrete nouns, no feelings.\n' +
-        `facts: 0–${LIVE_CANON_FACT_CAP} durable facts (debts, promises, objects, injuries, who saw what). ` +
-        'Not weather, not mood, not a plot recap. Do not repeat Known facts.\n' +
-        `threads: 0–${LIVE_CANON_THREAD_CAP} NEW open tensions not already listed.\n` +
-        'place: lasting room condition and optional weather/light; omit if unchanged.\n' +
-        'knowledge: only in-scene named cast who clearly learned something; omit if none.\n' +
+        canonRules +
+        memoryRules +
+        inventoryRules +
+        suggestRules +
         shiftRules +
+        'bonds, goals, memories, and inventory come only from Newest beats. Recent beats are context: never grade or file them again.\n' +
         'Omit any key that has nothing new. Each canon line under 220 characters.',
       `World: ${world.title}. Episode ${ctx.episode.number}.\n` +
         `Place: ${placeLine}${loc?.currentState ? ` (now: ${loc.currentState})` : ''}\n` +
@@ -1298,11 +1479,15 @@ async function maybeRefreshLiveMemory(
         `Already established in this scene (do not refile as facts):\n${priorLedger || '(nothing yet)'}\n\n` +
         `Ties in the room:\n${tieLines || '(none filed)'}\n\n` +
         (askShifts ? `Tracked bonds:\n${bondList || '(none)'}\n\nPlayer goals:\n${goalList || '(none)'}\n\n` : '') +
-        `Known facts (do not repeat):\n${knownBlock || '(none)'}\n\n` +
-        `Open threads (do not repeat):\n${threadBlock || '(none)'}\n\n` +
+        (inventoryRules ? `Player carries: ${carried || '(nothing)'}\n\n` : '') +
+        (fileCanonNow
+          ? `Known facts (do not repeat):\n${knownBlock || '(none)'}\n\n` +
+            `Open threads (do not repeat):\n${threadBlock || '(none)'}\n\n`
+          : '') +
         `Recent beats:\n${digest.slice(0, 10000)}\n\n` +
+        `Newest beats:\n${newest.slice(0, 4000)}\n\n` +
         `Call update_live_memory.`,
-      askShifts ? 1400 : 1100,
+      (askShifts ? 1400 : 1100) + (memoryRules ? 300 : 0),
       signal,
       25_000,
       'utility',
@@ -1310,8 +1495,8 @@ async function maybeRefreshLiveMemory(
     );
 
     if (textStillFiled && !(await textStillFiled())) return;
-    const applied = inScene.length > 0
-      ? await applyLiveCharacterStateUpdates(world.id, inScene, result.updates ?? [])
+    const applied = scenePeople.length > 0
+      ? await applyLiveCharacterStateUpdates(world.id, scenePeople, result.updates ?? [])
       : 0;
     const tiesApplied = await applyLiveRelationshipUpdates(
       scenePeople,
@@ -1347,9 +1532,26 @@ async function maybeRefreshLiveMemory(
       existingThreads: existingThreadTexts,
       inSceneNames,
       episodeFactCount
-    }), fileCanon);
+    }), fileCanonNow);
 
     const now = Date.now();
+    let remembered = 0;
+    if (memoryRules) {
+      const byPerson = groupMemoryDrafts(result.memories, inScene);
+      for (const [id, drafts] of byPerson) {
+        const person = inScene.find((c) => c.id === id);
+        if (!person) continue;
+        // This context may predate the last turn's pass. Post-turn work is queued,
+        // so the stored row holds every memory filed so far.
+        const stored = (await db.characters.get(id))?.memories ?? person.memories;
+        const next = addMemories(stored, drafts, { episodeId: ctx.episode.id, now, makeId: uid });
+        if (next.length === (stored?.length ?? 0) && next.every((m, i) => m === stored?.[i])) continue;
+        // update() merges, so the score shifts written above are kept.
+        await db.characters.update(id, { memories: next, updatedAt: now });
+        person.memories = next;
+        remembered += 1;
+      }
+    }
     const newFacts = extract.facts.map((text) => ({
       id: uid(),
       worldId: world.id,
@@ -1408,12 +1610,24 @@ async function maybeRefreshLiveMemory(
       updatedAt: now
     };
     if (sceneLedger) epPatch.sceneLedger = sceneLedger;
+    const ideas = suggestRules ? cleanSuggestions(result.suggestions) : [];
+    if (ideas.length > 0 && latestTurn) epPatch.suggestions = { afterTurnId: latestTurn.id, items: ideas };
     if (extract.place?.atmosphere?.trim()) {
       epPatch.atmosphereNote = extract.place.atmosphere.trim();
     }
     await db.episodes.update(ctx.episode.id, epPatch);
     ctx.episode = { ...ctx.episode, ...epPatch };
-    if (applied > 0 || tiesApplied > 0 || shiftsApplied > 0) {
+    let packed = 0;
+    if (inventoryRules && playerHere && result.inventory?.length) {
+      const stored = (await db.characters.get(playerHere.id))?.inventory ?? playerHere.inventory;
+      const next = applyInventoryChanges(stored, result.inventory, uid);
+      if (next) {
+        await db.characters.update(playerHere.id, { inventory: next, updatedAt: now });
+        playerHere.inventory = next;
+        packed = 1;
+      }
+    }
+    if (applied > 0 || tiesApplied > 0 || shiftsApplied > 0 || remembered > 0 || packed > 0) {
       const refreshed = await db.characters.where('worldId').equals(world.id).toArray();
       ctx.characters = refreshed;
     }
@@ -1426,8 +1640,50 @@ async function maybeRefreshLiveMemory(
   } catch (e) {
     if ((e as Error).name === 'AbortError') throw e;
     logAppError(e, 'live memory');
-    onNotice?.('Couldn’t update the room — sheets and live memory will catch up at wrap.');
+    // The small per-turn pass fails quietly; the next turn or the wrap catches up.
+    if (fileCanonNow) onNotice?.('Couldn’t update the room — sheets and live memory will catch up at wrap.');
   }
+}
+
+/**
+ * The player move a reply answers: only the line right before it. A Continue or
+ * a world turn answers nobody, so an older roll must not decide its rewrite.
+ */
+export function answeredMove(turns: Turn[], replyAt: number): Turn | undefined {
+  const before = replyAt > 0 ? turns[replyAt - 1] : undefined;
+  return before?.role === 'user' ? before : undefined;
+}
+
+/**
+ * Turns whose deltas (scores, memories, the pack) are still ungraded. Normally
+ * that is what landed since the last pass. After an edit or rewind the mark is
+ * 0 and the canon window may span the whole chapter, so only the newest
+ * exchange counts: the last player move onward.
+ */
+export function turnsToGrade<T extends { role: string; text: string }>(turns: T[], lastStateChars: number): T[] {
+  const sinceLastPass = lastStateChars > 0 ? turnsSinceCharMark(turns, lastStateChars) : [];
+  if (sinceLastPass.length > 0) return sinceLastPass;
+  const lastMoveAt = turns.map((t) => t.role).lastIndexOf('user');
+  return lastMoveAt >= 0 ? turns.slice(lastMoveAt) : turns.slice(-2);
+}
+
+/** Memory drafts by in-scene person. Names that match nobody here are dropped. */
+export function groupMemoryDrafts(
+  drafts: MemoryDraft[] | undefined,
+  inScene: Array<Pick<Character, 'id' | 'name' | 'aliases'>>
+): Map<string, MemoryDraft[]> {
+  const out = new Map<string, MemoryDraft[]>();
+  for (const draft of drafts ?? []) {
+    const key = draft.name?.trim().toLowerCase();
+    if (!key || !draft.text?.trim()) continue;
+    const person = inScene.find((c) =>
+      c.name.trim().toLowerCase() === key ||
+      (c.aliases ?? []).some((alias) => alias.trim().toLowerCase() === key)
+    );
+    if (!person) continue;
+    out.set(person.id, [...(out.get(person.id) ?? []), draft]);
+  }
+  return out;
 }
 
 /** Longest scene ledger we will carry into a prompt. */
@@ -1481,6 +1737,8 @@ export async function applyLiveCharacterStateUpdates(
     emotion?: string;
     location?: string;
     condition?: string;
+    /** What they have on now, when they change or lose clothes. */
+    wearing?: string;
   }>
 ): Promise<number> {
   let applied = 0;
@@ -1489,18 +1747,25 @@ export async function applyLiveCharacterStateUpdates(
     const name = (u.name ?? '').trim().toLowerCase();
     if (!name) continue;
     const c = cast.find((x) => x.name.toLowerCase() === name);
-    if (!c || c.isPlayer) continue;
-    const state: CharacterState = {
-      goal: mergeStateField(u.goal, c.state.goal),
-      emotion: mergeStateField(u.emotion, c.state.emotion),
-      location: mergeStateField(u.location, c.state.location),
-      condition: mergeStateField(u.condition, c.state.condition)
-    };
+    if (!c) continue;
+    // The player's goals and feelings are theirs to set; only what they wear is tracked.
+    const wearing = mergeStateField(u.wearing, c.state.wearing ?? '');
+    const state: CharacterState = c.isPlayer
+      ? { ...c.state }
+      : {
+        goal: mergeStateField(u.goal, c.state.goal),
+        emotion: mergeStateField(u.emotion, c.state.emotion),
+        location: mergeStateField(u.location, c.state.location),
+        condition: mergeStateField(u.condition, c.state.condition)
+      };
+    if (wearing) state.wearing = wearing;
+    else delete state.wearing;
     if (
       state.goal === c.state.goal &&
       state.emotion === c.state.emotion &&
       state.location === c.state.location &&
-      state.condition === c.state.condition
+      state.condition === c.state.condition &&
+      (state.wearing ?? '') === (c.state.wearing ?? '')
     ) {
       continue;
     }
@@ -1908,7 +2173,6 @@ export async function finalizeChapterMemory(episodeId: string): Promise<void> {
     runningSummaryAtChars: 0,
     liveStateAtChars: 0,
     liveCanonAtChars: 0,
-    pendingPlan: null,
     sceneLedger: [],
     updatedAt: Date.now()
   });
@@ -1920,7 +2184,6 @@ export function chapterMemoryClearPatch(): {
   runningSummaryAtChars: 0;
   liveStateAtChars: 0;
   liveCanonAtChars: 0;
-  pendingPlan: null;
   sceneLedger: [];
 } {
   return {
@@ -1928,7 +2191,6 @@ export function chapterMemoryClearPatch(): {
     runningSummaryAtChars: 0,
     liveStateAtChars: 0,
     liveCanonAtChars: 0,
-    pendingPlan: null,
     sceneLedger: []
   };
 }
@@ -1946,6 +2208,53 @@ export async function deleteTurnsFrom(turnId: string, episodeId: string): Promis
   const turns = await snapshotTurnsFrom(turnId, episodeId);
   if (turns.length === 0) return;
   await tombstoneAndDeleteTurns(turns);
+  await forgetMemoriesSince(turns, episodeId);
+}
+
+/** Show another kept version of a rewritten reply. */
+export async function switchTurnAlt(turnId: string, episodeId: string, index: number): Promise<boolean> {
+  const turn = await db.turns.get(turnId);
+  if (!turn) return false;
+  const patch = switchAltPatch(turn, index);
+  if (!patch) return false;
+  await guardStorage(() => db.turns.update(turnId, { ...patch, updatedAt: Date.now() }));
+  await finalizeChapterMemory(episodeId);
+  return true;
+}
+
+/** Everything a rewind takes away, so Undo can put it back. */
+export interface RewindUndo {
+  episodeId: string;
+  removed: Turn[];
+  startedAt: number;
+  memory: EpisodeMemorySnapshot | null;
+  /** Each person's memories and live state (mood, place, outfit) before the rewind. */
+  recall: Array<{ id: string; memories: NpcMemory[] | undefined; state: CharacterState }>;
+}
+
+/** Drop everything after this turn. Returns what Undo needs, or null when nothing came after. */
+export async function rewindTo(turn: Turn): Promise<RewindUndo | null> {
+  const [removed, memory] = await Promise.all([
+    snapshotTurnsAfter(turn.id, turn.episodeId),
+    snapshotEpisodeMemory(turn.episodeId)
+  ]);
+  if (removed.length === 0) return null;
+  await waitForPostTurn();
+  const people = await db.characters.where('worldId').equals(turn.worldId).toArray();
+  const recall = people.map((p) => ({ id: p.id, memories: p.memories, state: p.state }));
+  const startedAt = Date.now();
+  await deleteTurnsAfter(turn.id, turn.episodeId);
+  await finalizeChapterMemory(turn.episodeId);
+  return { episodeId: turn.episodeId, removed, startedAt, memory, recall };
+}
+
+/** Put a rewind back. Lines written since the rewind are removed. */
+export async function undoRewind(undo: RewindUndo): Promise<void> {
+  await rollbackTurnSnapshot(undo.episodeId, undo.removed, undo.startedAt, undo.memory);
+  const now = Date.now();
+  for (const row of undo.recall) {
+    await db.characters.update(row.id, { memories: row.memories, state: row.state, updatedAt: now }).catch(() => undefined);
+  }
 }
 
 /** Delete everything after a turn, keeping the turn itself. */
@@ -1953,6 +2262,24 @@ export async function deleteTurnsAfter(turnId: string, episodeId: string): Promi
   const turns = await snapshotTurnsAfter(turnId, episodeId);
   if (turns.length === 0) return;
   await tombstoneAndDeleteTurns(turns);
+  await forgetMemoriesSince(turns, episodeId);
+}
+
+/**
+ * A rewind un-happens events, so nobody should still remember them.
+ * Drops memories filed in this chapter at or after the earliest removed turn.
+ */
+async function forgetMemoriesSince(removed: Turn[], episodeId: string): Promise<void> {
+  const since = Math.min(...removed.map((t) => t.createdAt));
+  const worldId = removed[0]?.worldId;
+  if (!worldId || !Number.isFinite(since)) return;
+  await waitForPostTurn();
+  const people = await db.characters.where('worldId').equals(worldId).toArray();
+  const now = Date.now();
+  for (const person of people) {
+    const kept = forgetFiledSince(person.memories, episodeId, since);
+    if (kept) await db.characters.update(person.id, { memories: kept, updatedAt: now });
+  }
 }
 
 /**
@@ -2818,11 +3145,15 @@ export async function draftCharacter(world: World | null, description: string): 
     speechStyle: string; exampleLines: string[]; traits: string; desires: string;
     fears: string; flaws: string; secrets: string; mustNotKnow?: string; anchors: string[];
     importance?: string;
+    looks?: Record<string, unknown>;
     state?: { goal?: string; emotion?: string; location?: string; condition?: string };
   }>(
     world,
     'You design deep NPC character sheets for longform interactive fiction. Call return_json with this shape:\n' +
-    '{"name": string, "role": "<role · relationship to protagonist>", "age": string, "appearance": string, ' +
+    '{"name": string, "role": "<role · relationship to protagonist>", "age": string, "appearance": "<overall impression, one sentence>", ' +
+    '"looks":{"face":"<features and expression>","hair":"<color, length, style>","body":"<build, height, how they move>",' +
+    '"clothing":"<their usual outfit>","details":"<scars, tattoos, jewellery, glasses, or empty>","senses":"<voice timbre and scent, or empty>"' +
+    (world?.ai.mature ? ',"intimate":"<adult physical details, only for an adult, or empty>"' : '') + '}, ' +
     '"mannerisms": "<2-3 recurring physical habits or tics, concrete and observable>", ' +
     '"backstory": "<the history that shaped them, 2-3 sentences>", "summary": "<who they are, 2-4 sentences of prose>", ' +
     '"speechStyle": "<how they sound when heard: sentence length, contractions, what they dodge, 1-2 sentences>", ' +
@@ -2845,9 +3176,16 @@ export async function draftCharacter(world: World | null, description: string): 
         condition: (result.state.condition ?? '').trim()
       }
     : undefined;
-  const { state: _s, importance: rawImportance, ...rest } = result;
+  const { state: _s, importance: rawImportance, looks: rawLooks, ...rest } = result;
+  // The intimate section is kept only for an adult in an adult world.
+  const allowIntimate = intimateAllowed(world, {
+    age: result.age ?? '', appearance: result.appearance, role: result.role,
+    looks: rawLooks as Character['looks']
+  });
+  const looks = mergeLooks(undefined, rawLooks as Character['looks'], allowIntimate);
   return {
     ...rest,
+    ...(looks ? { looks } : {}),
     importance: parseCharacterImportance(rawImportance) ?? 'regular',
     mustNotKnow: (result.mustNotKnow ?? '').trim(),
     ...(state ? { state } : {})
@@ -3083,6 +3421,7 @@ export async function fleshOutCharacter(
   const current = {
     isPlayer: !!character.isPlayer,
     name: character.name, role: character.role, age: character.age, appearance: character.appearance,
+    looks: character.looks ?? {},
     mannerisms: character.mannerisms, backstory: character.backstory, summary: character.summary,
     speechStyle: character.speechStyle, exampleLines: character.exampleLines, traits: character.traits,
     desires: character.desires, fears: character.fears, flaws: character.flaws, secrets: character.secrets,
@@ -3101,12 +3440,15 @@ export async function fleshOutCharacter(
     backstory: string; summary: string;
     speechStyle: string; exampleLines: string[]; traits: string; desires: string;
     fears: string; flaws: string; secrets: string; mustNotKnow?: string; anchors: string[];
+    looks?: Record<string, unknown>;
     state?: { goal?: string; emotion?: string; location?: string; condition?: string };
     relationships?: { targetName?: string; kind?: string; note?: string }[];
   }>(
     world,
     `You flesh out character sheets for longform interactive fiction. ${subjectFrame} ${NON_DESTRUCTIVE_RULE}\n` +
-    `Call return_json with this shape: {"name": string, "role": string, "age": string, "appearance": string, "mannerisms": string, ` +
+    `Call return_json with this shape: {"name": string, "role": string, "age": string, "appearance": string, ` +
+    `"looks": {"face": string, "hair": string, "body": string, "clothing": "<usual outfit>", "details": string, "senses": "<voice timbre and scent>"` +
+    `${intimateAllowed(world, character) ? ', "intimate": "<adult physical details>"' : ''}}, "mannerisms": string, ` +
     `"backstory": string, "summary": string, "speechStyle": string, "exampleLines": string[], "traits": string, ` +
     `"desires": string, "fears": string, "flaws": string, "secrets": string, "mustNotKnow": string, "anchors": string[], ` +
     `"state":{"goal":string,"emotion":string,"location":string,"condition":string}, ` +
@@ -3125,6 +3467,7 @@ export async function fleshOutCharacter(
 
   const stateIncoming = result.state ?? {};
   const state: CharacterState = {
+    ...character.state,
     goal: keepIfBlank(character.state.goal, stateIncoming.goal),
     emotion: keepIfBlank(character.state.emotion, stateIncoming.emotion),
     location: keepIfBlank(character.state.location, stateIncoming.location),
@@ -3136,6 +3479,10 @@ export async function fleshOutCharacter(
     role: keepIfBlank(character.role, result.role),
     age: keepIfBlank(character.age, result.age),
     appearance: keepIfBlank(character.appearance, result.appearance),
+    looks: mergeLooks(character.looks, result.looks as Character['looks'], intimateAllowed(world, {
+      age: keepIfBlank(character.age, result.age), appearance: character.appearance, role: character.role,
+      looks: { ...(character.looks ?? {}), ...((result.looks ?? {}) as Character['looks']) }
+    })),
     mannerisms: keepIfBlank(character.mannerisms, result.mannerisms),
     backstory: keepIfBlank(character.backstory, result.backstory),
     summary: keepIfBlank(character.summary, result.summary),

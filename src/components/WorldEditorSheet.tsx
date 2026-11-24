@@ -13,6 +13,8 @@ import type {
 } from '../types';
 import { TrackedScoreSection, WorldBondPaceChips } from './BondScores';
 import { StoryDateFields } from './StoryDateFields';
+import { GameRulesSection } from './GameRulesSection';
+import { AppearanceFields } from './AppearanceFields';
 import { PlacePhotoTools } from './PlacePhotoTools';
 import { Bar, Chip, ErrorNote, Field, Mono, Sheet, Spinner, Toggle } from '../ui/bits';
 import { characterAvatarStyle } from '../ui/avatar';
@@ -460,6 +462,17 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               valueLabel={world.ai.pacing < 34 ? 'slow-burn' : world.ai.pacing < 67 ? 'measured' : 'propulsive'}
             />
             <WorldBondPaceChips value={world.ai.bondPace} onChange={(bondPace) => patchAI({ bondPace })} />
+            <Field label="Living memory" note="How often moods, scores, memories, and next-move ideas update. Each update is one utility-model call.">
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <Chip active={(world.ai.liveUpdates ?? 'turn') === 'turn'} onClick={() => patchAI({ liveUpdates: 'turn' })}>Every turn</Chip>
+                <Chip active={world.ai.liveUpdates === 'few'} onClick={() => patchAI({ liveUpdates: 'few' })}>Every few turns</Chip>
+              </div>
+            </Field>
+            <GameRulesSection
+              world={world}
+              player={characters.find((c) => c.isPlayer)}
+              onSaveFail={onSaveFail}
+            />
 
             <div style={{ borderTop: '1px solid var(--rule)', paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
               <Field label="Prose model for this world" note="unset = global default">
@@ -555,10 +568,15 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
               <textarea key={selected.id + '-summary'} rows={4} defaultValue={selected.summary}
                 onBlur={(e) => patchChar(selected.id, { summary: e.target.value })} />
             </Field>
-            <Field label="Appearance">
-              <textarea key={selected.id + '-appearance'} rows={2} defaultValue={selected.appearance}
-                onBlur={(e) => patchChar(selected.id, { appearance: e.target.value })} />
-            </Field>
+            <AppearanceFields
+              key={selected.id + '-looks'}
+              appearance={selected.appearance}
+              looks={selected.looks}
+              age={selected.age}
+              role={selected.role}
+              mature={!!world.ai.mature}
+              onCommit={(next) => patchChar(selected.id, next)}
+            />
             <Field label="Mannerisms" note="recurring physical habits and tics">
               <textarea key={selected.id + '-mannerisms'} rows={2} defaultValue={selected.mannerisms ?? ''}
                 onBlur={(e) => patchChar(selected.id, { mannerisms: e.target.value })} />
