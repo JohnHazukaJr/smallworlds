@@ -209,6 +209,18 @@ export const SCENARIOS: EvalScenario[] = [
     judgeFocus: 'Ada answers in her clipped voice. Brannoc does not take over the answer.'
   },
   {
+    id: 'address-loose',
+    title: 'Spoken to without a comma',
+    probes: 'A name at the end of a question with no comma still gets that person’s spoken answer, not narration or silence.',
+    present: ['ada', 'brannoc'],
+    history: [
+      { who: 'narrator', text: 'The stove ticks. Brannoc is warming his hands; Ada is reading.' }
+    ],
+    move: { input: 'Did you see who took the ledger last night Brannoc?', length: 'beat' },
+    expect: { replier: 'brannoc', spoken: true },
+    judgeFocus: 'Brannoc answers out loud, in his own voice. The reply is not only narration of what he does.'
+  },
+  {
     id: 'address-by-role',
     title: 'Addressed by role, not name',
     probes: 'A role word only one person owns ("Dockmaster") routes the reply to them.',

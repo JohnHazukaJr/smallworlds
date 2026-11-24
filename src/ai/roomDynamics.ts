@@ -60,8 +60,18 @@ const ADDRESS_CONNECTORS =
 /**
  * Word-boundary match of a name in a line, graded by how directly it addresses them.
  * Substring matching is deliberately avoided — "Al" must not match "always".
+ *
+ * Default (broad) is for routing a reply among people already in the room: a name
+ * anywhere before ?/!/, counts as address, so "Did you see it Ada?" gets Ada's answer
+ * rather than narration. `strict` is for deciding whether a line *summons* someone who
+ * is not here: there the name must open a sentence or clause, so "What do you make of
+ * Corin?" talks about Corin without bringing him in.
  */
-export function addressStrength(text: string, rawName: string): AddressStrength | null {
+export function addressStrength(
+  text: string,
+  rawName: string,
+  opts: { strict?: boolean } = {}
+): AddressStrength | null {
   const name = rawName.trim();
   const line = text.trim();
   if (name.length < 2 || !line) return null;
@@ -70,10 +80,10 @@ export function addressStrength(text: string, rawName: string): AddressStrength 
   if (!new RegExp(`(^|[^\\p{L}\\p{N}])${n}([^\\p{L}\\p{N}]|$)`, 'iu').test(line)) {
     return null;
   }
-  // "Ada, listen." / "Ada?" / "*nods* Ada!" — the name opens the line or a clause and
-  // punctuation follows. Mid-sentence ("What do you make of Ada?") is a topic, not address.
+  // "Ada, listen." / "Ada?" / "*nods* Ada!" — name followed by punctuation that turns it into address.
+  const lead = opts.strict ? `(^|["'*]\\s*|[,;.!?…]\\s+)` : `(^|["'*\\s])`;
   let strength: AddressStrength = 'mention';
-  if (new RegExp(`(^|["'*]\\s*|[,;.!?…]\\s+)${n}\\s*[,!?:]`, 'iu').test(line)) strength = 'vocative';
+  if (new RegExp(`${lead}${n}\\s*[,!?:]`, 'iu').test(line)) strength = 'vocative';
   // "Ada, Ben and Clerk, listen." — the end of a list of people being called.
   else if (new RegExp(`\\b(?:and|or)\\s+${n}\\s*,`, 'iu').test(line)) strength = 'vocative';
   // "..., Ada?" — trailing vocative.
