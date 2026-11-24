@@ -32,7 +32,7 @@ describe('characterLookLine', () => {
     expect(line).toMatch(/^Ada, 34: Tall and spare/);
     expect(line).toMatch(/long grey coat/);
     expect(line).toMatch(/harbour registrar/);
-    expect(line).toMatch(/hand on the ledger/);
+    expect(line).not.toMatch(/hand on the ledger/);
     expect(line).not.toMatch(/Forged|brother/);
   });
 

@@ -464,7 +464,6 @@ export async function generateCharacterPortrait(opts: {
     age: opts.character.age,
     appearance: opts.character.appearance,
     looks: opts.character.looks,
-    mannerisms: opts.character.mannerisms,
     role: opts.character.role,
     contentNotes: opts.world.ai.contentNotes ?? '',
     mature: !!opts.world.ai.mature,
@@ -476,7 +475,7 @@ export async function generateCharacterPortrait(opts: {
   // image route, the same as a chapter picture would. Anyone under 18 never does.
   const venice = veniceAdultProvider();
   const reading = subjectAgeReading(opts.character);
-  const described = [allLooksText(opts.character), opts.character.mannerisms, opts.character.role].join('\n');
+  const described = [allLooksText(opts.character), opts.character.role].join('\n');
   // The adult route is photoreal. A comic portrait stays on the configured model unless there is none.
   const comicOnConfigured = opts.style === 'comic' && !!resolvedFirst && resolvedFirst.provider.kind === 'openai';
   if (venice && !comicOnConfigured && opts.world.ai.mature && reading.adult && !reading.minor && textLooksSexual(described)) {
@@ -485,7 +484,7 @@ export async function generateCharacterPortrait(opts: {
         framing, faceRef: true,
         name: opts.character.name, age: opts.character.age, appearance: opts.character.appearance,
         looks: opts.character.looks,
-        mannerisms: opts.character.mannerisms, role: opts.character.role,
+        role: opts.character.role,
         contentNotes: opts.world.ai.contentNotes ?? '', mature: true, style: opts.style
       });
       if (!kept.ok) throw new AIError(kept.error);

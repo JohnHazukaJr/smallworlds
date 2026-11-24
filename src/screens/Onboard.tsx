@@ -378,28 +378,33 @@ export function Onboard() {
     const name = castName.trim();
     const notes = castNotes.trim();
     if (!name && !notes) return;
-    setBusy('Generating…');
     setError('');
-    try {
-      const draft = emptyCharacter(worldId, { name: name || notes.slice(0, 40), summary: notes });
-      const existingCast = await db.characters.where('worldId').equals(worldId).toArray();
-      const sheet = await fleshOutCharacter(worldContext(), draft, existingCast);
-      const c: Character = { ...draft, ...sheet, updatedAt: Date.now() };
-      const episodeId = episode?.id;
+    // Saved before the model runs, so a timeout or error never loses what was typed.
+    const draft = emptyCharacter(worldId, { name: name || notes.slice(0, 40), summary: notes });
+    const episodeId = episode?.id;
+    const saved = await safeWrite(async () => {
       await db.transaction('rw', db.characters, db.episodes, async () => {
-        await db.characters.add(c);
+        await db.characters.add(draft);
         const ep = episodeId
           ? await db.episodes.get(episodeId)
           : await db.episodes.where('worldId').equals(worldId).first();
-        if (ep && !ep.castIds.includes(c.id)) {
-          await db.episodes.update(ep.id, { castIds: [...ep.castIds, c.id], updatedAt: Date.now() });
+        if (ep && !ep.castIds.includes(draft.id)) {
+          await db.episodes.update(ep.id, { castIds: [...ep.castIds, draft.id], updatedAt: Date.now() });
         }
       });
-      setCastName('');
-      setCastNotes('');
-      setExpandedCastId(c.id);
+      return true;
+    }, setError);
+    if (!saved) return;
+    setCastName('');
+    setCastNotes('');
+    setExpandedCastId(draft.id);
+    setBusy(`Fleshing ${draft.name || 'cast'}…`);
+    try {
+      const existingCast = await db.characters.where('worldId').equals(worldId).toArray();
+      const sheet = await fleshOutCharacter(worldContext(), draft, existingCast);
+      await db.characters.update(draft.id, { ...sheet, updatedAt: Date.now() });
     } catch (e) {
-      setError(formatUserError(e));
+      setError(`${formatUserError(e)} ${draft.name || 'They'} was kept with what you typed — press Fill in with AI on the card to try again.`);
     } finally {
       setBusy(null);
     }
@@ -480,33 +485,40 @@ export function Onboard() {
     const name = placeName.trim();
     const notes = placeNotes.trim();
     if (!name && !notes) return;
-    setBusy('Generating…');
     setError('');
+    // Saved before the model runs, so a timeout or error never loses what was typed.
+    const draft = emptyLocation(worldId, {
+      name: name || notes.slice(0, 40),
+      summary: notes,
+      parentId: placeParentId,
+      residentIds: placeResidentIds
+    });
+    const dismissed = placeDismissed;
+    const saved = await safeWrite(async () => {
+      await db.locations.add(draft);
+      await linkFirstPlace(draft.id);
+      return true;
+    }, setError);
+    if (!saved) return;
+    setPlaceName('');
+    setPlaceNotes('');
+    setPlaceParentId(null);
+    setPlaceResidentIds([]);
+    setPlaceDismissed([]);
+    setExpandedPlaceId(draft.id);
+    setBusy(`Fleshing ${draft.name || 'place'}…`);
     try {
-      const draft = emptyLocation(worldId, {
-        name: name || notes.slice(0, 40),
-        summary: notes,
-        parentId: placeParentId,
-        residentIds: placeResidentIds
-      });
       const sheet = await fleshOutLocation(worldContext(), draft, {
         cast: characters,
         places: places.map((place) => ({ id: place.id, name: place.name })),
-        selectedIds: placeResidentIds,
-        dismissedIds: placeDismissed
+        selectedIds: draft.residentIds,
+        dismissedIds: dismissed
       });
-      const l: Location = { ...draft, ...sheet, updatedAt: Date.now() };
-      await db.locations.add(l);
-      await linkFirstPlace(l.id);
-      setPlaceName('');
-      setPlaceNotes('');
-      setPlaceParentId(null);
-      setPlaceResidentIds([]);
-      setPlaceDismissed([]);
-      setExpandedPlaceId(l.id);
+      await db.locations.update(draft.id, { ...sheet, updatedAt: Date.now() });
+      const l = (await db.locations.get(draft.id)) ?? { ...draft, ...sheet };
       await seedBlankResidentLocations(l.residentIds, l.name);
     } catch (e) {
-      setError(formatUserError(e));
+      setError(`${formatUserError(e)} ${draft.name || 'The place'} was kept with what you typed — press Fill in with AI on its card to try again.`);
     } finally {
       setBusy(null);
     }
@@ -765,7 +777,7 @@ export function Onboard() {
               : sections.player ? 'Fleshing you…'
                 : 'Planning cast & places…'
       );
-      await fleshOutWorldEverything(liveWorld, s, ep, {
+      const built = await fleshOutWorldEverything(liveWorld, s, ep, {
         shape: shapeTag(shape),
         targetCharacters: targets.characters,
         targetLocations: targets.locations,
@@ -775,6 +787,9 @@ export function Onboard() {
       setReviewBanner(
         'Generated from your idea — review You, Cast, Place, and Memory. Edit anything, then Enter when the checklist is green.'
       );
+      if (built.missed.length > 0) {
+        setError(`Most of the world is built, but ${built.missed.length === 1 ? 'one step' : `${built.missed.length} steps`} did not finish: ${built.missed.join('; ')}. Press Fill in everything to finish just those.`);
+      }
       setStep(opts?.jumpToReview === false ? step : 3);
     } catch (e) {
       if (ctrl.signal.aborted) {

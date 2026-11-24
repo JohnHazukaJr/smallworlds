@@ -11,7 +11,6 @@ export interface PortraitPromptInput {
   name: string;
   age: string;
   appearance: string;
-  mannerisms: string;
   role: string;
   contentNotes: string;
   mature: boolean;
@@ -63,12 +62,12 @@ function clipLook(text: string, max: number): string {
 }
 
 /**
- * How someone looks, in one line: age, appearance, costume, visible manner.
+ * How someone looks, in one line: age, appearance, costume. Mannerisms are behaviour, not looks.
  * Only what the eye can see. Secrets, backstory, and lines are never inputs.
  */
 export function characterLookLine(
   c: {
-    name: string; age: string; appearance: string; role: string; mannerisms: string;
+    name: string; age: string; appearance: string; role: string;
     looks?: CharacterLooks; state?: Pick<CharacterState, 'wearing'>;
   },
   max = LOOK_MAX,
@@ -76,8 +75,7 @@ export function characterLookLine(
 ): string {
   const parts = [
     looksText(c, { adult: !!opts.adult, wearing: true }).replace(/\.$/, ''),
-    c.role.trim() ? `dressed as befits: ${c.role.trim()}` : '',
-    c.mannerisms.trim() ? `manner: ${c.mannerisms.trim()}` : ''
+    c.role.trim() ? `dressed as befits: ${c.role.trim()}` : ''
   ].filter(Boolean);
   if (parts.length === 0) return '';
   const who = [c.name.trim() || 'They', c.age.trim()].filter(Boolean).join(', ');
@@ -183,11 +181,11 @@ export function buildCharacterPortraitPrompt(input: PortraitPromptInput): Portra
       .replace(/\.$/, ''),
     PORTRAIT_LOOK_CHARS
   );
-  const look = [appearance, input.mannerisms, input.role].map((s) => s.trim()).filter(Boolean);
+  const look = [appearance, input.role].map((s) => s.trim()).filter(Boolean);
   if (look.length === 0) {
-    return { ok: false, error: 'Add an appearance, mannerisms, or role before generating a portrait.' };
+    return { ok: false, error: 'Add an appearance or role before generating a portrait.' };
   }
-  const visual = [allLooksText(input), input.mannerisms, input.role].join('\n');
+  const visual = [allLooksText(input), input.role].join('\n');
   if (minor && SEXUAL_VISUAL.test(visual)) {
     return {
       ok: false,
@@ -221,7 +219,6 @@ export function buildCharacterPortraitPrompt(input: PortraitPromptInput): Portra
     input.age.trim() ? `Age: ${input.age.trim()}` : '',
     input.role.trim() ? `Role and costume: ${clipLook(input.role.trim(), 200)}` : '',
     appearance ? `Appearance: ${appearance}` : '',
-    input.mannerisms.trim() ? `Visible manner: ${clipLook(input.mannerisms.trim(), 160)}` : '',
     input.contentNotes.trim() ? `Boundaries: ${clipLook(input.contentNotes.trim(), 200)}` : '',
     audience,
     input.style === 'comic' ? 'Drawn, not photographed. No text, no watermark, no extra people' : 'No text, no watermark, no extra people'

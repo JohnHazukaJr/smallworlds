@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { AIError } from './client';
-import { extractJson, jsonInstruction, jsonValueIsEmpty, parseToolArguments } from './utilityCall';
+import { extractJson, jsonInstruction, jsonValueIsEmpty, parseToolArguments, UTILITY_HARD_CAP_FACTOR, withStallSignal } from './utilityCall';
+import { vi } from 'vitest';
 
 describe('extractJson', () => {
   it('parses a bare object', () => {
@@ -37,5 +38,40 @@ describe('jsonInstruction', () => {
   it('asks for plain JSON when no return_json tool is sent', () => {
     expect(jsonInstruction('Call return_json with this shape: {}')).toBe('Reply with only a JSON object, with this shape: {}');
     expect(jsonInstruction('Call return_json with this shape: {}', 'return_json')).toBe('Call return_json with this shape: {}');
+  });
+});
+
+describe('withStallSignal', () => {
+  it('times out on silence, not while the model is still sending', () => {
+    vi.useFakeTimers();
+    try {
+      const { signal, activity, cancel } = withStallSignal(undefined, 1000);
+      vi.advanceTimersByTime(900);
+      activity();
+      vi.advanceTimersByTime(900);
+      expect(signal.aborted).toBe(false);
+      vi.advanceTimersByTime(200);
+      expect(signal.aborted).toBe(true);
+      cancel();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('still stops a model that never finishes', () => {
+    vi.useFakeTimers();
+    try {
+      const { signal, activity, cancel } = withStallSignal(undefined, 1000);
+      for (let t = 0; t < 1000 * UTILITY_HARD_CAP_FACTOR - 500; t += 500) {
+        vi.advanceTimersByTime(500);
+        activity();
+      }
+      expect(signal.aborted).toBe(false);
+      vi.advanceTimersByTime(600);
+      expect(signal.aborted).toBe(true);
+      cancel();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

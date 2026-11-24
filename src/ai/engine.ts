@@ -234,6 +234,24 @@ export interface CreateCall {
   lean?: boolean;
 }
 
+/** A shared pool: at most `n` jobs in flight across every caller; the rest queue in order. */
+export function createLimiter(n: number): <R>(job: () => Promise<R>) => Promise<R> {
+  let active = 0;
+  const queue: Array<() => void> = [];
+  const release = () => {
+    active -= 1;
+    queue.shift()?.();
+  };
+  return <R>(job: () => Promise<R>) => new Promise<R>((resolve, reject) => {
+    const start = () => {
+      active += 1;
+      job().then(resolve, reject).finally(release);
+    };
+    if (active < Math.max(1, n)) start();
+    else queue.push(start);
+  });
+}
+
 /** Run tasks with at most `n` in flight. Results keep input order; the first failure stops new starts. */
 export async function runLimited<T, R>(items: T[], n: number, task: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
@@ -4131,8 +4149,8 @@ export interface FleshOutEverythingOpts {
   signal?: AbortSignal;
 }
 
-/** Two at a time: enough to be quick, few enough to stay under provider rate limits. */
-const CREATE_PARALLEL = 2;
+/** Three at a time: quick, and few enough to stay under provider rate limits (429s retry once). */
+const CREATE_PARALLEL = 3;
 
 /**
  * Which opening sections still need a model call.
@@ -4173,6 +4191,8 @@ export interface FleshOutEverythingResult {
   locationIds: string[];
   continuityIds: string[];
   threadIds: string[];
+  /** Steps that failed and were skipped. Pressing again fills them. */
+  missed: string[];
 }
 
 /**
@@ -4356,118 +4376,172 @@ export async function fleshOutWorldEverything(
   });
   const needRoster = charSlots > 0 || placeSlots > 0;
 
-  let roster: WorldRosterProposal | null = null;
-  if (sections.premise || sections.rules || sections.player || needRoster) {
-    progress(
-      sections.premise ? 'Fleshing premise…'
-        : sections.rules ? 'Fleshing narrator rules…'
-          : sections.player ? 'Fleshing you…'
-            : 'Planning cast & places…'
-    );
-    // Each section is saved the moment it lands, so a later failure keeps it.
-    const jobs: Array<() => Promise<void>> = [];
-    if (needRoster) {
-      jobs.push(async () => {
-        roster = await proposeWorldRoster(live, opts.shape, { characters: charSlots, locations: placeSlots }, call);
-      });
+  // One pool for every call, so later steps start the moment a slot frees up instead of
+  // waiting for a whole stage. A failed person, place, or link is noted and skipped:
+  // the rest still gets built, and pressing again fills only what is missing.
+  const slot = createLimiter(CREATE_PARALLEL);
+  const missed: string[] = [];
+  const soft = async (label: string, job: () => Promise<void>) => {
+    try {
+      await slot(job);
+    } catch (e) {
+      if (opts.signal?.aborted || isAbortError(e)) throw e;
+      logAppError(e, `world build: ${label}`);
+      missed.push(label);
     }
-    if (sections.premise) {
-      jobs.push(async () => {
+  };
+
+  progress(
+    needRoster ? 'Planning cast & places…'
+      : sections.premise ? 'Fleshing premise…'
+        : sections.rules ? 'Fleshing narrator rules…'
+          : 'Fleshing you…'
+  );
+  // The roster gates everything after it, so it takes the first slot.
+  const rosterJob: Promise<WorldRosterProposal | null> = needRoster
+    ? slot(() => proposeWorldRoster(live, opts.shape, { characters: charSlots, locations: placeSlots }, call))
+    : Promise.resolve(null);
+  // Each section is saved the moment it lands, so a later failure keeps it.
+  const premiseJob = sections.premise
+    ? soft('the premise', async () => {
         const premise = await fleshOutPremise(live, liveSeason, call);
         await db.seasons.update(season.id, { premise });
         liveSeason = { ...liveSeason, premise };
-      });
-    }
-    if (sections.rules) {
-      jobs.push(async () => {
+      })
+    : Promise.resolve();
+  const rulesJob = sections.rules
+    ? soft('the narrator rules', async () => {
         const rules = await fleshOutNarratorRules(live, call);
         // Read fresh: the author may have edited AI settings while this ran.
         const fresh = (await db.worlds.get(live.id)) ?? live;
         await db.worlds.update(live.id, { ai: { ...fresh.ai, narratorRules: rules }, updatedAt: Date.now() });
         live = { ...live, ai: { ...fresh.ai, narratorRules: rules } };
-      });
-    }
-    if (sections.player && player) {
-      jobs.push(async () => {
+      })
+    : Promise.resolve();
+  const playerJob = sections.player && player
+    ? soft('your character', async () => {
         const sheet = await fleshOutCharacter(live, player, allChars, call);
         await db.characters.update(player.id, { ...sheet, isPlayer: true, updatedAt: Date.now() });
-      });
-    }
-    await runLimited(jobs, CREATE_PARALLEL, (job) => job());
-  }
+      })
+    : Promise.resolve();
+  // Keep the opening sections running even if the roster throws, so their work is saved.
+  const openingJobs = Promise.all([premiseJob, rulesJob, playerJob]);
+  const settle = (...jobs: Promise<unknown>[]) => Promise.all(jobs.map((j) => j.catch(() => {})));
 
   const createdCharacterIds: string[] = [];
   const createdLocationIds: string[] = [];
 
-  const plan = roster as WorldRosterProposal | null;
-  if (plan && (charSlots > 0 || placeSlots > 0)) {
-    const charDescs = plan.characters.slice(0, charSlots);
-    const placeDescs = plan.locations.slice(0, placeSlots);
+  let plan: WorldRosterProposal | null;
+  try {
+    plan = await rosterJob;
+  } catch (e) {
+    await settle(openingJobs);
+    throw e;
+  }
+  stopIfCancelled();
 
-    if (charDescs.length > 0) {
-      let done = 0;
-      progress(`Writing cast 0/${charDescs.length}…`);
-      await runLimited(charDescs, CREATE_PARALLEL, async ({ description }) => {
-        stopIfCancelled();
-        const draft = await draftCharacter(live, description, { ...call, lean: true });
-        const c = emptyCharacter(live.id, { ...draft, isPlayer: false, updatedAt: Date.now() });
-        if (!c.name.trim()) c.name = description.slice(0, 40);
-        await db.characters.add(c);
-        createdCharacterIds.push(c.id);
-        progress(`Writing cast ${++done}/${charDescs.length}…`);
-      });
-    }
+  let castDone = 0;
+  let placesDone = 0;
+  let linksDone = 0;
+  let linksTotal = 0;
+  const charDescs = plan ? plan.characters.slice(0, charSlots) : [];
+  const placeDescs = plan ? plan.locations.slice(0, placeSlots) : [];
+  const report = () => {
+    const parts: string[] = [];
+    if (castDone < charDescs.length) parts.push(`cast ${castDone}/${charDescs.length}`);
+    if (placesDone < placeDescs.length) parts.push(`places ${placesDone}/${placeDescs.length}`);
+    if (linksTotal > 0 && linksDone < linksTotal) parts.push(`links ${linksDone}/${linksTotal}`);
+    if (parts.length > 0) progress(`Building the world: ${parts.join(' · ')}…`);
+  };
 
-    if (placeDescs.length > 0) {
-      let done = 0;
-      progress(`Placing the world 0/${placeDescs.length}…`);
-      const castForPlaces = await db.characters.where('worldId').equals(live.id).toArray();
-      const knownPlaces = existingPlaces.map((place) => ({ id: place.id, name: place.name }));
-      const knownAreas = [...new Set(existingPlaces.map((place) => place.area?.trim() ?? '').filter(Boolean))];
-      const placeIds = new Array<string>(placeDescs.length);
-      // The first place is the broad setting; drafting it alone lets the rest sit inside it.
-      let markFirstDone = () => {};
-      const firstDone = new Promise<void>((resolve) => { markFirstDone = resolve; });
-      await runLimited(placeDescs, CREATE_PARALLEL, async ({ description }, index) => {
-        if (index > 0) await firstDone;
-        try {
-          stopIfCancelled();
-          const draft = await draftLocation(live, description, {
-            cast: castForPlaces,
-            areas: [...knownAreas],
-            places: [...knownPlaces]
-          }, call);
-          const l = emptyLocation(live.id, { ...draft, updatedAt: Date.now() });
-          if (!l.name.trim()) l.name = description.slice(0, 40);
-          await db.locations.add(l);
-          placeIds[index] = l.id;
-          knownPlaces.push({ id: l.id, name: l.name });
-          const area = l.area?.trim();
-          if (area && !knownAreas.includes(area)) knownAreas.push(area);
-          await seedBlankResidentLocations(l.residentIds, l.name);
-          progress(`Placing the world ${++done}/${placeDescs.length}…`);
-        } finally {
-          if (index === 0) markFirstDone();
-        }
-      });
-      // Roster order, so openingLocationIndex still points at the right place.
-      createdLocationIds.push(...placeIds.filter(Boolean));
-    }
+  if (charDescs.length > 0) {
+    report();
+    await Promise.all(charDescs.map(({ description }) => soft(`a character (${description.slice(0, 48)})`, async () => {
+      stopIfCancelled();
+      const draft = await draftCharacter(live, description, { ...call, lean: true });
+      const c = emptyCharacter(live.id, { ...draft, isPlayer: false, updatedAt: Date.now() });
+      if (!c.name.trim()) c.name = description.slice(0, 40);
+      await db.characters.add(c);
+      createdCharacterIds.push(c.id);
+      castDone += 1;
+      report();
+    })));
+  }
+  stopIfCancelled();
 
-    if (createdCharacterIds.length > 0) {
-      const openingCast = createdCharacterIds.slice(0, 2);
-      const castIds = [...new Set([...liveEpisode.castIds, ...openingCast])];
-      await db.episodes.update(liveEpisode.id, { castIds, updatedAt: Date.now() });
-      liveEpisode = { ...liveEpisode, castIds };
-    }
+  allChars = await db.characters.where('worldId').equals(live.id).toArray();
+  npcs = allChars.filter((c) => !c.isPlayer);
+  if (npcs.length === 0) {
+    await settle(openingJobs);
+    throw new AIError(missed.length > 0
+      ? 'None of the cast could be written: the model failed or went silent on every one. Everything else that finished was kept.'
+      : EMPTY_WORLD_DRAFT);
+  }
 
-    if (createdLocationIds.length > 0 && !liveEpisode.locationId && !liveEpisode.location.trim()) {
-      const idx = Math.max(0, Math.min(createdLocationIds.length - 1, plan.openingLocationIndex));
-      const openId = createdLocationIds[idx] ?? createdLocationIds[0];
-      const open = await db.locations.get(openId);
-      if (open) {
-        liveEpisode = await linkEpisodeOpening(liveEpisode, open);
-      }
+  // Places and relationship links need only the cast, so they run side by side.
+  const castForPlaces = allChars;
+  const placesJob = (async () => {
+    if (placeDescs.length === 0) return;
+    const knownPlaces = existingPlaces.map((place) => ({ id: place.id, name: place.name }));
+    const knownAreas = [...new Set(existingPlaces.map((place) => place.area?.trim() ?? '').filter(Boolean))];
+    const placeIds = new Array<string>(placeDescs.length);
+    const draftOne = (description: string, index: number) => soft(`a place (${description.slice(0, 48)})`, async () => {
+      stopIfCancelled();
+      const draft = await draftLocation(live, description, {
+        cast: castForPlaces,
+        areas: [...knownAreas],
+        places: [...knownPlaces]
+      }, call);
+      const l = emptyLocation(live.id, { ...draft, updatedAt: Date.now() });
+      if (!l.name.trim()) l.name = description.slice(0, 40);
+      await db.locations.add(l);
+      placeIds[index] = l.id;
+      knownPlaces.push({ id: l.id, name: l.name });
+      const area = l.area?.trim();
+      if (area && !knownAreas.includes(area)) knownAreas.push(area);
+      await seedBlankResidentLocations(l.residentIds, l.name);
+      placesDone += 1;
+      report();
+    });
+    report();
+    // The first place is the broad setting; drafting it alone lets the rest sit inside it.
+    await draftOne(placeDescs[0].description, 0);
+    await Promise.all(placeDescs.slice(1).map(({ description }, i) => draftOne(description, i + 1)));
+    // Roster order, so openingLocationIndex still points at the right place.
+    createdLocationIds.push(...placeIds.filter(Boolean));
+  })();
+
+  // Only people without links yet, so pressing again after a failure finishes the rest.
+  const unlinked = npcs.filter((npc) => npc.relationships.length === 0);
+  linksTotal = unlinked.length;
+  const linksJob = Promise.all(unlinked.map((npc) => soft(`${npc.name.trim() || 'a character'}: relationships`, async () => {
+    stopIfCancelled();
+    const relationships = await fleshOutRelationships(live, npc, castForPlaces, call);
+    await db.characters.update(npc.id, { relationships, updatedAt: Date.now() });
+    linksDone += 1;
+    report();
+  })));
+
+  try {
+    await placesJob;
+  } catch (e) {
+    await settle(linksJob, openingJobs);
+    throw e;
+  }
+
+  if (createdCharacterIds.length > 0) {
+    const openingCast = createdCharacterIds.slice(0, 2);
+    const castIds = [...new Set([...liveEpisode.castIds, ...openingCast])];
+    await db.episodes.update(liveEpisode.id, { castIds, updatedAt: Date.now() });
+    liveEpisode = { ...liveEpisode, castIds };
+  }
+
+  if (plan && createdLocationIds.length > 0 && !liveEpisode.locationId && !liveEpisode.location.trim()) {
+    const idx = Math.max(0, Math.min(createdLocationIds.length - 1, plan.openingLocationIndex));
+    const openId = createdLocationIds[idx] ?? createdLocationIds[0];
+    const open = await db.locations.get(openId);
+    if (open) {
+      liveEpisode = await linkEpisodeOpening(liveEpisode, open);
     }
   }
 
@@ -4484,30 +4558,21 @@ export async function fleshOutWorldEverything(
     }
   }
 
-  allChars = await db.characters.where('worldId').equals(live.id).toArray();
-  npcs = allChars.filter((c) => !c.isPlayer);
-
-  if (npcs.length === 0) {
-    throw new AIError(EMPTY_WORLD_DRAFT);
+  // Opening memory reads the premise and your sheet, so it waits for those (not for the links).
+  try {
+    await openingJobs;
+  } catch (e) {
+    await settle(linksJob);
+    throw e;
   }
-
-  // Only people without links yet, so pressing again after a failure finishes the rest.
-  const unlinked = npcs.filter((npc) => npc.relationships.length === 0);
-  if (unlinked.length > 0) {
-    let done = 0;
-    progress(`Linking relationships 0/${unlinked.length}…`);
-    await runLimited(unlinked, CREATE_PARALLEL, async (npc) => {
-      stopIfCancelled();
-      const relationships = await fleshOutRelationships(live, npc, allChars, call);
-      await db.characters.update(npc.id, { relationships, updatedAt: Date.now() });
-      progress(`Linking relationships ${++done}/${unlinked.length}…`);
-    });
-  }
-  allChars = await db.characters.where('worldId').equals(live.id).toArray();
-
   stopIfCancelled();
-  progress('Seeding opening memory…');
-  const memory = await seedOpeningMemory(live, liveSeason, liveEpisode, allChars, call);
+  progress(linksDone < linksTotal ? 'Seeding opening memory and finishing links…' : 'Seeding opening memory…');
+  allChars = await db.characters.where('worldId').equals(live.id).toArray();
+  let memory: { continuityIds: string[]; threadIds: string[] } = { continuityIds: [], threadIds: [] };
+  await soft('the opening memory', async () => {
+    memory = await seedOpeningMemory(live, liveSeason, liveEpisode, allChars, call);
+  });
+  await linksJob;
 
   // Looks were left out of the bulk drafts to keep them fast. Fill them quietly afterwards.
   void fillMissingLooks(live, createdCharacterIds);
@@ -4520,7 +4585,8 @@ export async function fleshOutWorldEverything(
     characterIds: createdCharacterIds,
     locationIds: createdLocationIds,
     continuityIds: memory.continuityIds,
-    threadIds: memory.threadIds
+    threadIds: memory.threadIds,
+    missed
   };
 }
 

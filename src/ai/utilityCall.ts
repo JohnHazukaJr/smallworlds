@@ -41,15 +41,33 @@ export function jsonInstruction(system: string, toolName?: string): string {
   return system.replace(/Call return_json with/g, 'Reply with only a JSON object, with');
 }
 
-function withTimeoutSignal(outer: AbortSignal | undefined, ms: number): { signal: AbortSignal; cancel: () => void } {
+/** A slow model that is still sending gets this many times the silence limit in total. */
+export const UTILITY_HARD_CAP_FACTOR = 2.5;
+
+/**
+ * Aborts after `silenceMs` with nothing from the provider, or `silenceMs * UTILITY_HARD_CAP_FACTOR`
+ * in total. A model that is still writing is not cut off at the silence limit and retried
+ * from nothing; that wasted every token and made slow models fail every time.
+ */
+export function withStallSignal(outer: AbortSignal | undefined, silenceMs: number): {
+  signal: AbortSignal; activity: () => void; cancel: () => void;
+} {
   const ctrl = new AbortController();
   const onOuter = () => ctrl.abort();
   outer?.addEventListener('abort', onOuter);
-  const t = window.setTimeout(() => ctrl.abort(), ms);
+  const abort = () => ctrl.abort();
+  let idle = setTimeout(abort, silenceMs);
+  const hard = setTimeout(abort, Math.round(silenceMs * UTILITY_HARD_CAP_FACTOR));
   return {
     signal: ctrl.signal,
+    activity: () => {
+      if (ctrl.signal.aborted) return;
+      clearTimeout(idle);
+      idle = setTimeout(abort, silenceMs);
+    },
     cancel: () => {
-      window.clearTimeout(t);
+      clearTimeout(idle);
+      clearTimeout(hard);
       outer?.removeEventListener('abort', onOuter);
     }
   };
@@ -125,9 +143,10 @@ export async function utilityCall<T>(opts: {
   const bumpTokens = Math.max(maxTokens + 2000, Math.floor(maxTokens * 1.5));
 
   const run = async (useTool: boolean, tokens: number): Promise<T> => {
-    const { signal: timed, cancel } = withTimeoutSignal(opts.signal, timeoutMs);
+    const { signal: timed, activity, cancel } = withStallSignal(opts.signal, timeoutMs);
     try {
       const result = await streamChat({
+        onActivity: activity,
         provider,
         model,
         system: jsonInstruction(opts.system, useTool ? structuredTool?.name : undefined),

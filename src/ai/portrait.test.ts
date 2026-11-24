@@ -8,7 +8,6 @@ const base = {
   name: 'Marisol',
   age: '34',
   appearance: 'Silver streak in black hair, a scar through the left brow.',
-  mannerisms: 'Keeps one hand on the ledger.',
   role: 'harbour registrar',
   contentNotes: '',
   mature: true,
@@ -91,9 +90,9 @@ describe('buildCharacterPortraitPrompt', () => {
   it('includes world boundaries and asks for a look first', () => {
     const bounded = buildCharacterPortraitPrompt({ ...base, contentNotes: 'No gore.' });
     expect(bounded.ok && bounded.prompt).toMatch(/Boundaries: No gore/);
-    expect(buildCharacterPortraitPrompt({ ...base, appearance: '', mannerisms: '', role: '' })).toEqual({
+    expect(buildCharacterPortraitPrompt({ ...base, appearance: '', role: '' })).toEqual({
       ok: false,
-      error: 'Add an appearance, mannerisms, or role before generating a portrait.'
+      error: 'Add an appearance or role before generating a portrait.'
     });
   });
 });

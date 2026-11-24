@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { runLimited } from './engine';
+import { createLimiter, runLimited } from './engine';
 
 describe('runLimited', () => {
   it('keeps at most n tasks in flight and returns results in order', async () => {
@@ -24,5 +24,26 @@ describe('runLimited', () => {
       return n;
     })).rejects.toThrow('boom');
     expect(started).toEqual([1, 2]);
+  });
+});
+
+describe('createLimiter', () => {
+  it('shares n slots across separate callers and keeps going after a failure', async () => {
+    const slot = createLimiter(2);
+    let live = 0;
+    let peak = 0;
+    const job = (ms: number, fail = false) => slot(async () => {
+      live++;
+      peak = Math.max(peak, live);
+      await new Promise((r) => setTimeout(r, ms));
+      live--;
+      if (fail) throw new Error('boom');
+      return ms;
+    });
+    const a = job(20);
+    const b = job(5, true).catch(() => 'failed');
+    const c = Promise.all([job(10), job(15)]);
+    expect(await Promise.all([a, b, c])).toEqual([20, 'failed', [10, 15]]);
+    expect(peak).toBe(2);
   });
 });

@@ -29,6 +29,8 @@ export interface StreamRequest {
   temperature?: number;
   signal?: AbortSignal;
   onDelta?: (text: string) => void;
+  /** Any bytes from the provider, including reasoning and tool arguments. Lets callers time out on silence, not length. */
+  onActivity?: () => void;
   job?: ChatJob;
   thinking?: boolean;
   jsonMode?: boolean;
@@ -566,6 +568,7 @@ async function streamOpenAI(req: StreamRequest): Promise<StreamResult> {
   const toolBuf: Record<number, { name: string; arguments: string }> = {};
   try {
   await readSSE(res, (data) => {
+    req.onActivity?.();
     try {
       const json = JSON.parse(data);
       const choice = json.choices?.[0];
@@ -643,6 +646,7 @@ async function streamAnthropic(req: StreamRequest): Promise<StreamResult> {
   let finishReason = '';
   try {
   await readSSE(res, (data) => {
+    req.onActivity?.();
     try {
       const json = JSON.parse(data);
       if (json.type === 'content_block_delta' && json.delta?.type === 'text_delta') {
@@ -695,6 +699,7 @@ async function streamGemini(req: StreamRequest): Promise<StreamResult> {
   let sawThought = false;
   try {
   await readSSE(res, (data) => {
+    req.onActivity?.();
     try {
       const json = JSON.parse(data);
       const parts: Array<{ text?: string; thought?: boolean }> =

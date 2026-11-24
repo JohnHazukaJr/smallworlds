@@ -75,7 +75,7 @@ describe('subjectAgeReading', () => {
 describe('portrait prompt reads the description when the age is blank', () => {
   it('refuses a sexual description of someone described as a teen', () => {
     const built = buildCharacterPortraitPrompt({
-      name: 'Mina', age: '', appearance: 'A teen, nude.', mannerisms: '', role: '',
+      name: 'Mina', age: '', appearance: 'A teen, nude.', role: '',
       contentNotes: '', mature: true, style: 'realistic'
     });
     expect(built.ok).toBe(false);
@@ -83,7 +83,7 @@ describe('portrait prompt reads the description when the age is blank', () => {
 
   it('follows an adult description as written in an adult world', () => {
     const built = buildCharacterPortraitPrompt({
-      name: 'Mina', age: '', appearance: 'Looks young for her age, nude.', mannerisms: '', role: '',
+      name: 'Mina', age: '', appearance: 'Looks young for her age, nude.', role: '',
       contentNotes: '', mature: true, style: 'realistic'
     });
     expect(built.ok && built.prompt).toMatch(/Adult subject/);
