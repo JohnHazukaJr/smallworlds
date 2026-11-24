@@ -122,7 +122,14 @@ async function seedScene(scenario: EvalScenario): Promise<Seeded> {
     locationId: place.id,
     location: place.name,
     guests,
-    activeGuestIds: guests.map((g) => g.id)
+    activeGuestIds: guests.map((g) => g.id),
+    // Seeded currents, marked drafted so the post-turn pass does not redraft them.
+    ...(scenario.currents?.length
+      ? {
+        plotTargets: scenario.currents.map((text) => ({ id: uid(), text, status: 'pending' as const, source: 'outline' as const })),
+        currentsAt: Date.now()
+      }
+      : {})
   });
 
   // Earlier lines in the chapter.

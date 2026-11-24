@@ -20,9 +20,13 @@ import {
 } from '../bonds';
 import {
   buildNextSeasonPlotTargets, calendarPatch, emptyCharacter, emptyLocation,
-  formatStoryDate, inferStanceFromInstructions, pendingPlotTargets,
+  formatStoryDate, inferStanceFromInstructions, partsForDay, pendingPlotTargets,
   povPersonLabel, storyStanceOf, worldCalendar, BIBLE_MIN_CHARS
 } from '../worldOps';
+import {
+  applyCurrentMoves, cleanCurrents, currentsLiveList, currentsLiveRules, currentsOn, currentsPrompt,
+  currentsSystem, isCurrent, liveCurrents, stanceGuide, timeOfYearLine, withCurrents, type CurrentMoveRow
+} from './currents';
 import { AIError, streamChat, isPromptPackRetryError, type ChatMessage } from './client';
 import { contextWindowFor, imageModelFor, proseModelFor, utilityModelFor } from './models';
 import { LIVE_MEMORY_TOOL, utilityCall, type ToolSpec } from './utilityCall';
@@ -84,7 +88,7 @@ import {
   NPC_MEMORY_PER_PASS, addMemories, forgetFiledSince, recallMemories, memoryCardLine, type MemoryDraft
 } from '../npcMemory';
 import {
-  OFFSCREEN_SYSTEM, cleanOffscreen, offscreenLifeOn, offscreenPrompt, pickOffscreenCast
+  OFFSCREEN_SYSTEM, cleanOffscreen, offscreenLifeOn, offscreenLines, offscreenPrompt, pickOffscreenCast
 } from './offscreenLife';
 import {
   knowledgeFactLine,
@@ -1015,6 +1019,8 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
             textStillFiled
           )
         ]);
+        // After the live pass, so the draft reads the room as it now stands.
+        if (await textStillFiled()) await draftChapterCurrents(opts.world, ctx.season, ctx.episode.id, { signal: opts.signal });
       } catch (e) {
         if ((e as Error).name === 'AbortError' || e instanceof WriteAbortedError) return;
         throw e;
@@ -1474,6 +1480,9 @@ async function maybeRefreshLiveMemory(
       'each under 14 words, in their voice. A spoken line goes in "double quotes"; an action is a bare phrase starting with a verb. ' +
       'Mix one bold, one careful, one curious. Never decide for them.\n'
     : '';
+  // A "just this moment" turn moves nothing durable, currents included.
+  const liveCurrentList = fileCanon && currentsOn(world) ? liveCurrents(ctx.episode.plotTargets) : [];
+  const currentRules = currentsLiveRules(liveCurrentList);
   const canonRules = fileCanonNow
     ? `facts: 0–${LIVE_CANON_FACT_CAP} durable facts (debts, promises, objects, injuries, who saw what). ` +
       'Not weather, not mood, not a plot recap. Do not repeat Known facts.\n' +
@@ -1522,6 +1531,7 @@ async function maybeRefreshLiveMemory(
       suggestions?: string[];
       bonds?: Array<{ name?: string; shift?: number; reason?: string }>;
       goals?: Array<{ index?: number; text?: string; shift?: number; reason?: string }>;
+      currents?: CurrentMoveRow[];
     }>(
       world,
       'You update live room state and file hard canon WHILE the episode is still open. ' +
@@ -1537,6 +1547,7 @@ async function maybeRefreshLiveMemory(
         memoryRules +
         inventoryRules +
         suggestRules +
+        currentRules +
         shiftRules +
         'movedTo: only when the Newest beats end with the scene in a different place than Place (the player walked, rode, or was taken there). ' +
         'Use place with the exact name from Saved places when it is one of them, else newPlace with a short name. Omit when they are still in the same place, only talk about going, or step briefly aside.\n' +
@@ -1554,6 +1565,7 @@ async function maybeRefreshLiveMemory(
           ? `Known facts (do not repeat):\n${knownBlock || '(none)'}\n\n` +
             `Open threads (do not repeat):\n${threadBlock || '(none)'}\n\n`
           : '') +
+        (currentRules ? `Currents:\n${currentsLiveList(liveCurrentList)}\n\n` : '') +
         `Recent beats:\n${digest.slice(0, 10000)}\n\n` +
         `Newest beats:\n${newest.slice(0, 4000)}\n\n` +
         `Call update_live_memory.`,
@@ -1684,6 +1696,12 @@ async function maybeRefreshLiveMemory(
     if (ideas.length > 0 && latestTurn) epPatch.suggestions = { afterTurnId: latestTurn.id, items: ideas };
     if (extract.place?.atmosphere?.trim()) {
       epPatch.atmosphereNote = extract.place.atmosphere.trim();
+    }
+    if (liveCurrentList.length > 0 && result.currents?.length) {
+      // Apply to the stored list: the author may have edited targets meanwhile.
+      const stored = (await db.episodes.get(ctx.episode.id))?.plotTargets;
+      const moved = applyCurrentMoves(stored, liveCurrentList, result.currents);
+      if (moved) epPatch.plotTargets = moved;
     }
     await db.episodes.update(ctx.episode.id, epPatch);
     ctx.episode = { ...ctx.episode, ...epPatch };
@@ -2296,6 +2314,96 @@ async function fileOffscreenLife(
   } catch (e) {
     logAppError(e, 'off-screen life');
     return [];
+  }
+}
+
+/** Chapters with a draft in flight, so two quick replies do not draft twice. */
+const draftingCurrents = new Set<string>();
+
+/**
+ * Draft this chapter's currents from the story so far: people's goals, the date
+ * and what is coming up, the last chapter and what happened off-screen, and what
+ * has happened here. Runs once per chapter after a reply; `force` redrafts now
+ * (the Journal's Redraft). Returns how many were drafted. Never throws unless forced.
+ */
+export async function draftChapterCurrents(
+  world: World,
+  season: Season,
+  episodeId: string,
+  opts: { force?: boolean; signal?: AbortSignal } = {}
+): Promise<number> {
+  if (!currentsOn(world) || draftingCurrents.has(episodeId)) return 0;
+  const episode = await db.episodes.get(episodeId);
+  if (!episode || episode.status !== 'active') return 0;
+  if (!opts.force && episode.currentsAt) return 0;
+  draftingCurrents.add(episodeId);
+  try {
+    const ctx = await loadContext(world, season, episode);
+    if (!opts.force && !ctx.turns.some((t) => t.role !== 'user')) return 0;
+    const cal = worldCalendar(world);
+    const day = episodeSceneDay(episode, cal);
+    const parts = partsForDay(cal, day);
+    const stance = storyStanceOf(world);
+    const player = ctx.characters.find((c) => c.isPlayer);
+    const dueEvents = worldCalendarEventPrefs(world).enabled
+      ? ctx.calendarEvents
+        .filter((e) => (e.status === 'scheduled' || e.status === 'due') && e.storyDay >= day && e.storyDay <= day + 14)
+        .sort((a, b) => a.storyDay - b.storyDay)
+      : [];
+    const authorTargets = [
+      ...(episode.plotTargets ?? []).filter((t) => !isCurrent(t)),
+      ...(season.plotTargets ?? [])
+    ].filter((t) => t.status === 'pending' && t.text.trim()).map((t) => t.text.trim());
+    const chapterSoFar = episode.runningSummary?.trim() ||
+      compressOmittedTurns(ctx.turns.slice(-10), ctx.characters, episode.guests ?? []);
+
+    const raw = await utilityJson<unknown>(
+      world,
+      currentsSystem(stance),
+      currentsPrompt({
+        world,
+        stance,
+        today: formatStoryDate(cal, day).replace(/ · day \d+$/, ''),
+        timeOfYear: timeOfYearLine(parts.monthName, parts.monthIndex, cal.months.length, cal.system),
+        dueEvents,
+        todayDay: day,
+        premise: season.premise ?? '',
+        authorTargets,
+        earlierCurrents: liveCurrents(episode.plotTargets),
+        priorRecap: ctx.priorEpisode?.wrap?.recap ?? '',
+        meanwhile: offscreenLines(ctx.priorEpisode?.wrap?.offscreen),
+        chapterSoFar,
+        threads: ctx.threads.map((t) => t.text),
+        people: ctx.characters,
+        presentIds: episode.castIds,
+        playerName: player?.name ?? ''
+      }),
+      1400,
+      opts.signal,
+      45_000,
+      'utility'
+    );
+    const drafted = cleanCurrents(raw, {
+      names: ctx.characters.map((c) => c.name).filter(Boolean),
+      playerName: player?.name ?? '',
+      cap: stanceGuide(stance).max,
+      makeId: uid
+    });
+    // Read again: the author may have edited targets while the call ran.
+    const fresh = await db.episodes.get(episodeId);
+    if (!fresh || fresh.status !== 'active') return 0;
+    await guardStorage(() => db.episodes.update(episodeId, {
+      plotTargets: withCurrents(fresh.plotTargets, drafted),
+      currentsAt: Date.now(),
+      updatedAt: Date.now()
+    }));
+    return drafted.length;
+  } catch (e) {
+    if (opts.force) throw e;
+    if ((e as Error).name !== 'AbortError') logAppError(e, 'chapter currents');
+    return 0;
+  } finally {
+    draftingCurrents.delete(episodeId);
   }
 }
 

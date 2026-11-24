@@ -57,6 +57,8 @@ export interface EvalScenario {
   guests?: EvalGuest[];
   /** Earlier lines in this chapter, oldest first. */
   history: EvalLine[];
+  /** Chapter currents (what is in motion) seeded on the episode, as the writer would see them. */
+  currents?: string[];
   move: {
     /** What the player types, exactly as in the Write box. */
     input: string;
@@ -352,6 +354,26 @@ export const SCENARIOS: EvalScenario[] = [
       forbidden: [{ phrases: ['Brannoc makes an excuse and leaves'], why: 'The instruction should be shown, not pasted.' }]
     },
     judgeFocus: 'Brannoc leaves with a joking excuse that does not hide his nerves. The instruction text is not copied verbatim.'
+  },
+  {
+    id: 'currents-ignored',
+    title: 'The player goes their own way',
+    probes: 'What is in motion stays in the background when the player starts something else. No railroading.',
+    present: ['ada', 'brannoc'],
+    currents: [
+      'Ada is quietly burning draft copies of the forged page before anyone can compare hands.',
+      'The grain-ship rumour is spreading along the quay, and the dockhands are nervous.'
+    ],
+    history: [
+      { who: 'narrator', text: 'Evening in the Long Room. Brannoc has come in from the cold, stamping fog off his boots.' }
+    ],
+    move: { input: '"Brannoc! How are the wedding plans for your daughter coming along?"', length: 'beat' },
+    expect: {
+      replier: 'brannoc',
+      spoken: true,
+      forbidden: [{ phrases: ['forged', 'forgery', 'grain ship', 'grain-ship'], why: 'The player asked about a wedding; the plot should not be dragged in.' }]
+    },
+    judgeFocus: 'The reply follows the player into the wedding talk. In-motion pressures may at most show as a faint background detail, and nothing steers the player back toward them.'
   },
   {
     id: 'continue-scene',

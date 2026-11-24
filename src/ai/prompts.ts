@@ -13,6 +13,7 @@ import { inferContextWindowTokens } from './contextBudget';
 import { deliveryPhrase, parseDeliveryTone } from './deliveryTone';
 import { stancePlaybook } from './storyStance';
 import { offscreenLines } from './offscreenLife';
+import { currentsWriterSection, isCurrent } from './currents';
 import { placesAround, placeWhereLine, resolveScenePlace } from '../places';
 
 
@@ -678,20 +679,24 @@ function formatPriorEpisodesSection(
 
 
 function plotTargetsSection(episode: Episode, season: Season): string | null {
+  // The author's targets. Currents are drafted by the AI and listed apart, below.
   const ep = (episode.plotTargets ?? [])
-    .filter((t) => t.status === 'pending' && t.text.trim())
+    .filter((t) => t.status === 'pending' && t.text.trim() && !isCurrent(t))
     .slice(0, PLOT_TARGET_CAP)
     .map((t) => `- ${clipText(t.text.trim(), 220)}`);
   const sea = (season.plotTargets ?? [])
-    .filter((t) => t.status === 'pending' && t.text.trim())
+    .filter((t) => t.status === 'pending' && t.text.trim() && !isCurrent(t))
     .slice(0, PLOT_TARGET_CAP)
     .map((t) => `- ${clipText(t.text.trim(), 220)}`);
-  if (ep.length === 0 && sea.length === 0) return null;
+  const currents = currentsWriterSection(episode.plotTargets);
+  if (ep.length === 0 && sea.length === 0) return currents;
   const parts: string[] = [
-    '## Plot targets — work toward these when natural; do not force every target in one turn; prefer story-driven progress over checklist completion'
+    '## Plot targets — work toward these when natural; do not force every target in one turn; prefer story-driven progress over checklist completion' +
+      (currents ? '. These are the author\'s and outrank anything merely in motion' : '')
   ];
   if (ep.length > 0) parts.push(`Episode:\n${ep.join('\n')}`);
   if (sea.length > 0) parts.push(`Season arc:\n${sea.join('\n')}`);
+  if (currents) parts.push(currents);
   return parts.join('\n');
 }
 

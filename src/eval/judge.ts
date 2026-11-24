@@ -25,7 +25,7 @@ const RUBRIC: Record<JudgeDimension, string> = {
   character: 'NPCs act from their own traits, wants, fears, mood, memories, and stance toward the player.',
   address: 'The reply answers what the player actually did or said, and the person addressed is the one who answers.',
   walls: 'No one reveals a secret they would keep, and no one knows what they must not know. Judge by meaning, not wording. 5 = clean.',
-  agency: 'The narrator never writes the player’s words, choices, thoughts, or feelings. Showing what the player physically sees is fine.',
+  agency: 'The narrator never writes the player’s words, choices, thoughts, or feelings, and never steers the player toward a plot they did not pick up. Showing what the player physically sees is fine.',
   craft: 'Grounded, specific prose that fits the world; no repetition, purple padding, summarising, or breaking the fourth wall.'
 };
 
@@ -86,6 +86,10 @@ export function judgePrompt(scenario: EvalScenario, pieces: EvalPiece[]): { syst
     ...present.map(sheet),
     ...guests,
     absent.length ? `NOT PRESENT (must not speak): ${absent.join(', ')}` : '',
+    '',
+    scenario.currents?.length
+      ? `IN MOTION (the writer was told these are background pressures that may surface lightly, never steer the player):\n${scenario.currents.map((c) => `- ${c}`).join('\n')}`
+      : '',
     '',
     'EARLIER:',
     ...scenario.history.map((l) => `[${lineLabel(l.who)}] ${l.text}`),

@@ -451,6 +451,12 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 <Chip active={world.ai.offscreenLife === false} onClick={() => patchAI({ offscreenLife: false })}>Off</Chip>
               </div>
             </Field>
+            <Field label="What's in motion" note="Each chapter, the AI notes a few things already moving in the world (people's aims, the season, what your actions set off) and keeps them current as you play. Pressures, never a script. One utility-model call per chapter.">
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <Chip active={world.ai.chapterCurrents !== false} onClick={() => patchAI({ chapterCurrents: true })}>On</Chip>
+                <Chip active={world.ai.chapterCurrents === false} onClick={() => patchAI({ chapterCurrents: false })}>Off</Chip>
+              </div>
+            </Field>
             <GameRulesSection
               world={world}
               player={characters.find((c) => c.isPlayer)}
@@ -797,9 +803,11 @@ function ContextPreview({
       </ContextSection>
 
       {(() => {
-        const epTargets = (episode.plotTargets ?? []).filter((t) => t.status === 'pending' && t.text.trim());
+        const pending = (episode.plotTargets ?? []).filter((t) => t.status === 'pending' && t.text.trim());
+        const epTargets = pending.filter((t) => t.source !== 'outline');
+        const inMotion = pending.filter((t) => t.source === 'outline');
         const seaTargets = (season.plotTargets ?? []).filter((t) => t.status === 'pending' && t.text.trim());
-        if (epTargets.length === 0 && seaTargets.length === 0) return null;
+        if (epTargets.length === 0 && seaTargets.length === 0 && inMotion.length === 0) return null;
         return (
           <ContextSection title="plot targets" note="work toward when natural">
             {epTargets.length > 0 && (
@@ -808,6 +816,19 @@ function ContextPreview({
                   <li key={t.id}>{t.text}</li>
                 ))}
               </ul>
+            )}
+            {inMotion.length > 0 && (
+              <>
+                <div style={{ opacity: 0.55, fontSize: 12 }}>In motion (AI currents; pressures, not a script)</div>
+                <ul style={{ margin: 0, paddingLeft: 18, opacity: 0.85 }}>
+                  {inMotion.map((t) => (
+                    <li key={t.id}>
+                      {t.text}
+                      {t.note ? <span style={{ opacity: 0.7 }}> · lately {t.note}</span> : null}
+                    </li>
+                  ))}
+                </ul>
+              </>
             )}
             {seaTargets.length > 0 && (
               <>

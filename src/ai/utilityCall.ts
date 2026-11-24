@@ -228,6 +228,19 @@ export const LIVE_MEMORY_TOOL: ToolSpec = {
         }
       },
       suggestions: { type: 'array', items: { type: 'string' } },
+      currents: {
+        type: 'array',
+        description: 'Only listed Currents the newest beats touched. Omit untouched ones.',
+        items: {
+          type: 'object',
+          properties: {
+            n: { type: 'integer' },
+            status: { type: 'string', enum: ['stirred', 'bent', 'resolved', 'faded'] },
+            note: { type: 'string' },
+            now: { type: 'string' }
+          }
+        }
+      },
       inventory: {
         type: 'array',
         items: {

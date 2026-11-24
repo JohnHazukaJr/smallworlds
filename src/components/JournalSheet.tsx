@@ -2,10 +2,17 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { useState, type ReactNode } from 'react';
 import { FALLBACK_BOND_MARKS, FALLBACK_GOAL_MARKS, meaningWords } from '../bonds';
 import { db, safeWrite } from '../db';
-import type { Character, Episode, OpenThread, PlotTargetStatus, Season } from '../types';
+import type { Character, CurrentKind, Episode, OpenThread, PlotTarget, PlotTargetStatus, Season, World } from '../types';
 import { Mono, Sheet } from '../ui/bits';
+import { draftChapterCurrents } from '../ai/engine';
+import { currentsOn } from '../ai/currents';
+import { formatUserError } from '../errors';
 
 const TARGET_LABEL: Record<PlotTargetStatus, string> = { pending: 'open', hit: 'done', dropped: 'dropped' };
+const CURRENT_LABEL: Record<PlotTargetStatus, string> = { pending: 'in motion', hit: 'settled', dropped: 'faded' };
+const KIND_LABEL: Record<CurrentKind, string> = {
+  agenda: 'someone\'s aim', season: 'the season', consequence: 'your doing', thread: 'a loose end', texture: 'texture'
+};
 
 function Section({ title, empty, children }: { title: string; empty?: string; children?: ReactNode }) {
   return (
@@ -36,16 +43,20 @@ function Row({ text, meta, actions, faded }: { text: string; meta?: string; acti
  * for, and how their goals and closest ties stand.
  */
 export function JournalSheet({
-  open, onClose, narrow, season, episode, characters
+  open, onClose, narrow, world, season, episode, characters
 }: {
   open: boolean;
   onClose: () => void;
   narrow: boolean;
+  world: World;
   season: Season;
   episode: Episode;
   characters: Character[];
 }) {
   const [showResolved, setShowResolved] = useState(false);
+  // Hidden until asked: knowing what is in motion spoils finding it in play.
+  const [showCurrents, setShowCurrents] = useState(false);
+  const [drafting, setDrafting] = useState(false);
   const [saveError, setSaveError] = useState('');
   const threads = useLiveQuery(
     async () => (open ? db.threads.where('seasonId').equals(season.id).toArray() : []),
@@ -55,8 +66,34 @@ export function JournalSheet({
     .filter((t) => t.status === 'open')
     .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned) || b.createdAt - a.createdAt);
   const resolved = threads.filter((t) => t.status === 'resolved').sort((a, b) => b.createdAt - a.createdAt);
-  const targets = episode.plotTargets ?? [];
+  const targets = (episode.plotTargets ?? []).filter((t) => t.source !== 'outline');
+  const currents = (episode.plotTargets ?? []).filter((t) => t.source === 'outline');
+  const liveCount = currents.filter((t) => t.status === 'pending').length;
   const player = characters.find((c) => c.isPlayer);
+
+  const patchTarget = (id: string, patch: (t: PlotTarget) => PlotTarget) =>
+    void safeWrite(async () => {
+      const fresh = await db.episodes.get(episode.id);
+      if (!fresh) return;
+      await db.episodes.update(episode.id, {
+        plotTargets: (fresh.plotTargets ?? []).map((t) => (t.id === id ? patch(t) : t)),
+        updatedAt: Date.now()
+      });
+    }, setSaveError);
+  // Yours now: an author target, which outranks currents and is never redrafted.
+  const adopt = (id: string) => patchTarget(id, ({ id: keep, text }) => ({ id: keep, text, status: 'pending', source: 'manual' }));
+  const fade = (id: string) => patchTarget(id, (t) => ({ ...t, status: 'dropped', note: 'dropped by you' }));
+  const redraft = async () => {
+    setDrafting(true);
+    setSaveError('');
+    try {
+      await draftChapterCurrents(world, season, episode.id, { force: true });
+    } catch (e) {
+      setSaveError(formatUserError(e));
+    } finally {
+      setDrafting(false);
+    }
+  };
   const goals = (player?.goals ?? []).filter((g) => g.text.trim());
   const bonds = player
     ? characters.flatMap((c) => c.isPlayer ? [] : c.relationships
@@ -117,6 +154,49 @@ export function JournalSheet({
           <Row key={t.id} text={t.text} meta={TARGET_LABEL[t.status]} faded={t.status !== 'pending'} />
         )) : undefined}
       </Section>
+
+      {currentsOn(world) && (
+        <Section title={`In motion · ${liveCount}`}>
+          <div className="label" style={{ lineHeight: 1.5 }}>
+            What the world is doing on its own: people&rsquo;s aims, the season, what your actions set off.
+            The story lets these surface; it never pushes you toward them.
+          </div>
+          <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+            <button type="button" className="btn-quiet" style={small} aria-expanded={showCurrents}
+              onClick={() => setShowCurrents((v) => !v)}>
+              {showCurrents ? 'Hide' : 'Show'} (may spoil)
+            </button>
+            <button type="button" className="btn-quiet" style={small} disabled={drafting} onClick={() => void redraft()}
+              title="Read the story so far again and redraft what is in motion">
+              {drafting ? 'Redrafting…' : 'Redraft'}
+            </button>
+          </div>
+          {showCurrents && (currents.length === 0
+            ? <div className="label">Nothing yet. Currents are drafted after the first reply of a chapter.</div>
+            : currents.map((t) => (
+              <Row
+                key={t.id}
+                text={t.text}
+                faded={t.status !== 'pending'}
+                meta={[
+                  CURRENT_LABEL[t.status],
+                  t.kind ? KIND_LABEL[t.kind] : '',
+                  t.who?.length ? t.who.join(', ') : '',
+                  t.note ? `lately: ${t.note}` : '',
+                  t.status === 'pending' && t.could?.length ? `could go: ${t.could.join(' / ')}` : ''
+                ].filter(Boolean).join(' · ')}
+                actions={t.status === 'pending' ? (
+                  <>
+                    <button type="button" className="btn-quiet" style={small}
+                      title="Make this one of your own plot targets"
+                      onClick={() => adopt(t.id)}>Make it mine</button>
+                    <button type="button" className="btn-quiet" style={small} onClick={() => fade(t.id)}>Drop</button>
+                  </>
+                ) : undefined}
+              />
+            )))}
+        </Section>
+      )}
 
       {player && (
         <Section title={`${player.name || 'Your'} goals`} empty="No goals yet. Add them on the character card.">

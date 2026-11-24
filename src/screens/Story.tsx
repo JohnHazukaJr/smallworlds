@@ -2937,6 +2937,7 @@ export function Story() {
         open={journalOpen}
         onClose={() => setJournalOpen(false)}
         narrow={sheetBottom}
+        world={world}
         season={season}
         episode={episode}
         characters={characters}

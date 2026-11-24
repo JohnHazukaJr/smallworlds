@@ -28,6 +28,11 @@ export interface WorldAISettings {
    * what happened. Missing means on; false turns it off.
    */
   offscreenLife?: boolean;
+  /**
+   * Each chapter drafts a few currents (what is in motion) from the story so far and keeps
+   * them up to date as play moves them. Missing means on; false turns it off.
+   */
+  chapterCurrents?: boolean;
   /** free text describing what is/isn't allowed in this world */
   contentNotes: string;
   /** hard rules the narrator must never break */
@@ -165,13 +170,29 @@ export interface CarriedBeat {
 
 export type PlotTargetStatus = 'pending' | 'hit' | 'dropped';
 
-/** Author-selected beat the director should work toward (not an open thread). */
+/** What kind of pressure an AI-drafted current is. */
+export type CurrentKind = 'agenda' | 'season' | 'consequence' | 'thread' | 'texture';
+
+/**
+ * A beat the director should work toward (not an open thread).
+ * `source: 'outline'` marks a current: something already in motion in the world that the
+ * AI drafted from the story so far. Currents are pressures, never a script; the author's
+ * own targets (every other source) always outrank them.
+ */
 export interface PlotTarget {
   id: string;
   text: string;
   status: PlotTargetStatus;
   /** where it was seeded from */
-  source: 'wrap-beat' | 'season-raise' | 'manual' | 'carried';
+  source: 'wrap-beat' | 'season-raise' | 'manual' | 'carried' | 'outline';
+  /** Currents only. */
+  kind?: CurrentKind;
+  /** Currents only: who is driving it, by name. */
+  who?: string[];
+  /** Currents only: places it could go. None is required. */
+  could?: string[];
+  /** Currents only: the latest way play moved it. */
+  note?: string;
 }
 
 export interface Season {
@@ -290,8 +311,10 @@ export interface Episode {
    * was last filed mid-episode. Throttles the utility pass between wraps.
    */
   liveCanonAtChars?: number;
-  /** Episode plot targets the director should work toward (Aim-from-wrap / manual). */
+  /** Episode plot targets the director should work toward (Aim-from-wrap / manual / outline currents). */
   plotTargets?: PlotTarget[];
+  /** When this chapter's currents were drafted. Set once, so deleting them does not bring them back. */
+  currentsAt?: number;
   /** Next-move ideas for the player, written after the latest turn. Stale once a newer turn lands. */
   suggestions?: { afterTurnId: string; items: string[] };
   status: 'active' | 'ended';
