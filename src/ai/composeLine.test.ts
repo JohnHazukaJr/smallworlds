@@ -16,7 +16,7 @@ describe('composeOutgoingLine', () => {
     });
   });
 
-  it('stores a bare player line as an action, even when someone else is here', () => {
+  it('sends an ambiguous bare line as a move that may be speech or action', () => {
     expect(composeOutgoingLine({
       direct: false,
       asCharacterId: null,
@@ -24,7 +24,7 @@ describe('composeOutgoingLine', () => {
       tone: 'sarcastic',
       text: 'Then write it again.'
     })).toEqual({
-      mode: 'act',
+      mode: 'play',
       text: '[sarcastic] Then write it again.',
       asCharacterId: null
     });
@@ -93,5 +93,23 @@ describe('summaryClearPatch', () => {
     expect(summaryClearPatch(null)).toBeNull();
     expect(summaryClearPatch('   ')).toBeNull();
     expect(summaryClearPatch(undefined)).toBeNull();
+  });
+});
+describe('bare lines', () => {
+  const send = (text: string) => composeOutgoingLine({
+    direct: false, asCharacterId: null, sceneHasOthers: true, tone: null, text
+  }).mode;
+
+  it('treats a question, a greeting, or words to "you" as spoken', () => {
+    expect(send("Hey, what's your name?")).toBe('speak');
+    expect(send('where were you last night')).toBe('speak');
+    expect(send('Thanks for the drink')).toBe('speak');
+    expect(send('Nice place you have here')).toBe('speak');
+  });
+
+  it('treats a plain action as an action', () => {
+    expect(send('I draw my sword')).toBe('act');
+    expect(send('open the door')).toBe('act');
+    expect(send('I sit down at the bar')).toBe('act');
   });
 });

@@ -97,10 +97,10 @@ describe('buildSceneReply', () => {
     const last = built.messages[built.messages.length - 1];
     expect(last?.role).toBe('user');
     const cue = last?.content ?? '';
-    expect(cue).toContain('Ada answers in their own voice');
-    expect(cue).toContain('Anyone else already here may speak');
+    expect(cue).toContain("Ada responds directly to the player's line");
+    expect(cue).toContain('Anyone else already here may cut in');
     expect(cue).toContain('Where is the ledger?');
-    expect(cue.lastIndexOf('Where is the ledger?')).toBeGreaterThan(cue.indexOf('Ada answers'));
+    expect(cue.lastIndexOf('Where is the ledger?')).toBeGreaterThan(cue.indexOf('Ada responds'));
     expect(cue).not.toContain('Only Ada may speak');
     expect(built.system).toContain('## Here');
     expect(built.system).toContain('### Ada');
@@ -172,10 +172,10 @@ describe('buildSceneReply', () => {
     });
     const cue = built.messages[built.messages.length - 1]?.content ?? '';
     expect(cue).toContain('This is said to Ada.');
-    expect(cue).toContain('Ada answers in their own voice');
-    expect(cue.indexOf('This is said to Ada.')).toBeLessThan(cue.indexOf('Ada answers'));
+    expect(cue).toContain("Ada responds directly to the player's line");
+    expect(cue.indexOf('This is said to Ada.')).toBeLessThan(cue.indexOf('Ada responds'));
     expect(cue).toContain('Where were you?');
-    expect(cue.lastIndexOf('Where were you?')).toBeGreaterThan(cue.indexOf('Ada answers'));
+    expect(cue.lastIndexOf('Where were you?')).toBeGreaterThan(cue.indexOf('Ada responds'));
   });
 
   it('keeps an injected line said to the player as narration', () => {
@@ -222,8 +222,8 @@ describe('buildSceneReply', () => {
       ]
     });
     const cue = built.messages[built.messages.length - 1]?.content ?? '';
-    expect(cue).toContain('Ada answers in their own voice');
-    expect(cue).toContain('Anyone else already here may speak');
+    expect(cue).toContain("Ada responds directly to the player's line");
+    expect(cue).toContain('Anyone else already here may cut in');
     expect(cue).not.toContain('Only Ada');
     expect(cue).not.toContain('do not get a line');
     expect(built.system).toContain('### Ada');
@@ -511,5 +511,26 @@ describe('bond meanings in the scene prompt', () => {
     expect(built.system).toContain('you know the office has a second book');
     expect(built.system).toContain('Do not skip to the next meaning in this scene.');
     expect(built.system).not.toMatch(/\b73\b/);
+  });
+});
+
+describe('buildSceneReply player line', () => {
+  it('sends the player line once, in the cue, when it is already the last turn', () => {
+    const c = ctx();
+    c.turns = [{
+      id: 't1', episodeId: 'e', worldId: 'w', role: 'user', mode: 'speak',
+      text: '"Where is the ledger?"', createdAt: 1
+    } as PromptContext['turns'][number]];
+    const built = buildSceneReply({
+      ctx: c,
+      mode: 'speak',
+      playerText: '"Where is the ledger?"',
+      length: 'scene',
+      speakers: [{ id: 'c1', name: 'Ada', kind: 'cast' }],
+      answerers: [{ name: 'Ada' }],
+      present: [{ name: 'Ada' }]
+    });
+    const all = built.messages.map((m) => m.content).join('\n');
+    expect(all.split('Where is the ledger?').length - 1).toBe(1);
   });
 });

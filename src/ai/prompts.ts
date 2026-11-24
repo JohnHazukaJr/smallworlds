@@ -2,11 +2,12 @@ import { looksText } from '../looks';
 import { intimateAllowed } from './portrait';
 import { activeMechanics, inventoryLine } from '../mechanics';
 import { BEAT_FORMAT_RULES, beatsToTagged, validBeats } from './beatProtocol';
+import { splitSceneReply, type SceneSpeaker } from './sceneReply';
 import type {
   CalendarEvent, Character, ComposeMode, ContinuityFact, Episode, EpisodeGuest, Location, OpenThread, Season, Turn, TurnLength, World
 } from '../types';
 import { playerGoalBlock } from '../bonds';
-import { PLOT_TARGET_CAP, storyStanceOf, worldCalendar } from '../worldOps';
+import { isGeneratedShapeTag, PLOT_TARGET_CAP, storyStanceOf, worldCalendar } from '../worldOps';
 import type { ChatMessage } from './client';
 import { inferContextWindowTokens } from './contextBudget';
 import { deliveryPhrase, parseDeliveryTone } from './deliveryTone';
@@ -26,14 +27,14 @@ export const ANTI_SLOP_PROSE =
 /** What makes people in the scene sound like people instead of a helpful assistant. */
 export const HUMAN_DIALOGUE =
   `## How people talk\n` +
-  `- Everyone speaks to get something, avoid something, or protect themselves. A line serves what that person wants right now, not the plot and not the player.\n` +
-  `- People rarely answer the exact question. They deflect, answer a different one, answer with a question, change the subject, joke, or go quiet.\n` +
+  `- First, respond to what the player just said or did. The person it was aimed at reacts to it directly: they answer, refuse, push back, or dodge on purpose, but it is plainly a reply to that line.\n` +
+  `- Talk like a real person in this exact situation, not like a narrator. No speeches, no explaining the theme, no summing up the mood, no poetic monologue.\n` +
   `- Most lines are short. Fragments, trailing off, interrupting, and restarting a sentence are normal. A long speech only when this person would really hold the floor.\n` +
   `- Contractions and the words this person would actually use — their age, work, background, and mood. Nobody explains their own feelings aloud ("I feel conflicted") unless that is who they are.\n` +
-  `- Do not echo or paraphrase the player's words back, do not agree with or validate everything, and do not end each line with a question that hands the turn back.\n` +
+  `- Everyone wants something right now. Let it show in what they say and how, but they still deal with what is in front of them.\n` +
+  `- Do not echo or paraphrase the player's words back, do not agree with or validate everything, and do not end every reply on a question.\n` +
   `- Not everyone is warm or helpful. Strangers are guarded, tired people are curt, people who dislike the player show it, and people keep grudges from earlier in the story.\n` +
-  `- People have their own business: they keep doing what they were doing, get distracted, misunderstand, or disagree.\n` +
-  `- Subtext over statement. What someone leaves unsaid, and what their hands do meanwhile, carries the feeling.`;
+  `- Subtext is fine, but the words still answer the moment. What someone leaves unsaid, and what their hands do meanwhile, carries the feeling.`;
 
 
 export type PromptPack = 'normal' | 'tight';
@@ -778,6 +779,12 @@ export const MODE_PREFIX: Record<ComposeMode, (input: string) => string> = {
   play: (input) => {
     const { tone, body } = parseDeliveryTone(input);
     const delivery = tone ? ` ${deliveryPhrase(tone)}` : '';
+    if (!/["“”*]/.test(body)) {
+      return (
+        `(The player's move${delivery} — treat what is aimed at someone as said aloud, the rest as action. ` +
+        `Do not add to it, and do not invent dialogue for them): ${body}`
+      );
+    }
     return (
       `(The player both acts and speaks${delivery}. ` +
       `Honor *actions* and "dialogue" exactly as written — do not invent extra spoken lines or strip the gestures): ${body}`
@@ -917,6 +924,26 @@ function latestUserTurnId(turns: Turn[]): string | null {
   return null;
 }
 
+/** Older prose turns, shown to the scene writer in the same @tag form it writes. */
+function taggedFromProse(text: string, characters: Character[], guests: EpisodeGuest[]): string {
+  const speakers: SceneSpeaker[] = [
+    ...characters.filter((c) => !c.isPlayer && c.name.trim()).map((c) => ({
+      id: c.id,
+      name: c.name.trim(),
+      kind: 'cast' as const,
+      ...(c.aliases?.length ? { aliases: c.aliases } : {})
+    })),
+    ...guests.filter((g) => g.name.trim()).map((g) => ({ id: g.id, name: g.name.trim(), kind: 'guest' as const }))
+  ];
+  const pieces = splitSceneReply(text, speakers);
+  if (!pieces.some((piece) => piece.role === 'character')) return `@narration\n${text.trim()}`;
+  return beatsToTagged(pieces.map((piece) => ({
+    role: piece.role,
+    text: piece.text,
+    ...(piece.speakerId ? { speakerId: piece.speakerId, name: speakers.find((s) => s.id === piece.speakerId)?.name } : {})
+  })));
+}
+
 function turnToChatContent(
   t: Turn,
   characters: Character[],
@@ -940,13 +967,14 @@ function turnToChatContent(
   if (t.role === 'character') {
     const name = resolveSpeakerName(t, characters, guests);
     const id = t.guestId ?? t.characterId ?? '';
+    if (voice.kind === 'narrator') return { role: 'user', content: `@${name}\n${t.text}` };
     const mine = voice.kind === 'speaker' && id === voice.speakerId;
     // Only this speaker's own lines are assistant. Everyone else is context.
     return { role: mine ? 'assistant' : 'user', content: `[${name}]\n${t.text}` };
   }
   if (voice.kind === 'narrator') {
     const beats = validBeats(t);
-    return { role: 'assistant', content: beats ? beatsToTagged(beats) : t.text };
+    return { role: 'assistant', content: beats ? beatsToTagged(beats) : taggedFromProse(t.text, characters, guests) };
   }
   return { role: 'user', content: `[Narrator]\n${t.text}` };
 }
@@ -1115,8 +1143,8 @@ export function sceneDateContextLine(sceneDate: string): string {
 /** One reply for the whole beat: narration and the lines of the people who may speak. */
 const SCENE_REPLY_TOKENS: Record<TurnLength, number> = {
   beat: 900,
-  scene: 1600,
-  episode: 2600
+  scene: 1200,
+  episode: 2000
 };
 
 export function sceneReplyTokens(length: TurnLength): number {
@@ -1124,9 +1152,9 @@ export function sceneReplyTokens(length: TurnLength): number {
 }
 
 export function sceneLengthHint(length: TurnLength): string {
-  if (length === 'beat') return 'Short reply: about 80–150 words for the whole scene.';
-  if (length === 'scene') return 'Medium reply: about 200–400 words for the whole scene.';
-  return 'Long reply: about 500–800 words for the whole scene.';
+  if (length === 'beat') return 'Short reply: about 40–100 words in all.';
+  if (length === 'scene') return 'Reply length: about 60–180 words in all.';
+  return 'Long reply: about 250–500 words in all.';
 }
 
 export interface SceneVoice {
@@ -1150,6 +1178,25 @@ export interface SceneVoice {
   memories?: string[];
   /** How they look right now: overall, face, hair, body, clothes, wearing now. */
   looks?: string;
+  /** Traits, flaws, fears, and habits, in a line. */
+  personality?: string;
+  /** The author's standing instructions for this person. */
+  notes?: string;
+}
+
+/** The short tag a card offers: the first name when nobody else here shares it. */
+function cardTags(voices: SceneVoice[]): Map<string, string> {
+  const firsts = new Map<string, number>();
+  for (const voice of voices) {
+    const first = voice.name.trim().split(/\s+/)[0]?.toLowerCase() ?? '';
+    if (first) firsts.set(first, (firsts.get(first) ?? 0) + 1);
+  }
+  const out = new Map<string, string>();
+  for (const voice of voices) {
+    const first = voice.name.trim().split(/\s+/)[0] ?? '';
+    if (first.length >= 2 && firsts.get(first.toLowerCase()) === 1 && !/^the$/i.test(first)) out.set(voice.id, first);
+  }
+  return out;
 }
 
 /** Full cards for the people who should answer, then the rest of a small room. */
@@ -1187,12 +1234,13 @@ export function characterLooksLine(world: World, c: Character): string {
   return looksText(c, { adult: intimateAllowed(world, c), wearing: true });
 }
 
-function sceneSpeakerCard(voice: SceneVoice): string {
-  const example = voice.example?.trim();
+function sceneSpeakerCard(voice: SceneVoice, tag?: string): string {
+  const example = voice.example?.trim().replace(/^["“”]+|["“”]+$/g, '').trim();
   const lines = [
-    `### ${voice.name}`,
+    tag && tag !== voice.name ? `### ${voice.name} (tag: @${tag})` : `### ${voice.name}`,
     voice.role && `Role: ${voice.role}`,
-    voice.brief && `Who they are here: ${clipText(voice.brief, 180)}`,
+    voice.brief && `Who they are here: ${clipText(voice.brief, voice.kind === 'cast' ? 320 : 180)}`,
+    voice.personality && `Personality: ${clipText(voice.personality, 300)}`,
     voice.looks && `Looks (keep consistent; mention only what the moment notices): ${clipText(voice.looks, 420)}`,
     voice.voice && `Voice: ${clipText(voice.voice, 240)}`,
     voice.want && `Wants: ${clipText(voice.want, 160)}`,
@@ -1204,24 +1252,33 @@ function sceneSpeakerCard(voice: SceneVoice): string {
     voice.memories?.length
       ? `Remembers (let it colour what they do; do not recite it):\n${voice.memories.map((m) => `- ${clipText(m, 220)}`).join('\n')}`
       : '',
-    voice.mustNotKnow && `Must not know or say: ${clipText(voice.mustNotKnow, 240)}`
+    voice.mustNotKnow && `Must not know or say: ${clipText(voice.mustNotKnow, 240)}`,
+    voice.notes && `Author notes for this person: ${clipText(voice.notes, 300)}`
   ];
   return lines.filter(Boolean).join('\n');
 }
 
-function answerLine(names: string[]): string {
+function answerLine(names: string[], reacting = true): string {
   if (names.length === 0) {
     return 'Nobody is here to speak. Write the consequence in narration. No quoted dialogue.';
   }
+  if (!reacting) {
+    return [
+      `${names.join(', ')} ${names.length === 1 ? 'carries' : 'carry'} this beat out loud, in their own voice.`,
+      'Spoken lines lead; narration only frames them.',
+      'Anyone else already here may cut in when the moment needs them.'
+    ].join(' ');
+  }
   const lead = names.length === 1
-    ? `${names[0]} answers in their own voice.`
+    ? `${names[0]} responds directly to the player's line, out loud, in their own voice.`
     : names.length === 2
-      ? `${names[0]} and ${names[1]} answer in their own voices.`
-      : `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]} answer in their own voices.`;
+      ? `${names[0]} and ${names[1]} respond directly to the player's line, out loud, in their own voices.`
+      : `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]} respond directly to the player's line, out loud, in their own voices.`;
+  const first = names[0];
   return [
     lead,
-    'Anyone else already here may speak or act when the moment needs them.',
-    'Do not write the player\'s next line, and do not bring in anyone who is not here.'
+    `Lead with ${first}'s spoken response in their @ beat. Narration only for what the moment needs: a gesture, a sound, what changes. Keep narration to a third of the reply or less. Stop when it is the player's turn.`,
+    'Anyone else already here may cut in when the moment needs them.'
   ].join(' ');
 }
 
@@ -1248,7 +1305,7 @@ export function sceneTurnCue(opts: {
         : `Stay with ${opts.rewrite.speakerName}. Do not hand the line to anyone else.`
     : opts.narrationOnly
       ? 'Nobody new speaks. Write narration only. No quoted dialogue.'
-      : answerLine(names);
+      : answerLine(names, !(opts.mode === 'continue' && !opts.playerText.trim()));
   const said = !opts.narrationOnly && saidTo ? `This is said to ${saidTo}.` : '';
   const move = opts.rewrite
     ? ''
@@ -1290,8 +1347,8 @@ export function buildSceneReply(opts: SceneReplyInput): { system: string; messag
   const rules = ai.narratorRules.filter((r) => r.trim());
   sections.push(
     [
-      `You write the next stretch of "${ctx.world.title}" in ${ai.pov} person, ${ai.tense} tense.`,
-      'Write narration and spoken beats in one reply.',
+      `You run the scene in "${ctx.world.title}". The player has just spoken or acted; the people here react to it, in ${ai.pov} person, ${ai.tense} tense.`,
+      'The people here talk. Their spoken lines carry the scene; narration only frames them.',
       BEAT_FORMAT_RULES,
       'Never write the player\'s dialogue, decisions, or inner thoughts. Do not repeat their line.',
       'Do not recap the transcript. Do not bring in anyone who is not already here.',
@@ -1304,7 +1361,7 @@ export function buildSceneReply(opts: SceneReplyInput): { system: string; messag
   sections.push(ANTI_SLOP_PROSE);
   if (!opts.narrationOnly) sections.push(HUMAN_DIALOGUE);
   sections.push(contentSection(ai));
-  if (ai.customInstructions.trim()) {
+  if (ai.customInstructions.trim() && !isGeneratedShapeTag(ai.customInstructions.trim())) {
     sections.push(`## Author's instructions (follow verbatim)\n${ai.customInstructions.trim()}`);
   }
   sections.push(situationPremise(ctx));
@@ -1338,7 +1395,8 @@ export function buildSceneReply(opts: SceneReplyInput): { system: string; messag
     const looks = c ? characterLooksLine(ctx.world, c) : '';
     return looks ? { ...voice, looks } : voice;
   });
-  const cards = cardVoices.map(sceneSpeakerCard).filter(Boolean);
+  const tags = cardTags(cardVoices);
+  const cards = cardVoices.map((voice) => sceneSpeakerCard(voice, tags.get(voice.id))).filter(Boolean);
   const listed = new Set(cardVoices.map((s) => s.name.trim().toLowerCase()));
   const also: Array<{ name: string; role?: string }> = [];
   const seen = new Set<string>();
@@ -1356,9 +1414,7 @@ export function buildSceneReply(opts: SceneReplyInput): { system: string; messag
   const inviteOthers = !opts.narrationOnly && (!opts.rewrite || opts.rewrite.speakerName === 'the narrator');
   const playerLooks = player ? characterLooksLine(ctx.world, player) : '';
   const playerLine = [
-    playerName
-      ? `The player is ${playerName}. Do not write their dialogue, decisions, or inner thoughts.`
-      : 'The player is here. Do not write their dialogue, decisions, or inner thoughts.',
+    playerName ? `The player is ${playerName}.` : 'The player is here.',
     playerLooks ? `How ${playerName || 'the player'} looks (keep consistent): ${clipText(playerLooks, 420)}` : ''
   ].filter(Boolean).join('\n');
   const goalBlock = playerGoalBlock(player?.goals);
@@ -1384,8 +1440,11 @@ export function buildSceneReply(opts: SceneReplyInput): { system: string; messag
   sections.push(...currentLocationBlock(ctx, { atmosphereOnly: true }));
 
   const system = sections.join('\n\n');
+  // The cue below carries this turn's move. Leaving it in the history too sends it twice.
+  const lastTurn = ctx.turns[ctx.turns.length - 1];
+  const cueCarriesMove = !opts.rewrite && !!opts.playerText.trim() && lastTurn?.role === 'user';
   const history = historyMessages(
-    ctx.turns,
+    cueCarriesMove ? ctx.turns.slice(0, -1) : ctx.turns,
     ctx.characters,
     ctx.episode.guests ?? [],
     ctx.episode,

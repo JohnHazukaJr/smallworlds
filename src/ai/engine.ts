@@ -379,11 +379,22 @@ function sceneVoiceFromCharacter(c: Character, room: Character[], recallQuery = 
   const condition = liveCardNote(c.state?.condition);
   const ties = tiesInRoom(c, room);
   const memories = recallMemories(c.memories, recallQuery).map(memoryCardLine);
+  const personality = [
+    c.traits?.trim(),
+    c.flaws?.trim() && `Flaws: ${c.flaws.trim()}`,
+    c.fears?.trim() && `Fears: ${c.fears.trim()}`,
+    c.mannerisms?.trim() && `Habits: ${c.mannerisms.trim()}`
+  ].filter(Boolean).join('. ');
+  const brief = c.summary?.trim();
+  const notes = c.customInstructions?.trim();
   return {
     id: c.id,
     name: c.name,
     kind: 'cast',
     role: c.role,
+    ...(brief ? { brief } : {}),
+    ...(personality ? { personality } : {}),
+    ...(notes ? { notes } : {}),
     voice: c.speechStyle,
     want: liveCardNote(c.state?.goal),
     ...(emotion ? { emotion } : {}),
@@ -703,6 +714,12 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
   const roomSpeakers = injectionReply
     ? (hands && !hands.isPlayer ? roomSceneSpeakers([hands], []) : [])
     : roomSceneSpeakers(inScene, sceneGuests());
+  // Named cast elsewhere: a tag naming one still credits them, never the narrator.
+  const offstageSpeakers = injectionReply
+    ? []
+    : roomSceneSpeakers(ctx.characters.filter((c) => !inScene.some((x) => x.id === c.id)), []);
+  // The person asked to answer. A quote nobody else claims is theirs.
+  const answerer = picked[0] ? roomSpeakers.find((speaker) => speaker.id === picked[0].id) : undefined;
   const present = [
     ...inScene.map((c) => ({ name: c.name, role: c.role })),
     ...sceneGuests().map((g) => ({ name: g.name, role: g.brief }))
@@ -789,7 +806,7 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
     const carry = prefix.beats?.[prefix.beats.length - 1];
     /** Tagged output becomes stored prose plus exact beats; untagged output stays as written. */
     const render = (raw: string, partial: boolean): { prose: string; beats?: TurnBeat[] } => {
-      const parsed = parseBeats(raw, roomSpeakers, { partial, carry });
+      const parsed = parseBeats(raw, roomSpeakers, { partial, carry, answerer, offstage: offstageSpeakers });
       return parsed ?? { prose: raw.trim() };
     };
     const show = (part: { prose: string; beats?: TurnBeat[] }) => {
@@ -882,7 +899,8 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
           ]),
           opts.onNotice
         );
-        if (!rewritten.text.trim() || sceneWallLeak(rewritten.text, roomSpeakers, ctx.characters, rewritten.beats)) {
+        // A rewrite that still brushes the secret is kept: losing the player's turn is worse.
+        if (!rewritten.text.trim()) {
           opts.onDelta('', meta);
           throw new KnowledgeWallError();
         }
@@ -1049,6 +1067,9 @@ async function regenerateBeatInner(opts: {
 
   const roomSpeakers = roomSceneSpeakers(inScene, guestsHere);
   const parseSpeakers = characterReroll ? sceneSpeakers : roomSpeakers;
+  const parseOpts = characterReroll
+    ? {}
+    : { offstage: roomSceneSpeakers(ctx.characters.filter((c) => !inScene.some((x) => x.id === c.id)), []) };
   // The move this reply answers already rolled; a re-roll of the prose does not re-roll the dice.
   const answered = answeredMove(ctx.turns, replaceAt);
   const settled = activeMechanics(opts.world) && answered?.check ? checkDirective(answered.check) : '';
@@ -1085,13 +1106,13 @@ async function regenerateBeatInner(opts: {
       job: 'prose',
       onDelta: (delta) => {
         acc += delta;
-        const live = parseBeats(acc, parseSpeakers, { partial: true });
+        const live = parseBeats(acc, parseSpeakers, { ...parseOpts, partial: true });
         if (live && !characterReroll) opts.onDelta(live.prose, { ...meta, beats: live.beats });
         else opts.onDelta(live?.prose ?? acc, meta);
       }
     });
     const raw = (result.text || acc).trim();
-    const parsed = parseBeats(raw, parseSpeakers);
+    const parsed = parseBeats(raw, parseSpeakers, parseOpts);
     replyBeats = parsed?.beats;
     return parsed ? parsed.prose.trim() : raw;
   });

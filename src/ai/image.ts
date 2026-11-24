@@ -469,7 +469,9 @@ export async function generateCharacterPortrait(opts: {
   const venice = veniceAdultProvider();
   const reading = subjectAgeReading(opts.character);
   const described = [allLooksText(opts.character), opts.character.mannerisms, opts.character.role].join('\n');
-  if (venice && opts.world.ai.mature && reading.adult && !reading.minor && textLooksSexual(described)) {
+  // The adult route is photoreal. A comic portrait stays on the configured model unless there is none.
+  const comicOnConfigured = opts.style === 'comic' && !!resolvedFirst && resolvedFirst.provider.kind === 'openai';
+  if (venice && !comicOnConfigured && opts.world.ai.mature && reading.adult && !reading.minor && textLooksSexual(described)) {
     if (framing === 'full' && face) {
       const kept = buildCharacterPortraitPrompt({
         framing, faceRef: true,
@@ -549,6 +551,8 @@ export function planAdultFaceEdit(opts: {
   subjects: { name?: string; age: string; appearance?: string; role?: string; looks?: Character['looks'] }[];
   faceCount: number;
   veniceConfigured: boolean;
+  /** A comic picture stays on the configured model: the adult route only draws photos. */
+  style?: PortraitStyle;
 }): AdultFaceEditPlan {
   // Sexual when the prompt says so, or when the people in it are described that way.
   const sexual = textLooksSexual(opts.userPrompt)
@@ -560,6 +564,7 @@ export function planAdultFaceEdit(opts: {
   if (readings.some((r) => r.minor)) {
     return { action: 'refuse', error: minorRefusalMessage(opts.subjects) };
   }
+  if (opts.style === 'comic') return { action: 'current' };
   if (opts.subjects.length === 0 || readings.some((r) => !r.adult)) {
     return { action: 'current' };
   }
@@ -665,7 +670,8 @@ export async function generateChapterPicture(opts: {
     userPrompt: opts.userPrompt,
     subjects,
     faceCount: faces.length,
-    veniceConfigured: !!venice
+    veniceConfigured: !!venice,
+    style: opts.style
   });
   if (adult.action === 'refuse') throw new AIError(adult.error);
   if (adult.action === 'generate' && venice) {

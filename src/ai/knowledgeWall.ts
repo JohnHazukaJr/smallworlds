@@ -21,18 +21,21 @@ function contentWords(s: string): Set<string> {
       .replace(/[^a-z0-9\s']/g, ' ')
       .split(/\s+/)
       .map((w) => w.replace(/'s$/g, '').replace(/^'+|'+$/g, ''))
-      .filter((w) => w.length >= 3 && !WALL_STOP.has(w))
+      .filter((w) => w.length >= 4 && !WALL_STOP.has(w))
   );
 }
 
-/** Token overlap; 0 unless at least two content words are shared. */
+/**
+ * Token overlap; 0 unless enough content words are shared. A short secret needs
+ * two shared words, a longer one three, so ordinary scene words do not trip it.
+ */
 export function knowledgeWallScore(text: string, wall: string): number {
   const A = contentWords(text);
   const B = contentWords(wall);
   if (A.size === 0 || B.size === 0) return 0;
   let inter = 0;
   for (const t of A) if (B.has(t)) inter++;
-  if (inter < 2) return 0;
+  if (inter < (B.size <= 4 ? 2 : 3)) return 0;
   return inter / Math.min(A.size, B.size);
 }
 

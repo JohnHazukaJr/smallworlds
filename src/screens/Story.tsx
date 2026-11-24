@@ -230,15 +230,24 @@ function parseTurn(turn: Turn, characters: Character[], guests: EpisodeGuest[] =
   }
   const speakers = speakersOnPage(characters, guests);
   const speakerLabels = speakers.flatMap((speaker) => [speaker.name, ...(speaker.aliases ?? [])]);
+  const pieces = speakers.length > 0 || validBeats(turn) ? scenePiecesOf(turn, speakers) : [];
+  const spokenQuotes = new Set(
+    pieces
+      .filter((piece) => piece.role === 'character')
+      .flatMap((piece) => [...piece.text.matchAll(/[“"]([^“”"]+)[”"]/g)].map((m) => m[1].trim()))
+  );
+  /** Drop a `Name: "..."` echo only when that line already shows in a speech block. Never lose words. */
   const stripNarration = (text: string) => {
     const stripped = speakers.length > 0
       ? stripNarratorEmbeddedDialogue(text, speakerLabels)
       : stripNarratorEmbeddedDialogue(text);
-    return stripped || text;
+    if (!stripped || stripped === text.trim()) return text;
+    const kept = new Set([...stripped.matchAll(/[“"]([^“”"]+)[”"]/g)].map((m) => m[1].trim()));
+    const removed = [...text.matchAll(/[“"]([^“”"]+)[”"]/g)].map((m) => m[1].trim()).filter((q) => !kept.has(q));
+    return removed.every((q) => spokenQuotes.has(q)) ? stripped : text;
   };
-  const pieces = speakers.length > 0 || validBeats(turn) ? scenePiecesOf(turn, speakers) : [];
   if (!pieces.some((piece) => piece.role === 'character' && piece.speakerId)) {
-    return [{ text: stripNarration(turn.text), kind: 'narration' }];
+    return [{ text: turn.text, kind: 'narration' }];
   }
   const blocks: ProseBlock[] = [];
   for (const piece of pieces) {

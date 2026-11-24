@@ -102,6 +102,9 @@ export function textLooksSexual(text: string): boolean {
   return SEXUAL_VISUAL.test(text);
 }
 
+/** How much of the written look a portrait prompt carries. */
+const PORTRAIT_LOOK_CHARS = 700;
+
 export function portraitStyleLine(style: PortraitStyle): string {
   return style === 'comic'
     ? 'Comic book illustration, ink linework and painted color, graphic novel, not a photograph'
@@ -174,8 +177,12 @@ export function minorRefusalMessage(subjects: Array<{
 export function buildCharacterPortraitPrompt(input: PortraitPromptInput): PortraitPromptResult {
   const reading = subjectAgeReading(input);
   const minor = reading.minor;
-  // The intimate section is sent only for an adult in an adult world.
-  const appearance = looksText(input, { adult: input.mature && !minor }).replace(/\.$/, '');
+  // The intimate section is sent only for an adult in an adult world. Voice and scent are not visual.
+  const appearance = clipLook(
+    looksText({ ...input, looks: input.looks ? { ...input.looks, senses: '' } : input.looks }, { adult: input.mature && !minor })
+      .replace(/\.$/, ''),
+    PORTRAIT_LOOK_CHARS
+  );
   const look = [appearance, input.mannerisms, input.role].map((s) => s.trim()).filter(Boolean);
   if (look.length === 0) {
     return { ok: false, error: 'Add an appearance, mannerisms, or role before generating a portrait.' };
@@ -201,17 +208,23 @@ export function buildCharacterPortraitPrompt(input: PortraitPromptInput): Portra
     : input.framing === 'full'
       ? 'Photorealistic full-length photograph, natural skin, real camera'
       : 'Photorealistic portrait photograph, natural skin, real camera, shallow depth of field';
+  const faceLine = !input.faceRef
+    ? ''
+    : input.style === 'comic'
+      ? `Image 1 is ${who}'s face, for identity only. Redraw them as a comic book illustration; do not copy the photo's realism`
+      : `Image 1 is ${who}'s face. Keep that face, hair, and coloring`;
+  // Style leads, so a long sheet can never push it out of the prompt.
   const bits = [
     frame,
-    input.faceRef ? `Image 1 is ${who}'s face. Keep that face, hair, and coloring` : '',
-    input.age.trim() ? `Age: ${input.age.trim()}` : '',
-    input.role.trim() ? `Role and costume: ${input.role.trim()}` : '',
-    appearance ? `Appearance: ${appearance}` : '',
-    input.mannerisms.trim() ? `Visible manner: ${input.mannerisms.trim()}` : '',
-    input.contentNotes.trim() ? `Boundaries: ${input.contentNotes.trim()}` : '',
     style,
+    faceLine,
+    input.age.trim() ? `Age: ${input.age.trim()}` : '',
+    input.role.trim() ? `Role and costume: ${clipLook(input.role.trim(), 200)}` : '',
+    appearance ? `Appearance: ${appearance}` : '',
+    input.mannerisms.trim() ? `Visible manner: ${clipLook(input.mannerisms.trim(), 160)}` : '',
+    input.contentNotes.trim() ? `Boundaries: ${clipLook(input.contentNotes.trim(), 200)}` : '',
     audience,
-    'No text, no watermark, no extra people'
+    input.style === 'comic' ? 'Drawn, not photographed. No text, no watermark, no extra people' : 'No text, no watermark, no extra people'
   ].filter(Boolean);
-  return { ok: true, prompt: bits.join('. ').slice(0, 1600) };
+  return { ok: true, prompt: bits.join('. ') };
 }

@@ -130,3 +130,36 @@ describe('portrait gallery as avatar', () => {
     ).background)).toContain('data:other');
   });
 });
+
+describe('comic portraits', () => {
+  const long = 'x'.repeat(0);
+  const sheet = {
+    ...base,
+    style: 'comic' as const,
+    appearance: 'Tall, weathered, broad through the shoulders, '.repeat(12),
+    looks: {
+      face: 'Sharp cheekbones, grey eyes, a scar through the left brow, '.repeat(6),
+      hair: 'Black with a silver streak, worn in a loose braid, '.repeat(6),
+      body: 'Rangy and strong, moves like a fencer, '.repeat(6),
+      clothing: 'Long grey registrar coat with ink-stained cuffs, '.repeat(6),
+      details: 'Gold ring she never removes, compass tattoo, '.repeat(6),
+      senses: 'Low rasping voice, smells of pipe smoke',
+      intimate: 'Adult details. '.repeat(10)
+    }
+  };
+
+  it('keeps the comic line and the closing lines however long the sheet is', () => {
+    const built = buildCharacterPortraitPrompt(sheet);
+    expect(built.ok).toBe(true);
+    const prompt = built.ok ? built.prompt : long;
+    expect(prompt).toMatch(/Comic book illustration/);
+    expect(prompt.indexOf('Comic book illustration')).toBeLessThan(prompt.indexOf('Appearance:'));
+    expect(prompt).toMatch(/No text, no watermark/);
+    expect(prompt).not.toMatch(/pipe smoke/);
+  });
+
+  it('tells a full-body comic to redraw the reference face, not copy the photo', () => {
+    const built = buildCharacterPortraitPrompt({ ...sheet, framing: 'full', faceRef: true });
+    expect(built.ok && built.prompt).toMatch(/identity only. Redraw them as a comic book illustration/);
+  });
+});

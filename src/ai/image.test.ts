@@ -160,6 +160,25 @@ describe('scene image refs', () => {
     expect(blocked.ok).toBe(false);
   });
 
+  it('keeps a comic picture off the photoreal adult route, but still refuses a minor', () => {
+    expect(planAdultFaceEdit({
+      mature: true,
+      userPrompt: 'Marisol, nude, in the long room.',
+      subjects: [{ name: 'Marisol', age: '34' }],
+      faceCount: 1,
+      veniceConfigured: true,
+      style: 'comic'
+    })).toEqual({ action: 'current' });
+    expect(planAdultFaceEdit({
+      mature: true,
+      userPrompt: 'Pip, nude.',
+      subjects: [{ name: 'Pip', age: '15' }],
+      faceCount: 1,
+      veniceConfigured: true,
+      style: 'comic'
+    }).action).toBe('refuse');
+  });
+
   it('keeps a non-sexual picture on the current image model', () => {
     expect(planAdultFaceEdit({
       mature: true,

@@ -100,3 +100,68 @@ describe('stored beats', () => {
     expect(edited.some((piece) => piece.speakerId === 'c2')).toBe(true);
   });
 });
+
+describe('NPC lines are never filed as narration', () => {
+  const cast: SceneSpeaker[] = [
+    { id: 'c1', name: 'Ada Vell', kind: 'cast' },
+    { id: 'c2', name: 'Ben Ruiz', kind: 'cast' }
+  ];
+  const ada = cast[0];
+  const spoken = (raw: string, answerer?: SceneSpeaker) => {
+    const parsed = parseBeats(raw, cast, { answerer })!;
+    const text = parsed.prose;
+    return scenePiecesOf({ text, beats: parsed.beats }, cast)
+      .filter((piece) => piece.role === 'character')
+      .map((piece) => [piece.speakerId, piece.text]);
+  };
+
+  it('credits a correct full-name tag', () => {
+    expect(spoken('@narration\nRain.\n@Ada Vell\n"Read it again."')).toEqual([['c1', '"Read it again."']]);
+  });
+
+  it('credits a first-name tag', () => {
+    expect(spoken('@narration\nRain.\n@Ada\n*taps* "Read it again."')).toEqual([['c1', '*taps* "Read it again."']]);
+    expect(spoken('@Ruiz\n"Fine."')).toEqual([['c2', '"Fine."']]);
+  });
+
+  it('credits a markdown-wrapped tag', () => {
+    expect(spoken('**@Ada**\n"Read it."')).toEqual([['c1', '"Read it."']]);
+    expect(spoken('@**Ben**\n"Fine."')).toEqual([['c2', '"Fine."']]);
+  });
+
+  it('credits novel-style dialogue written under @narration', () => {
+    expect(spoken('@narration\nRain.\n\n"Read it again," Ada Vell says.')).toEqual([['c1', '"Read it again,"']]);
+  });
+
+  it('credits legacy Name: lines written under @narration', () => {
+    expect(spoken('@narration\nRain.\nAda Vell: *taps* "Read."')).toEqual([['c1', '*taps* "Read."']]);
+  });
+
+  it('credits untagged prose to the person asked to answer', () => {
+    expect(spoken('Rain hits the glass. "Not tonight." She turns away.', ada)).toEqual([['c1', '"Not tonight."']]);
+  });
+
+  it('credits an uncredited quote under @narration to the answerer', () => {
+    expect(spoken('@narration\nShe looks up. "Late again."', ada)).toEqual([['c1', '"Late again."']]);
+  });
+
+  it('does not hand a stranger tag to the answerer', () => {
+    const parsed = parseBeats('@Mallory\n"I never left."', cast, { answerer: ada })!;
+    expect(parsed.beats).toEqual([{ role: 'narrator', text: 'Mallory: "I never left."' }]);
+  });
+
+  it('leaves an ambiguous first name uncredited by name', () => {
+    const twins: SceneSpeaker[] = [
+      { id: 'a', name: 'Sam Hart', kind: 'cast' },
+      { id: 'b', name: 'Sam Doyle', kind: 'cast' }
+    ];
+    const parsed = parseBeats('@Sam\n"Hi."', twins)!;
+    expect(parsed.beats.some((beat) => beat.role === 'character')).toBe(false);
+  });
+
+  it('credits saved all-narration turns when they are shown', () => {
+    const beats: TurnBeat[] = [{ role: 'narrator', text: 'Rain. "Read it again," Ada Vell says.' }];
+    const pieces = scenePiecesOf({ text: beatsToProse(beats), beats }, cast);
+    expect(pieces.some((piece) => piece.role === 'character' && piece.speakerId === 'c1')).toBe(true);
+  });
+});
