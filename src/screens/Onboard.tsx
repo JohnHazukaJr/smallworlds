@@ -12,6 +12,7 @@ import { AppearanceFields } from '../components/AppearanceFields';
 import { StoryWeightPicker } from '../components/StoryWeightPicker';
 import { PlacePhotoTools } from '../components/PlacePhotoTools';
 import { PlaceSettingFields } from '../components/PlaceSettingFields';
+import { StartDateFields } from '../components/StoryDateFields';
 import { placeWhereLine, removePlace, setScenePlace } from '../places';
 import { db, deleteWorld, recordTombstones, safeWrite } from '../db';
 import { formatUserError } from '../errors';
@@ -1150,14 +1151,15 @@ export function Onboard() {
       )
     },
     {
-      title: 'Where does it begin?',
+      title: 'Where and when does it begin?',
       body: hasAI
-        ? 'Add the places this story moves through and mark where it opens. Places can sit inside each other — a town, a street in it, a room in a house.'
-        : 'Add a place by hand and mark it as where the story opens.',
+        ? 'Pick the date it opens, add the places this story moves through, and mark where it opens. Places can sit inside each other — a town, a street in it, a room in a house.'
+        : 'Pick the date it opens, add a place by hand, and mark it as where the story opens.',
       cta: 'Next — memory & enter',
       content: (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           {checklistPanel(true)}
+          {worldRow && (turnCount ?? 0) === 0 && <StartDateFields world={worldRow} narrow={narrow} />}
           {places.length > 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 340, overflowY: 'auto', paddingRight: 2 }}>
               {places.map((l) => (

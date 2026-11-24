@@ -279,6 +279,37 @@ export function advanceMonths(cal: ResolvedCalendar, day: number, months: number
   return dayFromParts(cal, y, m, p.dayOfMonth);
 }
 
+/** Earth months and Monday–Sunday weeks, so real weekdays can be worked out. */
+export function isEarthCalendar(cal: ResolvedCalendar): boolean {
+  return cal.months.join('|') === DEFAULT_MONTHS.join('|') &&
+    cal.weekdays.join('|') === DEFAULT_WEEKDAYS.join('|') &&
+    cal.monthLengths.join('|') === DEFAULT_MONTH_LENGTHS.join('|');
+}
+
+/** Monday = 0 … Sunday = 6 for a real Gregorian date (year 1 and up). */
+export function gregorianWeekday(year: number, monthIndex: number, dayOfMonth: number): number {
+  const d = new Date(Date.UTC(2000, 0, 1));
+  d.setUTCFullYear(Math.floor(year), monthIndex, dayOfMonth);
+  return (d.getUTCDay() + 6) % 7;
+}
+
+/**
+ * Calendar patch that makes story day 1 fall on this date. On an Earth calendar
+ * the weekday is the real one; otherwise the chosen (or current) weekday is kept.
+ */
+export function startDatePatch(
+  cal: ResolvedCalendar,
+  pick: { year: number; monthIndex: number; dayOfMonth: number; weekdayIndex?: number }
+): Partial<WorldCalendar> {
+  const m = ((Math.floor(pick.monthIndex) % cal.months.length) + cal.months.length) % cal.months.length;
+  const d = Math.max(1, Math.min(cal.monthLengths[m] ?? 30, Math.floor(pick.dayOfMonth)));
+  const year = Math.floor(pick.year);
+  const weekday = isEarthCalendar(cal) && year >= 1
+    ? gregorianWeekday(year, m, d)
+    : (pick.weekdayIndex ?? cal.dayOneWeekday);
+  return { yearOne: year, dayOneMonth: m, dayOneDate: d, dayOneWeekday: weekday };
+}
+
 /** Human label: "Thursday, 12 March, Year 3 · day 72". */
 export function formatStoryDate(cal: ResolvedCalendar, day: number): string {
   const p = partsForDay(cal, day);

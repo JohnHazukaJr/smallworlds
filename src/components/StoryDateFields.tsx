@@ -2,8 +2,10 @@ import { useState } from 'react';
 import { safeWrite } from '../db';
 import type { Episode, Season, World } from '../types';
 import { Chip, ErrorNote } from '../ui/bits';
+import { db } from '../db';
 import {
-  advanceMonths, commitStoryDay, dayFromParts, formatStoryDateShort, partsForDay, worldCalendar
+  advanceMonths, calendarPatch, commitStoryDay, dayFromParts, formatStoryDateShort, isEarthCalendar,
+  partsForDay, startDatePatch, worldCalendar
 } from '../worldOps';
 
 const MONO_INPUT = { fontFamily: "'IBM Plex Mono', monospace", fontSize: 12 } as const;
@@ -89,6 +91,94 @@ export function StoryDateFields({
           style={{ width: 72, ...MONO_INPUT }}
         />
       </label>
+      {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
+    </div>
+  );
+}
+
+/**
+ * When the story begins: the date story day 1 falls on. For world creation, before
+ * any chapter has been played. On an Earth calendar the weekday is worked out; a
+ * custom calendar picks its own.
+ */
+export function StartDateFields({ world, narrow }: { world: World; narrow: boolean }) {
+  const [error, setError] = useState('');
+  const cal = worldCalendar(world);
+  const start = partsForDay(cal, 1);
+  const earth = isEarthCalendar(cal);
+  const save = (pick: { year?: number; monthIndex?: number; dayOfMonth?: number; weekdayIndex?: number }) => {
+    setError('');
+    const patch = startDatePatch(cal, {
+      year: pick.year ?? start.year,
+      monthIndex: pick.monthIndex ?? start.monthIndex,
+      dayOfMonth: pick.dayOfMonth ?? start.dayOfMonth,
+      weekdayIndex: pick.weekdayIndex
+    });
+    void safeWrite(
+      () => db.worlds.update(world.id, { calendar: calendarPatch(world, patch), updatedAt: Date.now() }),
+      setError
+    );
+  };
+  const monthLen = cal.monthLengths[start.monthIndex] ?? 30;
+  const label = { display: 'flex', flexDirection: 'column', gap: 4, fontSize: 11, opacity: 0.75 } as const;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div className="label">When does it begin?</div>
+      <div style={{ display: 'grid', gridTemplateColumns: narrow ? '1fr 1fr' : `0.8fr 1.4fr 1fr${earth ? '' : ' 1.2fr'}`, gap: 8 }}>
+        <label style={label}>
+          Day
+          <select
+            aria-label="Start day"
+            value={start.dayOfMonth}
+            onChange={(e) => save({ dayOfMonth: Number(e.target.value) })}
+            style={{ fontSize: 13, padding: '8px 10px' }}
+          >
+            {Array.from({ length: monthLen }, (_, i) => i + 1).map((d) => <option key={d} value={d}>{d}</option>)}
+          </select>
+        </label>
+        <label style={label}>
+          Month
+          <select
+            aria-label="Start month"
+            value={start.monthIndex}
+            onChange={(e) => save({ monthIndex: Number(e.target.value) })}
+            style={{ fontSize: 13, padding: '8px 10px' }}
+          >
+            {cal.months.map((name, i) => <option key={name + i} value={i}>{name}</option>)}
+          </select>
+        </label>
+        <label style={label}>
+          Year
+          <input
+            aria-label="Start year"
+            type="number"
+            value={start.year}
+            onChange={(e) => {
+              const y = Number(e.target.value);
+              if (e.target.value.trim() && Number.isFinite(y)) save({ year: y });
+            }}
+            style={{ ...MONO_INPUT, width: '100%' }}
+          />
+        </label>
+        {!earth && (
+          <label style={label}>
+            Weekday
+            <select
+              aria-label="Start weekday"
+              value={cal.dayOneWeekday}
+              onChange={(e) => save({ weekdayIndex: Number(e.target.value) })}
+              style={{ fontSize: 13, padding: '8px 10px' }}
+            >
+              {cal.weekdays.map((name, i) => <option key={name + i} value={i}>{name}</option>)}
+            </select>
+          </label>
+        )}
+      </div>
+      <div className="label" style={{ lineHeight: 1.5 }}>
+        Chapter 1 opens on {formatStoryDateShort(cal, 1).replace(/ Y(-?\d+)$/, ', Year $1')}. The time of year shapes weather,
+        festivals, and what people are doing.
+      </div>
       {error && <ErrorNote error={error} onDismiss={() => setError('')} />}
     </div>
   );
