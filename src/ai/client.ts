@@ -150,6 +150,25 @@ function isOpenRouter(provider: ProviderConfig): boolean {
   return provider.baseUrl.includes('openrouter.ai');
 }
 
+/**
+ * Models OpenRouter will not run with reasoning off ("Reasoning is mandatory for this
+ * endpoint"). They get the lowest effort instead, which in testing meant no reasoning
+ * tokens at all. Seeded with families known to refuse; others are learned on first refusal.
+ */
+const mandatoryReasoning = new Set<string>();
+const MANDATORY_REASONING = /(?:^|\/)(?:glm-5|gemini-)/i;
+
+export function openRouterReasoningOff(model: string): Record<string, unknown> {
+  return mandatoryReasoning.has(model) || MANDATORY_REASONING.test(model)
+    ? { effort: 'minimal' }
+    : { enabled: false };
+}
+
+/** For tests. */
+export function forgetMandatoryReasoning(): void {
+  mandatoryReasoning.clear();
+}
+
 function isClaudeModel(model: string): boolean {
   const m = model.toLowerCase();
   return m.includes('claude') || m.includes('anthropic/');
@@ -296,7 +315,13 @@ export function buildOpenAIChatBody(req: StreamRequest): Record<string, unknown>
   if (profile.usesMaxCompletionTokens) body.max_completion_tokens = req.maxTokens;
   else body.max_tokens = req.maxTokens;
 
-  if (profile.supportsThinkingToggle) {
+  if (isOpenRouter(req.provider)) {
+    // OpenRouter ignores Z.ai's `thinking` field. Without this, hybrid models (GLM, Qwen,
+    // Gemini Flash) reasoned on every call: a character draft on GLM 5.3 Flash took ~65s
+    // instead of ~8s, and often spent its whole budget thinking and returned nothing.
+    if (!thinking) body.reasoning = openRouterReasoningOff(req.model);
+    else if (profile.supportsThinkingToggle) body.reasoning = { effort: 'high' };
+  } else if (profile.supportsThinkingToggle) {
     body.thinking = { type: thinking ? 'enabled' : 'disabled' };
     if (thinking) body.reasoning_effort = 'high';
   }
@@ -554,12 +579,20 @@ function firstPresentText(...parts: unknown[]): string {
 
 async function streamOpenAI(req: StreamRequest): Promise<StreamResult> {
   const url = `${req.provider.baseUrl.replace(/\/$/, '')}/chat/completions`;
+  const body = buildOpenAIChatBody(req);
   const res = await providerFetch(url, {
     method: 'POST',
     headers: openaiHeaders(req.provider),
     signal: req.signal,
-    body: JSON.stringify(buildOpenAIChatBody(req))
+    body: JSON.stringify(body)
   });
+  if (!res.ok && res.status === 400 && (body.reasoning as { enabled?: boolean } | undefined)?.enabled === false) {
+    const detail = await res.clone().text().catch(() => '');
+    if (/reasoning is mandatory/i.test(detail) && !mandatoryReasoning.has(req.model)) {
+      mandatoryReasoning.add(req.model);
+      return streamOpenAI(req);
+    }
+  }
   if (!res.ok) await throwHttpError(res, req.provider);
   let full = '';
   let truncated = false;

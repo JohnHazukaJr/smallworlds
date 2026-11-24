@@ -3459,20 +3459,22 @@ export async function draftCharacter(
       '"looks":{"face":"<features and expression>","hair":"<color, length, style>","body":"<build, height, how they move>",' +
       '"clothing":"<their usual outfit>","details":"<scars, tattoos, jewellery, glasses, or empty>","senses":"<voice timbre and scent, or empty>"' +
       (world?.ai.mature ? ',"intimate":"<adult physical details, only for an adult, or empty>"' : '') + '}, ') +
-    '"mannerisms": "<2-3 recurring physical habits or tics, concrete and observable>", ' +
-    '"backstory": "<the history that shaped them, 2-3 sentences>", "summary": "<who they are, 2-4 sentences of prose>", ' +
+    (call.lean ? '' : '"mannerisms": "<2-3 recurring physical habits or tics, concrete and observable>", ' +
+    '"backstory": "<the history that shaped them, 2-3 sentences>", ') +
+    '"summary": "<who they are, 2-4 sentences of prose>", ' +
     '"speechStyle": "<how they sound when heard: sentence length, contractions, what they dodge, 1-2 sentences>", ' +
     '"exampleLines": [<2-3 lines they would actually say aloud, not narration>], ' +
-    '"traits": string, "desires": string, "fears": string, "flaws": string, "secrets": "<something they hide>", ' +
+    '"traits": string, "desires": string, ' +
+    (call.lean ? '' : '"fears": string, "flaws": string, "secrets": "<something they hide>", ' +
     '"mustNotKnow": "<facts they must not know yet, or empty>", ' +
-    '"anchors": [<3-4 hard behavioural rules they never break, e.g. "Never lies in writing">], ' +
+    '"anchors": [<3-4 hard behavioural rules they never break, e.g. "Never lies in writing">], ') +
     '"importance": "lead|regular|occasional|background", ' +
     '"state":{"goal":"<what they want right now>","emotion":"<mood>","location":"<where they are>","condition":"<physical/social condition>"}}\n' +
     'Make them specific, contradictory in believable ways, never generic. ' +
     'speechStyle is how they sound when heard. exampleLines are lines they would actually say, not narration. ' +
     'importance is how often they belong: lead carries the story, regular when the place fits, occasional when the moment needs them, background unless called on. Default regular.',
     `${world ? `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1200)}\n\n` : ''}Character to create: ${description}`,
-    call.lean ? 1400 : 2000,
+    call.lean ? 900 : 2000,
     call.signal,
     call.timeoutMs ?? CREATE_TIMEOUT_MS
   );
@@ -3498,6 +3500,69 @@ export async function draftCharacter(
     mustNotKnow: (result.mustNotKnow ?? '').trim(),
     ...(state ? { state } : {})
   };
+}
+
+const str = (v: unknown) => (typeof v === 'string' ? v.trim() : '');
+const strList = (v: unknown) => (Array.isArray(v) ? v.map(str).filter(Boolean) : []);
+
+/** Sheet fields a lean draft leaves for later. */
+function missingDepth(c: Character): string[] {
+  const out: string[] = [];
+  if (!hasLooks(c.looks)) out.push('looks');
+  for (const k of ['mannerisms', 'backstory', 'fears', 'flaws', 'secrets'] as const) {
+    if (!c[k].trim()) out.push(k);
+  }
+  // One anchor can be the stand-in the write-ready repair adds; real ones come in threes.
+  if (c.anchors.filter((a) => a.trim()).length < 2) out.push('anchors');
+  return out;
+}
+
+/**
+ * The rest of a lean draft: looks, history, fears, flaws, secrets, hard rules.
+ * Runs after the world is usable. Fills only what is still empty, so edits made
+ * meanwhile are kept; a failure leaves the sheet as it was.
+ */
+export async function fillCharacterDepth(world: World, characterIds: string[]): Promise<void> {
+  const rows = (await db.characters.bulkGet(characterIds))
+    .filter((c): c is Character => !!c && missingDepth(c).length > 0);
+  await runLimited(rows, CREATE_PARALLEL, async (character) => {
+    try {
+      const adult = intimateAllowed(world, character);
+      const result = await utilityJson<Record<string, unknown>>(
+        world,
+        'You finish a story character sheet. Call return_json with this shape: ' +
+        '{"looks":{"face":"<features and expression>","hair":"<color, length, style>","body":"<build, height, how they move>",' +
+        '"clothing":"<their usual outfit>","details":"<scars, tattoos, jewellery, glasses, or empty>","senses":"<voice timbre and scent, or empty>"' +
+        (adult ? ',"intimate":"<adult physical details, or empty>"' : '') + '}, ' +
+        '"mannerisms":"<2-3 recurring physical habits, concrete and observable>","backstory":"<the history that shaped them, 2-3 sentences>",' +
+        '"fears":string,"flaws":string,"secrets":"<something they hide>",' +
+        '"anchors":[<3-4 hard behavioural rules they never break>]}. ' +
+        'Stay consistent with the sheet. Concrete and specific, never generic.',
+        `World: ${world.title} — ${world.line}\n` +
+        `Character: ${character.name} — ${character.role}. Age: ${character.age || 'unknown'}.\n` +
+        `Appearance: ${character.appearance}\nSummary: ${character.summary.slice(0, 500)}\n` +
+        `Traits: ${character.traits.slice(0, 200)}\nWants: ${character.desires.slice(0, 200)}\n` +
+        `Speech: ${character.speechStyle.slice(0, 200)}`,
+        1100
+      );
+      const fresh = await db.characters.get(character.id);
+      if (!fresh) return;
+      const patch: Partial<Character> = {};
+      if (!hasLooks(fresh.looks)) {
+        const looks = mergeLooks(fresh.looks, result.looks as Character['looks'], intimateAllowed(world, fresh));
+        if (looks) patch.looks = looks;
+      }
+      for (const k of ['mannerisms', 'backstory', 'fears', 'flaws', 'secrets'] as const) {
+        if (!fresh[k].trim() && str(result[k])) patch[k] = str(result[k]);
+      }
+      const anchors = strList(result.anchors);
+      const kept = fresh.anchors.filter((a) => a.trim());
+      if (kept.length < 2 && anchors.length > 0) patch.anchors = [...new Set([...anchors, ...kept])].slice(0, 5);
+      if (Object.keys(patch).length > 0) await db.characters.update(fresh.id, { ...patch, updatedAt: Date.now() });
+    } catch {
+      // Optional detail. The author can fill it from the Cast sheet.
+    }
+  });
 }
 
 export interface PlaceFillContext {
@@ -4083,7 +4148,8 @@ export function isEmptyRosterProposal(
 }
 
 export interface WorldRosterProposal {
-  characters: { description: string }[];
+  /** `name` is assigned here, where the whole cast is seen at once, so parallel drafts cannot collide. */
+  characters: { description: string; name?: string }[];
   locations: { description: string }[];
   openingLocationIndex: number;
 }
@@ -4093,7 +4159,8 @@ export async function proposeWorldRoster(
   world: World,
   shape: string,
   counts: { characters: number; locations: number },
-  call: CreateCall = {}
+  call: CreateCall = {},
+  takenNames: string[] = []
 ): Promise<WorldRosterProposal> {
   const nChars = Math.max(0, Math.min(6, counts.characters));
   const nPlaces = Math.max(0, Math.min(5, counts.locations));
@@ -4104,7 +4171,7 @@ export async function proposeWorldRoster(
     const result = await utilityJson<WorldRosterProposal>(
       world,
       `You propose an opening cast and places for a longform interactive story world. ${playbookFor(world, shape)} Call return_json with this shape:\n` +
-      `{"characters":[{"description":"<one specific sentence: who they are to the protagonist>"}],` +
+      `{"characters":[{"name":"<full name that fits this world>","description":"<one specific sentence: who they are to the protagonist>"}],` +
       `"locations":[{"description":"<one specific sentence: what the place is and why it matters>"}],` +
       `"openingLocationIndex":<0-based index into locations for where episode 1 opens>}\n` +
       `Return exactly ${nChars} character description(s) and ${nPlaces} location description(s). ` +
@@ -4112,14 +4179,20 @@ export async function proposeWorldRoster(
         ? 'Make the first location the broad setting (a town, ship, school, district) and the rest specific places inside or near it. '
         : '') +
       `Use empty arrays when the count is 0. No player/protagonist. ` +
+      `Every character gets a different name: no two may share a first name or a surname, and none may reuse a name already taken. ` +
       `Every description must be concrete and rooted in THIS world's weather, rules, and situation — never generic fantasy filler.`,
       `World: ${world.title} — ${world.line}\nWorld bible: ${world.bible.slice(0, 1600)}\n` +
-      `Story shape the player wants: ${shape}\n\nPropose the roster.`,
+      `Story shape the player wants: ${shape}\n` +
+      (takenNames.length > 0 ? `Names already taken: ${takenNames.join(', ')}\n` : '') +
+      `\nPropose the roster.`,
       800,
       call.signal,
       call.timeoutMs ?? CREATE_TIMEOUT_MS
     );
-    const characters = (result.characters ?? []).filter((c) => c.description?.trim()).slice(0, nChars);
+    const characters = (result.characters ?? [])
+      .filter((c) => c.description?.trim())
+      .slice(0, nChars)
+      .map((c) => ({ description: c.description.trim(), ...(c.name?.trim() ? { name: c.name.trim() } : {}) }));
     const locations = (result.locations ?? []).filter((l) => l.description?.trim()).slice(0, nPlaces);
     const openingLocationIndex = locations.length === 0
       ? 0
@@ -4149,8 +4222,8 @@ export interface FleshOutEverythingOpts {
   signal?: AbortSignal;
 }
 
-/** Three at a time: quick, and few enough to stay under provider rate limits (429s retry once). */
-const CREATE_PARALLEL = 3;
+/** Four at a time: a whole cast in one round, and few enough for provider rate limits (429s retry once). */
+const CREATE_PARALLEL = 4;
 
 /**
  * Which opening sections still need a model call.
@@ -4399,7 +4472,10 @@ export async function fleshOutWorldEverything(
   );
   // The roster gates everything after it, so it takes the first slot.
   const rosterJob: Promise<WorldRosterProposal | null> = needRoster
-    ? slot(() => proposeWorldRoster(live, opts.shape, { characters: charSlots, locations: placeSlots }, call))
+    ? slot(() => proposeWorldRoster(
+        live, opts.shape, { characters: charSlots, locations: placeSlots }, call,
+        allChars.map((c) => c.name.trim()).filter(Boolean)
+      ))
     : Promise.resolve(null);
   // Each section is saved the moment it lands, so a later failure keeps it.
   const premiseJob = sections.premise
@@ -4444,6 +4520,7 @@ export async function fleshOutWorldEverything(
   let placesDone = 0;
   let linksDone = 0;
   let linksTotal = 0;
+  let seeding = false;
   const charDescs = plan ? plan.characters.slice(0, charSlots) : [];
   const placeDescs = plan ? plan.locations.slice(0, placeSlots) : [];
   const report = () => {
@@ -4451,83 +4528,79 @@ export async function fleshOutWorldEverything(
     if (castDone < charDescs.length) parts.push(`cast ${castDone}/${charDescs.length}`);
     if (placesDone < placeDescs.length) parts.push(`places ${placesDone}/${placeDescs.length}`);
     if (linksTotal > 0 && linksDone < linksTotal) parts.push(`links ${linksDone}/${linksTotal}`);
+    if (seeding) parts.push('opening memory');
     if (parts.length > 0) progress(`Building the world: ${parts.join(' · ')}…`);
   };
 
-  if (charDescs.length > 0) {
-    report();
-    await Promise.all(charDescs.map(({ description }) => soft(`a character (${description.slice(0, 48)})`, async () => {
-      stopIfCancelled();
-      const draft = await draftCharacter(live, description, { ...call, lean: true });
-      const c = emptyCharacter(live.id, { ...draft, isPlayer: false, updatedAt: Date.now() });
-      if (!c.name.trim()) c.name = description.slice(0, 40);
-      await db.characters.add(c);
-      createdCharacterIds.push(c.id);
-      castDone += 1;
-      report();
-    })));
+  // Places. The first one is the broad setting (a town, a ship, a school). It needs no cast,
+  // so it is drafted alongside the people; the rest wait for it so they can sit inside it.
+  const placeIds = new Array<string>(placeDescs.length);
+  const knownPlaces = existingPlaces.map((place) => ({ id: place.id, name: place.name }));
+  const knownAreas = [...new Set(existingPlaces.map((place) => place.area?.trim() ?? '').filter(Boolean))];
+  let castForPlaces: Character[] = allChars;
+  const draftPlace = (description: string, index: number) => soft(`a place (${description.slice(0, 48)})`, async () => {
+    stopIfCancelled();
+    const draft = await draftLocation(live, description, {
+      cast: castForPlaces,
+      areas: [...knownAreas],
+      places: [...knownPlaces]
+    }, call);
+    const l = emptyLocation(live.id, { ...draft, updatedAt: Date.now() });
+    if (!l.name.trim()) l.name = description.slice(0, 40);
+    await db.locations.add(l);
+    placeIds[index] = l.id;
+    knownPlaces.push({ id: l.id, name: l.name });
+    const area = l.area?.trim();
+    if (area && !knownAreas.includes(area)) knownAreas.push(area);
+    await seedBlankResidentLocations(l.residentIds, l.name);
+  }).finally(() => { placesDone += 1; report(); });
+
+  report();
+  const castJob = Promise.all(charDescs.map(({ description, name }) => soft(`a character (${name ?? description.slice(0, 48)})`, async () => {
+    stopIfCancelled();
+    const brief = name ? `${name}: ${description} (Their name is ${name}; keep it exactly.)` : description;
+    const draft = await draftCharacter(live, brief, { ...call, lean: true });
+    const c = emptyCharacter(live.id, { ...draft, isPlayer: false, updatedAt: Date.now() });
+    if (name) c.name = name;
+    if (!c.name.trim()) c.name = description.slice(0, 40);
+    await db.characters.add(c);
+    createdCharacterIds.push(c.id);
+  }).finally(() => { castDone += 1; report(); })));
+  const firstPlaceJob = placeDescs.length > 0 ? draftPlace(placeDescs[0].description, 0) : Promise.resolve();
+  try {
+    await castJob;
+  } catch (e) {
+    await settle(openingJobs, firstPlaceJob);
+    throw e;
   }
   stopIfCancelled();
 
   allChars = await db.characters.where('worldId').equals(live.id).toArray();
   npcs = allChars.filter((c) => !c.isPlayer);
   if (npcs.length === 0) {
-    await settle(openingJobs);
+    await settle(openingJobs, firstPlaceJob);
     throw new AIError(missed.length > 0
       ? 'None of the cast could be written: the model failed or went silent on every one. Everything else that finished was kept.'
       : EMPTY_WORLD_DRAFT);
   }
+  castForPlaces = allChars;
 
-  // Places and relationship links need only the cast, so they run side by side.
-  const castForPlaces = allChars;
-  const placesJob = (async () => {
-    if (placeDescs.length === 0) return;
-    const knownPlaces = existingPlaces.map((place) => ({ id: place.id, name: place.name }));
-    const knownAreas = [...new Set(existingPlaces.map((place) => place.area?.trim() ?? '').filter(Boolean))];
-    const placeIds = new Array<string>(placeDescs.length);
-    const draftOne = (description: string, index: number) => soft(`a place (${description.slice(0, 48)})`, async () => {
-      stopIfCancelled();
-      const draft = await draftLocation(live, description, {
-        cast: castForPlaces,
-        areas: [...knownAreas],
-        places: [...knownPlaces]
-      }, call);
-      const l = emptyLocation(live.id, { ...draft, updatedAt: Date.now() });
-      if (!l.name.trim()) l.name = description.slice(0, 40);
-      await db.locations.add(l);
-      placeIds[index] = l.id;
-      knownPlaces.push({ id: l.id, name: l.name });
-      const area = l.area?.trim();
-      if (area && !knownAreas.includes(area)) knownAreas.push(area);
-      await seedBlankResidentLocations(l.residentIds, l.name);
-      placesDone += 1;
-      report();
-    });
-    report();
-    // The first place is the broad setting; drafting it alone lets the rest sit inside it.
-    await draftOne(placeDescs[0].description, 0);
-    await Promise.all(placeDescs.slice(1).map(({ description }, i) => draftOne(description, i + 1)));
-    // Roster order, so openingLocationIndex still points at the right place.
-    createdLocationIds.push(...placeIds.filter(Boolean));
-  })();
+  // The remaining places and the relationship links need only the cast, so they run side by side.
+  const placeJobs: Promise<void>[] = [
+    firstPlaceJob,
+    ...placeDescs.slice(1).map(({ description }, i) => firstPlaceJob.then(() => draftPlace(description, i + 1)))
+  ];
+  const placesJob = Promise.all(placeJobs);
 
   // Only people without links yet, so pressing again after a failure finishes the rest.
   const unlinked = npcs.filter((npc) => npc.relationships.length === 0);
   linksTotal = unlinked.length;
   const linksJob = Promise.all(unlinked.map((npc) => soft(`${npc.name.trim() || 'a character'}: relationships`, async () => {
     stopIfCancelled();
-    const relationships = await fleshOutRelationships(live, npc, castForPlaces, call);
+    const relationships = await fleshOutRelationships(live, npc, allChars, call);
     await db.characters.update(npc.id, { relationships, updatedAt: Date.now() });
-    linksDone += 1;
-    report();
-  })));
-
-  try {
-    await placesJob;
-  } catch (e) {
-    await settle(linksJob, openingJobs);
-    throw e;
-  }
+  }).finally(() => { linksDone += 1; report(); })));
+  const rest = () => settle(placesJob, linksJob, openingJobs);
 
   if (createdCharacterIds.length > 0) {
     const openingCast = createdCharacterIds.slice(0, 2);
@@ -4536,15 +4609,21 @@ export async function fleshOutWorldEverything(
     liveEpisode = { ...liveEpisode, castIds };
   }
 
-  if (plan && createdLocationIds.length > 0 && !liveEpisode.locationId && !liveEpisode.location.trim()) {
-    const idx = Math.max(0, Math.min(createdLocationIds.length - 1, plan.openingLocationIndex));
-    const openId = createdLocationIds[idx] ?? createdLocationIds[0];
-    const open = await db.locations.get(openId);
-    if (open) {
-      liveEpisode = await linkEpisodeOpening(liveEpisode, open);
-    }
+  // Opening memory needs only where chapter 1 opens, so it waits for that one place.
+  const openIdx = plan && placeDescs.length > 0
+    ? Math.max(0, Math.min(placeDescs.length - 1, plan.openingLocationIndex))
+    : 0;
+  try {
+    await (placeJobs[openIdx] ?? Promise.resolve());
+  } catch (e) {
+    await rest();
+    throw e;
   }
-
+  if (!liveEpisode.locationId && !liveEpisode.location.trim()) {
+    const openId = placeIds[openIdx] ?? placeIds.find(Boolean);
+    const open = openId ? await db.locations.get(openId) : undefined;
+    if (open) liveEpisode = await linkEpisodeOpening(liveEpisode, open);
+  }
   // Ensure episode has an opening location if places exist but none linked.
   existingPlaces = await db.locations.where('worldId').equals(live.id).toArray();
   if (!liveEpisode.locationId && existingPlaces.length > 0) {
@@ -4558,24 +4637,39 @@ export async function fleshOutWorldEverything(
     }
   }
 
-  // Opening memory reads the premise and your sheet, so it waits for those (not for the links).
+  // It also reads the premise and your sheet.
   try {
     await openingJobs;
   } catch (e) {
-    await settle(linksJob);
+    await rest();
     throw e;
   }
   stopIfCancelled();
-  progress(linksDone < linksTotal ? 'Seeding opening memory and finishing links…' : 'Seeding opening memory…');
   allChars = await db.characters.where('worldId').equals(live.id).toArray();
   let memory: { continuityIds: string[]; threadIds: string[] } = { continuityIds: [], threadIds: [] };
-  await soft('the opening memory', async () => {
+  seeding = true;
+  report();
+  const memoryJob = soft('the opening memory', async () => {
     memory = await seedOpeningMemory(live, liveSeason, liveEpisode, allChars, call);
+  }).finally(() => {
+    seeding = false;
+    report();
   });
-  await linksJob;
+  try {
+    await Promise.all([memoryJob, placesJob, linksJob]);
+  } catch (e) {
+    await settle(memoryJob, placesJob, linksJob);
+    throw e;
+  }
+  // Roster order, so the list matches the plan.
+  createdLocationIds.push(...placeIds.filter(Boolean));
+  if (!liveEpisode.locationId) {
+    existingPlaces = await db.locations.where('worldId').equals(live.id).toArray();
+    if (existingPlaces.length > 0) liveEpisode = await linkEpisodeOpening(liveEpisode, existingPlaces[0]);
+  }
 
-  // Looks were left out of the bulk drafts to keep them fast. Fill them quietly afterwards.
-  void fillMissingLooks(live, createdCharacterIds);
+  // Looks and depth were left out of the bulk drafts to keep them fast. Fill them quietly afterwards.
+  void fillCharacterDepth(live, createdCharacterIds);
 
   await db.worlds.update(live.id, { updatedAt: Date.now() });
 
@@ -4588,36 +4682,6 @@ export async function fleshOutWorldEverything(
     threadIds: memory.threadIds,
     missed
   };
-}
-
-/**
- * Appearance sections for characters drafted without them. Runs after the world
- * is usable; a failure leaves the sheet as it was.
- */
-export async function fillMissingLooks(world: World, characterIds: string[]): Promise<void> {
-  const rows = (await db.characters.bulkGet(characterIds)).filter((c): c is Character => !!c && !hasLooks(c.looks));
-  await runLimited(rows, CREATE_PARALLEL, async (character) => {
-    try {
-      const result = await utilityJson<{ looks?: Record<string, unknown> }>(
-        world,
-        'You describe how a story character looks. Call return_json with this shape: ' +
-        '{"looks":{"face":"<features and expression>","hair":"<color, length, style>","body":"<build, height, how they move>",' +
-        '"clothing":"<their usual outfit>","details":"<scars, tattoos, jewellery, glasses, or empty>","senses":"<voice timbre and scent, or empty>"' +
-        (intimateAllowed(world, character) ? ',"intimate":"<adult physical details, or empty>"' : '') + '}}. ' +
-        'Stay consistent with the sheet. Concrete and specific.',
-        `World: ${world.title} — ${world.line}\n` +
-        `Character: ${character.name} — ${character.role}. Age: ${character.age || 'unknown'}.\n` +
-        `Appearance: ${character.appearance}\nSummary: ${character.summary.slice(0, 400)}`,
-        600
-      );
-      const fresh = await db.characters.get(character.id);
-      if (!fresh || hasLooks(fresh.looks)) return;
-      const looks = mergeLooks(fresh.looks, result.looks as Character['looks'], intimateAllowed(world, fresh));
-      if (looks) await db.characters.update(fresh.id, { looks, updatedAt: Date.now() });
-    } catch {
-      // Optional detail. The author can fill it from the Cast sheet.
-    }
-  });
 }
 
 /** Fill the three write-ready holes generation often leaves empty. */

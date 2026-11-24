@@ -93,6 +93,19 @@ describe('buildOpenAIChatBody', () => {
     expect(body.reasoning_effort).toBe('high');
   });
 
+  it('turns reasoning off through OpenRouter, with lowest effort where it is mandatory', () => {
+    const viaOpenRouter = (model: string, job: 'prose' | 'utility' | 'wrap') => buildOpenAIChatBody({
+      provider: { id: 'or', kind: 'openai', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', apiKey: 'k' },
+      model, system: 's', messages: [], maxTokens: 200, job
+    });
+    expect(viaOpenRouter('qwen/qwen3.8-flash', 'utility').reasoning).toEqual({ enabled: false });
+    expect(viaOpenRouter('meta-llama/llama-4-scout', 'prose').reasoning).toEqual({ enabled: false });
+    expect(viaOpenRouter('z-ai/glm-5.3-flash', 'utility').reasoning).toEqual({ effort: 'minimal' });
+    expect(viaOpenRouter('google/gemini-3.8-flash', 'prose').reasoning).toEqual({ effort: 'minimal' });
+    expect(viaOpenRouter('z-ai/glm-5.3-flash', 'utility').thinking).toBeUndefined();
+    expect(viaOpenRouter('z-ai/glm-5.3-flash', 'wrap').reasoning).toEqual({ effort: 'high' });
+  });
+
   it('uses max_completion_tokens for GPT-5', () => {
     const body = openai('gpt-5', 'prose');
     expect(body.max_completion_tokens).toBe(200);

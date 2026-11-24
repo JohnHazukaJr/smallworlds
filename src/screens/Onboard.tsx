@@ -822,6 +822,11 @@ export function Onboard() {
         Optional. Fills bible, premise, narrator rules, you, cast, places, relationships, and opening memory.
         Leave it and write each section yourself — Story opens only when the checklist passes.
       </div>
+      {!utilityModel && (
+        <div style={{ fontSize: 12, lineHeight: 1.5, color: 'oklch(0.78 0.06 195)' }}>
+          This uses your writing model, since no utility model is set. Picking a fast utility model in Settings makes it several times quicker.
+        </div>
+      )}
       <button
         className="btn-ghost"
         style={{ padding: '9px 16px', fontSize: 12.5, alignSelf: 'flex-start' }}
