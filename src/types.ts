@@ -23,6 +23,11 @@ export interface WorldAISettings {
    * Missing means every turn. "few" waits for a few turns' worth of story (one call instead of several).
    */
   liveUpdates?: 'turn' | 'few';
+  /**
+   * When a chapter ends, people who were elsewhere act on their own goals and may hear
+   * what happened. Missing means on; false turns it off.
+   */
+  offscreenLife?: boolean;
   /** free text describing what is/isn't allowed in this world */
   contentNotes: string;
   /** hard rules the narrator must never break */
@@ -206,6 +211,18 @@ export interface EpisodeWrap {
   recap: string;
   beats: EpisodeWrapBeat[];
   guestEffects: string[];
+  /** What people who were elsewhere did while this chapter happened. Filed once, at End chapter. */
+  offscreen?: OffscreenBeat[];
+}
+
+/** One person's off-screen turn between chapters. */
+export interface OffscreenBeat {
+  characterId: string;
+  name: string;
+  /** What they did, one sentence. */
+  did: string;
+  /** News of the chapter that reached them, and from whom. */
+  heard?: string;
 }
 
 export interface ChapterIllustration {

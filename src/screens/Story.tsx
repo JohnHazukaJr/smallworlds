@@ -17,6 +17,7 @@ import {
   type DeliveryTone
 } from '../ai/deliveryTone';
 import { composeOutgoingLine } from '../ai/composeLine';
+import { namesPhrase } from '../ai/offscreenLife';
 import {
   groupSpeakParagraphs,
   parseInlineEmphasis,
@@ -1596,16 +1597,21 @@ export function Story() {
     setError('');
     try {
       let atmosphereNote: string | undefined;
+      let movedOn: string[] = [];
       if (turns.length > 0) {
         const filed = await commitSoftEpisodeWrap(world, season, episode);
         atmosphereNote = filed.atmosphereNote;
+        movedOn = (filed.wrap.offscreen ?? []).map((o) => o.name);
       }
       const carried = pendingPlotTargets(episode.plotTargets);
       await nextEpisode(episode, {
         ...(atmosphereNote ? { atmosphereNote } : {}),
         ...(carried.length > 0 ? { plotTargets: carried } : {})
       });
-      setNotice('Chapter ended. The next chapter is open.');
+      // Say who moved, never what they did: that is for the story to reveal.
+      setNotice(movedOn.length > 0
+        ? `Chapter ended. While you were away, ${namesPhrase(movedOn)} went on with their lives.`
+        : 'Chapter ended. The next chapter is open.');
     } catch (e) {
       setError(classifyError(e));
     } finally {

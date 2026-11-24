@@ -5,7 +5,7 @@
  * alone does not pull anyone in.
  */
 
-import type { Character, Turn } from '../types';
+import type { Character, Turn, TurnBeat } from '../types';
 import { autoStagePool, characterImportance, importanceRank } from './characterWeight';
 import {
   addressStrength,
@@ -144,7 +144,8 @@ export function lineBringsCharacter(playerText: string, character: Character): b
     ...distinctiveTokens(character.role)
   ].map((l) => l.trim()).filter((l) => l.length >= 3);
   for (const label of labels) {
-    const strength = addressStrength(playerText, label);
+    // Strict: asking *about* someone ("What do you make of Corin?") must not bring them in.
+    const strength = addressStrength(playerText, label, { strict: true });
     if (strength === 'vocative' || strength === 'directed') return true;
     const n = escapeRe(label);
     if (new RegExp(`\\b(?:${BRING})\\b(?:\\s+\\w+){0,4}\\s+${n}\\b`, 'iu').test(playerText)) {
@@ -313,6 +314,27 @@ export function stageSceneCast(opts: {
     .sort((a, b) => importanceRank(b) - importanceRank(a))
     .slice(0, ALSO_FITS_CAP);
   return { castIds: ids, alsoFits, changes };
+}
+
+/**
+ * Cast the reply gave lines to who were not in the room. A credited line means
+ * they are here now, so the scene should hold them (their card, their face, and
+ * someone the player can answer). Never the player.
+ */
+export function arrivedSpeakers(
+  beats: TurnBeat[] | undefined,
+  castIds: string[],
+  characters: Character[]
+): Character[] {
+  const here = new Set(castIds);
+  const out: Character[] = [];
+  for (const beat of beats ?? []) {
+    if (beat.role !== 'character' || beat.kind === 'guest' || !beat.speakerId) continue;
+    if (here.has(beat.speakerId) || out.some((c) => c.id === beat.speakerId)) continue;
+    const c = characters.find((x) => x.id === beat.speakerId);
+    if (c && !c.isPlayer) out.push(c);
+  }
+  return out;
 }
 
 /** One sentence the player can read when the room changes. */

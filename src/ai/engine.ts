@@ -7,7 +7,7 @@ import type {
   CalendarEvent, CalendarEventKind, CalendarEventPromptPolicy, CalendarEventScale,
   Character, CharacterState, ComposeMode,   Episode, EpisodeGuest, EpisodeWrap, Location,
   OpenThread, PlayerGoal, Relationship, ScoreMark, Season, SeasonWrap, SeasonWrapPlotArc, SeasonWrapRelationshipUpdate,
-  NpcMemory, Turn, TurnBeat, TurnLength, TurnRole, World, WrapBeat, WrapCharacterOutcome
+  NpcMemory, OffscreenBeat, Turn, TurnBeat, TurnLength, TurnRole, World, WrapBeat, WrapCharacterOutcome
 } from '../types';
 import {
   CALENDAR_EVENT_CAP, defaultVisibilityForKind, isPlayerAgencyMode, worldCalendarEventPrefs
@@ -58,7 +58,7 @@ import {
 import { addAltPatch, switchAltPatch } from '../turnAlts';
 import { cleanSuggestions, dueEventsLine, pickWorldMover, worldMoveCue } from '../worldMove';
 import { parseCharacterImportance } from './characterWeight';
-import { characterFitsPlace, inferPlaceChanged, namedNewcomer, openingFittingIds, rosterChangeNotice, stageSceneCast } from './sceneFit';
+import { arrivedSpeakers, characterFitsPlace, inferPlaceChanged, namedNewcomer, openingFittingIds, rosterChangeNotice, stageSceneCast } from './sceneFit';
 import {
   applyPlaceDraft,
   placeAuthorText,
@@ -83,6 +83,9 @@ import { intimateAllowed } from './portrait';
 import {
   NPC_MEMORY_PER_PASS, addMemories, forgetFiledSince, recallMemories, memoryCardLine, type MemoryDraft
 } from '../npcMemory';
+import {
+  OFFSCREEN_SYSTEM, cleanOffscreen, offscreenLifeOn, offscreenPrompt, pickOffscreenCast
+} from './offscreenLife';
 import {
   knowledgeFactLine,
   LIVE_CANON_FACT_CAP,
@@ -978,6 +981,15 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
   }
   opts.onDelta('', meta);
   await db.worlds.update(opts.world.id, { updatedAt: Date.now() });
+
+  // Someone from elsewhere was given a line: they walked in. Keep them in the room.
+  const arrived = injectionReply ? [] : arrivedSpeakers(beats, ctx.episode.castIds, ctx.characters);
+  if (arrived.length > 0) {
+    const castIds = [...ctx.episode.castIds, ...arrived.map((c) => c.id)];
+    await guardStorage(() => db.episodes.update(ctx.episode.id, { castIds, updatedAt: Date.now() }));
+    ctx.episode = { ...ctx.episode, castIds };
+    opts.onNotice?.(`${arrived.map((c) => c.name).join(' and ')} ${arrived.length > 1 ? 'are' : 'is'} here now.`);
+  }
 
   if (!opts.signal?.aborted) {
     const saved = beatsCompleted;
@@ -2171,10 +2183,13 @@ export async function commitSoftEpisodeWrap(
     episode = { ...episode, wrap };
   }
 
-  const wrap = episode.wrap!;
+  let wrap = episode.wrap!;
   let atmosphereNote: string | undefined;
   const inScene = characters.filter((c) => episode.castIds.includes(c.id) && !c.isPlayer);
   const inSceneNames = new Set(inScene.map((c) => c.name.trim().toLowerCase()).filter(Boolean));
+  // People elsewhere take their turn alongside the continuity pass. The two write
+  // disjoint cards (present vs absent), so they can run at once.
+  const offscreen = fileOffscreenLife(world, episode, characters, recap);
   try {
     const source = close.trim() || recap;
     const result = await utilityJson<{
@@ -2219,7 +2234,69 @@ export async function commitSoftEpisodeWrap(
     logAppError(e, 'soft wrap continuity');
   }
 
+  const beats = await offscreen;
+  if (beats.length > 0) {
+    wrap = { ...wrap, offscreen: beats };
+    await db.episodes.update(episode.id, { wrap, updatedAt: Date.now() });
+  }
+
   return atmosphereNote ? { wrap, atmosphereNote } : { wrap };
+}
+
+/**
+ * Off-screen turns for people who were not in this chapter: where they went,
+ * what they want now, and what they remember of it. Filed once per chapter; a
+ * retried End chapter does not move anyone twice. Never throws.
+ */
+async function fileOffscreenLife(
+  world: World,
+  episode: Episode,
+  characters: Character[],
+  recap: string
+): Promise<OffscreenBeat[]> {
+  if (!offscreenLifeOn(world) || episode.wrap?.offscreen) return [];
+  try {
+    const movers = pickOffscreenCast(characters, episode.castIds, recap);
+    if (movers.length === 0) return [];
+    const locations = await db.locations.where('worldId').equals(world.id).toArray();
+    const present = characters.filter((c) => episode.castIds.includes(c.id));
+    const raw = await utilityJson<unknown>(
+      world,
+      OFFSCREEN_SYSTEM,
+      offscreenPrompt({
+        world,
+        movers,
+        everyone: characters,
+        presentNames: present.map((c) => c.name).filter(Boolean),
+        placeNames: locations.map((l) => l.name).filter(Boolean),
+        recap,
+        gapDays: worldCalendar(world).episodeAdvanceDays
+      }),
+      1600,
+      undefined,
+      45_000,
+      'wrap'
+    );
+    const results = cleanOffscreen(raw, movers);
+    const now = Date.now();
+    for (const r of results) {
+      // Read fresh: the card may have changed since the chapter loaded.
+      const card = await db.characters.get(r.character.id);
+      if (!card) continue;
+      const state = {
+        ...card.state,
+        goal: mergeStateField(r.state.goal, card.state.goal),
+        emotion: mergeStateField(r.state.emotion, card.state.emotion),
+        location: mergeStateField(r.state.location, card.state.location)
+      };
+      const memories = addMemories(card.memories, r.memories, { episodeId: episode.id, now, makeId: uid });
+      await guardStorage(() => db.characters.update(card.id, { state, memories, updatedAt: now }));
+    }
+    return results.map((r) => r.beat);
+  } catch (e) {
+    logAppError(e, 'off-screen life');
+    return [];
+  }
 }
 
 export type EpisodeMemorySnapshot = {

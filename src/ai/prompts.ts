@@ -12,6 +12,7 @@ import type { ChatMessage } from './client';
 import { inferContextWindowTokens } from './contextBudget';
 import { deliveryPhrase, parseDeliveryTone } from './deliveryTone';
 import { stancePlaybook } from './storyStance';
+import { offscreenLines } from './offscreenLife';
 import { placesAround, placeWhereLine, resolveScenePlace } from '../places';
 
 
@@ -657,6 +658,7 @@ function formatPriorEpisodesSection(
         .map((g) => `- ${clipText(g, 180)}`)
         .join('\n')
       : '';
+    const meanwhile = immediate ? offscreenLines(ep.wrap?.offscreen) : '';
     const title = ep.title ? ` — ${ep.title}` : '';
     const body = clipText(recap, immediate ? immediateCap : opts.recapDigestChars);
     const heading = immediate
@@ -665,7 +667,10 @@ function formatPriorEpisodesSection(
     return (
       `${heading}\n${body}` +
       (beats ? `\n\nWhat still matters:\n${beats}` : '') +
-      (guestFx ? `\n\nWalk-on effects that still matter:\n${guestFx}` : '')
+      (guestFx ? `\n\nWalk-on effects that still matter:\n${guestFx}` : '') +
+      (meanwhile
+        ? `\n\nMeanwhile, elsewhere (the player did not see this; let it surface only through what people say and do):\n${meanwhile}`
+        : '')
     );
   });
   return `## Earlier chapters\n${blocks.join('\n\n')}`;

@@ -237,7 +237,10 @@ describe('buildSceneReply', () => {
     prior.id = 'e0';
     prior.number = 1;
     prior.status = 'ended';
-    prior.wrap = { recap: 'Ada hid the real ledger under the desk.', beats: [], guestEffects: [] };
+    prior.wrap = {
+      recap: 'Ada hid the real ledger under the desk.', beats: [], guestEffects: [],
+      offscreen: [{ characterId: 'c2', name: 'Ben', did: 'Bribed the night watch.', heard: 'Sam found the page, from a dockhand' }]
+    };
     const live = episode();
     live.sceneLedger = ['Rain is already on the window.'];
     live.runningSummary = 'They argued about the missing page.';
@@ -280,6 +283,8 @@ describe('buildSceneReply', () => {
     expect(built.system).toContain('Rain is already on the window.');
     expect(built.system).toContain('They argued about the missing page.');
     expect(built.system).toContain('Ada hid the real ledger under the desk.');
+    expect(built.system).toContain('Meanwhile, elsewhere');
+    expect(built.system).toContain('- Ben: Bribed the night watch. (Heard: Sam found the page, from a dockhand)');
     expect(built.system).toContain('Find who forged the page');
     expect(built.system).toContain('The harbour still owes Ada');
     expect(built.system).toContain('The player is Sam.');

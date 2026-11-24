@@ -445,6 +445,12 @@ export function WorldEditorSheet({ open, onClose, narrow, world, season, episode
                 <Chip active={world.ai.liveUpdates === 'few'} onClick={() => patchAI({ liveUpdates: 'few' })}>Every few turns</Chip>
               </div>
             </Field>
+            <Field label="Life off-screen" note="When a chapter ends, up to four people who were elsewhere act on what they want, and may hear what happened. One utility-model call per chapter.">
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                <Chip active={world.ai.offscreenLife !== false} onClick={() => patchAI({ offscreenLife: true })}>On</Chip>
+                <Chip active={world.ai.offscreenLife === false} onClick={() => patchAI({ offscreenLife: false })}>Off</Chip>
+              </div>
+            </Field>
             <GameRulesSection
               world={world}
               player={characters.find((c) => c.isPlayer)}
@@ -843,6 +849,21 @@ function ContextPreview({
                     <li key={`g${i}`}>{clipPreview(g, 180)}</li>
                   ))}
                 </ul>
+              )}
+              {idx === 0 && (ep.wrap?.offscreen?.length ?? 0) > 0 && (
+                <>
+                  <div style={{ fontFamily: "'IBM Plex Mono', monospace", fontSize: monoPx, opacity: 0.65, marginTop: 4 }}>
+                    meanwhile, elsewhere
+                  </div>
+                  <ul style={{ margin: 0, paddingLeft: 18, opacity: 0.75 }}>
+                    {(ep.wrap!.offscreen ?? []).map((o) => (
+                      <li key={o.characterId}>
+                        <strong style={{ fontWeight: 500 }}>{o.name}</strong>: {clipPreview(o.did, 200)}
+                        {o.heard ? <span style={{ opacity: 0.8 }}> · heard {clipPreview(o.heard, 160)}</span> : null}
+                      </li>
+                    ))}
+                  </ul>
+                </>
               )}
             </div>
           ))}
