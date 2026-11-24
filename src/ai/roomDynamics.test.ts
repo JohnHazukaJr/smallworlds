@@ -65,6 +65,17 @@ describe('addressStrength', () => {
     expect(addressStrength('Ada, put it down.', 'Ada')).toBe('vocative');
     expect(addressStrength('Where were you, Ben?', 'Ben')).toBe('vocative');
     expect(addressStrength('"Ada?"', 'Ada')).toBe('vocative');
+    expect(addressStrength('*nods* Ada, sit.', 'Ada')).toBe('vocative');
+    expect(addressStrength('Fine. Ada, sit.', 'Ada')).toBe('vocative');
+    expect(addressStrength('Okay Ada, tell me.', 'Ada')).toBe('vocative');
+  });
+
+  it('reads a name asked about mid-sentence as a topic, not address', () => {
+    expect(addressStrength('What do you make of Councillor Corin Marsh?', 'Corin Marsh')).toBe('mention');
+    expect(addressStrength('Have you seen Ada?', 'Ada')).toBe('mention');
+    expect(addressStrength('I was talking about Ben!', 'Ben')).toBe('mention');
+    expect(addressStrength('What do you make of Ada and Ben?', 'Ben')).toBe('mention');
+    expect(addressStrength('Ada, Ben and Clerk, listen.', 'Clerk')).toBe('vocative');
   });
 
   it('reads address verbs as directed', () => {

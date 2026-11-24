@@ -6,3 +6,4 @@ dev-dist/
 .tmp-visual/
 qa-*.png
 *.tsbuildinfo
+eval-results/

@@ -9,6 +9,7 @@
     "build": "tsc -b && vite build",
     "test": "vitest run",
     "smoke": "node scripts/smoke-ui.mjs",
+    "eval": "node scripts/eval-npc.mjs",
     "preview": "vite preview",
     "typecheck": "tsc -b"
   },

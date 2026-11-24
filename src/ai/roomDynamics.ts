@@ -70,13 +70,16 @@ export function addressStrength(text: string, rawName: string): AddressStrength 
   if (!new RegExp(`(^|[^\\p{L}\\p{N}])${n}([^\\p{L}\\p{N}]|$)`, 'iu').test(line)) {
     return null;
   }
-  // "Ada, listen." / "Ada?" / "Ada!" — name followed by punctuation that turns it into address.
+  // "Ada, listen." / "Ada?" / "*nods* Ada!" — the name opens the line or a clause and
+  // punctuation follows. Mid-sentence ("What do you make of Ada?") is a topic, not address.
   let strength: AddressStrength = 'mention';
-  if (new RegExp(`(^|["'*\\s])${n}\\s*[,!?:]`, 'iu').test(line)) strength = 'vocative';
+  if (new RegExp(`(^|["'*]\\s*|[,;.!?…]\\s+)${n}\\s*[,!?:]`, 'iu').test(line)) strength = 'vocative';
+  // "Ada, Ben and Clerk, listen." — the end of a list of people being called.
+  else if (new RegExp(`\\b(?:and|or)\\s+${n}\\s*,`, 'iu').test(line)) strength = 'vocative';
   // "..., Ada?" — trailing vocative.
   else if (new RegExp(`,\\s*${n}\\s*["'*.!?]*$`, 'iu').test(line)) strength = 'vocative';
-  // "Hey Ada" / "Hi registrar".
-  else if (new RegExp(`\\b(?:hey|hi|hello)\\s+${n}\\b`, 'iu').test(line)) strength = 'vocative';
+  // "Hey Ada" / "Hi registrar" / "Okay Ada, ..." / "Listen, Ada".
+  else if (new RegExp(`\\b(?:hey|hi|hello|oi|okay|ok|look|listen|please|sorry|thanks)[,!]?\\s+${n}\\b`, 'iu').test(line)) strength = 'vocative';
   // "ask Ada", "turn to Ada", "looks up at Ada" — only connectors may sit between verb and name,
   // so "tell Ada that Ben lied" leaves Ben a topic rather than an addressee.
   else if (new RegExp(`\\b(?:${ADDRESS_VERBS})\\b(?:\\s+(?:${ADDRESS_CONNECTORS}))*\\s+${n}\\b`, 'iu').test(line)) {

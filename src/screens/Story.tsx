@@ -37,7 +37,7 @@ import { onSceneMoved, placeTree, placeWhereLine, resolveScenePlace, setScenePla
 import {
   AVATAR_MAX, AVATAR_MIN, AVATAR_STEP,
   DEFAULT_DISPLAY, moodFromHue, storyAvatarHeight, useApp,
-  type DialogueStyle, type StoryLayout
+  type DialogueStyle, type MoodId, type StoryLayout
 } from '../store/app';
 import { generateChapterPicture } from '../ai/image';
 import { rememberedPortraitStyle } from '../ai/portrait';
@@ -1086,6 +1086,26 @@ export function Story() {
 
   const activeLocation = resolveScenePlace(episode, locations);
 
+  // A title card when the chapter moves from one place to another. Not on first load,
+  // not when a chapter opens, and not when a place first resolves.
+  const [placeCard, setPlaceCard] = useState<PlaceCardInfo | null>(null);
+  const placeSeen = useRef<{ episodeId?: string; locationId: string | null }>({ locationId: null });
+  useEffect(() => {
+    const episodeId = episode?.id;
+    const locationId = activeLocation?.id ?? null;
+    const prev = placeSeen.current;
+    placeSeen.current = { episodeId, locationId };
+    if (!activeLocation || !locationId || !prev.locationId) return;
+    if (prev.episodeId !== episodeId || prev.locationId === locationId) return;
+    const parent = activeLocation.parentId ? locations.find((l) => l.id === activeLocation.parentId) : undefined;
+    setPlaceCard({
+      key: `${locationId}:${Date.now()}`,
+      name: activeLocation.name,
+      within: parent?.name,
+      line: firstSentence(activeLocation.atmosphere || activeLocation.summary, 110)
+    });
+  }, [episode?.id, activeLocation?.id]);
+
   useEffect(() => {
     if (!readMode) {
       setComposerOpen(true);
@@ -2113,6 +2133,7 @@ export function Story() {
             fontPx={fontPx}
             signature={bookSignature}
             pieces={bookPieces}
+            stain={<PageStain mood={mood} />}
             tail={(
               <StreamTail
                 sinkRef={streamSink}
@@ -2141,6 +2162,7 @@ export function Story() {
           <div
             className="page-plane"
             style={{
+              position: 'relative',
               maxWidth: '40rem',
               margin: readMode ? '12px auto 28px' : '12px auto 18px',
               width: 'calc(100% - 32px)',
@@ -2151,6 +2173,7 @@ export function Story() {
                 : (readMode ? '44px 48px 80px' : '36px 44px 68px')
             }}
           >
+            <PageStain mood={mood} />
             <header style={{ marginBottom: turns.length === 0 ? 28 : 22 }}>
               <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
                 {activeLocation && (
@@ -2478,6 +2501,14 @@ export function Story() {
 
           </div>
         </section>
+        )}
+        {placeCard && (
+          <PlaceCard
+            key={placeCard.key}
+            card={placeCard}
+            tint={M.tint}
+            onDone={() => setPlaceCard((cur) => (cur?.key === placeCard.key ? null : cur))}
+          />
         )}
       </div>
 
@@ -3110,6 +3141,61 @@ function TurnRow({
         onAlt={onAlt}
         onRewindHere={onRewindHere}
       />
+    </div>
+  );
+}
+
+/** The place's mood laid over the sheet: a flat wash plus that climate's edge stain. */
+function PageStain({ mood }: { mood: MoodId }) {
+  return (
+    <div
+      key={mood}
+      className={`page-stain climate-${mood}`}
+      style={{ backgroundColor: MOODS[mood].tint }}
+      aria-hidden
+    />
+  );
+}
+
+interface PlaceCardInfo {
+  key: string;
+  name: string;
+  /** The place this one sits inside. */
+  within?: string;
+  /** One line of feel. */
+  line?: string;
+}
+
+function firstSentence(text: string | undefined, max: number): string | undefined {
+  const flat = (text ?? '').replace(/\s+/g, ' ').trim();
+  if (!flat) return undefined;
+  const cut = flat.match(/^.+?[.!?](?=\s|$)/)?.[0] ?? flat;
+  return cut.length > max ? `${cut.slice(0, max - 1).trimEnd()}…` : cut;
+}
+
+/** A brief title card when the scene moves to a new place. Never blocks input. */
+function PlaceCard({ card, tint, onDone }: { card: PlaceCardInfo; tint: string; onDone: () => void }) {
+  return (
+    <div className="place-card-wrap" aria-hidden>
+      <div
+        className="place-card"
+        style={{ backgroundImage: `linear-gradient(${tint}, ${tint})` }}
+        onAnimationEnd={onDone}
+      >
+        {card.within && (
+          <div className="serif" style={{ fontSize: 11, letterSpacing: '0.2em', textTransform: 'uppercase', color: 'var(--ink-muted)' }}>
+            {card.within}
+          </div>
+        )}
+        <div className="serif" style={{ fontSize: 26, fontWeight: 400, marginTop: card.within ? 8 : 0, color: 'var(--ink-heading)' }}>
+          {card.name}
+        </div>
+        {card.line && (
+          <div className="serif" style={{ fontSize: 14, fontStyle: 'italic', marginTop: 10, color: 'var(--ink-muted)', lineHeight: 1.5 }}>
+            {card.line}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

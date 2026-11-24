@@ -20,16 +20,20 @@ export const ACCENT_RGBA = {
   solid: ACCENT
 };
 
-/** Moods are faint stains on the page. Prose stays ink. */
+/**
+ * Moods are faint stains on the page. Prose stays ink; the app chrome stays neutral.
+ * `tint` washes the sheet (multiplied, so ink stays black). `accent` must stay 6-digit
+ * hex: callers append a hex alpha to it.
+ */
 export const MOODS: Record<MoodId, { label: string; tint: string; text: string; accent: string; prose: string }> = {
-  ember: { label: 'Ember', tint: 'transparent', text: '#1a1a1a', accent: '#5b6b7f', prose: '#1a1a1a' },
-  ash:   { label: 'Ash',   tint: 'transparent', text: '#1a1a1a', accent: '#5b6b7f', prose: '#1a1a1a' },
-  frost: { label: 'Frost', tint: 'transparent', text: '#1a1a1a', accent: '#5b6b7f', prose: '#1a1a1a' },
-  rot:   { label: 'Rot',   tint: 'transparent', text: '#1a1a1a', accent: '#5b6b7f', prose: '#1a1a1a' },
-  dusk:  { label: 'Dusk',  tint: 'transparent', text: '#1a1a1a', accent: '#5b6b7f', prose: '#1a1a1a' },
-  bloom: { label: 'Bloom', tint: 'transparent', text: '#1a1a1a', accent: '#5b6b7f', prose: '#1a1a1a' },
-  storm: { label: 'Storm', tint: 'transparent', text: '#1a1a1a', accent: '#5b6b7f', prose: '#1a1a1a' },
-  brine: { label: 'Brine', tint: 'transparent', text: '#1a1a1a', accent: '#5b6b7f', prose: '#1a1a1a' }
+  ember: { label: 'Ember', tint: 'rgba(160,90,40,0.06)',  text: '#1a1a1a', accent: '#7a5a3e', prose: '#1a1a1a' },
+  ash:   { label: 'Ash',   tint: 'rgba(80,90,100,0.05)',  text: '#1a1a1a', accent: '#5b6470', prose: '#1a1a1a' },
+  frost: { label: 'Frost', tint: 'rgba(70,110,130,0.06)', text: '#1a1a1a', accent: '#4d6b78', prose: '#1a1a1a' },
+  rot:   { label: 'Rot',   tint: 'rgba(70,100,60,0.06)',  text: '#1a1a1a', accent: '#56684a', prose: '#1a1a1a' },
+  dusk:  { label: 'Dusk',  tint: 'rgba(90,70,110,0.06)',  text: '#1a1a1a', accent: '#64587a', prose: '#1a1a1a' },
+  bloom: { label: 'Bloom', tint: 'rgba(110,120,50,0.06)', text: '#1a1a1a', accent: '#6b6c3e', prose: '#1a1a1a' },
+  storm: { label: 'Storm', tint: 'rgba(50,70,100,0.07)',  text: '#1a1a1a', accent: '#4b5a72', prose: '#1a1a1a' },
+  brine: { label: 'Brine', tint: 'rgba(40,110,100,0.06)', text: '#1a1a1a', accent: '#3f6b66', prose: '#1a1a1a' }
 };
 
 export const STRIPE = (a: string, b: string) =>
@@ -60,19 +64,19 @@ export const GAP_EFFECTS = [
 ];
 
 /** A speaker's name in the ink of their hue, dark enough to read on paper. */
-export function speakerInk(_hue: number): string {
-  return '#46536a';
+export function speakerInk(hue: number): string {
+  return `oklch(0.4 0.09 ${hue})`;
 }
 
-export function avatarStyle(_hue: number, size: number, ring?: string): CSSProperties {
-  const r = size > 30 ? 2 : 2;
+/** Placeholder plate in the person's or place's own hue, so no two look the same. */
+export function avatarStyle(hue: number, size: number, ring?: string): CSSProperties {
   return {
     width: size,
     height: size,
-    borderRadius: r,
+    borderRadius: 2,
     flexShrink: 0,
     border: `1px solid ${ring || 'rgba(0,0,0,0.15)'}`,
-    background: '#e4e4e7',
+    background: `linear-gradient(160deg, oklch(0.8 0.05 ${hue}), oklch(0.92 0.025 ${hue}))`,
     boxShadow: 'none'
   };
 }

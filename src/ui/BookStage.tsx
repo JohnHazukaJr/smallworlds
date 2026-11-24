@@ -53,8 +53,10 @@ function baseKey(key: string): string {
  * Reduced motion cuts straight to the destination page.
  */
 export function BookStage({
-  episodeId, reveal, streaming, fontPx, signature, pieces, tail
+  episodeId, reveal, streaming, fontPx, signature, pieces, tail, stain
 }: {
+  /** A wash laid over the sheet (pointer-transparent), e.g. the place's mood. */
+  stain?: ReactNode;
   episodeId: string;
   /** Bumps when a reply finishes cleanly. One forward turn if the reader is at the end. */
   reveal: number;
@@ -528,6 +530,7 @@ export function BookStage({
             {pageBody(underIndex, false)}
           </div>
         </div>
+        {stain}
         <div className="book-spine" aria-hidden />
       </div>
       <div className="book-folio serif">
