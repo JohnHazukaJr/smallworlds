@@ -633,6 +633,54 @@ export function characterPortraits(c: Pick<Character, 'portrait' | 'portraits'>)
   return c.portrait ? [c.portrait] : [];
 }
 
+/**
+ * A short fingerprint of a picture, so its style survives the gallery being reordered.
+ * Data URLs run to hundreds of KB: the length plus a sample of the bytes is enough.
+ */
+export function portraitKey(url: string): string {
+  let h = 0x811c9dc5;
+  const step = Math.max(1, Math.floor(url.length / 512));
+  for (let i = 0; i < url.length; i += step) {
+    h ^= url.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  for (let i = Math.max(0, url.length - 64); i < url.length; i++) {
+    h ^= url.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return `${url.length.toString(36)}-${(h >>> 0).toString(36)}`;
+}
+
+/**
+ * The face reference for a picture in `style`: the first portrait made in that style,
+ * else the primary one. Image models copy a reference's art style, so a comic portrait as
+ * the reference kept realistic pictures drawn, and the other way round.
+ */
+export function faceRefFor(
+  c: Pick<Character, 'portrait' | 'portraits' | 'portraitStyles'>,
+  style?: 'realistic' | 'comic'
+): string | undefined {
+  const all = characterPortraits(c);
+  if (style && c.portraitStyles) {
+    const match = all.find((url) => c.portraitStyles?.[portraitKey(url)] === style);
+    if (match) return match;
+  }
+  return all[0];
+}
+
+/** Styles for the pictures still on the character, plus one new one. */
+export function portraitStylesPatch(
+  c: Pick<Character, 'portrait' | 'portraits' | 'portraitStyles'>,
+  keep: string[],
+  added?: { url: string; style: 'realistic' | 'comic' }
+): Record<string, 'realistic' | 'comic'> {
+  const live = new Set(keep.map(portraitKey));
+  const out: Record<string, 'realistic' | 'comic'> = {};
+  for (const [k, v] of Object.entries(c.portraitStyles ?? {})) if (live.has(k)) out[k] = v;
+  if (added) out[portraitKey(added.url)] = added.style;
+  return out;
+}
+
 /** Patch that keeps `portrait` (primary) aligned with `portraits[0]`. */
 export function portraitsPatch(urls: string[]): Pick<Character, 'portraits' | 'portrait'> {
   const portraits = urls.filter(Boolean).slice(0, MAX_CHARACTER_PORTRAITS);

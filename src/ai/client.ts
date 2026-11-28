@@ -69,6 +69,8 @@ export class AIError extends Error {
   providerLabel?: string;
   /** True when the failure came from Small Worlds hosted, not a BYOK provider. */
   hostedProvider?: boolean;
+  /** Start of what the model actually sent, for a reply that could not be parsed. Logged in dev only. */
+  raw?: string;
 
   constructor(message: string, public status?: number, provider?: AIErrorProviderTag) {
     super(message);

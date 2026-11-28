@@ -97,10 +97,11 @@ describe('buildSceneReply', () => {
     const last = built.messages[built.messages.length - 1];
     expect(last?.role).toBe('user');
     const cue = last?.content ?? '';
-    expect(cue).toContain("Ada responds directly to the player's line");
+    expect(cue).toContain('Ada answers the player out loud');
     expect(cue).toContain('Anyone else already here may cut in');
     expect(cue).toContain('Where is the ledger?');
-    expect(cue.lastIndexOf('Where is the ledger?')).toBeGreaterThan(cue.indexOf('Ada responds'));
+    expect(cue.lastIndexOf('Where is the ledger?')).toBeLessThan(cue.indexOf('Ada answers'));
+    expect(cue).toContain('Do not restate, re-ask, or paraphrase');
     expect(cue).not.toContain('Only Ada may speak');
     expect(built.system).toContain('## Here');
     expect(built.system).toContain('### Ada');
@@ -172,10 +173,10 @@ describe('buildSceneReply', () => {
     });
     const cue = built.messages[built.messages.length - 1]?.content ?? '';
     expect(cue).toContain('This is said to Ada.');
-    expect(cue).toContain("Ada responds directly to the player's line");
-    expect(cue.indexOf('This is said to Ada.')).toBeLessThan(cue.indexOf('Ada responds'));
+    expect(cue).toContain('Ada answers the player out loud');
+    expect(cue.indexOf('This is said to Ada.')).toBeLessThan(cue.indexOf('Ada answers'));
     expect(cue).toContain('Where were you?');
-    expect(cue.lastIndexOf('Where were you?')).toBeGreaterThan(cue.indexOf('Ada responds'));
+    expect(cue.lastIndexOf('Where were you?')).toBeLessThan(cue.indexOf('This is said to Ada.'));
   });
 
   it('keeps an injected line said to the player as narration', () => {
@@ -222,7 +223,7 @@ describe('buildSceneReply', () => {
       ]
     });
     const cue = built.messages[built.messages.length - 1]?.content ?? '';
-    expect(cue).toContain("Ada responds directly to the player's line");
+    expect(cue).toContain('Ada answers the player out loud');
     expect(cue).toContain('Anyone else already here may cut in');
     expect(cue).not.toContain('Only Ada');
     expect(cue).not.toContain('do not get a line');
@@ -537,5 +538,33 @@ describe('buildSceneReply player line', () => {
     });
     const all = built.messages.map((m) => m.content).join('\n');
     expect(all.split('Where is the ledger?').length - 1).toBe(1);
+  });
+});
+
+describe('the player in the story text', () => {
+  const withPlayer = (pov: World['ai']['pov'], pronouns?: string): PromptContext => {
+    const base = ctx();
+    const rowan: Character = { ...npc('p', 'Rowan'), isPlayer: true, ...(pronouns ? { pronouns } : {}) };
+    return { ...base, world: { ...base.world, ai: { ...base.world.ai, pov } }, characters: [...base.characters, rowan] };
+  };
+  const system = (c: PromptContext, speakers = [{ id: 'c1', name: 'Ada', kind: 'cast' as const, pronouns: 'she/her' }]) =>
+    buildSceneReply({ ctx: c, mode: 'speak', playerText: 'Where is it?', length: 'beat', speakers, present: [] }).system;
+
+  it('names them by POV and forbids writing "the player"', () => {
+    expect(system(withPlayer('third'))).toContain('In the story text, the player is "Rowan".');
+    expect(system(withPlayer('second'))).toContain('the player is "you" (people here may call them Rowan)');
+    expect(system(withPlayer('first'))).toContain('the player is "I"');
+    expect(system(withPlayer('third'))).toContain('never write it in narration or dialogue');
+  });
+
+  it('uses set pronouns, and forbids guessing when there are none', () => {
+    const set = system(withPlayer('third', 'they/them'));
+    expect(set).toContain('Rowan uses they/them.');
+    expect(set).not.toContain('Do not give the player a gender');
+    expect(system(withPlayer('third'))).toContain('Do not give the player a gender');
+  });
+
+  it('puts pronouns on a speaker card', () => {
+    expect(system(withPlayer('third'))).toMatch(/### Ada\nRole: .*\nPronouns: she\/her|### Ada\nPronouns: she\/her/);
   });
 });

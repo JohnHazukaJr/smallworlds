@@ -322,7 +322,12 @@ describe('scene image refs', () => {
     ], 'realistic');
     expect(realistic).toBe(plain);
     expect(withFaceRealistic).toBe(withFace);
-    expect(plain).toMatch(/painterly environment art/);
+    // Realistic means a photograph, not painted environment art, and the style leads.
+    expect(plain).toMatch(/^Photorealistic photograph/);
+    expect(plain).not.toMatch(/painterly/);
+    // With a face photo attached the style is still stated, so the photo cannot decide it.
+    expect(withFace).toMatch(/^Photorealistic photograph/);
+    expect(withFace).toMatch(/Image 1 is Ada: use it only for who they are/);
     expect(comic).toMatch(/Comic book illustration/);
     expect(comic).not.toMatch(/painterly/);
     expect(comic).not.toMatch(/cinematic lighting/);

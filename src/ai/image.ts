@@ -1,6 +1,6 @@
 import type { Character, Location, ProviderConfig, World } from '../types';
 import { PORTRAIT_JPEG_QUALITY, PORTRAIT_MAX_PX } from '../ui/image';
-import { characterPortraits } from '../worldOps';
+import { characterPortraits, faceRefFor } from '../worldOps';
 import { AIError, providerTagFor } from './client';
 import { allLooksText } from '../looks';
 import { readAge } from './ageRead';
@@ -10,6 +10,7 @@ import {
   characterLookLine,
   minorRefusalMessage,
   portraitStyleLine,
+  refIdentityLine,
   subjectAgeReading,
   textLooksSexual,
   wantsFullBody,
@@ -18,6 +19,7 @@ import {
 } from './portrait';
 import { isZaiProvider, providerFetch } from './providerFetch';
 import { isOpenRouterHost, VENICE_ADULT_EDIT_MODEL, VENICE_ADULT_GENERATE_MODEL } from './providers';
+import { utilityCall } from './utilityCall';
 
 export interface SceneImageRef {
   name: string;
@@ -46,18 +48,15 @@ export function sceneImagePrompt(
 ): string {
   const faces = (refs ?? []).filter((r) => r.kind === 'face');
   const places = (refs ?? []).filter((r) => r.kind === 'place');
-  const identity = faces.length > 0
-    ? faces.map((r, i) => `Image ${i + 1} is ${r.name} — keep their face, hair, and coloring.`).join(' ')
-    : '';
-  const placeRef = places.length > 0
-    ? `Image ${faces.length + 1} is the place "${location.name}" — match architecture and palette, not as a face.`
-    : '';
+  const look = style ?? 'realistic';
+  const identity = faces.map((r, i) => refIdentityLine(look, i + 1, r.name, 'face')).join('. ');
+  const placeRef = places.length > 0 ? refIdentityLine(look, faces.length + 1, `"${location.name}"`, 'place') : '';
   const peopleLine = faces.length > 0
-    ? 'People in frame must match the named reference faces. No extra invented faces.'
-    : style === 'comic'
-      ? `${portraitStyleLine('comic')}. No people, no text, no watermark`
-      : 'cinematic lighting, no people, no text, no watermark, painterly environment art';
+    ? 'People in frame must match the named reference faces. No extra invented faces. No text, no watermark'
+    : 'No people, no text, no watermark';
+  // Style leads: with face photos attached it used to be left out, so the photos decided it.
   const bits = [
+    portraitStyleLine(look),
     `Atmospheric wide establishing shot of "${location.name}"`,
     location.tagline,
     location.atmosphere || location.summary,
@@ -76,6 +75,7 @@ export function collectSceneImageRefs(opts: {
   characters: Character[];
   castIds: string[];
   location?: Location | null;
+  style?: PortraitStyle;
 }): SceneImageRef[] {
   const { characters, castIds, location } = opts;
   const inScene = characters.filter((c) => castIds.includes(c.id) || c.isPlayer);
@@ -84,7 +84,7 @@ export function collectSceneImageRefs(opts: {
   const ordered = [...player, ...others];
   const faces: SceneImageRef[] = [];
   for (const c of ordered) {
-    const face = characterPortraits(c)[0];
+    const face = faceRefFor(c, opts.style);
     if (!face) continue;
     faces.push({ name: c.name || 'someone', dataUrl: face, kind: 'face' });
     if (faces.length >= FACE_REF_CAP) break;
@@ -148,10 +148,11 @@ export function chapterPictureFaces(opts: {
   characters: Character[];
   castIds: string[];
   prompt: string;
+  style?: PortraitStyle;
 }): SceneImageRef[] {
   const faces: SceneImageRef[] = [];
   for (const character of chapterPictureSubjects(opts)) {
-    const face = characterPortraits(character)[0];
+    const face = faceRefFor(character, opts.style);
     if (!face) continue;
     faces.push({ name: character.name.trim() || 'someone', dataUrl: face, kind: 'face' });
     if (faces.length >= FACE_REF_CAP) break;
@@ -182,15 +183,16 @@ export function chapterPicturePrompt(opts: {
   fullBody?: boolean;
 }): string {
   const identity = opts.refs
-    .map((ref, i) => ref.kind === 'place'
-      ? `Image ${i + 1} is ${ref.name}, the setting. Keep its layout, materials, and light.`
-      : `Image ${i + 1} is ${ref.name}. Keep their face, hair, and coloring from that photo.`)
-    .join(' ');
+    .map((ref, i) => refIdentityLine(opts.style, i + 1, ref.name, ref.kind === 'place' ? 'place' : 'face'))
+    .join('. ');
   const audience = opts.minor || !opts.mature
     ? 'Fully clothed, non-sexual, no nudity, no suggestive pose'
     : '';
   const looks = (opts.looks ?? []).filter((l) => l.look.trim());
+  // Style leads. Last in the prompt, after "keep their face from that photo", the photos won,
+  // and a long prompt could cut it off altogether.
   const head = [
+    portraitStyleLine(opts.style),
     opts.userPrompt.trim(),
     opts.fullBody ? 'Show the whole figure, head to feet' : '',
     identity
@@ -200,7 +202,6 @@ export function chapterPicturePrompt(opts: {
       ? 'Everyone named must match their description: no invented outfits, builds, or faces.'
       : opts.refs.length > 0 ? 'People in frame must match the named reference photos. No extra invented faces.' : '',
     opts.contentNotes.trim() ? `Boundaries: ${opts.contentNotes.trim()}` : '',
-    portraitStyleLine(opts.style),
     audience,
     'No text, no watermark'
   ];
@@ -272,7 +273,8 @@ export function prepareChapterPicture(opts: {
   const refs = chapterPictureFaces({
     characters: opts.characters,
     castIds: opts.castIds,
-    prompt: userPrompt
+    prompt: userPrompt,
+    style: opts.style
   });
   const takesRefs = imageModelAcceptsRefs(opts.provider, opts.model);
   if (refs.length > 0 && !takesRefs) {
@@ -455,7 +457,7 @@ export async function generateCharacterPortrait(opts: {
     });
   }
   const resolvedFirst = configuredImageModel(opts.world);
-  const face = framing === 'full' ? characterPortraits(opts.character)[0] : undefined;
+  const face = framing === 'full' ? faceRefFor(opts.character, opts.style) : undefined;
   const useFace = !!face && !!resolvedFirst && imageModelAcceptsRefs(resolvedFirst.provider, resolvedFirst.model);
   const built = buildCharacterPortraitPrompt({
     framing,
@@ -1040,4 +1042,61 @@ function loadImage(src: string): Promise<HTMLImageElement> {
     img.onerror = () => reject(new AIError('Could not load the generated image.'));
     img.src = src;
   });
+}
+
+/** What a passage shows, as the start of a picture prompt, when no model can draft one. */
+export function passagePictureFallback(passage: string, names: string[]): string {
+  const visual = passage
+    .replace(/["“”][^"“”]*["”]/g, ' ') // dialogue is heard, not seen
+    .replace(/[*_]/g, '')
+    .replace(/^\s*[\w .'-]{1,40}:\s*/gm, '') // "Ada:" speaker labels
+    .replace(/\s+/g, ' ')
+    .trim();
+  const clipped = visual.length > 320 ? `${visual.slice(0, 320).replace(/\s+\S*$/, '')}…` : visual;
+  const lower = passage.toLowerCase();
+  const inFrame = names.filter((n) => n.trim() && lower.includes(n.trim().split(/\s+/)[0].toLowerCase()));
+  return [inFrame.join(' and '), clipped].filter(Boolean).join(': ');
+}
+
+/**
+ * Turn one passage of the story into a picture prompt the player can edit before sending.
+ * Names the people in frame exactly, because the picture keeps a named person's face.
+ * Visual only, and no art style: the style picker decides that.
+ */
+export async function draftPassagePicture(opts: {
+  world: World;
+  passage: string;
+  /** Everyone who could be in frame, the player included. */
+  names: string[];
+  place?: string;
+  signal?: AbortSignal;
+}): Promise<string> {
+  const names = opts.names.map((n) => n.trim()).filter(Boolean);
+  const passage = opts.passage.trim();
+  if (!passage) return '';
+  try {
+    const result = await utilityCall<{ prompt?: string }>({
+      world: opts.world,
+      system:
+        'You turn one passage of a story into the description of a single still picture. ' +
+        'Reply with only a JSON object: {"prompt": "<one or two sentences, under 60 words>"}. ' +
+        'Name each person in frame by their exact name from the list. Say where they are, what they are doing, ' +
+        'their expressions, and the light. Visual only: no dialogue, thoughts, sounds, or smells. ' +
+        'Do not name an art style; that is chosen elsewhere.',
+      user:
+        `World: ${opts.world.title}. ${opts.world.line}\n` +
+        (opts.place ? `Place: ${opts.place}\n` : '') +
+        (names.length ? `People who may be in frame: ${names.join(', ')}\n` : '') +
+        `\nPassage:\n${passage.slice(0, 2400)}`,
+      maxTokens: 300,
+      signal: opts.signal,
+      timeoutMs: 20_000
+    });
+    const drafted = typeof result?.prompt === 'string' ? result.prompt.trim() : '';
+    if (drafted) return drafted;
+  } catch (e) {
+    if (isAbortError(e)) throw e;
+    // Fall through: the passage itself still says what the picture is of.
+  }
+  return passagePictureFallback(passage, names);
 }

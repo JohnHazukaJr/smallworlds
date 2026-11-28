@@ -5,20 +5,27 @@ import { utilityModelFor } from './models';
 
 export type { ToolSpec };
 
+/** A parse failure that carries the start of the reply, so a log shows what the model sent. */
+function unreadable(message: string, raw: string): AIError {
+  const err = new AIError(message);
+  err.raw = raw.trim().slice(0, 300) || '(empty)';
+  return err;
+}
+
 export function extractJson<T>(raw: string): T {
   const cleaned = raw.replace(/```(?:json)?/g, '').trim();
   const start = Math.min(
     ...['{', '['].map((c) => cleaned.indexOf(c)).filter((i) => i >= 0)
   );
-  if (!Number.isFinite(start)) throw new AIError('The model did not return JSON.');
+  if (!Number.isFinite(start)) throw unreadable('The model did not return JSON.', raw);
   const open = cleaned[start];
   const close = open === '{' ? '}' : ']';
   const end = cleaned.lastIndexOf(close);
-  if (end <= start) throw new AIError('The model returned malformed JSON.');
+  if (end <= start) throw unreadable('The model returned malformed JSON.', raw);
   try {
     return JSON.parse(cleaned.slice(start, end + 1)) as T;
   } catch {
-    throw new AIError('The model returned malformed JSON.');
+    throw unreadable('The model returned malformed JSON.', raw);
   }
 }
 
@@ -115,7 +122,13 @@ function parseUtilityResult<T>(
       }
     }
   }
-  return extractJson<T>(result.text);
+  try {
+    return extractJson<T>(result.text);
+  } catch (e) {
+    const args = result.toolCalls?.map((c) => `${c.name}(${c.arguments ?? ''})`).join(' ');
+    if (e instanceof AIError && args && !result.text.trim()) e.raw = `tool call: ${args}`.slice(0, 300);
+    throw e;
+  }
 }
 
 export async function utilityCall<T>(opts: {

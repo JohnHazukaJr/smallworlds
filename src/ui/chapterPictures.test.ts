@@ -94,3 +94,26 @@ describe('placeChapterPictures', () => {
     expect(scrolled.before.size).toBe(0);
   });
 });
+
+describe('a picture of one passage', () => {
+  it('sits after that passage, not after the latest line', () => {
+    const turns = [
+      { id: 't1', episodeId: 'e', createdAt: 1 },
+      { id: 't2', episodeId: 'e', createdAt: 2 },
+      { id: 't3', episodeId: 'e', createdAt: 3 }
+    ];
+    const placed = placeChapterPictures({
+      turns,
+      episodeOrder: ['e'],
+      pictures: [
+        { episodeId: 'e', picture: { id: 'p1', createdAt: 10, afterTurnId: 't1' } },
+        { episodeId: 'e', picture: { id: 'p2', createdAt: 10 } },
+        { episodeId: 'e', picture: { id: 'p3', createdAt: 10, afterTurnId: 'gone' } }
+      ],
+      windowSize: 10
+    });
+    expect(placed.after.get('t1')?.map((p) => p.id)).toEqual(['p1']);
+    // No anchor, or an anchor that was deleted: after the latest line, as before.
+    expect(placed.after.get('t3')?.map((p) => p.id)).toEqual(['p2', 'p3']);
+  });
+});

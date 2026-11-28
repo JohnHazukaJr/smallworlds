@@ -40,8 +40,8 @@ import {
   DEFAULT_DISPLAY, moodFromHue, storyAvatarHeight, useApp,
   type DialogueStyle, type MoodId, type StoryLayout
 } from '../store/app';
-import { generateChapterPicture } from '../ai/image';
-import { rememberedPortraitStyle } from '../ai/portrait';
+import { draftPassagePicture, generateChapterPicture } from '../ai/image';
+import { rememberedPortraitStyle, rememberPortraitStyle, type PortraitStyle } from '../ai/portrait';
 import type { SceneSpeaker } from '../ai/sceneReply';
 import { checkChipDetail, checkChipText } from '../mechanics';
 import { altPosition, editAltPatch } from '../turnAlts';
@@ -1026,6 +1026,11 @@ export function Story() {
   const [picturePrompt, setPicturePrompt] = useState('');
   const [pictureBusy, setPictureBusy] = useState(false);
   const pictureAbortRef = useRef<AbortController | null>(null);
+  /** The passage being pictured, so the picture sits beside it. Null for a free picture. */
+  const [pictureAnchor, setPictureAnchor] = useState<{ id: string; excerpt: string } | null>(null);
+  const [pictureDrafting, setPictureDrafting] = useState(false);
+  /** Shown on the panel: it is the same remembered style the portrait and place tools use. */
+  const [pictureStyle, setPictureStyle] = useState<PortraitStyle>(rememberedPortraitStyle);
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [tailHasText, setTailHasText] = useState(false);
@@ -1483,7 +1488,7 @@ export function Story() {
         characters,
         castIds: episode.castIds,
         userPrompt: text,
-        style: rememberedPortraitStyle(),
+        style: pictureStyle,
         place: activeLocation ?? null,
         signal: controller.signal
       });
@@ -1492,19 +1497,53 @@ export function Story() {
         id: crypto.randomUUID(),
         prompt: text,
         dataUrl,
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        ...(pictureAnchor ? { afterTurnId: pictureAnchor.id } : {})
       };
       await db.episodes.update(episode.id, {
         illustrations: [...(episode.illustrations ?? []), illustration],
         updatedAt: Date.now()
       });
       setPicturePrompt('');
+      setPictureAnchor(null);
     } catch (e) {
       if (e instanceof Error && e.name === 'AbortError') return;
       setError(classifyError(e));
     } finally {
       if (pictureAbortRef.current === controller) pictureAbortRef.current = null;
       setPictureBusy(false);
+    }
+  };
+
+  /** Draft a picture of one passage into the Picture box. Nothing is generated until Generate. */
+  const pictureThis = async (turn: Turn) => {
+    if (!world || !episode || pictureBusy || pictureDrafting) return;
+    const passage = turn.text.trim();
+    if (!passage) return;
+    const flat = passage.replace(/\s+/g, ' ');
+    setPictureOpen(true);
+    setPictureAnchor({ id: turn.id, excerpt: flat.length > 90 ? `${flat.slice(0, 90)}…` : flat });
+    setPicturePrompt('');
+    setPictureDrafting(true);
+    setError('');
+    const controller = new AbortController();
+    pictureAbortRef.current = controller;
+    try {
+      const here = characters.filter((c) => c.isPlayer || episode.castIds.includes(c.id));
+      const drafted = await draftPassagePicture({
+        world,
+        passage,
+        names: [...here.map((c) => c.name), ...(episode.guests ?? []).map((g) => g.name)],
+        place: activeLocation?.name || episode.location,
+        signal: controller.signal
+      });
+      if (!controller.signal.aborted) setPicturePrompt(drafted);
+    } catch (e) {
+      if (e instanceof Error && e.name === 'AbortError') return;
+      setError(classifyError(e));
+    } finally {
+      if (pictureAbortRef.current === controller) pictureAbortRef.current = null;
+      setPictureDrafting(false);
     }
   };
 
@@ -1984,6 +2023,7 @@ export function Story() {
               alt={canEdit ? altPosition(turn) : null}
               onAlt={canEdit ? (index) => { void flipAlt(turn, index); } : undefined}
               onRewindHere={canRewindHere(turn) ? () => { void rewindHere(turn); } : undefined}
+              onPicture={turn.role !== 'user' ? () => { void pictureThis(turn); } : undefined}
             />
           )
         });
@@ -2476,6 +2516,7 @@ export function Story() {
                       editing={editing?.id === turn.id}
                       onAlt={canEdit ? (index) => { void flipAlt(turn, index); } : undefined}
                       onRewindHere={canRewindHere(turn) ? () => { void rewindHere(turn); } : undefined}
+                      onPicture={turn.role !== 'user' ? () => { void pictureThis(turn); } : undefined}
                     />
                     {(picturePlacement.after.get(turn.id) ?? []).map((picture) => (
                       <ChapterFigure key={picture.id} picture={picture} />
@@ -2613,7 +2654,10 @@ export function Story() {
               {optionsOpen ? 'Hide options' : 'Options'}
             </button>
             <button className="btn-quiet" style={{ fontSize: 12, minHeight: 32, padding: '4px 6px' }}
-              onClick={() => setPictureOpen((o) => !o)}>
+              onClick={() => {
+                if (pictureOpen) setPictureAnchor(null);
+                setPictureOpen((o) => !o);
+              }}>
               {pictureOpen ? 'Hide picture' : 'Picture'}
             </button>
           </div>
@@ -2622,10 +2666,10 @@ export function Story() {
               <textarea
                 value={picturePrompt}
                 onChange={(e) => setPicturePrompt(e.target.value)}
-                placeholder="Who is in the picture, and what are they doing?"
-                rows={2}
+                placeholder={pictureDrafting ? 'Drafting from the passage…' : 'Who is in the picture, and what are they doing?'}
+                rows={pictureAnchor ? 3 : 2}
                 aria-label="Picture prompt"
-                disabled={pictureBusy}
+                disabled={pictureBusy || pictureDrafting}
                 style={{
                   width: '100%', resize: 'vertical',
                   fontFamily: 'var(--serif)', fontSize: 16, lineHeight: 1.5,
@@ -2633,6 +2677,25 @@ export function Story() {
                   background: 'var(--page)', color: 'var(--page-ink)'
                 }}
               />
+              {pictureAnchor && (
+                <div className="label" style={{ fontSize: 11, display: 'flex', gap: 6, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                  <span>Of the passage “{pictureAnchor.excerpt}”. It will sit beside it.</span>
+                  <button className="btn-quiet" style={{ fontSize: 11, padding: '0 4px', minHeight: 0 }}
+                    disabled={pictureBusy || pictureDrafting}
+                    onClick={() => setPictureAnchor(null)}>Unlink</button>
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                <span className="label" style={{ fontSize: 11 }}>Style</span>
+                {(['realistic', 'comic'] as const).map((id) => (
+                  <Chip key={id} active={pictureStyle === id} onClick={() => {
+                    setPictureStyle(id);
+                    rememberPortraitStyle(id);
+                  }}>
+                    {id === 'realistic' ? 'Realistic' : 'Comic'}
+                  </Chip>
+                ))}
+              </div>
               <div className="label" style={{ fontSize: 11 }}>
                 Name characters to keep their face and written look. Add “full body” for head to toe.
               </div>
@@ -2641,7 +2704,7 @@ export function Story() {
                   onClick={() => pictureAbortRef.current?.abort()}>Stop</button>
               ) : (
                 <button className="btn-ghost" style={{ alignSelf: 'flex-start', fontSize: 12, padding: '7px 12px' }}
-                  disabled={!picturePrompt.trim()}
+                  disabled={!picturePrompt.trim() || pictureDrafting}
                   onClick={() => { void makePicture(); }}>
                   Generate
                 </button>
@@ -3031,7 +3094,7 @@ function DisplaySheet({ open, onClose, narrow }: {
 
 function TurnTools({
   streaming, canEdit, editing, onEdit, onRewrite, onRewriteFromHere, onDeleteLine, onDeleteFromHere,
-  alt, onAlt, onRewindHere
+  alt, onAlt, onRewindHere, onPicture
 }: {
   streaming: boolean;
   canEdit: boolean;
@@ -3045,8 +3108,10 @@ function TurnTools({
   alt?: { index: number; count: number } | null;
   onAlt?: (index: number) => void;
   onRewindHere?: () => void;
+  /** Draft a picture of this passage. */
+  onPicture?: () => void;
 }) {
-  if (!canEdit && !onRewrite && !onRewriteFromHere && !onDeleteLine && !onDeleteFromHere && !alt && !onRewindHere) return null;
+  if (!canEdit && !onRewrite && !onRewriteFromHere && !onDeleteLine && !onDeleteFromHere && !alt && !onRewindHere && !onPicture) return null;
   return (
     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4, marginBottom: 10, flexWrap: 'wrap' }}>
       {alt && onAlt && (
@@ -3068,6 +3133,12 @@ function TurnTools({
       {onRewrite && (
         <button className="btn-quiet" style={{ fontSize: 12, padding: '6px 10px', minHeight: 36 }} disabled={streaming} onClick={onRewrite}>
           Rewrite this passage
+        </button>
+      )}
+      {onPicture && (
+        <button className="btn-quiet" style={{ fontSize: 12, padding: '6px 10px', minHeight: 36 }} onClick={onPicture}
+          title="Draft a picture of this passage. You can edit it before generating.">
+          Picture this
         </button>
       )}
       {onRewriteFromHere && (
@@ -3097,7 +3168,7 @@ function TurnTools({
 
 function TurnRow({
   turn, blocks, accent, prose, fontPx, avatarPx, dialogueStyle, prevSpeaker, streaming, opening,
-  onRewrite, onRewriteFromHere, onEdit, onDeleteLine, onDeleteFromHere, editing, onAlt, onRewindHere
+  onRewrite, onRewriteFromHere, onEdit, onDeleteLine, onDeleteFromHere, editing, onAlt, onRewindHere, onPicture
 }: {
   turn: Turn;
   blocks: ProseBlock[];
@@ -3117,6 +3188,7 @@ function TurnRow({
   editing?: boolean;
   onAlt?: (index: number) => void;
   onRewindHere?: () => void;
+  onPicture?: () => void;
 }) {
   const continued = attributionRun(blocks, prevSpeaker);
   return (
@@ -3147,6 +3219,7 @@ function TurnRow({
         alt={onAlt ? altPosition(turn) : null}
         onAlt={onAlt}
         onRewindHere={onRewindHere}
+        onPicture={onPicture}
       />
     </div>
   );

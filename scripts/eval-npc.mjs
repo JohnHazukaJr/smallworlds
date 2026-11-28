@@ -21,6 +21,7 @@
  *   EVAL_OUT            output folder (default eval-results/<timestamp>)
  *   EVAL_BASELINE       a previous results.json to compare against
  *   EVAL_STRICT=1       exit 1 when any rule check fails or a scene errors
+ *   EVAL_SCENE_TIMEOUT_MIN  give up on one scene after this many minutes (default 15)
  *
  * Writes results.json (everything, minus the key) and report.md.
  */
@@ -77,6 +78,8 @@ function fail(message) {
 // ---------- server ----------
 
 const PORT = 5198;
+/** Per scene. A multi-turn scene on a slow model takes a few minutes; an hour means something hung. */
+const SCENE_TIMEOUT_MS = Math.max(60_000, Number(env.EVAL_SCENE_TIMEOUT_MIN || 15) * 60_000);
 const BASE = `http://localhost:${PORT}/`;
 
 async function waitForServer(url, ms = 60_000) {
@@ -101,10 +104,18 @@ async function runOne(browser, id, run) {
   try {
     await page.goto(BASE);
     await page.waitForLoadState('networkidle');
-    const result = await page.evaluate(async ({ id, cfg }) => {
-      const mod = await import('/src/eval/runInPage.ts');
-      return mod.runScenario(id, cfg);
-    }, { id, cfg });
+    // One stuck scene must not hold the whole run: it is recorded as an error and the next begins.
+    let timer;
+    const cap = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`scene timed out after ${SCENE_TIMEOUT_MS / 60_000} min`)), SCENE_TIMEOUT_MS);
+    });
+    const result = await Promise.race([
+      page.evaluate(async ({ id, cfg }) => {
+        const mod = await import('/src/eval/runInPage.ts');
+        return mod.runScenario(id, cfg);
+      }, { id, cfg }),
+      cap
+    ]).finally(() => clearTimeout(timer));
     return { ...result, run, pageErrors: errors.slice(0, 3) };
   } catch (e) {
     return { scenarioId: id, run, error: String(e?.message ?? e).split('\n')[0], pieces: [], checks: [], notices: [], pageErrors: errors.slice(0, 3) };
@@ -126,6 +137,25 @@ async function pool(jobs, n, task) {
 }
 
 // ---------- report ----------
+
+/**
+ * Background utility passes (live memory, summaries) that failed to parse, counted from the
+ * page console the dev server forwards. They never fail a scene, so without this they go unseen.
+ */
+function utilityFailures(log) {
+  const out = {};
+  for (const m of log.matchAll(/\[parse\] ([a-z][a-z -]*?) (?:The model|$)/gim)) {
+    const key = m[1].trim();
+    out[key] = (out[key] ?? 0) + 1;
+  }
+  return out;
+}
+
+function utilityLine(failures) {
+  const entries = Object.entries(failures ?? {});
+  if (!entries.length) return 'Utility passes: no parse failures';
+  return `**Utility parse failures:** ${entries.map(([k, n]) => `${k} ×${n}`).join(', ')} — story memory is not updating on this utility model`;
+}
 
 const DIMS = ['voice', 'character', 'address', 'walls', 'agency', 'craft'];
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : NaN);
@@ -176,6 +206,7 @@ function report(meta, results, baseline) {
     baseline ? `Compared with ${baseline.meta.date} (commit \`${baseline.meta.commit}\`, prose \`${baseline.meta.proseModel}\`).` : '',
     '',
     `**Judge mean ${fmt(overall)}/5${delta(overall, baseOverall)}** · rule checks: ${allChecks.filter((c) => c.status === 'fail').length} failed, ${allChecks.filter((c) => c.status === 'warn').length} warned, ${allChecks.filter((c) => c.status === 'pass').length} passed · ${results.filter((r) => r.error).length} errored`,
+    utilityLine(meta.utilityFailures),
     '',
     `| Scene | Fail | Warn | ${DIMS.join(' | ')} | Mean |`,
     `|---|---|---|${DIMS.map(() => '---').join('|')}|---|`,
@@ -202,6 +233,14 @@ function report(meta, results, baseline) {
         if (r.verdict.worst && r.verdict.worst !== 'none') lines.push(`- worst: ${r.verdict.worst}`);
       }
       if (r.notices?.length) lines.push(`- engine notices: ${r.notices.join(' / ')}`);
+      if (r.earlier?.length) {
+        lines.push('', `Earlier turns (${r.earlier.length}):`, '```');
+        for (const e of r.earlier) {
+          lines.push(`> ${e.input}`);
+          for (const p of e.pieces) lines.push(`[${p.role === 'character' ? (p.name ?? p.who ?? '?') : 'Narrator'}] ${p.text.trim()}`);
+        }
+        lines.push('```', 'Graded reply:');
+      }
       if (r.pieces?.length) {
         lines.push('', '```');
         for (const p of r.pieces) lines.push(`[${p.role === 'character' ? (p.name ?? p.who ?? '?') : 'Narrator'}] ${p.text.trim()}`);
@@ -223,6 +262,9 @@ const server = spawn(`npx vite --port ${PORT} --strictPort`, { shell: true, stdi
 let serverLog = '';
 server.stdout.on('data', (d) => { serverLog += d; });
 server.stderr.on('data', (d) => { serverLog += d; });
+server.on('exit', (code, signal) => { serverLog += `
+[eval] dev server exited (code ${code}, signal ${signal}) at ${new Date().toISOString()}
+`; });
 
 let browser;
 let exitCode = 0;
@@ -259,7 +301,8 @@ try {
     proseModel: cfg.proseModel,
     utilityModel: cfg.utilityModel,
     judgeModel: cfg.noJudge ? null : cfg.judgeModel,
-    runs: RUNS
+    runs: RUNS,
+    utilityFailures: utilityFailures(serverLog)
   };
   const baseline = env.EVAL_BASELINE ? JSON.parse(readFileSync(env.EVAL_BASELINE, 'utf8')) : null;
   mkdirSync(OUT, { recursive: true });
@@ -274,7 +317,9 @@ try {
   exitCode = 2;
 } finally {
   await browser?.close();
-  if (process.platform === 'win32') spawn(`taskkill /pid ${server.pid} /T /F`, { shell: true });
+  try { mkdirSync(OUT, { recursive: true }); writeFileSync(join(OUT, 'server.log'), serverLog); } catch { /* best effort */ }
+  // Synchronous, so the server is gone before this process exits.
+  if (process.platform === 'win32') { try { execSync(`taskkill /pid ${server.pid} /T /F`, { stdio: 'ignore' }); } catch { /* already gone */ } }
   else server.kill('SIGTERM');
 }
 process.exit(exitCode);

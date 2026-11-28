@@ -112,3 +112,46 @@ describe('scenarios', () => {
     expect(new Set(SCENARIOS.map((s) => s.id)).size).toBe(SCENARIOS.length);
   });
 });
+
+describe('multi-turn scenes', () => {
+  const ada = (text: string): EvalPiece[] => [{ role: 'character', who: 'ada', name: 'Ada Vey', text }];
+  const long = scene('long-interrogation');
+
+  it('every warm-up scene has moves and a graded move', () => {
+    for (const s of SCENARIOS.filter((x) => x.warmup)) {
+      expect(s.warmup!.length).toBeGreaterThan(2);
+      expect(s.move.input.trim()).not.toBe('');
+    }
+  });
+
+  it('flags a gesture repeated reply after reply, but not the scene’s own topic', () => {
+    const tic = (line: string) => ada(`*her eyes narrowing slightly* "${line}"`);
+    const earlier = long.warmup!.map((m, i) => ({ input: m.input, pieces: tic(`Line ${i}.`) }));
+    const checks = gradeReply(long, tic('Find them yourself.'), { playerName: 'Rowan', earlier, background: 'the forged page' });
+    const rep = checks.find((c) => c.id === 'repetition')!;
+    expect(rep.status).toBe('warn');
+    expect(rep.detail).toContain('eyes narrowing');
+
+    const lines = ['stays here', 'is not yours', 'proves nothing', 'was filed in March', 'goes back on the shelf'];
+    const topical = long.warmup!.map((m, i) => ({ input: m.input, pieces: ada(`"The forged page ${lines[i]}."`) }));
+    const clean = gradeReply(long, ada('"The forged page is evidence."'), { playerName: 'Rowan', earlier: topical, background: 'the forged page' });
+    expect(clean.find((c) => c.id === 'repetition')!.status).toBe('pass');
+  });
+
+  it('counts earlier replies that echoed, and fails a move that got no reply', () => {
+    const earlier = [
+      { input: '"Who else has a key to the Long Room?"', pieces: ada('"A key to the Long Room? Mine. The Registrar’s."') },
+      { input: '"The ink on this line is fresher than the rest."', pieces: [] }
+    ];
+    const checks = gradeReply(long, ada('"Then look."'), { playerName: 'Rowan', earlier });
+    expect(checks.find((c) => c.id === 'echo-over-turns')!.detail).toContain('1 of 2');
+    expect(status(checks, 'earlier-replies')).toBe('fail');
+  });
+
+  it('shows the judge the live turns', () => {
+    const earlier = [{ input: '"Ada, how long have you kept the drowned-book?"', pieces: ada('"Eleven years."') }];
+    const { user } = judgePrompt(long, ada('"Then look."'), earlier);
+    expect(user).toContain('[Rowan] "Ada, how long have you kept the drowned-book?"');
+    expect(user).toContain('[Ada Vey] "Eleven years."');
+  });
+});

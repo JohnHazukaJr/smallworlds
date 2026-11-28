@@ -82,14 +82,14 @@ export function Settings() {
           <div className="craft-row" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>Prose model</div>
             <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
-              Writes the story. Recommended: glm-5.2 (or glm-5.3-flash if you want speed).
+              Writes the story. Recommended: glm-5.3. Kimi K2.6 and glm-5.2 write as well and cost more. Small models (Llama 4 Scout) echo the player and drift.
             </div>
             <ModelPicker value={s.proseModel} onChange={s.setProseModel} />
           </div>
           <div className="craft-row" style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink-heading)' }}>Utility model</div>
             <div style={{ fontSize: 12, lineHeight: 1.55, color: 'var(--ink-muted)' }}>
-              Chapter memory, drafts, live canon. Recommended: glm-5.2. Falls back to prose if unset.
+              Chapter memory, drafts, live canon. It must return clean JSON every turn, or the story loses track of itself. Recommended: glm-5.3, or deepseek-v4.1-flash to save money. Falls back to prose if unset.
             </div>
             <ModelPicker value={s.utilityModel} onChange={s.setUtilityModel} />
           </div>

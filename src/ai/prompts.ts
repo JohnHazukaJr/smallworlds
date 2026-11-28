@@ -30,12 +30,13 @@ export const ANTI_SLOP_PROSE =
 /** What makes people in the scene sound like people instead of a helpful assistant. */
 export const HUMAN_DIALOGUE =
   `## How people talk\n` +
-  `- First, respond to what the player just said or did. The person it was aimed at reacts to it directly: they answer, refuse, push back, or dodge on purpose, but it is plainly a reply to that line.\n` +
+  `- First, respond to what the player just said or did. The person it was aimed at answers, refuses, pushes back, or dodges on purpose. The player already knows what they said: move the exchange forward instead of repeating it.\n` +
   `- Talk like a real person in this exact situation, not like a narrator. No speeches, no explaining the theme, no summing up the mood, no poetic monologue.\n` +
   `- Most lines are short. Fragments, trailing off, interrupting, and restarting a sentence are normal. A long speech only when this person would really hold the floor.\n` +
   `- Contractions and the words this person would actually use — their age, work, background, and mood. Nobody explains their own feelings aloud ("I feel conflicted") unless that is who they are.\n` +
   `- Everyone wants something right now. Let it show in what they say and how, but they still deal with what is in front of them.\n` +
-  `- Do not echo or paraphrase the player's words back, do not agree with or validate everything, and do not end every reply on a question.\n` +
+  `- Never open by saying the player's words back as a question or a summary ("See who took it?", "So you think…", "You want to know about…"). Do not agree with or validate everything, and do not end every reply on a question.\n` +
+  `- Stay consistent with the transcript: nobody asks what has already been answered, forgets what just happened, or contradicts an earlier detail.\n` +
   `- Not everyone is warm or helpful. Strangers are guarded, tired people are curt, people who dislike the player show it, and people keep grudges from earlier in the story.\n` +
   `- Subtext is fine, but the words still answer the moment. What someone leaves unsaid, and what their hands do meanwhile, carries the feeling.`;
 
@@ -855,17 +856,34 @@ function injectedNpcHistory(t: Turn, characters: Character[]): string | null {
   return `[${name}]\n${body}`;
 }
 
+/**
+ * A player move as the transcript shows it: by name, never "player". Models copy the
+ * transcript more than they follow rules, and a "[player speak]" label invites them to
+ * write "the player" into the story.
+ */
+export function playerMoveLabel(mode: ComposeMode | null | undefined, characters: Character[] = []): string {
+  const name = characters.find((c) => c.isPlayer)?.name.trim() || 'The protagonist';
+  switch (mode) {
+    case 'speak': return `${name} says`;
+    case 'act': return `${name} does`;
+    case 'continue': return 'the scene continues';
+    case 'steer': return 'author direction';
+    default: return name;
+  }
+}
+
 function shortPlayerHistory(t: Turn, characters: Character[] = []): string {
   const injected = injectedNpcHistory(t, characters);
   if (injected) return injected;
   const mode = t.mode ?? 'steer';
   const { body } = parseDeliveryTone(t.text);
+  const label = playerMoveLabel(mode, characters);
   if (mode === 'speak') {
     const spoken = body.replace(/^"|"$/g, '');
-    return `[player speak]: "${spoken}"`;
+    return `[${label}]: "${spoken}"`;
   }
-  if (mode === 'continue') return '[player continue]';
-  return `[player ${mode}]: ${body}`;
+  if (mode === 'continue') return `[${label}]`;
+  return `[${label}]: ${body}`;
 }
 
 function latestUserTurnId(turns: Turn[]): string | null {
@@ -942,7 +960,7 @@ function labelTurnCompact(
       const { body } = parseDeliveryTone(t.text);
       return `[${name}]: ${body}`;
     }
-    return `[player ${t.mode ?? 'turn'}]: ${t.text}`;
+    return `[${playerMoveLabel(t.mode, characters)}]: ${t.text}`;
   }
   if (t.role === 'character') {
     return `[${resolveSpeakerName(t, characters, guests)}]: ${t.text}`;
@@ -1113,6 +1131,7 @@ export interface SceneVoice {
   name: string;
   kind: 'cast' | 'guest';
   role?: string;
+  pronouns?: string;
   voice?: string;
   want?: string;
   /** Live feeling. Empty and clear-words are omitted. */
@@ -1190,6 +1209,7 @@ function sceneSpeakerCard(voice: SceneVoice, tag?: string): string {
   const lines = [
     tag && tag !== voice.name ? `### ${voice.name} (tag: @${tag})` : `### ${voice.name}`,
     voice.role && `Role: ${voice.role}`,
+    voice.pronouns && `Pronouns: ${clipText(voice.pronouns, 40)}`,
     voice.brief && `Who they are here: ${clipText(voice.brief, voice.kind === 'cast' ? 320 : 180)}`,
     voice.personality && `Personality: ${clipText(voice.personality, 300)}`,
     voice.looks && `Looks (keep consistent; mention only what the moment notices): ${clipText(voice.looks, 420)}`,
@@ -1209,6 +1229,19 @@ function sceneSpeakerCard(voice: SceneVoice, tag?: string): string {
   return lines.filter(Boolean).join('\n');
 }
 
+/**
+ * "The player" is how these instructions name them. It must never reach the story,
+ * and weaker models copy it straight into the prose.
+ */
+export function playerTextRule(pov: World['ai']['pov'], playerName: string): string {
+  const called = pov === 'second'
+    ? `"you"${playerName ? ` (people here may call them ${playerName})` : ''}`
+    : pov === 'first'
+      ? `"I"${playerName ? ` (people here may call them ${playerName})` : ''}`
+      : playerName ? `"${playerName}"` : 'their name';
+  return `In the story text, the player is ${called}. "The player" is only how these instructions name them: never write it in narration or dialogue.`;
+}
+
 function answerLine(names: string[], reacting = true): string {
   if (names.length === 0) {
     return 'Nobody is here to speak. Write the consequence in narration. No quoted dialogue.';
@@ -1221,10 +1254,10 @@ function answerLine(names: string[], reacting = true): string {
     ].join(' ');
   }
   const lead = names.length === 1
-    ? `${names[0]} responds directly to the player's line, out loud, in their own voice.`
+    ? `${names[0]} answers the player out loud, in their own voice.`
     : names.length === 2
-      ? `${names[0]} and ${names[1]} respond directly to the player's line, out loud, in their own voices.`
-      : `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]} respond directly to the player's line, out loud, in their own voices.`;
+      ? `${names[0]} and ${names[1]} answer the player out loud, in their own voices.`
+      : `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]} answer the player out loud, in their own voices.`;
   const first = names[0];
   return [
     lead,
@@ -1277,7 +1310,15 @@ export function sceneTurnCue(opts: {
       ? `Rewrite the previous scene in fresh wording. Keep the same events and who spoke. Do not copy it.\nPrevious scene:\n${opts.rewrite.prior.trim()}`
       : `Rewrite only ${opts.rewrite.speakerName}'s previous line with fresh wording and the same job. Do not copy it.\nPrevious line:\n${opts.rewrite.prior.trim()}`;
   const outcome = opts.checkDirective?.trim() ?? '';
-  return [said, who, sceneLengthHint(opts.length), rewrite, move, outcome].filter(Boolean).join('\n\n');
+  // The move comes first and the instructions last. Ending on the player's quoted line
+  // invites the model to open by saying it back.
+  const reacting = !opts.rewrite && !opts.narrationOnly && names.length > 0 && !!opts.playerText.trim();
+  const noEcho = reacting
+    ? 'The first spoken words add something new: an answer, a refusal, a demand, news, a turn of their own. ' +
+      'Do not restate, re-ask, or paraphrase what the player just said.'
+    : '';
+  // A settled check stays last: it is the one thing the reply must not overrule.
+  return [rewrite, move, said, who, noEcho, sceneLengthHint(opts.length), outcome].filter(Boolean).join('\n\n');
 }
 
 /**
@@ -1364,8 +1405,13 @@ export function buildSceneReply(opts: SceneReplyInput): { system: string; messag
     .join(', ');
   const inviteOthers = !opts.narrationOnly && (!opts.rewrite || opts.rewrite.speakerName === 'the narrator');
   const playerLooks = player ? characterLooksLine(ctx.world, player) : '';
+  const playerPronouns = player?.pronouns?.trim() ?? '';
   const playerLine = [
     playerName ? `The player is ${playerName}.` : 'The player is here.',
+    playerTextRule(ai.pov, playerName),
+    playerPronouns
+      ? `${playerName || 'The player'} uses ${playerPronouns}. Every reference and form of address matches.`
+      : 'Do not give the player a gender, or gendered address like lad, lass, sir, or miss, unless the transcript already does. Keep whatever is established.',
     playerLooks ? `How ${playerName || 'the player'} looks (keep consistent): ${clipText(playerLooks, 420)}` : ''
   ].filter(Boolean).join('\n');
   const goalBlock = playerGoalBlock(player?.goals);

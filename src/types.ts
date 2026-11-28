@@ -252,6 +252,8 @@ export interface ChapterIllustration {
   /** JPEG data URL */
   dataUrl: string;
   createdAt: number;
+  /** The passage it pictures. It sits right after that line; without one, after the latest line when it was made. */
+  afterTurnId?: string;
 }
 
 export interface Episode {
@@ -516,12 +518,19 @@ export interface Character {
   /** All uploaded photos as data URLs; index 0 is the primary face */
   portraits?: string[];
   /**
+   * The art style each generated portrait was made in, keyed by portraitKey(url).
+   * Uploads have none. A picture in one style prefers a face reference in that style.
+   */
+  portraitStyles?: Record<string, 'realistic' | 'comic'>;
+  /**
    * Full-body and scene pictures of this person. Kept apart from `portraits`
    * so they never become the avatar or the face reference.
    */
   figures?: string[];
   // identity
   age: string;
+  /** "she/her", "they/them", … Missing or empty means the story must not guess. */
+  pronouns?: string;
   appearance: string;
   /** Face, hair, body, clothing, and more. Optional; `appearance` stays the overall line. */
   looks?: CharacterLooks;

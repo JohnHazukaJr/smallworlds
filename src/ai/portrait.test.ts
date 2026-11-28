@@ -159,6 +159,6 @@ describe('comic portraits', () => {
 
   it('tells a full-body comic to redraw the reference face, not copy the photo', () => {
     const built = buildCharacterPortraitPrompt({ ...sheet, framing: 'full', faceRef: true });
-    expect(built.ok && built.prompt).toMatch(/identity only. Redraw them as a comic book illustration/);
+    expect(built.ok && built.prompt).toMatch(/not for its art style; draw it as a comic illustration even if the image is a photograph/);
   });
 });

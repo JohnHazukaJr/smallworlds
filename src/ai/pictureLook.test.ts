@@ -1,9 +1,9 @@
 import '../test/storagePolyfill';
 import { describe, expect, it } from 'vitest';
 import type { Character, ProviderConfig } from '../types';
-import { emptyCharacter } from '../worldOps';
+import { emptyCharacter, faceRefFor, portraitKey, portraitStylesPatch } from '../worldOps';
 import {
-  chapterPictureLooks, chapterPicturePrompt, imageSizeCandidates, prepareChapterPicture
+  chapterPictureLooks, chapterPicturePrompt, imageSizeCandidates, passagePictureFallback, prepareChapterPicture
 } from './image';
 import { buildCharacterPortraitPrompt, characterLookLine, wantsFullBody } from './portrait';
 
@@ -53,7 +53,9 @@ describe('portrait framing', () => {
     expect(built.ok).toBe(true);
     if (!built.ok) return;
     expect(built.prompt).toMatch(/Full-body portrait of Marisol, the whole figure visible from head to feet/);
-    expect(built.prompt).toMatch(/Image 1 is Marisol's face/);
+    expect(built.prompt).toMatch(/Image 1 is Marisol: use it only for who they are \(face shape, hair, coloring\), not for its art style/);
+    // A drawn reference must not keep a realistic portrait drawn.
+    expect(built.prompt).toMatch(/show it as a real photograph even if the image is drawn or painted/);
     expect(built.prompt).not.toMatch(/head and shoulders/);
   });
 
@@ -113,5 +115,55 @@ describe('chapter pictures carry the written look', () => {
       style: 'realistic', contentNotes: '', mature: true, provider: or, model: 'flux', fullBody: true
     });
     expect(plan.ok).toBe(false);
+  });
+});
+
+describe('chosen style leads every picture prompt', () => {
+  it('puts the style first in a chapter picture, before the photos and the request', () => {
+    const refs = [{ name: 'Ada', dataUrl: 'data:image/jpeg;base64,x', kind: 'face' as const }];
+    const realistic = chapterPicturePrompt({ userPrompt: 'Ada at the window', refs, style: 'realistic', contentNotes: '', mature: false, minor: false });
+    const comic = chapterPicturePrompt({ userPrompt: 'Ada at the window', refs, style: 'comic', contentNotes: '', mature: false, minor: false });
+    expect(realistic).toMatch(/^Photorealistic photograph/);
+    expect(comic).toMatch(/^Comic book illustration/);
+    expect(realistic).toMatch(/show it as a real photograph even if the image is drawn/);
+    expect(comic).toMatch(/draw it as a comic illustration even if the image is a photograph/);
+  });
+
+  it('keeps the style when a long request fills the prompt', () => {
+    const long = 'Ada at the window, rain, '.repeat(120);
+    const prompt = chapterPicturePrompt({ userPrompt: long, refs: [], style: 'comic', contentNotes: '', mature: false, minor: false });
+    expect(prompt).toMatch(/^Comic book illustration/);
+  });
+});
+
+describe('passagePictureFallback', () => {
+  it('keeps what is seen, drops what is said, and names who is in it', () => {
+    const passage = 'Ada Vey: *slides the page toward the lamp* "Read it again." Rain needles the window; Brannoc says nothing.';
+    const out = passagePictureFallback(passage, ['Ada Vey', 'Brannoc Hale', 'Sister Ilse']);
+    expect(out.startsWith('Ada Vey and Brannoc Hale: ')).toBe(true);
+    expect(out).toContain('slides the page toward the lamp');
+    expect(out).toContain('Rain needles the window');
+    expect(out).not.toContain('Read it again');
+    expect(out).not.toContain('Ilse');
+  });
+});
+
+describe('a face reference in the chosen style', () => {
+  const photo = 'data:image/jpeg;base64,' + 'P'.repeat(4000);
+  const drawn = 'data:image/jpeg;base64,' + 'D'.repeat(4000);
+
+  it('prefers a portrait made in that style, else the primary one', () => {
+    const c = { portraits: [drawn, photo], portrait: drawn, portraitStyles: { [portraitKey(drawn)]: 'comic' as const, [portraitKey(photo)]: 'realistic' as const } };
+    expect(faceRefFor(c, 'realistic')).toBe(photo);
+    expect(faceRefFor(c, 'comic')).toBe(drawn);
+    expect(faceRefFor({ portraits: [drawn, photo], portrait: drawn }, 'realistic')).toBe(drawn);
+    expect(faceRefFor({ portraits: [], portrait: null }, 'realistic')).toBeUndefined();
+  });
+
+  it('keeps styles through a reorder, and forgets deleted pictures', () => {
+    const c = { portraits: [drawn], portrait: drawn, portraitStyles: { [portraitKey(drawn)]: 'comic' as const, stale: 'realistic' as const } };
+    const styles = portraitStylesPatch(c, [photo, drawn], { url: photo, style: 'realistic' });
+    expect(styles).toEqual({ [portraitKey(drawn)]: 'comic', [portraitKey(photo)]: 'realistic' });
+    expect(portraitKey(photo)).not.toBe(portraitKey(drawn));
   });
 });

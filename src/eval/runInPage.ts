@@ -9,15 +9,15 @@
 import { db, uid } from '../db';
 import { createWorld, emptyCharacter, emptyLocation } from '../worldOps';
 import { useSettings } from '../store/settings';
-import { writeTurn } from '../ai/engine';
+import { waitForPostTurn, writeTurn } from '../ai/engine';
 import { streamChat } from '../ai/client';
 import { extractJson } from '../ai/utilityCall';
 import { composeOutgoingLine } from '../ai/composeLine';
 import { beatsToProse, scenePiecesOf, validBeats } from '../ai/beatProtocol';
 import type { SceneSpeaker } from '../ai/sceneReply';
 import type { ComposeMode, EpisodeGuest, ProviderConfig, ProviderKind, Turn, TurnBeat } from '../types';
-import { CAST, EVAL_WORLD, SCENARIOS, type EvalScenario } from './scenarios';
-import { gradeReply, type EvalCheck, type EvalPiece } from './grade';
+import { CAST, EVAL_WORLD, SCENARIOS, type EvalMove, type EvalScenario } from './scenarios';
+import { gradeReply, type EarlierReply, type EvalCheck, type EvalPiece } from './grade';
 import { judgePrompt, parseVerdict, type JudgeVerdict } from './judge';
 
 export interface EvalConfig {
@@ -40,6 +40,18 @@ export interface EvalRunResult {
   verdict?: JudgeVerdict;
   judgeError?: string;
   notices: string[];
+  /** Multi-turn scenes: the live replies before the graded one. */
+  earlier?: EarlierReply[];
+}
+
+/** World, place, and cast text: phrases from here are topic, not repetition. */
+function sceneBackground(scenario: EvalScenario): string {
+  const people = CAST.filter((p) => scenario.present.includes(p.key))
+    .map((p) => [p.name, p.role, p.summary, p.speechStyle, ...p.exampleLines, p.traits, p.desires].join(' '));
+  return [
+    EVAL_WORLD.bible, EVAL_WORLD.place.summary, EVAL_WORLD.place.atmosphere, EVAL_WORLD.premise,
+    ...scenario.history.map((l) => l.text), ...people
+  ].join('\n');
 }
 
 const PROVIDER_ID = 'eval-provider';
@@ -73,8 +85,9 @@ async function seedScene(scenario: EvalScenario): Promise<Seeded> {
     line: EVAL_WORLD.line,
     bible: EVAL_WORLD.bible,
     premise: EVAL_WORLD.premise,
-    // Keep background bookkeeping light; the eval grades the reply itself.
-    ai: { liveUpdates: 'few' }
+    // One-move scenes keep bookkeeping light. Multi-turn scenes run it every turn, as play does,
+    // so memory that never lands shows up in what the NPCs remember.
+    ai: { liveUpdates: scenario.warmup?.length ? 'turn' : 'few' }
   });
   const episode = await db.episodes.where('worldId').equals(world.id).first();
   const player = await db.characters.where('worldId').equals(world.id).first();
@@ -185,8 +198,7 @@ function piecesOf(turns: Turn[], seeded: Seeded, scenario: EvalScenario): EvalPi
   });
 }
 
-function moveFor(scenario: EvalScenario, seeded: Seeded): { mode: ComposeMode; input: string } & Record<string, unknown> {
-  const { move } = scenario;
+function moveFor(move: EvalMove, scenario: EvalScenario, seeded: Seeded): { mode: ComposeMode; input: string } & Record<string, unknown> {
   const to = move.to ? seeded.idOf.get(move.to) : undefined;
   const isGuest = !!move.to && !!scenario.guests?.some((g) => g.key === move.to);
   const address = to ? (isGuest ? { toGuestId: to } : { toCharacterId: to }) : {};
@@ -196,8 +208,10 @@ function moveFor(scenario: EvalScenario, seeded: Seeded): { mode: ComposeMode; i
   return { mode: out.mode, input: out.text, ...address };
 }
 
-async function judge(cfg: EvalConfig, provider: ProviderConfig, scenario: EvalScenario, pieces: EvalPiece[]): Promise<JudgeVerdict> {
-  const { system, user } = judgePrompt(scenario, pieces);
+async function judge(
+  cfg: EvalConfig, provider: ProviderConfig, scenario: EvalScenario, pieces: EvalPiece[], earlier: EarlierReply[]
+): Promise<JudgeVerdict> {
+  const { system, user } = judgePrompt(scenario, pieces, earlier);
   const res = await streamChat({
     provider,
     model: cfg.judgeModel,
@@ -220,32 +234,50 @@ export async function runScenario(id: string, cfg: EvalConfig): Promise<EvalRunR
   const started = performance.now();
   try {
     const seeded = await seedScene(scenario);
-    const world = await db.worlds.get(seeded.worldId);
-    const episode = await db.episodes.get(seeded.episodeId);
-    const season = world?.activeSeasonId ? await db.seasons.get(world.activeSeasonId) : undefined;
-    if (!world || !episode || !season) throw new Error('seeded world did not load');
 
-    const before = Date.now();
-    await writeTurn({
-      world, season, episode,
-      length: scenario.move.length ?? 'beat',
-      weight: 'matters',
-      ...moveFor(scenario, seeded),
-      onDelta: () => {},
-      onNotice: (m) => notices.push(m)
-    } as Parameters<typeof writeTurn>[0]);
-    const ms = Math.round(performance.now() - started);
+    /** Play one move through the real writer, as the Story screen would, and return its reply. */
+    const play = async (move: EvalMove): Promise<EvalPiece[]> => {
+      // Reload each time: a turn can change the cast, the place, or the episode itself.
+      const world = await db.worlds.get(seeded.worldId);
+      const episode = await db.episodes.get(seeded.episodeId);
+      const season = world?.activeSeasonId ? await db.seasons.get(world.activeSeasonId) : undefined;
+      if (!world || !episode || !season) throw new Error('seeded world did not load');
+      const before = Date.now();
+      await writeTurn({
+        world, season, episode,
+        length: move.length ?? 'beat',
+        weight: 'matters',
+        ...moveFor(move, scenario, seeded),
+        onDelta: () => {},
+        onNotice: (m) => notices.push(m)
+      } as Parameters<typeof writeTurn>[0]);
+      const fresh = (await db.turns.where('episodeId').equals(seeded.episodeId).toArray())
+        .filter((t) => t.createdAt >= before && t.role !== 'user')
+        .sort((a, b) => a.createdAt - b.createdAt);
+      return piecesOf(fresh, seeded, scenario);
+    };
 
-    const fresh = (await db.turns.where('episodeId').equals(seeded.episodeId).toArray())
-      .filter((t) => t.createdAt >= before && t.role !== 'user')
-      .sort((a, b) => a.createdAt - b.createdAt);
-    const pieces = piecesOf(fresh, seeded, scenario);
-    const checks = gradeReply(scenario, pieces, { playerName: EVAL_WORLD.player.name });
+    const earlier: EarlierReply[] = [];
+    for (const move of scenario.warmup ?? []) {
+      const t0 = performance.now();
+      const pieces = await play(move);
+      const t1 = performance.now();
+      // The memory pass after each turn feeds the next one, exactly as in play.
+      await waitForPostTurn();
+      earlier.push({ input: move.input, pieces, writeMs: Math.round(t1 - t0), memoryMs: Math.round(performance.now() - t1) });
+    }
+    const graded = performance.now();
+    const pieces = await play(scenario.move);
+    const ms = Math.round(performance.now() - graded);
+    const checks = gradeReply(scenario, pieces, {
+      playerName: EVAL_WORLD.player.name,
+      ...(earlier.length ? { earlier, background: sceneBackground(scenario) } : {})
+    });
 
-    const result: EvalRunResult = { scenarioId: id, ms, pieces, checks, notices };
+    const result: EvalRunResult = { scenarioId: id, ms, pieces, checks, notices, ...(earlier.length ? { earlier } : {}) };
     if (!cfg.noJudge) {
       try {
-        result.verdict = await judge(cfg, provider, scenario, pieces);
+        result.verdict = await judge(cfg, provider, scenario, pieces, earlier);
       } catch (e) {
         result.judgeError = String((e as Error)?.message ?? e);
       }

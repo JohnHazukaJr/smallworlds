@@ -42,9 +42,13 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     kind: 'openai',
     baseUrl: 'https://openrouter.ai/api/v1',
     keyUrl: 'https://openrouter.ai/keys',
+    // The first five scored best in the NPC eval (2026-11), cheapest-at-par first.
     suggestedModels: [
-      'z-ai/glm-5.2',
       'z-ai/glm-5.3',
+      'z-ai/glm-5.2',
+      'moonshotai/kimi-k2.6',
+      'deepseek/deepseek-v4-pro',
+      'deepseek/deepseek-v4.1-flash',
       'anthropic/claude-sonnet-4.5',
       'anthropic/claude-opus-4.1',
       'moonshotai/kimi-k2',
@@ -59,7 +63,7 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
       'openai/gpt-5-image',
       'google/gemini-3-pro-image-preview'
     ],
-    note: 'One key, hundreds of models. Recommended: compare narrative models side by side. GLM 5.x is listed as z-ai/glm-5.2. Image models are a separate OpenRouter catalog — fetch list on the image picker, not the writing one.'
+    note: 'One key, hundreds of models. Recommended: z-ai/glm-5.3 for prose and utility; deepseek/deepseek-v4.1-flash is a cheaper utility model. Image models are a separate OpenRouter catalog — fetch list on the image picker, not the writing one.'
   },
   {
     id: 'zai',
@@ -67,9 +71,9 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     kind: 'openai',
     baseUrl: 'https://api.z.ai/api/paas/v4',
     keyUrl: 'https://z.ai/manage-apikey/apikey-list',
-    suggestedModels: ['glm-5.2', 'glm-5.3', 'glm-5.3-flash'],
+    suggestedModels: ['glm-5.3', 'glm-5.2', 'glm-5.3-flash'],
     suggestedImageModels: ['glm-image'],
-    note: 'Direct GLM. Pair glm-5.2 for prose and utility, glm-image for scenes. The browser may hit CORS — use OpenRouter’s z-ai/glm-5.2, or sign in so the cloud relay can reach Z.ai. China BigModel is Custom: open.bigmodel.cn/api/paas/v4.'
+    note: 'Direct GLM. Pair glm-5.3 for prose and utility, glm-image for scenes. The browser may hit CORS — use OpenRouter’s z-ai/glm-5.3, or sign in so the cloud relay can reach Z.ai. China BigModel is Custom: open.bigmodel.cn/api/paas/v4.'
   },
   {
     id: 'anthropic',

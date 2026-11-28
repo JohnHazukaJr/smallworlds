@@ -106,7 +106,22 @@ const PORTRAIT_LOOK_CHARS = 700;
 export function portraitStyleLine(style: PortraitStyle): string {
   return style === 'comic'
     ? 'Comic book illustration, ink linework and painted color, graphic novel, not a photograph'
-    : 'Photorealistic, natural light, real camera';
+    : 'Photorealistic photograph, natural light, real camera, not an illustration, drawing, or painting';
+}
+
+/**
+ * The line for one reference image. Image models copy a reference's art style as readily as
+ * its face, so a drawn portrait made every later picture drawn, and a photo made them all
+ * photos, whatever style was picked. Each reference is named as identity only, in both
+ * directions, with the chosen style restated.
+ */
+export function refIdentityLine(style: PortraitStyle, index: number, name: string, kind: 'face' | 'place'): string {
+  const render = style === 'comic'
+    ? 'draw it as a comic illustration even if the image is a photograph'
+    : 'show it as a real photograph even if the image is drawn or painted';
+  return kind === 'place'
+    ? `Image ${index} is ${name}, the setting: keep its layout, materials, and light, but not its art style; ${render}`
+    : `Image ${index} is ${name}: use it only for who they are (face shape, hair, coloring), not for its art style; ${render}`;
 }
 
 /**
@@ -206,11 +221,7 @@ export function buildCharacterPortraitPrompt(input: PortraitPromptInput): Portra
     : input.framing === 'full'
       ? 'Photorealistic full-length photograph, natural skin, real camera'
       : 'Photorealistic portrait photograph, natural skin, real camera, shallow depth of field';
-  const faceLine = !input.faceRef
-    ? ''
-    : input.style === 'comic'
-      ? `Image 1 is ${who}'s face, for identity only. Redraw them as a comic book illustration; do not copy the photo's realism`
-      : `Image 1 is ${who}'s face. Keep that face, hair, and coloring`;
+  const faceLine = input.faceRef ? refIdentityLine(input.style, 1, who, 'face') : '';
   // Style leads, so a long sheet can never push it out of the prompt.
   const bits = [
     frame,

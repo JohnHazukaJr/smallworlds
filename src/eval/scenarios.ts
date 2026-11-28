@@ -47,6 +47,18 @@ export interface EvalLine {
   text: string;
 }
 
+export interface EvalMove {
+  /** What the player types, exactly as in the Write box. */
+  input: string;
+  /** Direct (author instruction) instead of a player move. */
+  direct?: boolean;
+  /** Continue with no input. */
+  continue?: boolean;
+  /** Addressed to this cast or guest key, as the "To" picker would. */
+  to?: string;
+  length?: TurnLength;
+}
+
 export interface EvalScenario {
   id: string;
   title: string;
@@ -59,17 +71,13 @@ export interface EvalScenario {
   history: EvalLine[];
   /** Chapter currents (what is in motion) seeded on the episode, as the writer would see them. */
   currents?: string[];
-  move: {
-    /** What the player types, exactly as in the Write box. */
-    input: string;
-    /** Direct (author instruction) instead of a player move. */
-    direct?: boolean;
-    /** Continue with no input. */
-    continue?: boolean;
-    /** Addressed to this cast or guest key, as the "To" picker would. */
-    to?: string;
-    length?: TurnLength;
-  };
+  move: EvalMove;
+  /**
+   * Moves played live, through the real writer and memory passes, before the graded move.
+   * Only multi-turn failures show here: drift, a tic repeated every reply, forgetting
+   * what the player said three turns ago, live memory that never lands.
+   */
+  warmup?: EvalMove[];
   expect: {
     /** This person must speak at least one quoted line. */
     replier?: string;
@@ -387,6 +395,58 @@ export const SCENARIOS: EvalScenario[] = [
     move: { input: '', continue: true, length: 'beat' },
     expect: {},
     judgeFocus: 'The scene advances with Ada and Ilse acting on their own wants. Rowan is not given lines or choices.'
+  },
+  {
+    id: 'long-interrogation',
+    title: 'Six turns with the same person',
+    probes: 'Over a long exchange one NPC keeps their voice and secret, follows what was said, and does not fall into repeating a gesture, a phrase, or the player’s words.',
+    present: ['ada'],
+    history: [
+      { who: 'narrator', text: 'Late. The Long Room is empty but for Ada at the long table and the stove ticking.' }
+    ],
+    warmup: [
+      { input: '"Ada, how long have you kept the drowned-book?"', length: 'beat' },
+      { input: '"Who else has a key to the Long Room?"', length: 'beat' },
+      { input: 'I turn the forged page toward the lamp so the watermark shows.', length: 'beat' },
+      { input: '"The ink on this line is fresher than the rest."', length: 'beat' },
+      { input: '"You were here late on the night the grain ship came in."', length: 'beat' }
+    ],
+    move: { input: '"Ada, if it wasn’t you, help me find who it was."', length: 'beat' },
+    expect: {
+      replier: 'ada',
+      spoken: true,
+      forbidden: [{
+        who: 'ada',
+        phrases: ['I signed it', 'I forged', 'I wrote it', 'the Council made me', 'Corin made me'],
+        why: 'Ada never admits a mistake out loud; six turns of pressure is not a confession.'
+      }]
+    },
+    judgeFocus: 'Across all six turns Ada stays the same person: clipped, controlled, secret kept. The final reply follows from what was said (the watermark, the fresher ink, the late night) and does not recycle earlier replies, gestures, or phrases.'
+  },
+  {
+    id: 'callback',
+    title: 'Remembering what the player said',
+    probes: 'Details the player gave several turns ago are still known, and nobody asks again what was already answered.',
+    present: ['brannoc', 'ilse'],
+    history: [
+      { who: 'narrator', text: 'Brannoc has his boots on the stove fender. Sister Ilse is copying names into the drowned-book.' }
+    ],
+    warmup: [
+      { input: '"Brannoc, my sister Mae works the night tide at the fish market."', length: 'beat' },
+      { input: '"She saw a handcart leave the Registry at two in the morning, the night the grain ship came in."', length: 'beat' },
+      { input: '"Sister Ilse, were you awake at two that night?"', length: 'beat' },
+      { input: 'I write the time on a scrap of paper and pocket it.', length: 'beat' }
+    ],
+    move: { input: '"Brannoc, will you talk to Mae about the cart, or not?"', length: 'beat' },
+    expect: {
+      replier: 'brannoc',
+      spoken: true,
+      forbidden: [{
+        phrases: ['who is mae', 'who’s mae', "who's mae", 'your brother', 'what cart'],
+        why: 'Mae was introduced as Rowan’s sister and the cart was described turns ago.'
+      }]
+    },
+    judgeFocus: 'Brannoc remembers what Rowan told him: Mae is Rowan’s sister, she works the night tide at the fish market, and the cart left at two. No one contradicts or forgets these, and no one re-asks what was already answered.'
   }
 ];
 

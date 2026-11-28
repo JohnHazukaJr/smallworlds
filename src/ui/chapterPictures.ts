@@ -25,7 +25,7 @@ function pushAt<T>(map: Map<string, T[]>, key: string, item: T) {
  * already written, then keep only the pictures whose line is still on the page.
  * The window counts turns. A picture does not take a slot of its own.
  */
-export function placeChapterPictures<T extends { id: string; createdAt: number }>(opts: {
+export function placeChapterPictures<T extends { id: string; createdAt: number; afterTurnId?: string }>(opts: {
   turns: readonly PictureAnchorTurn[];
   episodeOrder: readonly string[];
   pictures: readonly { episodeId: string; picture: T }[];
@@ -61,11 +61,13 @@ export function placeChapterPictures<T extends { id: string; createdAt: number }
   const before = new Map<string, T[]>();
   const after = new Map<string, T[]>();
 
-  const slotOf = (episodeId: string, createdAt: number):
+  const slotOf = (episodeId: string, createdAt: number, afterTurnId?: string):
     | { kind: 'leading' }
     | { kind: 'before'; turnId: string }
     | { kind: 'after'; turnId: string } => {
     const episodeTurns = byEpisode.get(episodeId) ?? [];
+    // A picture of one passage stays beside it, however much was written after.
+    if (afterTurnId && episodeTurns.some((turn) => turn.id === afterTurnId)) return { kind: 'after', turnId: afterTurnId };
     let anchor: PictureAnchorTurn | null = null;
     for (const turn of episodeTurns) {
       if (turn.createdAt <= createdAt) anchor = turn;
@@ -83,7 +85,7 @@ export function placeChapterPictures<T extends { id: string; createdAt: number }
   };
 
   for (const item of pictures) {
-    const slot = slotOf(item.episodeId, item.picture.createdAt);
+    const slot = slotOf(item.episodeId, item.picture.createdAt, item.picture.afterTurnId);
     if (slot.kind === 'after') {
       if (visibleIds.has(slot.turnId)) pushAt(after, slot.turnId, item.picture);
       continue;

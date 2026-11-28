@@ -73,8 +73,8 @@ describe('addProvider', () => {
       apiKey: 'sk-or-test'
     });
     const s = useSettings.getState();
-    expect(s.proseModel).toEqual({ providerId: 'or1', model: 'z-ai/glm-5.2' });
-    expect(s.utilityModel).toEqual({ providerId: 'or1', model: 'z-ai/glm-5.2' });
+    expect(s.proseModel).toEqual({ providerId: 'or1', model: 'z-ai/glm-5.3' });
+    expect(s.utilityModel).toEqual({ providerId: 'or1', model: 'z-ai/glm-5.3' });
   });
 
   it('does not let hosted claim prose and utility from a BYOK provider', () => {
@@ -87,8 +87,8 @@ describe('addProvider', () => {
     };
     useSettings.setState({
       providers: [openRouter],
-      proseModel: { providerId: 'or1', model: 'z-ai/glm-5.2' },
-      utilityModel: { providerId: 'or1', model: 'z-ai/glm-5.2' }
+      proseModel: { providerId: 'or1', model: 'z-ai/glm-5.3' },
+      utilityModel: { providerId: 'or1', model: 'z-ai/glm-5.3' }
     });
     useSettings.getState().addProvider({
       id: 'hosted1',
@@ -98,8 +98,8 @@ describe('addProvider', () => {
       apiKey: ''
     });
     const s = useSettings.getState();
-    expect(s.proseModel).toEqual({ providerId: 'or1', model: 'z-ai/glm-5.2' });
-    expect(s.utilityModel).toEqual({ providerId: 'or1', model: 'z-ai/glm-5.2' });
+    expect(s.proseModel).toEqual({ providerId: 'or1', model: 'z-ai/glm-5.3' });
+    expect(s.utilityModel).toEqual({ providerId: 'or1', model: 'z-ai/glm-5.3' });
   });
 
   it('points adult pictures at Venice and leaves the writer in place', () => {

@@ -50,8 +50,12 @@ import {
   episodeHistoryChars,
   omittedTurnsForNarratorTail,
   HISTORY_CHAR_BUDGET,
-  type PromptBuildOpts
+  type PromptBuildOpts,
+  playerMoveLabel
 } from './prompts';
+import { opensWithEcho, playerSpokenWords } from './echo';
+import { normalizeLiveMemory } from './liveShape';
+import { objectOr, rowList, textList } from './modelShape';
 import {
   detectHardAddressees,
   sceneReplySpeakerCap,
@@ -273,7 +277,7 @@ export async function runLimited<T, R>(items: T[], n: number, task: (item: T, in
 }
 
 function labelTurn(t: Turn, characters: Character[], guests: EpisodeGuest[] = []): string {
-  if (t.role === 'user') return `[player ${t.mode ?? 'turn'}]: ${t.text}`;
+  if (t.role === 'user') return `[${playerMoveLabel(t.mode, characters)}]: ${t.text}`;
   if (t.role === 'character') {
     const name = t.guestId
       ? (guests.find((g) => g.id === t.guestId)?.name ?? 'Walk-on')
@@ -451,6 +455,7 @@ function sceneVoiceFromCharacter(c: Character, room: Character[], recallQuery = 
     name: c.name,
     kind: 'cast',
     role: c.role,
+    ...(c.pronouns?.trim() ? { pronouns: c.pronouns.trim() } : {}),
     ...(brief ? { brief } : {}),
     ...(personality ? { personality } : {}),
     ...(notes ? { notes } : {}),
@@ -932,6 +937,46 @@ async function writeTurnInner(opts: WriteOptions): Promise<string> {
       if (rest.text.trim()) {
         text = `${text.trim()}\n\n${rest.text.trim()}`.trim();
         beats = beats && rest.beats ? [...beats, ...rest.beats] : undefined;
+      }
+      acc = text;
+      accBeats = beats;
+      opts.onDelta(text, { ...meta, ...(beats ? { beats } : {}) });
+    }
+    // An NPC who opens by saying the player's line back gets one rewrite. Before the wall
+    // check, so a rewrite is held to the same walls.
+    const playerWords = injectionReply ? '' : playerSpokenWords(opts.mode, moveText);
+    const echoed = playerWords ? opensWithEcho(playerWords, text, beats) : null;
+    if (echoed) {
+      progress('answering instead of repeating…');
+      const kept = { text, beats, safeText, safeBeats };
+      const restore = () => {
+        ({ text, beats, safeText, safeBeats } = kept);
+      };
+      const playerName = ctx.characters.find((c) => c.isPlayer)?.name.trim() || 'the other person';
+      try {
+        const redo = await withOverflowRetry(
+          (pack) => streamScene(pack, [
+            { role: 'assistant', content: asWritten() },
+            {
+              role: 'user',
+              content:
+                `That opens by saying ${playerName}'s words back ("${echoed}"). ${playerName} knows what they said. ` +
+                'Rewrite the scene so the first spoken words answer, refuse, or move things forward. Keep the same people and events.'
+            }
+          ]),
+          opts.onNotice
+        );
+        const fresh = redo.text.trim();
+        if (fresh && !opensWithEcho(playerWords, fresh, redo.beats)) {
+          text = fresh;
+          beats = redo.beats;
+        } else {
+          restore();
+        }
+      } catch (e) {
+        if (isAbortError(e)) throw e;
+        // The first reply is still a reply. A failed rewrite must not cost the turn.
+        restore();
       }
       acc = text;
       accBeats = beats;
@@ -1528,29 +1573,7 @@ async function maybeRefreshLiveMemory(
 
   try {
     progress('updating the room…');
-    const result = await utilityJson<{
-      updates?: Array<{
-        name?: string;
-        goal?: string;
-        emotion?: string;
-        location?: string;
-        condition?: string;
-        wearing?: string;
-      }>;
-      scene?: string[];
-      ties?: Array<{ from?: string; to?: string; kind?: string; note?: string }>;
-      facts?: string[];
-      threads?: string[];
-      place?: { name?: string; currentState?: string; atmosphere?: string };
-      movedTo?: { place?: string; newPlace?: string } | null;
-      knowledge?: Array<{ name?: string; nowKnows?: string }>;
-      memories?: MemoryDraft[];
-      inventory?: InventoryChange[];
-      suggestions?: string[];
-      bonds?: Array<{ name?: string; shift?: number; reason?: string }>;
-      goals?: Array<{ index?: number; text?: string; shift?: number; reason?: string }>;
-      currents?: CurrentMoveRow[];
-    }>(
+    const result = normalizeLiveMemory(await utilityJson<unknown>(
       world,
       'You update live room state and file hard canon WHILE the episode is still open. ' +
         'Call update_live_memory. Do not write story prose. ' +
@@ -1592,7 +1615,7 @@ async function maybeRefreshLiveMemory(
       25_000,
       'utility',
       LIVE_MEMORY_TOOL
-    );
+    ));
 
     if (textStillFiled && !(await textStillFiled())) return;
     const applied = scenePeople.length > 0
@@ -1744,12 +1767,35 @@ async function maybeRefreshLiveMemory(
     if (newThreads.length > 0) {
       ctx.threads = [...ctx.threads, ...newThreads];
     }
+    liveMemoryFailStreak.delete(world.id);
   } catch (e) {
     if ((e as Error).name === 'AbortError') throw e;
     logAppError(e, 'live memory');
-    // The small per-turn pass fails quietly; the next turn or the wrap catches up.
-    if (fileCanonNow) onNotice?.('Couldn’t update the room — sheets and live memory will catch up at wrap.');
+    const streak = (liveMemoryFailStreak.get(world.id) ?? 0) + 1;
+    liveMemoryFailStreak.set(world.id, streak);
+    const warning = liveMemoryFailWarning(streak);
+    if (warning) onNotice?.(warning);
+    // A single miss stays quiet; the next turn or the wrap catches up.
+    else if (fileCanonNow) onNotice?.('Couldn’t update the room — sheets and live memory will catch up at wrap.');
   }
+}
+
+/** Live-memory passes that failed in a row, per world. Cleared by one that lands. */
+const liveMemoryFailStreak = new Map<string, number>();
+
+/** For tests. */
+export function resetLiveMemoryFailStreak(): void {
+  liveMemoryFailStreak.clear();
+}
+
+/**
+ * One miss is noise. Several in a row mean the utility model cannot do this job, and the
+ * story is losing track of itself without anyone knowing. Said at 3, then every 5 after.
+ */
+export function liveMemoryFailWarning(streak: number): string | null {
+  if (streak < 3 || (streak - 3) % 5 !== 0) return null;
+  return `Story memory has not updated for ${streak} turns: the utility model is not returning usable data. ` +
+    'Characters will lose track of what happened. Pick a stronger utility model in Settings.';
 }
 
 /** Follow the scene to where the live-state pass says it went. A new place is made, linked, and filled in later. */
@@ -2036,10 +2082,11 @@ export function capSoftWrapExtract(
   },
   inSceneNames: Set<string>
 ): SoftWrapExtract {
-  const facts = (raw.facts ?? []).map((f) => f.trim()).filter(Boolean).slice(0, SOFT_WRAP_FACT_CAP);
-  const threads = (raw.threads ?? []).map((t) => t.trim()).filter(Boolean).slice(0, SOFT_WRAP_THREAD_CAP);
+  // Straight from the model: shape it before trusting it, or one odd field loses the chapter close.
+  const facts = textList(raw.facts).map((f) => f.trim()).filter(Boolean).slice(0, SOFT_WRAP_FACT_CAP);
+  const threads = textList(raw.threads).map((t) => t.trim()).filter(Boolean).slice(0, SOFT_WRAP_THREAD_CAP);
   const characterUpdates: EpisodeWrapCharacterUpdate[] = [];
-  for (const u of raw.characterUpdates ?? []) {
+  for (const u of rowList<NonNullable<typeof raw.characterUpdates>[number]>(raw.characterUpdates)) {
     const name = (u.name ?? '').trim();
     if (!name || !inSceneNames.has(name.toLowerCase())) continue;
     characterUpdates.push({
@@ -2050,8 +2097,8 @@ export function capSoftWrapExtract(
       condition: u.condition?.trim() || undefined
     });
   }
-  const staleFacts = (raw.staleFacts ?? [])
-    .map((line) => (typeof line === 'string' ? line.trim() : ''))
+  const staleFacts = textList(raw.staleFacts)
+    .map((line) => line.trim())
     .filter(Boolean)
     .slice(0, SOFT_WRAP_FACT_CAP);
   return { facts, threads, characterUpdates, place: normalizePlacePatch(raw.place), staleFacts };
@@ -2738,13 +2785,18 @@ export async function analyzeSeason(world: World, season: Season): Promise<Seaso
   );
 
   const now = Date.now();
+  // A missing list, a beat sent as a string, or a nameless outcome used to throw and lose the season read.
+  const beats = rowList<{ where?: string; text?: string; consequence?: string }>(result.beats)
+    .map((b) => ({ where: (b.where ?? '').trim(), text: (b.text ?? '').trim(), consequence: (b.consequence ?? '').trim() }))
+    .filter((b) => b.text);
+  const outcomes = rowList<{ name?: string; outcome?: string }>(result.characters, 'outcome');
   const wrap: SeasonWrap = {
     id: uid(), seasonId: season.id, worldId: world.id,
-    beats: result.beats.map((b) => ({ ...b, disposition: 'keep' as const })),
+    beats: beats.map((b) => ({ ...b, disposition: 'keep' as const })),
     characters: characters.map((c) => ({
       characterId: c.id,
       name: c.name,
-      outcome: result.characters.find((r) => r.name.toLowerCase() === c.name.toLowerCase())?.outcome ?? '',
+      outcome: (outcomes.find((r) => (r.name ?? '').trim().toLowerCase() === c.name.trim().toLowerCase())?.outcome ?? '').trim(),
       evolution: '',
       returning: true
     })),
@@ -2848,8 +2900,8 @@ export async function evolveCharacters(world: World, wrap: SeasonWrap, gapLabel:
     'wrap'
   );
 
-  const charResults = result.characters ?? [];
-  const relUpdates: SeasonWrapRelationshipUpdate[] = (result.relationshipUpdates ?? [])
+  const charResults = rowList<NonNullable<typeof result.characters>[number]>(result.characters);
+  const relUpdates: SeasonWrapRelationshipUpdate[] = rowList<NonNullable<typeof result.relationshipUpdates>[number]>(result.relationshipUpdates)
     .map((r) => ({
       from: (r.from ?? '').trim(),
       to: (r.to ?? '').trim(),
@@ -2859,7 +2911,7 @@ export async function evolveCharacters(world: World, wrap: SeasonWrap, gapLabel:
     }))
     .filter((r) => r.from && r.to && r.from.toLowerCase() !== r.to.toLowerCase());
 
-  const plotArc: SeasonWrapPlotArc[] = (result.plotArc ?? [])
+  const plotArc: SeasonWrapPlotArc[] = rowList<NonNullable<typeof result.plotArc>[number]>(result.plotArc)
     .map((p) => ({ text: (p.text ?? '').trim(), keep: true }))
     .filter((p) => p.text);
 
@@ -3444,7 +3496,7 @@ export async function draftCharacter(
   call: CreateCall = {}
 ): Promise<Partial<Character>> {
   const result = await utilityJson<{
-    name: string; role: string; age: string; appearance: string; mannerisms: string;
+    name: string; role: string; age: string; pronouns?: string; appearance: string; mannerisms: string;
     backstory: string; summary: string;
     speechStyle: string; exampleLines: string[]; traits: string; desires: string;
     fears: string; flaws: string; secrets: string; mustNotKnow?: string; anchors: string[];
@@ -3454,7 +3506,7 @@ export async function draftCharacter(
   }>(
     world,
     'You design deep NPC character sheets for longform interactive fiction. Call return_json with this shape:\n' +
-    '{"name": string, "role": "<role · relationship to protagonist>", "age": string, "appearance": "<overall impression, one sentence>", ' +
+    '{"name": string, "role": "<role · relationship to protagonist>", "age": string, "pronouns": "<e.g. she/her>", "appearance": "<overall impression, one sentence>", ' +
     (call.lean ? '' :
       '"looks":{"face":"<features and expression>","hair":"<color, length, style>","body":"<build, height, how they move>",' +
       '"clothing":"<their usual outfit>","details":"<scars, tattoos, jewellery, glasses, or empty>","senses":"<voice timbre and scent, or empty>"' +
@@ -3804,7 +3856,7 @@ export async function fleshOutCharacter(
     : 'SUBJECT is this NPC — not the player. Do not rewrite them as the reader or address them as "you".';
   const current = {
     isPlayer: !!character.isPlayer,
-    name: character.name, role: character.role, age: character.age, appearance: character.appearance,
+    name: character.name, role: character.role, age: character.age, pronouns: character.pronouns ?? '', appearance: character.appearance,
     looks: character.looks ?? {},
     mannerisms: character.mannerisms, backstory: character.backstory, summary: character.summary,
     speechStyle: character.speechStyle, exampleLines: character.exampleLines, traits: character.traits,
@@ -3820,7 +3872,7 @@ export async function fleshOutCharacter(
   const roster = others.map((c) => castRosterEntry(c, 160));
 
   const result = await utilityJson<{
-    name: string; role: string; age: string; appearance: string; mannerisms: string;
+    name: string; role: string; age: string; pronouns?: string; appearance: string; mannerisms: string;
     backstory: string; summary: string;
     speechStyle: string; exampleLines: string[]; traits: string; desires: string;
     fears: string; flaws: string; secrets: string; mustNotKnow?: string; anchors: string[];
@@ -3830,7 +3882,7 @@ export async function fleshOutCharacter(
   }>(
     world,
     `You flesh out character sheets for longform interactive fiction. ${subjectFrame} ${NON_DESTRUCTIVE_RULE}\n` +
-    `Call return_json with this shape: {"name": string, "role": string, "age": string, "appearance": string, ` +
+    `Call return_json with this shape: {"name": string, "role": string, "age": string, "pronouns": string, "appearance": string, ` +
     `"looks": {"face": string, "hair": string, "body": string, "clothing": "<usual outfit>", "details": string, "senses": "<voice timbre and scent>"` +
     `${intimateAllowed(world, character) ? ', "intimate": "<adult physical details>"' : ''}}, "mannerisms": string, ` +
     `"backstory": string, "summary": string, "speechStyle": string, "exampleLines": string[], "traits": string, ` +
@@ -3865,6 +3917,7 @@ export async function fleshOutCharacter(
     name: keepIfBlank(character.name, result.name),
     role: keepIfBlank(character.role, result.role),
     age: keepIfBlank(character.age, result.age),
+    pronouns: keepIfBlank(character.pronouns ?? '', result.pronouns),
     appearance: keepIfBlank(character.appearance, result.appearance),
     looks: mergeLooks(character.looks, result.looks as Character['looks'], intimateAllowed(world, {
       age: keepIfBlank(character.age, result.age), appearance: character.appearance, role: character.role,
@@ -3950,8 +4003,8 @@ export async function fleshOutRelationships(
   );
 }
 
-function parsedMarks(rows: Array<{ at?: number; text?: string }> | undefined): ScoreMark[] {
-  return (rows ?? []).map((row) => ({ at: Number(row.at), text: row.text ?? '' }));
+function parsedMarks(rows: unknown): ScoreMark[] {
+  return rowList<{ at?: unknown; text?: string }>(rows).map((row) => ({ at: Number(row.at), text: row.text ?? '' }));
 }
 
 /**
@@ -4006,7 +4059,7 @@ export async function draftPlayerGoals(
       `What they want: ${player.desires.slice(0, 240)}. ` +
       `Cast: ${names.join(', ') || '(none yet)'}.`
   );
-  const incoming: PlayerGoal[] = (result.goals ?? []).slice(0, PLAYER_GOAL_CAP).map((goal) => ({
+  const incoming: PlayerGoal[] = rowList<NonNullable<typeof result.goals>[number]>(result.goals).slice(0, PLAYER_GOAL_CAP).map((goal) => ({
     id: uid(),
     text: (goal.text ?? '').trim(),
     score: 0,
@@ -4189,11 +4242,12 @@ export async function proposeWorldRoster(
       call.signal,
       call.timeoutMs ?? CREATE_TIMEOUT_MS
     );
-    const characters = (result.characters ?? [])
+    // A plain list of strings is a list of descriptions.
+    const characters = rowList<{ description: string; name?: string }>(result.characters, 'description')
       .filter((c) => c.description?.trim())
       .slice(0, nChars)
       .map((c) => ({ description: c.description.trim(), ...(c.name?.trim() ? { name: c.name.trim() } : {}) }));
-    const locations = (result.locations ?? []).filter((l) => l.description?.trim()).slice(0, nPlaces);
+    const locations = rowList<{ description: string }>(result.locations, 'description').filter((l) => l.description?.trim()).slice(0, nPlaces);
     const openingLocationIndex = locations.length === 0
       ? 0
       : Number.isFinite(result.openingLocationIndex)
@@ -4309,8 +4363,8 @@ export async function seedOpeningMemory(
   );
 
   const now = Date.now();
-  const facts = (result.facts ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 4);
-  const threads = (result.threads ?? []).map((t) => t.trim()).filter(Boolean).slice(0, 4);
+  const facts = textList(result.facts).map((t) => t.trim()).filter(Boolean).slice(0, 4);
+  const threads = textList(result.threads).map((t) => t.trim()).filter(Boolean).slice(0, 4);
   const continuityIds: string[] = [];
   const threadIds: string[] = [];
 

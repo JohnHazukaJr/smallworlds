@@ -6,7 +6,7 @@
  */
 
 import { CAST, EVAL_WORLD, personByKey, type EvalPerson, type EvalScenario } from './scenarios';
-import type { EvalPiece } from './grade';
+import type { EarlierReply, EvalPiece } from './grade';
 
 export const JUDGE_DIMENSIONS = ['voice', 'character', 'address', 'walls', 'agency', 'craft'] as const;
 export type JudgeDimension = (typeof JUDGE_DIMENSIONS)[number];
@@ -23,10 +23,10 @@ export interface JudgeVerdict {
 const RUBRIC: Record<JudgeDimension, string> = {
   voice: 'Each NPC sounds like their speech style and example lines, and no two NPCs are interchangeable.',
   character: 'NPCs act from their own traits, wants, fears, mood, memories, and stance toward the player.',
-  address: 'The reply answers what the player actually did or said, and the person addressed is the one who answers.',
+  address: 'The reply answers what the player actually did or said, and the person addressed is the one who answers. Restating, paraphrasing, or quoting the player’s line back instead of moving the exchange forward scores 2 or lower.',
   walls: 'No one reveals a secret they would keep, and no one knows what they must not know. Judge by meaning, not wording. 5 = clean.',
   agency: 'The narrator never writes the player’s words, choices, thoughts, or feelings, and never steers the player toward a plot they did not pick up. Showing what the player physically sees is fine.',
-  craft: 'Grounded, specific prose that fits the world; no repetition, purple padding, summarising, or breaking the fourth wall.'
+  craft: 'Grounded, specific prose that fits the world and follows on logically from EARLIER: each sentence connects to the last, actions and objects stay consistent, nothing contradicts what was established. No repetition, purple padding, summarising, or breaking the fourth wall.'
 };
 
 function sheet(p: EvalPerson): string {
@@ -58,7 +58,11 @@ export function renderPieces(pieces: EvalPiece[]): string {
     .join('\n');
 }
 
-export function judgePrompt(scenario: EvalScenario, pieces: EvalPiece[]): { system: string; user: string } {
+export function judgePrompt(
+  scenario: EvalScenario,
+  pieces: EvalPiece[],
+  earlier: EarlierReply[] = []
+): { system: string; user: string } {
   const present = scenario.present.map((k) => personByKey(k)).filter((p): p is EvalPerson => !!p);
   const absent = CAST.filter((p) => !scenario.present.includes(p.key)).map((p) => p.name);
   const guests = (scenario.guests ?? []).map((g) => `${g.name} (walk-on): ${g.brief}${g.voice ? ` Voice: ${g.voice}` : ''}`);
@@ -93,6 +97,8 @@ export function judgePrompt(scenario: EvalScenario, pieces: EvalPiece[]): { syst
     '',
     'EARLIER:',
     ...scenario.history.map((l) => `[${lineLabel(l.who)}] ${l.text}`),
+    // Played live before the graded move: the writer's own earlier replies.
+    ...earlier.flatMap((e) => [`[${EVAL_WORLD.player.name}] ${e.input}`, renderPieces(e.pieces) || '(no reply)']),
     '',
     `THE MOVE: ${move}`,
     '',

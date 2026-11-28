@@ -9,13 +9,13 @@ import type { Character, World } from '../types';
 import { ErrorNote } from '../ui/bits';
 import { fileToPortraitImage } from '../ui/image';
 import { ACCENT } from '../ui/theme';
-import { characterPortraits, MAX_CHARACTER_PORTRAITS, portraitsPatch } from '../worldOps';
+import { characterPortraits, MAX_CHARACTER_PORTRAITS, portraitsPatch, portraitStylesPatch } from '../worldOps';
 
 function aborted(e: unknown): boolean {
   return e instanceof Error && e.name === 'AbortError';
 }
 
-type PortraitPatch = Partial<Pick<Character, 'portraits' | 'portrait' | 'figures'>>;
+type PortraitPatch = Partial<Pick<Character, 'portraits' | 'portrait' | 'figures' | 'portraitStyles'>>;
 
 const chipStyle = (on: boolean) => ({
   fontSize: 11, padding: '6px 12px', minHeight: 36,
@@ -110,7 +110,11 @@ export function CharacterPortraitTools({
         signal: controller.signal
       });
       if (makesFigure) await onChange({ figures: [...figures, url] });
-      else await onChange(portraitsPatch([...gallery, url]));
+      else {
+        const next = [...gallery, url];
+        // Recorded, so later pictures in this style pick this face as their reference.
+        await onChange({ ...portraitsPatch(next), portraitStyles: portraitStylesPatch(character, next, { url, style }) });
+      }
     } catch (e) {
       setError(aborted(e) ? 'Portrait cancelled.' : formatUserError(e));
     } finally {

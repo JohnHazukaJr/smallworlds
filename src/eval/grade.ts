@@ -5,6 +5,9 @@
  */
 
 import type { EvalScenario } from './scenarios';
+import { echoOf, opensWithEcho, playerSpokenWords } from '../ai/echo';
+
+export { echoOf };
 
 /** One credited block of the reply, as the reader sees it. */
 export interface EvalPiece {
@@ -63,10 +66,61 @@ export function narratorVoicesPlayer(text: string, playerName: string): boolean 
   return before.test(text) || after.test(text);
 }
 
+function wordList(text: string): string[] {
+  return normalizeForMatch(text).replace(/[^a-z0-9' ]+/g, ' ').split(' ').filter(Boolean);
+}
+
+/** A reply played live before the graded one, with the move that drew it. */
+export interface EarlierReply {
+  input: string;
+  pieces: EvalPiece[];
+  /** Milliseconds writing the reply, then waiting on the memory pass after it. */
+  writeMs?: number;
+  memoryMs?: number;
+}
+
+const GRAM_STOP = new Set(
+  ('the a an and or but of to in on at for with from by is are was were be it its this that his her their ' +
+    'your you him she he they them i me my we our as into onto over then than not no so just one up out').split(' ')
+);
+
+/** Two-word phrases with no small words: "eyes narrowing", "taps ledger". */
+function pairs(text: string): Set<string> {
+  const w = wordList(text).filter((x) => x.length > 2 && !GRAM_STOP.has(x));
+  const out = new Set<string>();
+  for (let i = 0; i + 1 < w.length; i++) out.add(`${w[i]} ${w[i + 1]}`);
+  return out;
+}
+
+/**
+ * Phrases that come back in reply after reply: the same gesture or line, turn on turn.
+ * Phrases from the player's own moves or the scene and cast sheets are topic, not a tic.
+ */
+export function repeatedPhrases(replies: string[], background: string): Array<{ phrase: string; replies: number }> {
+  const topic = pairs(background);
+  const counts = new Map<string, number>();
+  for (const reply of replies) {
+    for (const gram of pairs(reply)) {
+      if (!topic.has(gram)) counts.set(gram, (counts.get(gram) ?? 0) + 1);
+    }
+  }
+  const floor = Math.max(3, Math.ceil(replies.length / 2));
+  return [...counts.entries()]
+    .filter(([, n]) => n >= floor)
+    .map(([phrase, n]) => ({ phrase, replies: n }))
+    .sort((a, b) => b.replies - a.replies);
+}
+
 export function gradeReply(
   scenario: EvalScenario,
   pieces: EvalPiece[],
-  opts: { playerName: string }
+  opts: {
+    playerName: string;
+    /** Multi-turn scenes: the live replies before this one, oldest first. */
+    earlier?: EarlierReply[];
+    /** Scene, cast, and world text, so their phrases are not counted as repetition. */
+    background?: string;
+  }
 ): EvalCheck[] {
   const checks: EvalCheck[] = [];
   const add = (id: string, status: CheckStatus, detail: string) => checks.push({ id, status, detail });
@@ -112,6 +166,40 @@ export function gradeReply(
     add('player-voice', 'warn', 'narration may put words in the player’s mouth');
   } else {
     add('player-voice', 'pass', 'player not voiced');
+  }
+
+  const playerLine = scenario.move.continue || scenario.move.direct ? '' : scenario.move.input.replace(/^\[[^\]]*\]\s*/, '');
+  if (wordList(playerLine).length >= 4) {
+    const spoken = filled.filter((p) => p.role === 'character').flatMap((p) => quotes(p.text));
+    const { run, share } = echoOf(playerLine, spoken.join(' '));
+    // Re-asking the line is an opening habit, so the first sentence spoken counts at a lower bar.
+    const opener = (spoken[0] ?? '').split(/(?<=[.!?])\s/)[0] ?? '';
+    const openerRun = echoOf(playerLine, opener).run;
+    const echoed = run >= 4 || share >= 0.6 || openerRun >= 3;
+    add('echo', echoed ? 'warn' : 'pass', echoed
+      ? `NPC repeats the player: ${run} words in a row, ${Math.round(share * 100)}% of their content words`
+      : `${run}-word run, ${Math.round(share * 100)}% reuse`);
+  }
+
+  if (opts.earlier?.length) {
+    const textOf = (ps: EvalPiece[]) => ps.map((p) => p.text).join('\n');
+    const echoedTurns = opts.earlier.filter((e) => {
+      const said = playerSpokenWords('play', e.input);
+      return said && opensWithEcho(said, textOf(e.pieces));
+    }).length;
+    add('echo-over-turns', echoedTurns ? 'warn' : 'pass', echoedTurns
+      ? `${echoedTurns} of ${opts.earlier.length} earlier replies opened by saying the player's line back`
+      : `no echo in ${opts.earlier.length} earlier replies`);
+
+    const all = [...opts.earlier.map((e) => textOf(e.pieces)), textOf(filled)];
+    const background = [opts.background ?? '', ...opts.earlier.map((e) => e.input), scenario.move.input].join('\n');
+    const repeats = repeatedPhrases(all, background);
+    add('repetition', repeats.length ? 'warn' : 'pass', repeats.length
+      ? `repeated across replies: ${repeats.slice(0, 3).map((r) => `"${r.phrase}" ×${r.replies}`).join(', ')}`
+      : `no phrase repeated across ${all.length} replies`);
+
+    const empty = opts.earlier.filter((e) => !e.pieces.some((p) => p.text.trim())).length;
+    if (empty) add('earlier-replies', 'fail', `${empty} earlier move(s) got no reply`);
   }
 
   const loose = filled

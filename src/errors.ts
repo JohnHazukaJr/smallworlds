@@ -332,7 +332,9 @@ export function classifyError(e: unknown): AppError {
     });
   }
 
-  if (e instanceof TypeError || looksLikeNetwork(msg)) {
+  // fetch failures are TypeErrors, but so is "x is not iterable": only the message tells them apart.
+  // Calling every TypeError a network error hid real bugs behind "check your connection".
+  if (looksLikeNetwork(msg)) {
     return new AppError({
       code: 'network',
       userMessage: 'Network error. Check your connection and try again.',
@@ -443,7 +445,12 @@ export function formatUserError(e: unknown): string {
 export function logAppError(e: unknown, context?: string): void {
   if (!import.meta.env.DEV) return;
   const err = classifyError(e);
-  console.warn(`[${err.code}]${context ? ` ${context}` : ''}`, err.userMessage, err.detail ?? '');
+  const raw = (e as { raw?: unknown })?.raw;
+  console.warn(
+    `[${err.code}]${context ? ` ${context}` : ''}`, err.userMessage, err.detail ?? '',
+    ...(typeof raw === 'string' ? [`
+  model sent: ${JSON.stringify(raw)}`] : [])
+  );
 }
 
 /** Run a task; on failure call setError with classified copy and return undefined. */

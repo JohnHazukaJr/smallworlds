@@ -1042,6 +1042,13 @@ export function Onboard() {
                   placeholder="Second-person summary — who you are as the story opens."
                 />
               </Field>
+              <Field label="Pronouns" note="how the story refers to you. Leave blank and nobody will guess.">
+                <SheetText
+                  value={player.pronouns ?? ''}
+                  onCommit={(pronouns) => patchPlayer({ pronouns })}
+                  placeholder="she/her, he/him, they/them"
+                />
+              </Field>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 160px), 1fr))', gap: 10 }}>
                 <Field label="Goal now">
                   <SheetText

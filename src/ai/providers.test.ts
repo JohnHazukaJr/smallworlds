@@ -90,7 +90,7 @@ describe('catalogModelIds', () => {
 describe('suggestedModelsFor', () => {
   it('uses image generators for the image picker', () => {
     const or = PROVIDER_PRESETS.find((p) => p.id === 'openrouter');
-    expect(suggestedModelsFor(or, 'text')[0]).toBe('z-ai/glm-5.2');
+    expect(suggestedModelsFor(or, 'text')[0]).toBe('z-ai/glm-5.3');
     expect(suggestedModelsFor(or, 'image')).toContain('google/gemini-2.5-flash-image');
     expect(suggestedModelsFor(or, 'image').some((m) => m.includes('glm-5'))).toBe(false);
   });

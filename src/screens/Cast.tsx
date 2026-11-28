@@ -549,6 +549,9 @@ export function Cast() {
                       className="serif" style={{ fontSize: 15.5, lineHeight: 1.7 }} />
                   </Field>
                   <Field label="Age / read"><input value={d.age} onChange={(e) => patch({ age: e.target.value })} placeholder="Late thirties. Tired in a competent way." /></Field>
+                  <Field label="Pronouns" note="how the story refers to them. Leave blank and nobody will guess.">
+                    <input value={d.pronouns ?? ''} onChange={(e) => patch({ pronouns: e.target.value })} placeholder="she/her, he/him, they/them" />
+                  </Field>
                   <Field label="Also answers to" note="nicknames and roles they answer to — one per line. Mom, Red, Registrar.">
                     <textarea
                       rows={2}

@@ -16,6 +16,8 @@ import { calendarPatch, PLOT_TARGET_CAP, worldCalendar } from '../worldOps';
 import { isContextOverflowError, streamChat } from './client';
 import { utilityModelFor } from './models';
 import { utilityCall } from './utilityCall';
+import { playerMoveLabel } from './prompts';
+import { rowList } from './modelShape';
 
 export const VOLUME_DIGEST_SYSTEM =
   'You compress a longform interactive-fiction world into a canon digest for a new volume. ' +
@@ -275,7 +277,7 @@ async function withOverflowRetry<T>(run: (tight: boolean) => Promise<T>): Promis
 }
 
 function labelTurn(t: Turn, characters: Character[], guests: EpisodeGuest[] = []): string {
-  if (t.role === 'user') return `[player ${t.mode ?? 'turn'}]: ${t.text}`;
+  if (t.role === 'user') return `[${playerMoveLabel(t.mode, characters)}]: ${t.text}`;
   if (t.role === 'character') {
     const name = t.guestId
       ? (guests.find((g) => g.id === t.guestId)?.name ?? 'Walk-on')
@@ -845,7 +847,7 @@ async function distillCharacters(
       VOLUME_TIMEOUT_MS
     ));
     const allowed = new Set(batch.map((c) => c.name.trim().toLowerCase()));
-    for (const row of result.characters ?? []) {
+    for (const row of rowList<NonNullable<typeof result.characters>[number]>(result.characters)) {
       if (!row?.name || !allowed.has(row.name.trim().toLowerCase())) continue;
       out.push(row);
     }
@@ -882,7 +884,7 @@ async function distillLocations(
       VOLUME_TIMEOUT_MS
     ));
     const allowed = new Set(batch.map((l) => l.name.trim().toLowerCase()));
-    for (const row of result.locations ?? []) {
+    for (const row of rowList<NonNullable<typeof result.locations>[number]>(result.locations)) {
       if (!row?.name || !allowed.has(row.name.trim().toLowerCase())) continue;
       out.push(row);
     }
